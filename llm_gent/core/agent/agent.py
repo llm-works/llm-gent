@@ -283,9 +283,13 @@ class Agent(Runnable):
         from ..errors import ConfigError
         from .identity import Identity
 
+        # Check top-level identity first, then fall back to kelt.identity
         identity_config = self.config.get("identity", {})
-        name = identity_config.get("name")
+        if not identity_config.get("name"):
+            kelt_config = self.config.get("kelt", {})
+            identity_config = kelt_config.get("identity", {})
 
+        name = identity_config.get("name")
         if not name:
             raise ConfigError("identity.name is required in config")
 

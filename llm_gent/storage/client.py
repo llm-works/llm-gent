@@ -110,6 +110,7 @@ class AgentStorage:
         """Register an agent-defined table schema.
 
         Validates the model and creates the table if it doesn't exist.
+        Tables are created in public schema; isolation is via context_key column.
 
         Args:
             model_class: SQLAlchemy model inheriting from AgentTable.
@@ -117,30 +118,19 @@ class AgentStorage:
         Raises:
             ValueError: If model_class doesn't meet requirements.
         """
-        # Validate schema
         validate_agent_table(model_class)
 
         table_name = model_class.__tablename__
 
-        # Schema support note: We don't set model_class.__table__.schema here because
-        # it would mutate the class globally (breaking multi-schema isolation).
-        # Isolation is enforced via context_key column filtering.
-        # TODO: Implement proper schema support via schema-qualified table names at query time.
-
-        # Create table if it doesn't exist
+        # Create table in default schema (isolation via context_key, not schema)
         engine = self._kelt.database.engine
         model_class.__table__.create(engine, checkfirst=True)  # type: ignore[attr-defined]
 
-        # Store registration
         self._registered_tables[table_name] = model_class
 
         self._lg.debug(
             "agent table registered",
-            extra={
-                "table": table_name,
-                "schema": self.schema_name or "public",
-                "context_key": self.context_key,
-            },
+            extra={"table": table_name, "context_key": self.context_key},
         )
 
     def select(self, model_class: type[AgentTable], **filters: Any) -> list[AgentTable]:

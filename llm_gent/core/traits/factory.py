@@ -121,7 +121,9 @@ class Factory:
         if "backends" in override and "backends" in result:
             for backend_name, backend_override in override["backends"].items():
                 if backend_name in result["backends"]:
-                    result["backends"][backend_name].update(backend_override)
+                    # Skip None backends (from YAML with all content commented out)
+                    if backend_override:
+                        result["backends"][backend_name].update(backend_override)
                 else:
                     result["backends"][backend_name] = backend_override
         elif "backends" in override:
@@ -135,9 +137,18 @@ class Factory:
         return DotDict(result)
 
     def _create_learn(self, agent: Agent) -> LearnTrait:
-        """Route to create_learn_trait."""
+        """Route to create_learn_trait.
+
+        Merges platform learn config with agent-level kelt config (schema, identity overrides).
+        """
         learn_config_raw = self._platform.learn_config()
         learn_config: DotDict | None = DotDict(learn_config_raw) if learn_config_raw else None
+
+        # Merge agent's kelt.schema config (dict with name/enforce)
+        agent_kelt = agent.config.get("kelt", {})
+        if agent_kelt and learn_config and agent_kelt.get("schema"):
+            learn_config["schema"] = agent_kelt["schema"]
+
         return self.create_learn_trait(agent, agent.identity, learn_config)
 
     def _create_rating(self, agent: Agent) -> Trait:
@@ -240,12 +251,14 @@ class Factory:
 
         config = LearnConfig(
             identity=identity,
+            schema=learn_config.get("schema"),
             llm=learn_config.get("llm", {}),
             db=learn_config["db"],
             embedder_url=learn_config.get("embedder_url"),
             embedder_model=learn_config.get("embedder_model", "default"),
             embedder_timeout=learn_config.get("embedder_timeout", 30.0),
             training=learn_config.get("training"),
+            adapters=learn_config.get("adapters"),
         )
         return LearnTrait(agent, config)
 

@@ -94,7 +94,9 @@ class HTTPTrait(BaseTrait):
             title=title,
             description=description,
         )
-        self._server: HTTPServer | None = HTTPServer(http_config, router_factory=router_factory)
+        self._server: HTTPServer | None = HTTPServer(
+            self.agent.lg, http_config, router_factory=router_factory
+        )
         self._ipc_thread: threading.Thread | None = None
         self._ipc_shutdown = threading.Event()
 

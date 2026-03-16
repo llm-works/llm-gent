@@ -101,6 +101,7 @@ def pair_by_margin(
     no_reuse: bool = False,
     chosen_filter: StarFilter | None = None,
     rejected_filter: StarFilter | None = None,
+    length_epsilons: list[int | None] | None = None,
 ) -> StarPairingResult:
     """Pair highest-rated with lowest-rated, respecting minimum margin.
 
@@ -115,6 +116,13 @@ def pair_by_margin(
         no_reuse: If True, each chosen item is used at most once (1:1 pairing).
         chosen_filter: Filter for chosen pool (e.g., StarFilter(4, ">=")).
         rejected_filter: Filter for rejected pool (e.g., StarFilter(2, "<=")).
+        length_epsilons: Multi-pass length balancing. List of max length differences
+            (in chars) for each pass. E.g., [5, 15, 30, None] means:
+            - Pass 1: only pairs where |len(chosen) - len(rejected)| <= 5
+            - Pass 2: remaining items with <= 15 char difference
+            - Pass 3: remaining items with <= 30 char difference
+            - Pass 4: any remaining valid pairs (no length constraint)
+            This prevents DPO from learning "longer = better" as spurious correlation.
 
     Returns:
         PairingResult with pairs and metadata.
@@ -140,7 +148,7 @@ def pair_by_margin(
         )
 
     target = min_pairs if min_pairs is not None else len(chosen_pool)
-    pairs = _generate_pairs(chosen_pool, rejected_pool, margin, target, no_reuse)
+    pairs = _generate_pairs(chosen_pool, rejected_pool, margin, target, no_reuse, length_epsilons)
 
     if max_pairs is not None and len(pairs) > max_pairs:
         pairs = pairs[:max_pairs]
@@ -149,7 +157,7 @@ def pair_by_margin(
         pairs=pairs,
         total_rated=len(rated_items),
         strategy="margin",
-        params={"margin": margin},
+        params={"margin": margin, "length_epsilons": length_epsilons},
     )
 
 
@@ -240,47 +248,155 @@ def _generate_pairs(
     margin: int,
     target: int,
     no_reuse: bool,
+    length_epsilons: list[int | None] | None = None,
 ) -> list[StarPreferencePair]:
-    """Generate pairs by cycling through chosen pool until target or exhausted."""
+    """Generate pairs, optionally using multi-pass length balancing.
+
+    If length_epsilons is provided, uses multi-pass pairing to minimize length bias.
+    """
+    if not chosen_pool or not rejected_pool:
+        return []
+
+    if length_epsilons is None:
+        return _generate_pairs_single_pass(
+            chosen_pool, rejected_pool, margin, target, no_reuse, length_epsilon=None
+        )
+
+    return _generate_pairs_multi_pass(
+        chosen_pool, rejected_pool, margin, target, no_reuse, length_epsilons
+    )
+
+
+def _generate_pairs_multi_pass(
+    chosen_pool: list[StarRatedItem],
+    rejected_pool: list[StarRatedItem],
+    margin: int,
+    target: int,
+    no_reuse: bool,
+    length_epsilons: list[int | None],
+) -> list[StarPreferencePair]:
+    """Multi-pass pairing with progressively looser length constraints."""
     pairs: list[StarPreferencePair] = []
-    used_rejected: set[int] = set()
     used_chosen: set[int] = set()
-    chosen_idx = 0
-    max_iterations = len(chosen_pool) * len(rejected_pool)
+    used_rejected: set[int] = set()
 
-    while len(pairs) < target and len(used_rejected) < len(rejected_pool):
-        chosen = chosen_pool[chosen_idx % len(chosen_pool)]
-        chosen_idx += 1
-
-        if no_reuse and chosen.id in used_chosen:
-            if chosen_idx >= max_iterations:
-                break
-            continue
-
-        match = _find_match(chosen, rejected_pool, used_rejected, margin)
-        if match:
-            pairs.append(PreferencePair(chosen=chosen, rejected=match))
-            used_rejected.add(match.id)
-            used_chosen.add(chosen.id)
-
-        if chosen_idx >= max_iterations:
+    for epsilon in length_epsilons:
+        if len(pairs) >= target:
             break
+
+        available_chosen = [c for c in chosen_pool if c.id not in used_chosen or not no_reuse]
+        available_rejected = [r for r in rejected_pool if r.id not in used_rejected]
+
+        if not available_chosen or not available_rejected:
+            break
+
+        pass_pairs = _generate_pairs_single_pass(
+            available_chosen,
+            available_rejected,
+            margin,
+            target - len(pairs),
+            no_reuse,
+            length_epsilon=epsilon,
+            used_chosen=used_chosen if no_reuse else None,
+        )
+
+        _track_used_items(pairs, pass_pairs, used_chosen, used_rejected, no_reuse)
 
     return pairs
 
 
-def _find_match(
-    chosen: StarRatedItem,
-    pool: list[StarRatedItem],
+def _track_used_items(
+    pairs: list[StarPreferencePair],
+    new_pairs: list[StarPreferencePair],
+    used_chosen: set[int],
+    used_rejected: set[int],
+    no_reuse: bool,
+) -> None:
+    """Track used items from new pairs."""
+    for pair in new_pairs:
+        pairs.append(pair)
+        used_rejected.add(pair.rejected.id)
+        if no_reuse:
+            used_chosen.add(pair.chosen.id)
+
+
+def _generate_pairs_single_pass(
+    chosen_pool: list[StarRatedItem],
+    rejected_pool: list[StarRatedItem],
+    margin: int,
+    target: int,
+    no_reuse: bool,
+    length_epsilon: int | None,
+    used_chosen: set[int] | None = None,
+) -> list[StarPreferencePair]:
+    """Generate pairs in a single pass with optional length constraint."""
+    if not chosen_pool or not rejected_pool:
+        return []
+
+    pairs: list[StarPreferencePair] = []
+    local_used_chosen: set[int] = used_chosen.copy() if used_chosen else set()
+    chosen_idx = 0
+
+    for rejected in rejected_pool:
+        if len(pairs) >= target:
+            break
+
+        match = _find_chosen_match(
+            rejected, chosen_pool, local_used_chosen, margin, no_reuse, chosen_idx, length_epsilon
+        )
+        if match:
+            chosen, new_idx = match
+            pairs.append(PreferencePair(chosen=chosen, rejected=rejected))
+            if no_reuse:
+                local_used_chosen.add(chosen.id)
+            chosen_idx = new_idx
+
+    return pairs
+
+
+def _find_chosen_match(
+    rejected: StarRatedItem,
+    chosen_pool: list[StarRatedItem],
     used: set[int],
     margin: int,
-) -> StarRatedItem | None:
-    """Find first unused rejected item that meets margin requirement."""
-    for rejected in pool:
-        if (
-            rejected.id not in used
-            and rejected.id != chosen.id
-            and chosen.score - rejected.score >= margin
-        ):
-            return rejected
+    no_reuse: bool,
+    start_idx: int,
+    length_epsilon: int | None = None,
+) -> tuple[StarRatedItem, int] | None:
+    """Find a chosen item that can pair with this rejected item.
+
+    Args:
+        rejected: The rejected item to find a match for.
+        chosen_pool: Pool of potential chosen items.
+        used: Set of already-used chosen IDs.
+        margin: Minimum star difference required.
+        no_reuse: If True, skip items in used set.
+        start_idx: Index to start searching from (for round-robin).
+        length_epsilon: If set, only match if |len(chosen) - len(rejected)| <= epsilon.
+
+    Returns (chosen, next_idx) or None if no match found.
+    """
+    pool_size = len(chosen_pool)
+    rejected_len = len(rejected.content)
+
+    for offset in range(pool_size):
+        idx = (start_idx + offset) % pool_size
+        chosen = chosen_pool[idx]
+
+        # Basic validity checks
+        if chosen.score - rejected.score < margin:
+            continue
+        if chosen.id == rejected.id:
+            continue
+        if no_reuse and chosen.id in used:
+            continue
+
+        # Length constraint check
+        if length_epsilon is not None:
+            length_diff = abs(len(chosen.content) - rejected_len)
+            if length_diff > length_epsilon:
+                continue
+
+        return chosen, (idx + 1) % pool_size
+
     return None

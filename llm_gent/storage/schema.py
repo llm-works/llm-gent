@@ -6,11 +6,16 @@ Provides AgentTable base class that all agent tables inherit from.
 from __future__ import annotations
 
 import warnings
-from datetime import datetime
+from datetime import UTC, datetime
 
-from llm_kelt.core.base import Base, utc_now
+from llm_kelt.core.base import Base
 from sqlalchemy import BigInteger, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
+
+
+def utc_now() -> datetime:
+    """Return current UTC time."""
+    return datetime.now(UTC)
 
 
 class AgentTable(Base):

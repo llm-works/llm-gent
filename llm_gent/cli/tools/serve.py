@@ -93,6 +93,8 @@ class ServeTool(Tool):
             embedder_url=config.learn.embedder_url,
             embedder_model=config.learn.embedder_model,
             embedder_timeout=config.learn.embedder_timeout,
+            training=config.learn.training,
+            adapters=config.learn.adapters,
             # Note: identity is set per-agent in factory
         )
 
@@ -197,7 +199,7 @@ class ServeTool(Tool):
         from llm_gent.runtime.server.management import create_management_routes
 
         server: Server = (
-            ServerBuilder("agent-gateway")
+            ServerBuilder(self.lg, "agent-gateway")
             .with_config(config.server)
             .subprocess.with_ipc(request_q, response_q)
             .done()

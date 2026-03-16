@@ -105,30 +105,36 @@ class AgentRunner:
 
     def _run_loop(self) -> None:
         """Main message processing loop."""
-        self._lg.trace(
-            "entering run loop",
-            extra={
-                "agent": self._agent.name,
-                "schedule_interval": self._schedule_interval,
-                "mode": "continuous"
-                if self._schedule_interval == 0
-                else "scheduled"
-                if self._ticker
-                else "message-only",
-            },
-        )
+        # If agent has run(), delegate loop control to agent
+        if hasattr(self._agent, "run") and callable(self._agent.run):
+            self._lg.debug("delegating to agent.run()", extra={"agent": self._agent.name})
+            self._run_agent_loop()
+            return
 
+        self._run_framework_loop()
+
+    def _run_framework_loop(self) -> None:
+        """Legacy framework-controlled loop for agents without run()."""
+        self._lg.trace(
+            "entering framework run loop",
+            extra={"agent": self._agent.name, "mode": self._get_execution_mode()},
+        )
         while self._running:
-            # Calculate timeout based on mode
             timeout = self._calculate_timeout()
             msg = self._channel.recv(timeout=timeout)
-
             if msg is None:
-                # Timeout - check if we should run cycle
                 if self._should_run_cycle():
                     self._run_cycle()
             else:
                 self._handle_message(msg)
+
+    def _get_execution_mode(self) -> str:
+        """Get execution mode string for logging."""
+        if self._schedule_interval == 0:
+            return "continuous"
+        if self._ticker:
+            return "scheduled"
+        return "message-only"
 
     def _calculate_timeout(self) -> float:
         """Calculate recv timeout based on execution mode.
@@ -176,6 +182,32 @@ class AgentRunner:
             )
         except Exception as e:
             self._lg.warning("cycle failed", extra={"agent": self._agent.name, "exception": e})
+            self._channel.send(
+                Message(
+                    type=MessageType.CYCLE_ERROR,
+                    payload={"name": self._agent.name, "error": str(e)},
+                )
+            )
+
+    def _run_agent_loop(self) -> None:
+        """Delegate loop control to agent's run() method.
+
+        Agent manages its own loop, schedule, and exit conditions.
+        """
+        try:
+            result = self._agent.run()  # type: ignore[attr-defined]
+            self._channel.send(
+                Message(
+                    type=MessageType.CYCLE_COMPLETE,
+                    payload={
+                        "name": self._agent.name,
+                        "success": result.success,
+                        "iterations": result.iterations,
+                    },
+                )
+            )
+        except Exception as e:
+            self._lg.warning("agent run failed", extra={"agent": self._agent.name, "exception": e})
             self._channel.send(
                 Message(
                     type=MessageType.CYCLE_ERROR,

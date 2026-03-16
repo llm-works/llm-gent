@@ -151,7 +151,11 @@ class RatingTrait(BaseTrait):
         # Initialize rating service and backend with LLMCaller wrapper
         caller = LLMCaller(self.agent.lg, llm_trait.router)
         self._service = RatingService(self.agent.lg, caller)
-        self._backend = AtomicFactsBackend(self.agent.lg, learn_trait.kelt.database)
+
+        # Get schema from LearnTrait config for backend operations
+        schema_config = learn_trait.config.get("schema", {})
+        schema = str(schema_config.get("name")) if schema_config.get("name") else None
+        self._backend = AtomicFactsBackend(self.agent.lg, learn_trait.kelt.database, schema)
 
         self._parse_config()
         self._log_started()
@@ -311,6 +315,7 @@ class RatingTrait(BaseTrait):
         criteria: list[Criteria],
         model: str,
         provider_id: str,
+        schema: str | None = None,
     ) -> tuple[int, int]:
         """Rate facts in batches and save results."""
         assert self._service is not None
@@ -319,7 +324,7 @@ class RatingTrait(BaseTrait):
         for i in range(0, len(facts), batch_size):
             batch_facts = facts[i : i + batch_size]
             rated, failed = self._process_batch(
-                batch_facts, prompt_template, criteria, model, provider_id, i
+                batch_facts, prompt_template, criteria, model, provider_id, i, schema
             )
             total_rated += rated
             total_failed += failed
@@ -334,6 +339,7 @@ class RatingTrait(BaseTrait):
         model: str,
         provider_id: str,
         batch_start: int,
+        schema: str | None = None,
     ) -> tuple[int, int]:
         """Process a single batch of facts. Returns (rated, failed) counts."""
         assert self._service is not None
@@ -349,7 +355,7 @@ class RatingTrait(BaseTrait):
         try:
             results = self._service.rate_batch(request)
             for result in results:
-                self._save_rating(result)
+                self._save_rating(result, schema)
             return (len(results), len(items) - len(results))
         except Exception as e:
             self.agent.lg.warning(
@@ -358,11 +364,13 @@ class RatingTrait(BaseTrait):
             )
             return (0, len(items))
 
-    def _try_rate_fact(self, fact: dict[str, Any], provider: ProviderConfig) -> RatingResult | None:
+    def _try_rate_fact(
+        self, fact: dict[str, Any], provider: ProviderConfig, schema: str | None = None
+    ) -> RatingResult | None:
         """Attempt to rate a single fact and save."""
         try:
             result = self.rate_fact(fact["id"], fact["content"], fact["type"], provider)
-            self._save_rating(result)
+            self._save_rating(result, schema)
             return result
         except Exception as e:
             self.agent.lg.warning(
@@ -457,12 +465,14 @@ class RatingTrait(BaseTrait):
         self,
         items: list[tuple[int, str]],
         fact_type: str = "solution",
+        schema: str | None = None,
     ) -> int:
         """Rate specific items in a batch.
 
         Args:
             items: List of (fact_id, content) tuples to rate.
             fact_type: Type of facts (default: "solution").
+            schema: Optional schema for saving ratings.
 
         Returns:
             Number of items successfully rated.
@@ -473,7 +483,7 @@ class RatingTrait(BaseTrait):
         ctx = self._prepare_batch_context(fact_type, provider_index=0)
         batch_facts = [{"id": fid, "content": content} for fid, content in items]
         rated, _ = self._process_batch(
-            batch_facts, ctx.prompt, ctx.criteria, ctx.model, ctx.provider_id, 0
+            batch_facts, ctx.prompt, ctx.criteria, ctx.model, ctx.provider_id, 0, schema
         )
         return rated
 
@@ -483,11 +493,12 @@ class RatingTrait(BaseTrait):
         content: str,
         fact_type: str,
         provider: ProviderConfig,
+        schema: str | None = None,
     ) -> RatingResult | None:
         """Rate a fact with a single provider and save."""
         try:
             result = self.rate_fact(fact_id, content, fact_type, provider)
-            self._save_rating(result)
+            self._save_rating(result, schema)
             self.agent.lg.debug(
                 "rated fact",
                 extra={"fact_id": fact_id, "model": provider.model, "stars": result.stars},
@@ -525,22 +536,28 @@ class RatingTrait(BaseTrait):
 
         return enabled_providers[index]
 
-    def _save_rating(self, result: RatingResult) -> None:
-        """Save rating using backend."""
+    def _save_rating(self, result: RatingResult, schema: str | None = None) -> None:
+        """Save rating using backend.
+
+        Args:
+            result: Rating result to save.
+            schema: Optional schema for the rating (uses backend default if not provided).
+        """
         if not self._backend:
             raise RuntimeError("Rating backend not initialized - call on_start() first")
 
-        self._backend.save_rating(result=result, source="llm_rater")
+        self._backend.save_rating(result=result, source="llm_rater", schema=schema)
 
-    def get_fact_rating(self, fact_id: int) -> int | None:
+    def get_fact_rating(self, fact_id: int, schema: str | None = None) -> int | None:
         """Get the star rating for a specific fact.
 
         Args:
             fact_id: ID of the fact to look up.
+            schema: Optional schema override.
 
         Returns:
             Star rating (1-5) if rated, None if not rated.
         """
         if not self._backend:
             return None
-        return self._backend.get_fact_rating(fact_id)
+        return self._backend.get_fact_rating(fact_id, schema)

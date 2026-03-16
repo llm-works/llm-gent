@@ -7,12 +7,15 @@ from typing import TYPE_CHECKING, Any, Literal
 from appinfra.db.pg import PG
 from llm_infer.client import ChatClient, ChatResponse
 from llm_infer.client import Factory as LLMClientFactory
+from llm_infer.client.types import AdapterInfo
 from llm_kelt import Client as KeltClient
 from llm_kelt.core import Database
 from llm_kelt.core.types import ScoredEntity
 from llm_kelt.inference import ContextBuilder, Embedder
-from llm_kelt.memory.atomic import Fact
+from llm_kelt.memory.atomic import EmbeddingFilter, Fact
 from llm_kelt.memory.isolation import ClientContext
+from llm_kelt.scoped_client import ScopedClient
+from llm_kelt.training import Factory as TrainFactory
 
 from ...llm.types import CompletionResult
 from ...runnable import ExecutionResult
@@ -27,18 +30,26 @@ if TYPE_CHECKING:
 from appinfra import DotDict
 
 
+class ManifestNotFoundError(Exception):
+    """Raised when adapter manifest cannot be found for schema resolution."""
+
+    pass
+
+
 # Type alias for Learn configuration
 LearnConfig = DotDict
 """Learn configuration as DotDict.
 
 Expected fields:
     identity: Resolved Identity (required).
+    schema: Schema config dict with 'name' and 'enforce' (default: {"name": "public"}).
     llm: LLM configuration for learned completions.
     db: Database configuration dict (with url, extensions, etc.).
     embedder_url: URL for embedding service (None = no RAG).
     embedder_model: Model name for embeddings (default: "default").
     embedder_timeout: Embedder timeout in seconds (default: 30.0).
     training: Training configuration dict (default_profiles, etc.).
+    adapters: Adapter registry config dict (lora.base_path for manifest lookups).
 """
 
 
@@ -90,6 +101,7 @@ class LearnTrait(BaseTrait):
         self.config = config
         self._database: Database | None = None
         self._kelt: KeltClient | None = None
+        self._train_factory: TrainFactory | None = None  # initialized in on_start
         self._embedder: Embedder | None = None
         self._context: ContextBuilder | None = None
         self._client: ChatClient | None = None
@@ -98,23 +110,23 @@ class LearnTrait(BaseTrait):
     def _create_kelt_client(
         self, database: Database, embedder: Embedder | None, llm_client: ChatClient | None
     ) -> KeltClient:
-        """Create kelt client from config using identity.
+        """Create schema-agnostic kelt client.
 
         Args:
             database: Database instance.
             embedder: Embedder instance (None if not configured).
             llm_client: LLM client instance (None if not configured).
+
+        Returns:
+            Schema-agnostic KeltClient. Use client.with_schema("X") for
+            per-operation schema selection.
         """
         identity = self._resolve_identity()
-
-        # Create ClientContext from identity
         if identity is None:
             raise ValueError("LearnConfig must have identity set")
 
-        context_key = identity.context_key
-        schema_name = "public"  # Default schema
-
-        context = ClientContext(context_key=context_key, schema_name=schema_name)
+        # Schema-agnostic context - no schema_name
+        context = ClientContext(context_key=identity.context_key)
 
         return KeltClient(
             lg=self.agent.lg,
@@ -160,6 +172,8 @@ class LearnTrait(BaseTrait):
         self._kelt = self._create_kelt_client(self._database, self._embedder, self._client)
         self._context = ContextBuilder(self._kelt.atomic.assertions)
 
+        # Train factory created lazily via _get_train_factory() when needed
+
     def on_stop(self) -> None:
         """Close LLM client and embedder on agent stop."""
         if self._client is not None:
@@ -169,8 +183,108 @@ class LearnTrait(BaseTrait):
             self._embedder.close()
             self._embedder = None
         self._kelt = None
+        self._train_factory = None
         self._context = None
         self._database = None
+
+    def _get_train_factory(self) -> TrainFactory | None:
+        """Get or create training factory for manifest lookups.
+
+        Returns:
+            TrainFactory if adapters.lora.base_path is configured, None otherwise.
+        """
+        if self._train_factory is not None:
+            return self._train_factory
+
+        from pathlib import Path
+
+        adapters_config = self.config.get("adapters") or {}
+        lora_config = adapters_config.get("lora") or {}
+        base_path = lora_config.get("base_path")
+
+        if not base_path:
+            self.agent.lg.warning(
+                "no adapters.lora.base_path configured, manifest lookup disabled",
+                extra={"adapters_config": adapters_config},
+            )
+            return None
+
+        registry_path = Path(base_path).expanduser()
+        if not registry_path.exists():
+            self.agent.lg.warning(
+                "adapter registry path does not exist, manifest lookup disabled",
+                extra={"path": str(registry_path)},
+            )
+            return None
+
+        self._train_factory = TrainFactory(self.agent.lg, registry_path)
+        return self._train_factory
+
+    # =========================================================================
+    # Schema-aware client access
+    # =========================================================================
+
+    def get_client_for_schema(self, schema: str) -> ScopedClient:
+        """Get a scoped client for a specific schema.
+
+        Uses the new with_schema() API for per-operation schema selection.
+        Schema and tables are created lazily on first use.
+
+        Args:
+            schema: PostgreSQL schema name.
+
+        Returns:
+            ScopedClient configured for the specified schema.
+
+        Raises:
+            RuntimeError: If trait not started.
+        """
+        return self.kelt.with_schema(schema)
+
+    def resolve_schema_for_adapter(self, adapter_info: AdapterInfo) -> str:
+        """Resolve the schema for an adapter by looking up its manifest.
+
+        If `enforce=true` is set in schema config, always uses the config schema
+        regardless of the adapter's manifest.
+
+        Args:
+            adapter_info: Adapter info from LLM response.
+
+        Returns:
+            Schema name from manifest, or default schema if not found/not configured.
+        """
+        # Config override: if enforce=true, use config schema instead of manifest lookup
+        schema_config = self.config.get("schema", {})
+        if schema_config.get("enforce", False):
+            return self._default_schema
+
+        md5 = adapter_info.md5
+        if not md5:
+            self.agent.lg.debug("no md5 in adapter info, using default schema")
+            return self._default_schema
+
+        # Try manifest lookup (returns None if adapters not configured)
+        train_factory = self._get_train_factory()
+        if train_factory is None:
+            self.agent.lg.debug("no train factory, using default schema")
+            return self._default_schema
+
+        manifest = train_factory.manifest.get_manifest(md5)
+        if manifest and manifest.source and manifest.source.schema_name:
+            schema = str(manifest.source.schema_name)
+            self.agent.lg.trace("resolved schema from manifest", extra={"schema": schema})
+            return schema
+
+        raise ManifestNotFoundError(
+            f"Manifest lookup failed for md5={md5}. "
+            f"Cannot determine schema - refusing to use default to prevent data corruption."
+        )
+
+    @property
+    def _default_schema(self) -> str:
+        """Get default schema from config (schema.name)."""
+        schema_config = self.config.get("schema", {})
+        return str(schema_config.get("name") or "public")
 
     @property
     def kelt(self) -> KeltClient:
@@ -349,6 +463,8 @@ class LearnTrait(BaseTrait):
         top_k: int = 10,
         min_similarity: float = 0.5,
         categories: list[str] | None = None,
+        embedding_filter: EmbeddingFilter | None = None,
+        schema: str | None = None,
     ) -> list[ScoredEntity[Fact]]:
         """Search facts by semantic similarity.
 
@@ -356,7 +472,9 @@ class LearnTrait(BaseTrait):
             query: Text to search for similar facts.
             top_k: Maximum results.
             min_similarity: Minimum similarity threshold (0-1).
-            categories: Filter to these categories (None = all).
+            categories: Filter to these categories (None = all). Deprecated: use embedding_filter.
+            embedding_filter: EmbeddingFilter for flexible filtering (recommended).
+            schema: PostgreSQL schema to search in (uses with_schema for scoping).
 
         Returns:
             List of ScoredEntity[Fact] sorted by similarity.
@@ -368,12 +486,14 @@ class LearnTrait(BaseTrait):
             raise ValueError("recall() requires embedder - configure embedder_url in LearnConfig")
 
         embedding = self._embedder.embed(query)
-        return self.kelt.atomic.embeddings.search_similar(
+        client = self.kelt if schema is None else self.kelt.with_schema(schema)
+        return client.atomic.embeddings.search_similar(
             query=embedding.embedding,
             model_name=self._embedder.model,
             top_k=top_k,
             min_similarity=min_similarity,
             categories=categories,
+            filter=embedding_filter,
         )
 
     # =========================================================================

@@ -17,6 +17,7 @@ from sqlalchemy import text
 from llm_gent.core.llm import LLMCaller
 from llm_gent.core.training import StarRatedItem
 
+from ..schema import validate_schema_name
 from .models import BatchItem, BatchRequest, Result
 from .service import Service as CoreRatingService
 
@@ -49,6 +50,8 @@ class BatchRatingService:
         provider: str = "local",
         model: str = "auto",
         fact_type: str = "solution",
+        schema: str | None = None,
+        max_chars: int | None = None,
     ) -> None:
         self._lg = lg
         self._pg = pg
@@ -59,17 +62,31 @@ class BatchRatingService:
         self._provider = provider
         self._model = model
         self._fact_type = fact_type
+        self._schema = schema
+        self._max_chars = max_chars
+
+    def _schema_prefix(self) -> str:
+        """Get schema prefix for table names."""
+        if self._schema and self._schema != "public":
+            return f"{validate_schema_name(self._schema)}."
+        return ""
 
     def get_unrated(self, limit: int | None = None) -> list[UnratedItem]:
-        """Get unrated facts from the database."""
+        """Get unrated facts from the database.
+
+        Respects max_chars filter if configured.
+        """
+        prefix = self._schema_prefix()
         limit_clause = "LIMIT :limit" if limit is not None else ""
+        max_chars_clause = "AND length(af.content) < :max_chars" if self._max_chars else ""
         sql = text(f"""
             SELECT af.id, af.content
-            FROM atomic_facts af
-            LEFT JOIN atomic_feedback_details afd ON af.id = afd.fact_id
+            FROM {prefix}atomic_facts af
+            LEFT JOIN {prefix}atomic_feedback_details afd ON af.id = afd.fact_id
             WHERE af.context_key = :context_key
               AND af.type = :fact_type
               AND afd.id IS NULL
+              {max_chars_clause}
             ORDER BY af.created_at ASC
             {limit_clause}
         """)
@@ -79,6 +96,8 @@ class BatchRatingService:
         }
         if limit is not None:
             params["limit"] = limit
+        if self._max_chars is not None:
+            params["max_chars"] = self._max_chars
         with self._pg.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [UnratedItem(id=r[0], content=r[1]) for r in rows]
@@ -145,8 +164,9 @@ class BatchRatingService:
 
     def _save_rating(self, result: Result) -> bool:
         """Save a rating to the database."""
-        sql = text("""
-            INSERT INTO atomic_feedback_details
+        prefix = self._schema_prefix()
+        sql = text(f"""
+            INSERT INTO {prefix}atomic_feedback_details
                 (fact_id, signal, strength, provider_type, context, provider)
             VALUES (:fact_id, :signal, :strength, :provider_type, CAST(:context AS jsonb), :provider)
             ON CONFLICT (fact_id) DO NOTHING

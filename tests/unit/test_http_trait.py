@@ -87,7 +87,7 @@ class TestHTTPServer:
         config = HTTPServerConfig(port=9000)
         router_factory = MagicMock()
 
-        server = HTTPServer(config, router_factory)
+        server = HTTPServer(MagicMock(), config, router_factory)
 
         assert server.config == config
         assert server.request_queue is not None

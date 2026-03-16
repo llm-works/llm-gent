@@ -28,6 +28,10 @@ class LearnBackendConfig(BaseModel):
     embedder_model: str = "default"
     embedder_timeout: float = 30.0
     """Embedder timeout in seconds."""
+    training: dict[str, Any] | None = None
+    """Training configuration (default profiles, etc.)."""
+    adapters: dict[str, Any] | None = None
+    """Adapter configuration (lora base_path, etc.)."""
 
 
 class TaskConfigYAML(BaseModel):

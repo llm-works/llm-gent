@@ -110,9 +110,9 @@ llm-gent -c etc/llm-gent.yaml serve
 
 ## Related Projects
 
-- [llm-infer](https://github.com/serendip-ml/llm-infer) - LLM inference server and client
-- [llm-kelt](https://github.com/serendip-ml/llm-kelt) - Training infrastructure (SFT/DPO)
-- [appinfra](https://github.com/serendip-ml/appinfra) - Application infrastructure utilities
+- [llm-infer](https://github.com/llm-works/llm-infer) - LLM inference server and client
+- [llm-kelt](https://github.com/llm-works/llm-kelt) - Training infrastructure (SFT/DPO)
+- [appinfra](https://github.com/llm-works/appinfra) - Application infrastructure utilities
 
 ## License
 

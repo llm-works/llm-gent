@@ -30,8 +30,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # TODO: remove after these packages are released to PyPI
+          python -m pip install "git+https://github.com/llm-works/appinfra.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
           python -m pip install -e ".[dev]"
-          # For dev: python -m pip install "git+https://github.com/serendip-ml/llm-kelt.git@develop"
 
       - name: Check formatting
         run: python -m ruff format --check .
@@ -61,8 +65,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # TODO: remove after these packages are released to PyPI
+          python -m pip install "git+https://github.com/llm-works/appinfra.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
           python -m pip install -e ".[dev]"
-          # For dev: python -m pip install "git+https://github.com/serendip-ml/llm-kelt.git@develop"
 
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short
@@ -86,8 +94,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # TODO: remove after these packages are released to PyPI
+          python -m pip install "git+https://github.com/llm-works/appinfra.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
+          python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
           python -m pip install -e ".[dev]"
-          # For dev: python -m pip install "git+https://github.com/serendip-ml/llm-kelt.git@develop"
 
       - name: Run tests with coverage
         run: python -m pytest tests/ --cov=llm_gent --cov-report=xml --cov-report=term

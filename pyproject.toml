@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 keywords = ["agents", "llm", "ai", "learning"]
-authors = [{ name = "serendip-ml", email = "64741025+serendip-ml@users.noreply.github.com" }]
+authors = [{ name = "LLM Works LLC", email = "info@llm-works.ai" }]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: Apache Software License",
@@ -26,6 +26,7 @@ dependencies = [
     "llm-kelt",
     "llm-saia",
     "pydantic>=2.0",
+    "rapidfuzz>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -45,9 +46,9 @@ dev = [
 llm-gent = "llm_gent.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/serendip-ml/llm-gent"
-Documentation = "https://github.com/serendip-ml/llm-gent#readme"
-Repository = "https://github.com/serendip-ml/llm-gent"
+Homepage = "https://github.com/llm-works/llm-gent"
+Documentation = "https://github.com/llm-works/llm-gent#readme"
+Repository = "https://github.com/llm-works/llm-gent"
 
 [tool.setuptools_scm]
 fallback_version = "0.0.0.dev0"
@@ -123,7 +124,7 @@ lines-after-imports = 2
 [tool.coverage.run]
 source = ["llm_gent"]
 branch = true
-omit = ["*/tests/*", "*/__pycache__/*", "*/llm_gent/cli/*"]
+omit = ["*/tests/*", "*/__pycache__/*", "*/llm_gent/cli/*", "*/llm_gent/agents/*/cli.py"]
 
 [tool.coverage.report]
 exclude_lines = [

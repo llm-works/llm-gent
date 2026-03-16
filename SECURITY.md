@@ -10,7 +10,7 @@
 
 Please report security vulnerabilities through GitHub's private vulnerability reporting:
 
-**[Report a vulnerability](https://github.com/serendip-ml/llm-gent/security/advisories/new)**
+**[Report a vulnerability](https://github.com/llm-works/llm-gent/security/advisories/new)**
 
 Please include:
 - Description of the vulnerability

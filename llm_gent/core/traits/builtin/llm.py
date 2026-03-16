@@ -206,6 +206,64 @@ class LLMTrait(BaseTrait):
 
         return result
 
+    async def complete_async(
+        self,
+        messages: list[Message],
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        output_schema: type[BaseModel] | None = None,
+        backend: str | None = None,
+        adapter: str | None = None,
+    ) -> CompletionResult:
+        """Generate a completion asynchronously.
+
+        Same as complete() but uses async I/O for concurrent requests.
+        Use with asyncio.gather() for parallel LLM calls.
+
+        Args:
+            messages: Conversation messages.
+            model: Model override (uses config default if None).
+            temperature: Temperature override (uses config default if None).
+            max_tokens: Max tokens override (uses config default if None).
+            tools: Tool definitions for function calling.
+            output_schema: Pydantic model class for structured output.
+            backend: Backend to route to.
+            adapter: LoRA adapter to use.
+
+        Returns:
+            CompletionResult with content and metadata.
+        """
+        if tools and output_schema:
+            raise ValueError("Cannot use both tools and output_schema")
+
+        api_messages, extra_body = self._prepare_messages(messages, output_schema)
+        params = self._resolve_params(model, temperature, max_tokens, adapter)
+
+        self._log_request(
+            api_messages, params["model"], params["temp"], params["max_tokens"], params["adapter"]
+        )
+
+        response = await self.router.chat_async(
+            messages=api_messages,
+            model=params["model"],
+            temperature=params["temp"],
+            max_tokens=params["max_tokens"],
+            tools=tools,
+            backend=backend,
+            adapter=params["adapter"],
+            extra_body=extra_body,
+        )
+
+        self._log_response(response)
+        result = self._response_to_result(response)
+
+        if output_schema:
+            result.parsed = self._parse_structured_output(result.content, output_schema)
+
+        return result
+
     def _prepare_messages(
         self, messages: list[Message], output_schema: type[BaseModel] | None
     ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:

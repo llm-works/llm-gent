@@ -11,6 +11,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from appinfra.log import Logger
+
 
 if TYPE_CHECKING:
     from multiprocessing.queues import Queue
@@ -60,7 +62,7 @@ class HTTPServer:
             # ... define routes ...
             return router
 
-        server = HTTPServer(HTTPServerConfig(port=8080), create_routes)
+        server = HTTPServer(lg, HTTPServerConfig(port=8080), create_routes)
         server.start()  # Non-blocking, starts subprocess
 
         # Main process reads requests and sends responses
@@ -74,15 +76,18 @@ class HTTPServer:
 
     def __init__(
         self,
+        lg: Logger,
         config: HTTPServerConfig,
         router_factory: Callable[[], APIRouter],
     ) -> None:
         """Initialize the HTTP server.
 
         Args:
+            lg: Logger instance.
             config: Server configuration.
             router_factory: Function that creates the APIRouter for this server.
         """
+        self._lg = lg
         self._config = config
         self._router_factory = router_factory
         self._request_q: Queue[Any] = mp.Queue()
@@ -129,7 +134,7 @@ class HTTPServer:
         router = self._router_factory()
 
         return (
-            ServerBuilder(self._config.title)
+            ServerBuilder(self._lg, self._config.title)
             .with_host(self._config.host)
             .with_port(self._config.port)
             .with_title(self._config.title)

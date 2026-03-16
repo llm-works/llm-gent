@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from appinfra.log import Logger
 from sqlalchemy import text
 
+from ..schema import validate_schema_name
 from .models import ProviderType, Result
 
 
@@ -28,26 +29,37 @@ class AtomicFactsBackend:
         backend.save_rating(result, source="llm_rater")
     """
 
-    def __init__(self, lg: Logger, database: Database) -> None:
+    def __init__(self, lg: Logger, database: Database, schema: str | None = None) -> None:
         """Initialize atomic facts backend.
 
         Args:
             lg: Logger instance.
             database: llm-kelt Database instance.
+            schema: Optional schema name for table prefixing.
         """
         self._lg = lg
         self._db = database
+        self._schema = schema
+
+    def _table(self, name: str, schema: str | None = None) -> str:
+        """Get schema-qualified table name."""
+        effective_schema = schema or self._schema
+        if effective_schema and effective_schema != "public":
+            return f"{validate_schema_name(effective_schema)}.{name}"
+        return name
 
     def save_rating(
         self,
         result: Result,
         source: str = "llm_rater",
+        schema: str | None = None,
     ) -> None:
         """Save rating to atomic_feedback_details table.
 
         Args:
             result: Rating result to save (result.fact must be int fact_id).
             source: Source identifier for the rating.
+            schema: Optional schema override (uses instance schema if not provided).
 
         Raises:
             TypeError: If result.fact is not an int.
@@ -58,7 +70,7 @@ class AtomicFactsBackend:
             )
 
         fact_id = result.fact
-        query, params = self._build_insert_query(result, fact_id, source)
+        query, params = self._build_insert_query(result, fact_id, source, schema)
 
         with self._db.session() as session:
             session.execute(text(query), params)
@@ -67,11 +79,12 @@ class AtomicFactsBackend:
         self._log_rating_saved(result, fact_id)
 
     def _build_insert_query(
-        self, result: Result, fact_id: int, source: str
+        self, result: Result, fact_id: int, source: str, schema: str | None = None
     ) -> tuple[str, dict[str, Any]]:
         """Build INSERT query and params for rating."""
-        query = """
-        INSERT INTO atomic_feedback_details (
+        table = self._table("atomic_feedback_details", schema)
+        query = f"""
+        INSERT INTO {table} (
             fact_id, signal, strength, provider_type, provider, context
         )
         VALUES (
@@ -177,10 +190,12 @@ class AtomicFactsBackend:
 
     def _get_base_unrated_query(self) -> str:
         """Get base SQL query for unrated facts."""
-        return """
+        facts_table = self._table("atomic_facts")
+        feedback_table = self._table("atomic_feedback_details")
+        return f"""
         SELECT af.id, af.type, af.category, af.source, af.content, af.created_at
-        FROM atomic_facts af
-        LEFT JOIN atomic_feedback_details afd ON af.id = afd.fact_id
+        FROM {facts_table} af
+        LEFT JOIN {feedback_table} afd ON af.id = afd.fact_id
         WHERE afd.id IS NULL
           AND af.context_key LIKE :context_pattern ESCAPE '\\'
           AND af.active = true
@@ -272,13 +287,15 @@ class AtomicFactsBackend:
         Uses a lateral subquery to get only the latest feedback row per fact,
         ensuring consistency with mark_facts_paired and get_fact_rating.
         """
-        query = """
+        facts_table = self._table("atomic_facts")
+        feedback_table = self._table("atomic_feedback_details")
+        query = f"""
         SELECT af.id, af.content, (afd_latest.context->>'stars')::int as stars,
                afd_latest.id as feedback_id
-        FROM atomic_facts af
+        FROM {facts_table} af
         JOIN LATERAL (
             SELECT afd.id, afd.context
-            FROM atomic_feedback_details afd
+            FROM {feedback_table} afd
             WHERE afd.fact_id = af.id
             ORDER BY afd.id DESC
             LIMIT 1
@@ -300,18 +317,20 @@ class AtomicFactsBackend:
         params["limit"] = limit
         return query, params
 
-    def get_fact_rating(self, fact_id: int) -> int | None:
+    def get_fact_rating(self, fact_id: int, schema: str | None = None) -> int | None:
         """Get the star rating for a specific fact.
 
         Args:
             fact_id: ID of the fact to get rating for.
+            schema: Optional schema override.
 
         Returns:
             Star rating (1-5) if rated, None if unrated.
         """
-        query = text("""
+        table = self._table("atomic_feedback_details", schema)
+        query = text(f"""
             SELECT (context->>'stars')::int as stars
-            FROM atomic_feedback_details
+            FROM {table}
             WHERE fact_id = :fact_id
             ORDER BY id DESC
             LIMIT 1
@@ -327,11 +346,12 @@ class AtomicFactsBackend:
         Only updates the latest feedback row for each fact to avoid polluting
         stale ratings.
         """
-        query = text("""
-            UPDATE atomic_feedback_details
+        table = self._table("atomic_feedback_details")
+        query = text(f"""
+            UPDATE {table}
             SET context = context || CAST(:pairing_info AS jsonb)
             WHERE id = (
-                SELECT id FROM atomic_feedback_details
+                SELECT id FROM {table}
                 WHERE fact_id = :fact_id
                 ORDER BY id DESC LIMIT 1
             )

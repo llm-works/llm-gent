@@ -5,12 +5,33 @@ type: programmatic
 module: llm_gent.agents.jokester_p
 factory: Factory
 
-# Learning profile - where this agent's memory is stored
-identity:
-  name: "jokester-p"
+max_retries: 10
+schedule:
+  interval: 43200  # Every 12 hours (override: INFRA_AGENTS_JOKESTER_P_SCHEDULE_INTERVAL=60)
 
-max_retries: 0
-similarity_threshold: 0.85
+# Novelty checking ensures jokes are never repeated using embedding similarity.
+# Isolation modes control which jokes are compared against:
+#   off       - Compare against all jokes (no isolation)
+#   reference - Binary split: reference model vs local model (for seeding with Haiku)
+#   model     - Per-model: each model only sees its own jokes
+#   adapter   - Per-adapter: each adapter version only sees its own jokes (for training iterations)
+novelty:
+  similarity:
+    threshold: 0.85
+  mode: adapter
+  rag:
+    mode: avoid_most_frequent  # or "recent" for current behavior
+    attach: 5          # top N most frequent to include in prompt
+    history: 100       # track last N collisions
+  variety:
+    ngram:
+      enabled: false   # reject jokes with same first N words as recent jokes
+      n: 2             # number of words to check (e.g., "Why don't scientists")
+      history: 10      # remember last N openings
+    levenshtein:
+      enabled: false   # reject jokes too similar to recent (fuzzy match)
+      threshold: 0.7   # similarity threshold (0-1, higher = stricter)
+      history: 10      # remember last N full jokes
 
 denylist:
   - hipster
@@ -19,14 +40,33 @@ denylist:
   - participation trophy
   - selfie
 
+target:
+  adapter: 1000
+  max_chars: 140
+
+# Parallel generation: fire N LLM calls concurrently, then filter sequentially
+# Higher values = faster throughput, but may waste some LLM calls on duplicates
+parallel: 2
+
+# Learning profile - where this agent's memory is stored
+kelt:
+  identity:
+    name: "jokester-p"
+  schema:
+    name: "playground"
+    enforce: false
+  reference:
+    schema:
+      - haiku_ref
+      - haiku_ref2
+    model: "claude-haiku-4-5"  # Used when mode=reference to identify the reference model
+
 # Agent-specific LLM config (merged with global llm.yaml)
 llm:
   default: local
   backends:
     local:
-      adapter: jokester-p-sft
-    vastai:
-      adapter: jokester-p-sft
+      adapter: # jokester-p-sft, jokester-p-dpo, jokester-p-prompt
     anthropic:
       model: "claude-haiku-4-5"
       #model: "claude-sonnet-4-20250514"
@@ -56,9 +96,6 @@ task:
     The agent enforces "never repeat" across thousands of jokes using
     embedding-based similarity search, which is not reliably achievable
     through prompt-based instructions alone.
-
-schedule:
-  interval: 43200  # Every 12 hours (override: INFRA_AGENTS_JOKESTER_P_SCHEDULE_INTERVAL=60)
 
 # Automated rating configuration
 rating:

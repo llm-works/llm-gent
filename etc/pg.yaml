@@ -9,7 +9,7 @@ pgserver:
 
 dbs:
   main:
-    url: "postgresql://${pgserver.user}:${pgserver.pass}@127.0.0.1:${pgserver.port}/learn"
+    url: "postgresql://${pgserver.user}:${pgserver.pass}@127.0.0.1:${pgserver.port}/kelt"
     create_db: true
     readonly: false
     pool_pre_ping: true
