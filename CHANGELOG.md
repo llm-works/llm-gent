@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-16
+
 ### Added
 
 - Length-balanced DPO pairing with `--length-balance` and `--length-epsilons` to prevent length
@@ -36,5 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migrated from llm-learn to llm-kelt for training
 - Refactored training infrastructure to core modules
 
-[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/llm-works/llm-gent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/llm-works/llm-gent/releases/tag/v0.1.0
