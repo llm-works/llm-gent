@@ -119,12 +119,14 @@ class TestCoreStart:
 
     def test_start_error_cleans_up_resources(self, core, registry):
         """Start cleans up IPC resources on spawn failure."""
+        import multiprocessing as mp
+
         registry.register("test", {"name": "test"})
         handle = registry.get("test")
 
         # Simulate partial spawn: channel created, then error
         mock_channel = MagicMock()
-        mock_process = MagicMock()
+        mock_process = MagicMock(spec=mp.Process)
         mock_process.is_alive.return_value = True
 
         def spawn_with_partial_setup(h):
@@ -140,6 +142,28 @@ class TestCoreStart:
         mock_process.terminate.assert_called()
         assert handle.channel is None
         assert handle.process is None
+
+    def test_start_rejects_duplicate_start(self, core, registry):
+        """Start raises RuntimeError if agent is already active."""
+        registry.register("test", {"name": "test"})
+        handle = registry.get("test")
+
+        # Set agent to RUNNING state
+        handle.state = State.RUNNING
+
+        with pytest.raises(RuntimeError, match="already active"):
+            core.start("test")
+
+    def test_start_rejects_starting_agent(self, core, registry):
+        """Start raises RuntimeError if agent is in STARTING state."""
+        registry.register("test", {"name": "test"})
+        handle = registry.get("test")
+
+        # Set agent to STARTING state
+        handle.state = State.STARTING
+
+        with pytest.raises(RuntimeError, match="already active"):
+            core.start("test")
 
 
 class TestCoreStop:
@@ -382,11 +406,13 @@ class TestCoreTerminateProcess:
 
     def test_terminate_kills_stubborn_process(self, core, registry):
         """Terminate kills process that won't stop."""
+        import multiprocessing as mp
+
         from llm_gent.runtime import AgentHandle
 
         handle = AgentHandle(name="test", config={})
         mock_channel = MagicMock()
-        mock_process = MagicMock()
+        mock_process = MagicMock(spec=mp.Process)
         # Process stays alive through terminate
         mock_process.is_alive.side_effect = [True, True, True]
         handle.channel = mock_channel
@@ -431,11 +457,13 @@ class TestCoreCleanupFailedStart:
 
     def test_cleanup_with_process_only(self, core, registry):
         """Cleanup handles case where only process was created."""
+        import multiprocessing as mp
+
         from llm_gent.runtime import AgentHandle
 
         handle = AgentHandle(name="test", config={})
         handle.channel = None
-        mock_process = MagicMock()
+        mock_process = MagicMock(spec=mp.Process)
         mock_process.is_alive.return_value = False
         handle.process = mock_process
 
@@ -459,10 +487,12 @@ class TestCoreCleanupFailedStart:
 
     def test_cleanup_kills_stubborn_process(self, core, registry):
         """Cleanup kills process that won't terminate."""
+        import multiprocessing as mp
+
         from llm_gent.runtime import AgentHandle
 
         handle = AgentHandle(name="test", config={})
-        mock_process = MagicMock()
+        mock_process = MagicMock(spec=mp.Process)
         mock_process.is_alive.return_value = True
         handle.process = mock_process
 

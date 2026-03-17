@@ -72,7 +72,7 @@ class ServeTool(Tool):
         core = self._create_core(registry, config, learn_config)
         self._register_agents(registry, core, config)
 
-        self._log_startup(config)
+        self._log_startup(config, registry)
         self._run_server(config, core)
         return 0
 
@@ -123,15 +123,16 @@ class ServeTool(Tool):
             variables=self._parse_env_vars(),
         )
 
-    def _log_startup(self, config: AgentServerConfig) -> None:
+    def _log_startup(self, config: AgentServerConfig, registry: AgentRegistry) -> None:
         """Log server startup information."""
-        enabled_agents = [name for name, cfg in config.agents.items() if cfg.enabled]
+        # Use registry to report actually registered agents (not just config)
+        registered_agents = [info.name for info in registry.list_agents()]
         self.lg.info(
             "agent server started",
             extra={
                 "host": config.server.host,
                 "port": config.server.port,
-                "agents": enabled_agents,
+                "agents": registered_agents,
             },
         )
 
@@ -503,6 +504,7 @@ class ServeTool(Tool):
         config_dict = DotDict()
         config_dict["name"] = name
         config_dict["type"] = agent_config.type_
+        config_dict["execution"] = agent_config.execution
         config_dict["task"] = agent_config.task.model_dump()
 
         # Add type-specific fields

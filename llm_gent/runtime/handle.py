@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -33,8 +34,8 @@ class AgentHandle:
     state: State = State.CREATED
     """Current lifecycle state."""
 
-    process: mp.Process | None = None
-    """Subprocess running the agent, or None if not started."""
+    process: mp.Process | threading.Thread | None = None
+    """Subprocess or thread running the agent, or None if not started."""
 
     channel: ProcessChannel[Any, Any] | ThreadChannel[Any, Any] | None = None
     """Communication channel to subprocess/thread, or None if not started."""

@@ -258,8 +258,11 @@ class TestAgentRunnerIntegration:
         return agent
 
     def test_run_sends_started_and_stops(self, mock_logger, mock_agent):
-        """Run sends STARTED message and handles shutdown."""
+        """Run sends STARTED message and handles shutdown via framework loop."""
         mock_channel = MagicMock()
+
+        # Force AgentRunner to use framework loop (not agent.run())
+        mock_agent.run = None
 
         # Simulate shutdown after startup
         def recv_side_effect(timeout=None):
@@ -275,6 +278,8 @@ class TestAgentRunnerIntegration:
 
         runner.run()
 
+        # Verify shutdown was processed through framework loop
+        mock_channel.recv.assert_called()
         mock_agent.stop.assert_called_once()
 
         # Check that STARTED message was sent
