@@ -6,7 +6,7 @@ import pytest
 
 from llm_gent.core.agent import ExecutionResult
 from llm_gent.runtime import AgentRunner
-from llm_gent.runtime.transport import Message, MessageType, Response
+from llm_gent.runtime.messages import AgentMessage, AgentResponse, MessageType
 
 
 pytestmark = pytest.mark.unit
@@ -124,7 +124,7 @@ class TestAgentRunner:
     def test_handle_shutdown(self, runner, mock_channel):
         """Handle shutdown message stops the runner."""
         runner._running = True
-        msg = Message(type=MessageType.SHUTDOWN)
+        msg = AgentMessage(type=MessageType.SHUTDOWN)
 
         runner._handle_message(msg)
 
@@ -132,20 +132,24 @@ class TestAgentRunner:
 
     def test_handle_ask(self, runner, mock_channel, mock_agent):
         """Handle ask calls agent.ask and returns response."""
-        msg = Message(id="test-id", type=MessageType.ASK, payload={"question": "test question"})
+        msg = AgentMessage(
+            type=MessageType.ASK, payload={"question": "test question"}, id="test-id"
+        )
 
         runner._handle_ask(msg)
 
         mock_agent.ask.assert_called_once_with("test question")
         mock_channel.send.assert_called_once()
         call = mock_channel.send.call_args[0][0]
-        assert isinstance(call, Response)
+        assert isinstance(call, AgentResponse)
         assert call.success is True
         assert call.payload["response"] == "Agent response"
 
     def test_handle_feedback(self, runner, mock_channel, mock_agent):
         """Handle feedback calls agent.record_feedback."""
-        msg = Message(id="test-id", type=MessageType.FEEDBACK, payload={"message": "Good job!"})
+        msg = AgentMessage(
+            type=MessageType.FEEDBACK, payload={"message": "Good job!"}, id="test-id"
+        )
 
         runner._handle_feedback(msg)
 
@@ -161,7 +165,7 @@ class TestAgentRunner:
         mock_result.iterations = 1
         mock_agent.get_recent_results.return_value = [mock_result]
 
-        msg = Message(id="test-id", type=MessageType.GET_INSIGHTS, payload={"limit": 5})
+        msg = AgentMessage(type=MessageType.GET_INSIGHTS, payload={"limit": 5}, id="test-id")
 
         runner._handle_get_insights(msg)
 
@@ -172,7 +176,7 @@ class TestAgentRunner:
 
     def test_handle_run_cycle(self, runner, mock_channel, mock_agent):
         """Handle run_cycle calls _run_cycle."""
-        msg = Message(type=MessageType.RUN_CYCLE)
+        msg = AgentMessage(type=MessageType.RUN_CYCLE)
 
         runner._handle_message(msg)
 
@@ -204,7 +208,7 @@ class TestAgentRunner:
 
     def test_send_error_response_maps_types(self, runner, mock_channel):
         """Send error response maps request types to response types."""
-        msg = Message(id="test-id", type=MessageType.ASK)
+        msg = AgentMessage(type=MessageType.ASK, id="test-id")
 
         runner._send_error_response(msg, "Error message")
 
@@ -231,7 +235,7 @@ class TestAgentRunner:
 
     def test_handle_unknown_message_type(self, runner, mock_channel, mock_logger):
         """Handle unknown message type logs warning."""
-        msg = Message(type="unknown_type")
+        msg = AgentMessage(type="unknown_type")
 
         runner._handle_message(msg)
 
@@ -254,12 +258,15 @@ class TestAgentRunnerIntegration:
         return agent
 
     def test_run_sends_started_and_stops(self, mock_logger, mock_agent):
-        """Run sends STARTED message and handles shutdown."""
+        """Run sends STARTED message and handles shutdown via framework loop."""
         mock_channel = MagicMock()
+
+        # Force AgentRunner to use framework loop (not agent.run())
+        mock_agent.run = None
 
         # Simulate shutdown after startup
         def recv_side_effect(timeout=None):
-            return Message(type=MessageType.SHUTDOWN)
+            return AgentMessage(type=MessageType.SHUTDOWN)
 
         mock_channel.recv.side_effect = recv_side_effect
 
@@ -271,6 +278,8 @@ class TestAgentRunnerIntegration:
 
         runner.run()
 
+        # Verify shutdown was processed through framework loop
+        mock_channel.recv.assert_called()
         mock_agent.stop.assert_called_once()
 
         # Check that STARTED message was sent

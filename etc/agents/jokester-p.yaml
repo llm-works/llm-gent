@@ -1,6 +1,10 @@
 # Programmatic Agent Manifest
 type: programmatic
 
+# Disabled by default - requires database and embedder infrastructure setup
+# Set enabled: true after configuring learn.db and learn.embedder_url in llm-gent.yaml
+enabled: false
+
 # Module containing Factory class (required)
 module: llm_gent.agents.jokester_p
 factory: Factory

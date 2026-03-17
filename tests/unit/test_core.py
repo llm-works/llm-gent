@@ -3,10 +3,11 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from appinfra.service import State
 
 from llm_gent.core.traits.builtin.llm import LLMConfig
-from llm_gent.runtime import AgentRegistry, AgentState, Core
-from llm_gent.runtime.transport import MessageType, Response
+from llm_gent.runtime import AgentRegistry, Core
+from llm_gent.runtime.messages import AgentResponse, MessageType
 
 
 pytestmark = pytest.mark.unit
@@ -113,17 +114,19 @@ class TestCoreStart:
         with patch.object(core, "_spawn_process", side_effect=RuntimeError("spawn failed")):
             info = core.start("test")
 
-        assert info.status == "error"
+        assert info.status == "failed"
         assert "spawn failed" in info.error
 
     def test_start_error_cleans_up_resources(self, core, registry):
         """Start cleans up IPC resources on spawn failure."""
+        import multiprocessing as mp
+
         registry.register("test", {"name": "test"})
         handle = registry.get("test")
 
         # Simulate partial spawn: channel created, then error
         mock_channel = MagicMock()
-        mock_process = MagicMock()
+        mock_process = MagicMock(spec=mp.Process)
         mock_process.is_alive.return_value = True
 
         def spawn_with_partial_setup(h):
@@ -140,6 +143,28 @@ class TestCoreStart:
         assert handle.channel is None
         assert handle.process is None
 
+    def test_start_rejects_duplicate_start(self, core, registry):
+        """Start raises RuntimeError if agent is already active."""
+        registry.register("test", {"name": "test"})
+        handle = registry.get("test")
+
+        # Set agent to RUNNING state
+        handle.state = State.RUNNING
+
+        with pytest.raises(RuntimeError, match="already active"):
+            core.start("test")
+
+    def test_start_rejects_starting_agent(self, core, registry):
+        """Start raises RuntimeError if agent is in STARTING state."""
+        registry.register("test", {"name": "test"})
+        handle = registry.get("test")
+
+        # Set agent to STARTING state
+        handle.state = State.STARTING
+
+        with pytest.raises(RuntimeError, match="already active"):
+            core.start("test")
+
 
 class TestCoreStop:
     """Tests for Core.stop()."""
@@ -155,13 +180,13 @@ class TestCoreStop:
 
         info = core.stop("test")
 
-        assert info.status == "idle"
+        assert info.status == "created"
 
     def test_stop_running_agent(self, core, registry):
         """Stop terminates running agent."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
         mock_channel = MagicMock()
         handle.channel = mock_channel
         mock_process = MagicMock()
@@ -193,12 +218,10 @@ class TestCoreAsk:
         """Ask returns response from agent."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
         mock_channel = MagicMock()
-        mock_channel.request.return_value = Response(
-            id="resp-1",
+        mock_channel.submit.return_value = AgentResponse(
             type=MessageType.ASK_RESPONSE,
-            request_id="req-1",
             success=True,
             payload={"response": "Test answer"},
         )
@@ -210,17 +233,13 @@ class TestCoreAsk:
 
     def test_ask_failure(self, core, registry):
         """Ask raises RuntimeError on failure response."""
+        from appinfra.service import ChannelError
+
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
         mock_channel = MagicMock()
-        mock_channel.request.return_value = Response(
-            id="resp-1",
-            type=MessageType.ASK_RESPONSE,
-            request_id="req-1",
-            success=False,
-            error="Agent error",
-        )
+        mock_channel.submit.side_effect = ChannelError("Request failed: Agent error")
         handle.channel = mock_channel
 
         with pytest.raises(RuntimeError, match="Agent error"):
@@ -246,12 +265,10 @@ class TestCoreFeedback:
         """Feedback sends message to agent."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
         mock_channel = MagicMock()
-        mock_channel.request.return_value = Response(
-            id="resp-1",
+        mock_channel.submit.return_value = AgentResponse(
             type=MessageType.FEEDBACK_RESPONSE,
-            request_id="req-1",
             success=True,
         )
         handle.channel = mock_channel
@@ -260,17 +277,13 @@ class TestCoreFeedback:
 
     def test_feedback_failure(self, core, registry):
         """Feedback raises RuntimeError on failure."""
+        from appinfra.service import ChannelError
+
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
         mock_channel = MagicMock()
-        mock_channel.request.return_value = Response(
-            id="resp-1",
-            type=MessageType.FEEDBACK_RESPONSE,
-            request_id="req-1",
-            success=False,
-            error="Feedback error",
-        )
+        mock_channel.submit.side_effect = ChannelError("Request failed: Feedback error")
         handle.channel = mock_channel
 
         with pytest.raises(RuntimeError, match="Feedback error"):
@@ -296,13 +309,11 @@ class TestCoreGetInsights:
         """get_insights returns insights from agent."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
         mock_channel = MagicMock()
         insights_data = [{"success": True, "content": "Insight 1", "parsed": None, "iterations": 1}]
-        mock_channel.request.return_value = Response(
-            id="resp-1",
+        mock_channel.submit.return_value = AgentResponse(
             type=MessageType.INSIGHTS_RESPONSE,
-            request_id="req-1",
             success=True,
             payload={"insights": insights_data},
         )
@@ -314,17 +325,13 @@ class TestCoreGetInsights:
 
     def test_get_insights_failure(self, core, registry):
         """get_insights raises RuntimeError on failure."""
+        from appinfra.service import ChannelError
+
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
         mock_channel = MagicMock()
-        mock_channel.request.return_value = Response(
-            id="resp-1",
-            type=MessageType.INSIGHTS_RESPONSE,
-            request_id="req-1",
-            success=False,
-            error="Insights error",
-        )
+        mock_channel.submit.side_effect = ChannelError("Request failed: Insights error")
         handle.channel = mock_channel
 
         with pytest.raises(RuntimeError, match="Insights error"):
@@ -341,7 +348,7 @@ class TestCoreShutdown:
 
         # Set agent1 to running
         handle1 = registry.get("agent1")
-        handle1.state = AgentState.RUNNING
+        handle1.state = State.RUNNING
         handle1.channel = MagicMock()
         handle1.process = MagicMock()
         handle1.process.is_alive.return_value = False
@@ -349,13 +356,13 @@ class TestCoreShutdown:
         core.shutdown()
 
         # agent1 should have been stopped
-        assert handle1.state == AgentState.STOPPED
+        assert handle1.state == State.STOPPED
 
     def test_shutdown_handles_stop_errors(self, core, registry, mock_logger):
         """Shutdown handles errors when stopping agents."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
 
         # Mock stop to raise an exception
         with patch.object(core, "stop", side_effect=RuntimeError("Stop failed")):
@@ -399,11 +406,13 @@ class TestCoreTerminateProcess:
 
     def test_terminate_kills_stubborn_process(self, core, registry):
         """Terminate kills process that won't stop."""
+        import multiprocessing as mp
+
         from llm_gent.runtime import AgentHandle
 
         handle = AgentHandle(name="test", config={})
         mock_channel = MagicMock()
-        mock_process = MagicMock()
+        mock_process = MagicMock(spec=mp.Process)
         # Process stays alive through terminate
         mock_process.is_alive.side_effect = [True, True, True]
         handle.channel = mock_channel
@@ -448,11 +457,13 @@ class TestCoreCleanupFailedStart:
 
     def test_cleanup_with_process_only(self, core, registry):
         """Cleanup handles case where only process was created."""
+        import multiprocessing as mp
+
         from llm_gent.runtime import AgentHandle
 
         handle = AgentHandle(name="test", config={})
         handle.channel = None
-        mock_process = MagicMock()
+        mock_process = MagicMock(spec=mp.Process)
         mock_process.is_alive.return_value = False
         handle.process = mock_process
 
@@ -476,10 +487,12 @@ class TestCoreCleanupFailedStart:
 
     def test_cleanup_kills_stubborn_process(self, core, registry):
         """Cleanup kills process that won't terminate."""
+        import multiprocessing as mp
+
         from llm_gent.runtime import AgentHandle
 
         handle = AgentHandle(name="test", config={})
-        mock_process = MagicMock()
+        mock_process = MagicMock(spec=mp.Process)
         mock_process.is_alive.return_value = True
         handle.process = mock_process
 

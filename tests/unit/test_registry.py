@@ -3,8 +3,9 @@
 from unittest.mock import MagicMock
 
 import pytest
+from appinfra.service import State
 
-from llm_gent.runtime import AgentHandle, AgentInfo, AgentRegistry, AgentState
+from llm_gent.runtime import AgentHandle, AgentInfo, AgentRegistry
 
 
 pytestmark = pytest.mark.unit
@@ -19,7 +20,7 @@ class TestAgentHandle:
 
         assert handle.name == "test"
         assert handle.config == {}
-        assert handle.state == AgentState.IDLE
+        assert handle.state == State.CREATED
         assert handle.process is None
         assert handle.channel is None
         assert handle.cycle_count == 0
@@ -32,7 +33,7 @@ class TestAgentHandle:
         handle = AgentHandle(
             name="test-agent",
             config={},
-            state=AgentState.RUNNING,
+            state=State.RUNNING,
             cycle_count=5,
             schedule_interval=60,
         )
@@ -55,7 +56,7 @@ class TestAgentInfo:
         handle = AgentHandle(
             name="test",
             config={},
-            state=AgentState.RUNNING,
+            state=State.RUNNING,
             cycle_count=10,
         )
 
@@ -67,11 +68,11 @@ class TestAgentInfo:
 
     def test_immutable_snapshot(self):
         """AgentInfo is a snapshot, not a reference."""
-        handle = AgentHandle(name="test", config={}, state=AgentState.RUNNING)
+        handle = AgentHandle(name="test", config={}, state=State.RUNNING)
         info = AgentInfo.from_handle(handle)
 
         # Modify handle
-        handle.state = AgentState.STOPPED
+        handle.state = State.STOPPED
         handle.cycle_count = 100
 
         # Info should not change
@@ -100,7 +101,7 @@ class TestAgentRegistry:
         handle = registry.register("test-agent", config)
 
         assert handle.name == "test-agent"
-        assert handle.state == AgentState.IDLE
+        assert handle.state == State.CREATED
         assert handle.config == config
 
     def test_register_duplicate_raises(self, registry):
@@ -163,36 +164,36 @@ class TestAgentRegistry:
         """unregister raises RuntimeError for running agent."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.RUNNING
+        handle.state = State.RUNNING
 
-        with pytest.raises(RuntimeError, match="Agent must be IDLE or STOPPED"):
+        with pytest.raises(RuntimeError, match="Agent must be CREATED or STOPPED"):
             registry.unregister("test")
 
     def test_unregister_starting_raises(self, registry):
         """unregister raises RuntimeError for agent in STARTING state."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.STARTING
+        handle.state = State.STARTING
 
-        with pytest.raises(RuntimeError, match="Agent must be IDLE or STOPPED"):
+        with pytest.raises(RuntimeError, match="Agent must be CREATED or STOPPED"):
             registry.unregister("test")
 
     def test_unregister_stopping_raises(self, registry):
         """unregister raises RuntimeError for agent in STOPPING state."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.STOPPING
+        handle.state = State.STOPPING
 
-        with pytest.raises(RuntimeError, match="Agent must be IDLE or STOPPED"):
+        with pytest.raises(RuntimeError, match="Agent must be CREATED or STOPPED"):
             registry.unregister("test")
 
     def test_unregister_error_raises(self, registry):
         """unregister raises RuntimeError for agent in ERROR state."""
         registry.register("test", {})
         handle = registry.get("test")
-        handle.state = AgentState.ERROR
+        handle.state = State.FAILED
 
-        with pytest.raises(RuntimeError, match="Agent must be IDLE or STOPPED"):
+        with pytest.raises(RuntimeError, match="Agent must be CREATED or STOPPED"):
             registry.unregister("test")
 
     def test_handles_returns_all(self, registry):
