@@ -1,19 +1,14 @@
-"""Agent handle - represents a managed agent process."""
+"""Agent handle - represents a managed agent process or thread."""
 
 from __future__ import annotations
 
 import multiprocessing as mp
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from appinfra import DotDict
-
-from .state import AgentState
-
-
-if TYPE_CHECKING:
-    from llm_gent.runtime.transport import Channel
+from appinfra.service import ProcessChannel, State, ThreadChannel
 
 
 @dataclass
@@ -35,14 +30,14 @@ class AgentHandle:
     config: DotDict
     """Agent configuration (DotDict for dot notation access)."""
 
-    state: AgentState = AgentState.IDLE
+    state: State = State.CREATED
     """Current lifecycle state."""
 
     process: mp.Process | None = None
     """Subprocess running the agent, or None if not started."""
 
-    channel: Channel | None = None
-    """Communication channel to subprocess, or None if not started."""
+    channel: ProcessChannel[Any, Any] | ThreadChannel[Any, Any] | None = None
+    """Communication channel to subprocess/thread, or None if not started."""
 
     cycle_count: int = 0
     """Number of scheduled cycles completed."""
@@ -64,7 +59,7 @@ class AgentHandle:
         """
         return {
             "name": self.name,
-            "status": self.state.name.lower(),
+            "status": self.state.value,
             "cycle_count": self.cycle_count,
             "last_run": self.last_run.isoformat() if self.last_run else None,
             "error": self.error,
@@ -98,7 +93,7 @@ class AgentInfo:
         """
         return cls(
             name=handle.name,
-            status=handle.state.name.lower(),
+            status=handle.state.value,
             cycle_count=handle.cycle_count,
             last_run=handle.last_run,
             error=handle.error,

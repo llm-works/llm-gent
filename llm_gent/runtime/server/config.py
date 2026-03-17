@@ -75,6 +75,7 @@ class AgentConfigYAML(BaseModel):
     Example:
         codebase-explorer:
           class: prompt
+          enabled: true
           identity: |
             You are a codebase exploration agent.
             You value curiosity over speed, insight over coverage.
@@ -89,6 +90,12 @@ class AgentConfigYAML(BaseModel):
           schedule:
             interval: 600
     """
+
+    enabled: bool = True
+    """Whether this agent is enabled. Disabled agents are not registered."""
+
+    execution: Literal["process", "thread"] = "process"
+    """Execution mode: 'process' for subprocess isolation, 'thread' for in-process."""
 
     type_: Literal["prompt", "programmatic"] = Field(alias="type", default="prompt")
     """Agent type: 'prompt' for YAML-only, 'programmatic' for custom Python."""

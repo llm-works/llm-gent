@@ -1,6 +1,6 @@
-"""Agent runner - runs a single agent in a subprocess.
+"""Agent runner - runs a single agent in a subprocess or thread.
 
-The AgentRunner is the entry point for agent subprocesses. It:
+The AgentRunner is the entry point for agent subprocesses/threads. It:
 - Runs a sync main loop processing messages from the channel
 - Handles scheduled execution using appinfra.time.Ticker
 - Responds to shutdown messages cleanly
@@ -9,18 +9,17 @@ The AgentRunner is the entry point for agent subprocesses. It:
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
+from appinfra.service import ChannelTimeoutError, ProcessChannel, ThreadChannel
 from appinfra.time import Ticker, TickerMode
 
-from .transport import Message, MessageType, Response
+from .messages import AgentMessage, AgentResponse, MessageType
 
 
 if TYPE_CHECKING:
     from appinfra.log import Logger
 
     from llm_gent.core.agent import Agent
-    from llm_gent.runtime.transport import Channel
 
 
 class AgentRunner:
@@ -44,7 +43,7 @@ class AgentRunner:
         self,
         lg: Logger,
         agent: Agent,
-        channel: Channel,
+        channel: ProcessChannel[Any, Any] | ThreadChannel[Any, Any],
         schedule_interval: float | None = None,
     ) -> None:
         """Initialize the runner.
@@ -88,7 +87,7 @@ class AgentRunner:
 
             # Notify Core we're running
             self._channel.send(
-                Message(type=MessageType.STARTED, payload={"name": self._agent.name})
+                AgentMessage(type=MessageType.STARTED, payload={"name": self._agent.name})
             )
 
             self._run_loop()
@@ -98,7 +97,9 @@ class AgentRunner:
         except Exception as e:
             self._lg.warning("runner error", extra={"agent": self._agent.name, "exception": e})
             self._channel.send(
-                Message(type=MessageType.ERROR, payload={"name": self._agent.name, "error": str(e)})
+                AgentMessage(
+                    type=MessageType.ERROR, payload={"name": self._agent.name, "error": str(e)}
+                )
             )
         finally:
             self._cleanup()
@@ -121,12 +122,12 @@ class AgentRunner:
         )
         while self._running:
             timeout = self._calculate_timeout()
-            msg = self._channel.recv(timeout=timeout)
-            if msg is None:
+            try:
+                msg = self._channel.recv(timeout=timeout)
+                self._handle_message(msg)
+            except ChannelTimeoutError:
                 if self._should_run_cycle():
                     self._run_cycle()
-            else:
-                self._handle_message(msg)
 
     def _get_execution_mode(self) -> str:
         """Get execution mode string for logging."""
@@ -171,7 +172,7 @@ class AgentRunner:
         try:
             result = self._agent.run_once()
             self._channel.send(
-                Message(
+                AgentMessage(
                     type=MessageType.CYCLE_COMPLETE,
                     payload={
                         "name": self._agent.name,
@@ -183,7 +184,7 @@ class AgentRunner:
         except Exception as e:
             self._lg.warning("cycle failed", extra={"agent": self._agent.name, "exception": e})
             self._channel.send(
-                Message(
+                AgentMessage(
                     type=MessageType.CYCLE_ERROR,
                     payload={"name": self._agent.name, "error": str(e)},
                 )
@@ -197,7 +198,7 @@ class AgentRunner:
         try:
             result = self._agent.run()  # type: ignore[attr-defined]
             self._channel.send(
-                Message(
+                AgentMessage(
                     type=MessageType.CYCLE_COMPLETE,
                     payload={
                         "name": self._agent.name,
@@ -209,13 +210,13 @@ class AgentRunner:
         except Exception as e:
             self._lg.warning("agent run failed", extra={"agent": self._agent.name, "exception": e})
             self._channel.send(
-                Message(
+                AgentMessage(
                     type=MessageType.CYCLE_ERROR,
                     payload={"name": self._agent.name, "error": str(e)},
                 )
             )
 
-    def _handle_message(self, msg: Message) -> None:
+    def _handle_message(self, msg: AgentMessage) -> None:
         """Handle message from Core."""
         self._lg.debug("received message", extra={"agent": self._agent.name, "type": msg.type})
 
@@ -240,7 +241,7 @@ class AgentRunner:
                     "unknown message type", extra={"agent": self._agent.name, "type": msg.type}
                 )
 
-    def _handle_ask(self, msg: Message) -> None:
+    def _handle_ask(self, msg: AgentMessage) -> None:
         """Handle ask request."""
         question = msg.payload.get("question", "")
         self._lg.debug(
@@ -254,8 +255,8 @@ class AgentRunner:
                 extra={"agent": self._agent.name, "response_len": len(response_text)},
             )
             self._channel.send(
-                Response(
-                    id=uuid4().hex,
+                AgentResponse(
+                    id=msg.id,
                     type=MessageType.ASK_RESPONSE,
                     request_id=msg.id,
                     success=True,
@@ -266,7 +267,7 @@ class AgentRunner:
             self._lg.warning("ask failed", extra={"agent": self._agent.name, "exception": e})
             self._send_error_response(msg, str(e))
 
-    def _handle_feedback(self, msg: Message) -> None:
+    def _handle_feedback(self, msg: AgentMessage) -> None:
         """Handle feedback request."""
         message = msg.payload.get("message", "")
         self._lg.debug("handling feedback", extra={"agent": self._agent.name})
@@ -275,8 +276,8 @@ class AgentRunner:
             self._agent.record_feedback(message)
             self._lg.debug("feedback recorded", extra={"agent": self._agent.name})
             self._channel.send(
-                Response(
-                    id=uuid4().hex,
+                AgentResponse(
+                    id=msg.id,
                     type=MessageType.FEEDBACK_RESPONSE,
                     request_id=msg.id,
                     success=True,
@@ -286,7 +287,7 @@ class AgentRunner:
             self._lg.warning("feedback failed", extra={"agent": self._agent.name, "exception": e})
             self._send_error_response(msg, str(e))
 
-    def _handle_get_insights(self, msg: Message) -> None:
+    def _handle_get_insights(self, msg: AgentMessage) -> None:
         """Handle get_insights request."""
         limit = msg.payload.get("limit", 10)
         self._lg.debug("handling get_insights", extra={"agent": self._agent.name, "limit": limit})
@@ -297,8 +298,8 @@ class AgentRunner:
                 "get_insights completed", extra={"agent": self._agent.name, "count": len(insights)}
             )
             self._channel.send(
-                Response(
-                    id=uuid4().hex,
+                AgentResponse(
+                    id=msg.id,
                     type=MessageType.INSIGHTS_RESPONSE,
                     request_id=msg.id,
                     success=True,
@@ -326,7 +327,7 @@ class AgentRunner:
             for r in results
         ]
 
-    def _send_error_response(self, msg: Message, error: str) -> None:
+    def _send_error_response(self, msg: AgentMessage, error: str) -> None:
         """Send error response for a request."""
         # Map request types to response types
         response_type_map: dict[str, str] = {
@@ -337,8 +338,8 @@ class AgentRunner:
         response_type = response_type_map.get(msg.type, MessageType.ERROR)
 
         self._channel.send(
-            Response(
-                id=uuid4().hex,
+            AgentResponse(
+                id=msg.id,
                 type=response_type,
                 request_id=msg.id,
                 success=False,

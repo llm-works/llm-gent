@@ -1,7 +1,7 @@
-"""Runtime core - orchestrates agent subprocess lifecycle.
+"""Runtime core - orchestrates agent subprocess/thread lifecycle.
 
 Core is the runtime orchestrator that manages:
-- Subprocess spawning and termination
+- Subprocess/thread spawning and termination
 - Communication with running agents
 - Log queue for subprocess logging
 """
@@ -15,10 +15,15 @@ from typing import TYPE_CHECKING, Any, cast
 
 from appinfra import DotDict
 from appinfra.log.mp import LogQueueListener
+from appinfra.service import (
+    ChannelError,
+    ChannelFactory,
+    ChannelTimeoutError,
+    State,
+)
 
 from .handle import AgentHandle, AgentInfo
-from .state import AgentState, transition
-from .transport import Message, MessageType, Request, create_channel_pair
+from .messages import AgentMessage, MessageType
 
 
 if TYPE_CHECKING:
@@ -97,16 +102,16 @@ class Core:
         if handle is None:
             raise KeyError(f"Agent not found: {name}")
 
-        handle.state = transition(handle.state, AgentState.STARTING)
+        handle.state = State.STARTING
         handle.error = None
 
         try:
             self._spawn_process(handle)
-            handle.state = transition(handle.state, AgentState.RUNNING)
+            handle.state = State.RUNNING
             self._lg.debug("agent runtime started", extra={"agent": name})
         except Exception as e:
             self._cleanup_failed_start(handle)
-            handle.state = AgentState.ERROR
+            handle.state = State.FAILED
             handle.error = str(e)
             self._lg.error("failed to start agent runtime", extra={"agent": name, "exception": e})
 
@@ -130,17 +135,17 @@ class Core:
         if handle is None:
             raise KeyError(f"Agent not found: {name}")
 
-        if handle.state != AgentState.RUNNING:
+        if handle.state != State.RUNNING:
             return AgentInfo.from_handle(handle)
 
-        handle.state = transition(handle.state, AgentState.STOPPING)
+        handle.state = State.STOPPING
 
         try:
             self._terminate_process(handle)
-            handle.state = transition(handle.state, AgentState.STOPPED)
+            handle.state = State.STOPPED
             self._lg.info("agent stopped", extra={"agent": name})
         except Exception as e:
-            handle.state = AgentState.ERROR
+            handle.state = State.FAILED
             handle.error = str(e)
             self._lg.warning("error stopping agent", extra={"agent": name, "exception": e})
 
@@ -163,16 +168,16 @@ class Core:
             TimeoutError: If no response within timeout.
         """
         handle = self._get_running_handle(name)
+        assert handle.channel is not None  # Verified by _get_running_handle
 
         self._lg.debug("ask request", extra={"agent": name, "question_len": len(question)})
 
-        request = Request(type=MessageType.ASK, payload={"question": question})
-        # channel is guaranteed non-None by _get_running_handle
-        response = handle.channel.request(request, timeout=timeout)  # type: ignore[union-attr]
-
-        if not response.success:
-            self._lg.warning("ask failed", extra={"agent": name, "error": response.error})
-            raise RuntimeError(response.error or "Ask failed")
+        request = AgentMessage(type=MessageType.ASK, payload={"question": question})
+        try:
+            response = handle.channel.submit(request, timeout=timeout)
+        except ChannelError as e:
+            self._lg.warning("ask failed", extra={"agent": name, "error": str(e)})
+            raise RuntimeError(str(e)) from e
 
         self._lg.debug("ask completed", extra={"agent": name})
         return str(response.payload.get("response", ""))
@@ -190,16 +195,16 @@ class Core:
             RuntimeError: If agent not running or feedback failed.
         """
         handle = self._get_running_handle(name)
+        assert handle.channel is not None  # Verified by _get_running_handle
 
         self._lg.debug("feedback request", extra={"agent": name})
 
-        request = Request(type=MessageType.FEEDBACK, payload={"message": message})
-        # channel is guaranteed non-None by _get_running_handle
-        response = handle.channel.request(request, timeout=timeout)  # type: ignore[union-attr]
-
-        if not response.success:
-            self._lg.warning("feedback failed", extra={"agent": name, "error": response.error})
-            raise RuntimeError(response.error or "Feedback failed")
+        request = AgentMessage(type=MessageType.FEEDBACK, payload={"message": message})
+        try:
+            handle.channel.submit(request, timeout=timeout)
+        except ChannelError as e:
+            self._lg.warning("feedback failed", extra={"agent": name, "error": str(e)})
+            raise RuntimeError(str(e)) from e
 
         self._lg.debug("feedback sent", extra={"agent": name})
 
@@ -221,16 +226,16 @@ class Core:
             RuntimeError: If agent not running.
         """
         handle = self._get_running_handle(name)
+        assert handle.channel is not None  # Verified by _get_running_handle
 
         self._lg.debug("get_insights request", extra={"agent": name, "limit": limit})
 
-        request = Request(type=MessageType.GET_INSIGHTS, payload={"limit": limit})
-        # channel is guaranteed non-None by _get_running_handle
-        response = handle.channel.request(request, timeout=timeout)  # type: ignore[union-attr]
-
-        if not response.success:
-            self._lg.warning("get_insights failed", extra={"agent": name, "error": response.error})
-            raise RuntimeError(response.error or "Get insights failed")
+        request = AgentMessage(type=MessageType.GET_INSIGHTS, payload={"limit": limit})
+        try:
+            response = handle.channel.submit(request, timeout=timeout)
+        except ChannelError as e:
+            self._lg.warning("get_insights failed", extra={"agent": name, "error": str(e)})
+            raise RuntimeError(str(e)) from e
 
         insights = cast(list[dict[str, Any]], response.payload.get("insights", []))
 
@@ -250,7 +255,7 @@ class Core:
         """
         self._lg.info("shutting down core")
         for handle in self._registry.handles():
-            if handle.state == AgentState.RUNNING:
+            if handle.state == State.RUNNING:
                 try:
                     self.stop(handle.name)
                 except Exception as e:
@@ -277,7 +282,7 @@ class Core:
         if handle is None:
             raise KeyError(f"Agent not found: {name}")
 
-        if handle.state != AgentState.RUNNING or handle.channel is None:
+        if handle.state != State.RUNNING or handle.channel is None:
             raise RuntimeError(f"Agent not running: {name}")
 
         return handle
@@ -307,8 +312,8 @@ class Core:
         """Spawn subprocess for agent."""
         self._lg.debug("spawning process for agent runtime...", extra={"agent": handle.name})
 
-        main_channel, subprocess_channel = create_channel_pair(self._lg)
-        handle.channel = main_channel
+        pair = ChannelFactory().create_process_pair()
+        handle.channel = pair.parent
 
         # LearnConfig can be passed directly - DotDict pickles fine
         learn_config = self._learn_config if self._learn_config else None
@@ -321,7 +326,7 @@ class Core:
             args=(
                 handle.name,
                 self._build_runner_config(handle),
-                subprocess_channel,
+                pair.child,
                 self._llm_config,
                 learn_config,
                 self._variables,
@@ -332,14 +337,15 @@ class Core:
             daemon=True,
         )
         handle.process.start()
-        self._wait_for_started(main_channel)
+        self._wait_for_started(pair.parent)
         self._lg.debug("spawned process for agent runtime", extra={"agent": handle.name})
 
     def _wait_for_started(self, channel: Any) -> None:
         """Wait for subprocess to signal it has started."""
-        msg = channel.recv(timeout=30.0)
-        if msg is None:
-            raise RuntimeError("Agent process did not start within timeout")
+        try:
+            msg = channel.recv(timeout=30.0)
+        except ChannelTimeoutError:
+            raise RuntimeError("Agent process did not start within timeout") from None
         if msg.type == MessageType.ERROR:
             raise RuntimeError(msg.payload.get("error", "Unknown startup error"))
 
@@ -357,7 +363,7 @@ class Core:
 
         if handle.channel is not None:
             with contextlib.suppress(Exception):
-                handle.channel.send(Message(type=MessageType.SHUTDOWN))
+                handle.channel.send(AgentMessage(type=MessageType.SHUTDOWN))
 
         if handle.process is not None:
             handle.process.join(timeout=5.0)
@@ -388,6 +394,7 @@ def _subprocess_entry(
     """
     from appinfra.log import Logger
 
+    from llm_gent.runtime.messages import AgentMessage, MessageType
     from llm_gent.runtime.runner import AgentRunner
 
     try:
@@ -414,7 +421,7 @@ def _subprocess_entry(
         runner.run()
     except Exception as e:
         # Send error back to main process for faster feedback
-        channel.send(Message(type=MessageType.ERROR, payload={"error": str(e)}))
+        channel.send(AgentMessage(type=MessageType.ERROR, payload={"error": str(e)}))
 
 
 def _load_agent_factory(factory_module: str, platform: Any) -> Any:

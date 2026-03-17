@@ -125,12 +125,13 @@ class ServeTool(Tool):
 
     def _log_startup(self, config: AgentServerConfig) -> None:
         """Log server startup information."""
+        enabled_agents = [name for name, cfg in config.agents.items() if cfg.enabled]
         self.lg.info(
             "agent server started",
             extra={
                 "host": config.server.host,
                 "port": config.server.port,
-                "agents": list(config.agents.keys()),
+                "agents": enabled_agents,
             },
         )
 
@@ -480,6 +481,10 @@ class ServeTool(Tool):
     ) -> None:
         """Register and auto-start agents from configuration."""
         for name, agent_config in config.agents.items():
+            if not agent_config.enabled:
+                self.lg.debug("skipping disabled agent", extra={"agent": name})
+                continue
+
             config_dict = self._build_agent_config_dict(name, agent_config)
             try:
                 registry.register(name, config_dict)

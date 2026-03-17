@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Refactored runtime to use `appinfra.service` for IPC and state management, removing ~780 lines
+  of custom transport and state code
+- Agent config now supports `execution: "thread"` for in-process execution (default: "process")
+
 ## [0.2.0] - 2026-03-16
 
 ### Added

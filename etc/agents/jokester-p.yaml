@@ -1,6 +1,8 @@
 # Programmatic Agent Manifest
 type: programmatic
 
+enabled: false
+
 # Module containing Factory class (required)
 module: llm_gent.agents.jokester_p
 factory: Factory
