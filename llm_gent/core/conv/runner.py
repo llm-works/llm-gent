@@ -188,7 +188,7 @@ class ConversationRunner:
 
         try:
             # Build task description from conversation context
-            messages = self.conversation.messages
+            messages = list(self.conversation.messages)
             task_context = self._build_task_from_conversation(messages, effective_task)
 
             # Run SAIA complete - handle sync/async boundary

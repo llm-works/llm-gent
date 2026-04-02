@@ -17,11 +17,9 @@ from .agent import Agent, Config, ExecutionResult
 from .conv import (
     Compactor,
     Conversation,
+    ConversationConfig,
     SlidingWindowCompactor,
     SummarizingCompactor,
-)
-from .conv import (
-    Config as ConversationConfig,
 )
 from .errors import (
     AgentError,

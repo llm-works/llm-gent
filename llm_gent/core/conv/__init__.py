@@ -19,10 +19,13 @@ from llm_kelt.conversation import (
 from .runner import ConversationRunner
 
 
+ConversationConfig = Config
+
 __all__ = [
     # Core (from llm-kelt)
     "Compactor",
     "Config",
+    "ConversationConfig",
     "Conversation",
     "Message",
     "Role",
