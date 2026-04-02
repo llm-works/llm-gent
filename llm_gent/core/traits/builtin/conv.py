@@ -130,7 +130,7 @@ class ConversationTrait(BaseTrait):
         Returns:
             List of messages to include in LLM prompt.
         """
-        return self._conversation.messages
+        return list(self._conversation.messages)
 
     def add_turn(self, user_content: str, assistant_content: str) -> None:
         """Add a conversation turn and compact if needed.
