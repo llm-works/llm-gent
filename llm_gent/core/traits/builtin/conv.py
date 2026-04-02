@@ -5,8 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ...conv import Compactor, Conversation, ConversationConfig, SlidingWindowCompactor
-from ...llm.types import Message
+from llm_kelt.conversation import (
+    Compactor,
+    Config,
+    Conversation,
+    Message,
+    Role,
+    SlidingWindowCompactor,
+)
+
 from ..base import BaseTrait
 
 
@@ -78,7 +85,7 @@ class ConversationTrait(BaseTrait):
         self.config = config or ConversationTraitConfig()
 
         # Create conversation
-        conv_config = ConversationConfig(
+        conv_config = Config(
             max_tokens=self.config.max_tokens,
             compact_threshold=self.config.compact_threshold,
             preserve_system=self.config.preserve_system,
@@ -106,7 +113,7 @@ class ConversationTrait(BaseTrait):
 
         saia_trait = self.agent.get_trait(SAIATrait)
         if saia_trait is not None and saia_trait.config.system_prompt:
-            self._conversation.add_system(saia_trait.config.system_prompt)
+            self._conversation.add(saia_trait.config.system_prompt, Role.SYSTEM)
 
     def on_stop(self) -> None:
         """Stop trait (conversation state preserved in memory)."""
@@ -123,7 +130,7 @@ class ConversationTrait(BaseTrait):
         Returns:
             List of messages to include in LLM prompt.
         """
-        return self._conversation.messages()
+        return list(self._conversation.messages)
 
     def add_turn(self, user_content: str, assistant_content: str) -> None:
         """Add a conversation turn and compact if needed.
@@ -132,8 +139,8 @@ class ConversationTrait(BaseTrait):
             user_content: The user's message (task/question).
             assistant_content: The assistant's response.
         """
-        self._conversation.add_user(user_content)
-        self._conversation.add_assistant(assistant_content)
+        self._conversation.add(user_content)
+        self._conversation.add(assistant_content, Role.ASSISTANT)
 
         # Compact if needed
         if self._conversation.needs_compaction():
@@ -150,7 +157,7 @@ class ConversationTrait(BaseTrait):
                 extra={
                     "agent": self.agent.name,
                     "tokens_after": self._conversation.token_count,
-                    "messages": len(self._conversation.messages()),
+                    "messages": self._conversation.message_count,
                 },
             )
 
@@ -163,4 +170,4 @@ class ConversationTrait(BaseTrait):
 
             saia_trait = self.agent.get_trait(SAIATrait)
             if saia_trait is not None and saia_trait.config.system_prompt:
-                self._conversation.add_system(saia_trait.config.system_prompt)
+                self._conversation.add(saia_trait.config.system_prompt, Role.SYSTEM)

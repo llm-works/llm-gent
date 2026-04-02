@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
+from llm_kelt.conversation import Compactor, Conversation, Message, Role
 
-from ..llm.types import Message
+from ..llm.types import Message as LLMMessage
 from ..task import Task, TaskResult
-from . import Compactor, Conversation
 
 
 if TYPE_CHECKING:
@@ -23,6 +23,23 @@ if TYPE_CHECKING:
 # Type alias for identity prompt builder
 IdentityBuilder = Callable[[], str]
 """Function that builds the identity/system prompt."""
+
+
+def _to_llm_messages(messages: list[Message]) -> list[LLMMessage]:
+    """Convert kelt conversation Messages to LLM backend Messages."""
+    result = []
+    for m in messages:
+        tool_calls = [asdict(tc) for tc in m.tool_calls] if m.tool_calls else None
+        role: Any = m.role  # StrEnum compatible with Literal[...]
+        result.append(
+            LLMMessage(
+                role=role,
+                content=m.content,
+                tool_calls=tool_calls,
+                tool_call_id=m.tool_call_id,
+            )
+        )
+    return result
 
 
 # Conversation context limits
@@ -94,23 +111,23 @@ class ConversationRunner:
         """Initialize conversation with system prompt and task for first run."""
         # Build system prompt using identity builder
         system_prompt = self.identity_builder()
-        self.conversation.add_system(system_prompt)
+        self.conversation.add(system_prompt, Role.SYSTEM)
 
         # Use task description or default task description
         effective_task = task or self.default_task
-        self.conversation.add_user(effective_task.description)
+        self.conversation.add(effective_task.description)
 
     def _continue_conversation(self, task: Task | None) -> None:
         """Add continuation prompt for subsequent runs."""
         if task:
-            self.conversation.add_user(task.description)
+            self.conversation.add(task.description)
         else:
             continue_prompt = (
                 "Continue your exploration and analysis. Build on what you've learned so far. "
                 "Focus on areas you haven't fully explored yet, or dive deeper into interesting "
                 "findings. Use your tools to gather more information."
             )
-            self.conversation.add_user(continue_prompt)
+            self.conversation.add(continue_prompt)
 
     def _compact_conversation(self) -> None:
         """Compact conversation when approaching token limit."""
@@ -143,8 +160,8 @@ class ConversationRunner:
         if self.llm_trait is None:
             raise RuntimeError("Either SAIA or LLMTrait required for execution")
 
-        result = self.llm_trait.complete(messages=self.conversation.messages())
-        self.conversation.add_assistant(result.content)
+        result = self.llm_trait.complete(messages=_to_llm_messages(self.conversation.messages))
+        self.conversation.add(result.content, Role.ASSISTANT)
 
         # Handle structured output extraction if requested
         parsed, extra_tokens = None, 0
@@ -171,14 +188,14 @@ class ConversationRunner:
 
         try:
             # Build task description from conversation context
-            messages = self.conversation.messages()
+            messages = list(self.conversation.messages)
             task_context = self._build_task_from_conversation(messages, effective_task)
 
             # Run SAIA complete - handle sync/async boundary
             saia_result = self._run_saia_complete(task_context)
 
             # Update conversation with result
-            self.conversation.add_assistant(saia_result.output)
+            self.conversation.add(saia_result.output, Role.ASSISTANT)
 
             # Build result
             return self._build_saia_result(effective_task, saia_result)
@@ -329,7 +346,7 @@ class ConversationRunner:
                 error=f"Structured output error: {e}",
             )
 
-    def _build_extraction_messages(self, content: str) -> list[Message]:
+    def _build_extraction_messages(self, content: str) -> list[LLMMessage]:
         """Build messages for structured output extraction."""
         system_prompt = (
             "You are a data extraction assistant. "
@@ -340,6 +357,6 @@ class ConversationRunner:
             f"Information:\n{content}"
         )
         return [
-            Message(role="system", content=system_prompt),
-            Message(role="user", content=user_prompt),
+            LLMMessage(role="system", content=system_prompt),
+            LLMMessage(role="user", content=user_prompt),
         ]

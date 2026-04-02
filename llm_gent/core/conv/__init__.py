@@ -1,57 +1,38 @@
 """Conversation management for agents.
 
-Conversation is a fundamental concept - it's the medium through which agents
-learn and build understanding over time. An agent that forgets everything
-between interactions can't truly learn from experience.
-
-This module provides:
-- Conversation: Core class for managing message history with token awareness
-- Compactors: Strategies for reducing context when approaching token limits
-- Token utilities: Fast estimation without tokenizer dependencies
-
-Example:
-    from llm_gent.core.conv import Conversation, ConversationConfig
-
-    config = ConversationConfig(max_tokens=32000, compact_threshold=0.8)
-    conversation = Conversation(config=config)
-
-    conversation.add_system("You are a helpful assistant.")
-    conversation.add_user("Hello!")
-    conversation.add_assistant("Hi there!")
-
-    if conversation.needs_compaction():
-        compactor = SlidingWindowCompactor()
-        compactor.compact(conversation)
-
-    # Get messages for LLM call
-    messages = conversation.messages()
+Re-exports from llm-kelt conversation module, plus the local ConversationRunner
+which ties conversation to the agent execution lifecycle.
 """
 
-from .compactor import (
+from llm_kelt.conversation import (
     Compactor,
+    Config,
+    Conversation,
+    Message,
+    Role,
     SlidingWindowCompactor,
     SummarizingCompactor,
-)
-from .conversation import Conversation, ConversationConfig
-from .runner import ConversationRunner
-from .tokens import (
-    DEFAULT_CHARS_PER_TOKEN,
     estimate_message_tokens,
     estimate_tokens,
 )
 
+from .runner import ConversationRunner
+
+
+ConversationConfig = Config
 
 __all__ = [
-    # Core
-    "Conversation",
-    "ConversationConfig",
-    "ConversationRunner",
-    # Compactors
+    # Core (from llm-kelt)
     "Compactor",
+    "Config",
+    "ConversationConfig",
+    "Conversation",
+    "Message",
+    "Role",
     "SlidingWindowCompactor",
     "SummarizingCompactor",
-    # Token utilities
     "estimate_tokens",
     "estimate_message_tokens",
-    "DEFAULT_CHARS_PER_TOKEN",
+    # Local
+    "ConversationRunner",
 ]

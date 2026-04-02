@@ -53,10 +53,10 @@ __all__ = [
     # Factories
     "ToolFactory",
     "TraitFactory",
-    # Conversation
+    # Conversation (from llm-kelt)
     "Compactor",
-    "Conversation",
     "ConversationConfig",
+    "Conversation",
     "SlidingWindowCompactor",
     "SummarizingCompactor",
     # Tasks
