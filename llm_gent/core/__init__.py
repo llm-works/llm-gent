@@ -17,9 +17,11 @@ from .agent import Agent, Config, ExecutionResult
 from .conv import (
     Compactor,
     Conversation,
-    ConversationConfig,
     SlidingWindowCompactor,
     SummarizingCompactor,
+)
+from .conv import (
+    Config as ConversationConfig,
 )
 from .errors import (
     AgentError,
@@ -53,10 +55,10 @@ __all__ = [
     # Factories
     "ToolFactory",
     "TraitFactory",
-    # Conversation
+    # Conversation (from llm-kelt)
     "Compactor",
-    "Conversation",
     "ConversationConfig",
+    "Conversation",
     "SlidingWindowCompactor",
     "SummarizingCompactor",
     # Tasks
