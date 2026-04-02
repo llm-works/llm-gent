@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
@@ -27,12 +27,10 @@ IdentityBuilder = Callable[[], str]
 
 def _to_llm_messages(messages: list[Message]) -> list[LLMMessage]:
     """Convert kelt conversation Messages to LLM backend Messages."""
-    from dataclasses import asdict
-
     result = []
     for m in messages:
         tool_calls = [asdict(tc) for tc in m.tool_calls] if m.tool_calls else None
-        role: Any = m.role  # Role enum → Literal coercion
+        role: Any = m.role  # StrEnum compatible with Literal[...]
         result.append(
             LLMMessage(
                 role=role,
