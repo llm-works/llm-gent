@@ -9,7 +9,6 @@ Provides commands to:
 - ask: Ask an agent a question
 - feedback: Provide feedback to an agent
 - rate: Rate agent responses
-- train: Create training manifests for agents
 """
 
 from appinfra.app import AppBuilder
@@ -23,7 +22,6 @@ from .tools import (
     ServeTool,
     StartTool,
     StopTool,
-    TrainTool,
 )
 
 
@@ -40,7 +38,6 @@ def main() -> int:
         .with_tool(AskTool())
         .with_tool(FeedbackTool())
         .with_tool(RateTool())
-        .with_tool(TrainTool())
         .with_tool(AgentTool())
         .done()
         .build()

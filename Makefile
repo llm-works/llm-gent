@@ -20,4 +20,5 @@ include $(infra)/make/Makefile.help
 include $(infra)/make/Makefile.utils
 include $(infra)/make/Makefile.dev
 include $(infra)/make/Makefile.pytest
+include $(infra)/make/Makefile.install
 include $(infra)/make/Makefile.clean

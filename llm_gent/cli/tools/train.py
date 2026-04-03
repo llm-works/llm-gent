@@ -185,7 +185,7 @@ class TrainTool(Tool):
         agent_parser.add_argument(
             "agent_name",
             metavar="name",
-            help="Agent name (e.g., jokester-p)",
+            help="Agent name",
         )
         # Remaining args will be parsed by agent's data provider
         agent_parser.add_argument(
@@ -260,23 +260,9 @@ class TrainTool(Tool):
             print(f"Available agents: {', '.join(agents.keys())}")
             return None
 
-        agent_config = agents[agent_name]
-
-        # Get the agent's training data provider
-        # For now, support jokester-p directly; later make this pluggable
-        if agent_name == "jokester-p":
-            return self._create_jokester_provider(agent_config)
-
+        # TODO: Make training providers pluggable (agent config should declare its provider)
         print(f"Error: Agent '{agent_name}' does not support training")
         return None
-
-    def _create_jokester_provider(self, config: DotDict) -> TrainingDataProvider:
-        """Create training data provider for jokester-p agent."""
-        from llm_gent.agents.jokester_p.training import JokesterTrainingProvider
-
-        assert self._pg is not None
-        context_key = self._resolve_context_key(config)
-        return JokesterTrainingProvider(self.lg, self._pg, context_key)
 
     def _resolve_context_key(self, config: DotDict) -> str:
         """Resolve context key from agent config (kelt.identity.name)."""

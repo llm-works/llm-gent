@@ -32,8 +32,7 @@ learn:
 # Agent definitions
 agents:
   #codebase-qna: !include './agents/codebase-qna.yaml'
-  #jokester: !include './agents/jokester.yaml'
-  jokester-p: !include './agents/jokester-p.yaml'
+  jokester: !include './agents/jokester.yaml'
 
 # Appinfra logging (optional, uses defaults if not specified)
 logging: !include './infra.yaml#logging'

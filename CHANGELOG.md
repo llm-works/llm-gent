@@ -11,8 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Refactored runtime to use `appinfra.service` for IPC and state management, removing ~780 lines
   of custom transport and state code
+- Replaced local conversation layer with `llm-kelt` conversation module, delegating compaction to
+  kelt's built-in auto-compaction
 - Agent config now supports `enabled: false` to disable agents without removing them from config
 - Agent config now supports `execution: "thread"` for in-process execution (default: "process")
+
+### Removed
+
+- Extracted `jokester-p` agent (~4,500 LOC) to standalone `agents` repo; prompt-based jokester
+  remains as example agent
+- Removed `core/conv` package and `ConversationRunner` (replaced by `llm-kelt` conversation)
 
 ## [0.2.0] - 2026-03-16
 
