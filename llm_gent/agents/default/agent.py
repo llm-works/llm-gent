@@ -22,7 +22,7 @@ from ...core.traits.builtin.saia import SAIATrait
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.traits.builtin.conversation import ConversationTrait
+    from ...core.traits.builtin.conversation import ConversationTrait
 
 
 @dataclass
