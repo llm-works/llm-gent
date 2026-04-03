@@ -13,14 +13,17 @@ This package contains the core abstractions for building agents:
 - llm: LLM backend abstractions
 """
 
-from .agent import Agent, Config, ExecutionResult
-from .conv import (
+from llm_kelt.conversation import (
     Compactor,
     Conversation,
-    ConversationConfig,
     SlidingWindowCompactor,
     SummarizingCompactor,
 )
+from llm_kelt.conversation import (
+    Config as ConversationConfig,
+)
+
+from .agent import Agent, Config, ExecutionResult
 from .errors import (
     AgentError,
     ConfigError,

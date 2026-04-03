@@ -22,7 +22,7 @@ from ...core.traits.builtin.saia import SAIATrait
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.traits.builtin.conv import ConversationTrait
+    from ...core.traits.builtin.conversation import ConversationTrait
 
 
 @dataclass
@@ -179,7 +179,7 @@ class Agent(BaseAgent):
         Uses conversation history if ConversationTrait is present,
         otherwise falls back to solution recall from LearnTrait.
         """
-        from ...core.traits.builtin.conv import ConversationTrait
+        from ...core.traits.builtin.conversation import ConversationTrait
 
         conv_trait = self.get_trait(ConversationTrait)
 
@@ -211,7 +211,7 @@ class Agent(BaseAgent):
 
     def _record_conversation_turn(self, task: str, result: ExecutionResult) -> None:
         """Record conversation turn if ConversationTrait is present."""
-        from ...core.traits.builtin.conv import ConversationTrait
+        from ...core.traits.builtin.conversation import ConversationTrait
 
         conv_trait = self.get_trait(ConversationTrait)
         if conv_trait is not None:
