@@ -45,7 +45,7 @@ class RateTool(Tool):
     def add_args(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "agent_name",
-            help="Name of the agent to rate content from (e.g., 'jokester-p')",
+            help="Name of the agent to rate content from",
         )
         parser.add_argument(
             "--cont",
