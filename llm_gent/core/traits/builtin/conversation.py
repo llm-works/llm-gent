@@ -43,35 +43,20 @@ class ConversationTraitConfig:
 class ConversationTrait(BaseTrait):
     """Conversation management trait for agents.
 
-    Adds conversation history and automatic compaction to any agent. When attached,
-    the agent maintains context across run_once() or ask() calls, with automatic
-    compaction when approaching token limits.
+    Adds conversation history with automatic compaction to any agent.
+    Compaction is handled by kelt's Conversation internally when token
+    thresholds are exceeded.
 
     Example:
-        from llm_gent.agents.default import Agent
-        from llm_gent.core.traits.builtin.conv import (
-            ConversationTrait,
-            ConversationTraitConfig,
-        )
-
-        agent = Agent(lg, identity, "You are a helpful assistant")
-        agent.add_trait(SAIATrait(...))
-        agent.add_trait(
-            ConversationTrait(
-                agent,
-                ConversationTraitConfig(max_tokens=16000, compactor="sliding_window"),
-            )
-        )
+        agent = Agent(lg, config)
+        agent.add_trait(SAIATrait(agent, backend=backend))
+        agent.add_trait(ConversationTrait(agent))
         agent.start()
 
         # First interaction
         result = agent.ask("What is 2+2?")
         # Second interaction - has context from first
         result = agent.ask("What about multiplying that by 3?")
-
-    Lifecycle:
-        - on_start(): Initializes conversation with system prompt from agent
-        - on_stop(): No-op (conversation state preserved in memory)
     """
 
     def __init__(self, agent: Agent, config: ConversationTraitConfig | None = None) -> None:
@@ -84,31 +69,26 @@ class ConversationTrait(BaseTrait):
         super().__init__(agent)
         self.config = config or ConversationTraitConfig()
 
-        # Create conversation
         conv_config = Config(
             max_tokens=self.config.max_tokens,
             compact_threshold=self.config.compact_threshold,
             preserve_system=self.config.preserve_system,
             min_recent_messages=self.config.min_recent_messages,
         )
-        self._conversation = Conversation(config=conv_config)
-
-        # Create compactor
-        self._compactor = self._create_compactor()
+        compactor = self._create_compactor()
+        self._conversation = Conversation(config=conv_config, compactor=compactor)
 
     def _create_compactor(self) -> Compactor:
         """Create compactor from config."""
         if self.config.compactor == "sliding_window":
             return SlidingWindowCompactor()
         elif self.config.compactor == "summarizing":
-            # TODO: SummarizingCompactor requires LLM backend - add support later
             raise NotImplementedError("SummarizingCompactor not yet supported in ConversationTrait")
         else:
             raise ValueError(f"Unknown compactor: {self.config.compactor}")
 
     def on_start(self) -> None:
         """Initialize conversation with system prompt from agent."""
-        # Get system prompt from SAIATrait if available
         from .saia import SAIATrait
 
         saia_trait = self.agent.get_trait(SAIATrait)
@@ -133,7 +113,7 @@ class ConversationTrait(BaseTrait):
         return list(self._conversation.messages)
 
     def add_turn(self, user_content: str, assistant_content: str) -> None:
-        """Add a conversation turn and compact if needed.
+        """Add a conversation turn (compaction is automatic).
 
         Args:
             user_content: The user's message (task/question).
@@ -142,29 +122,9 @@ class ConversationTrait(BaseTrait):
         self._conversation.add(user_content)
         self._conversation.add(assistant_content, Role.ASSISTANT)
 
-        # Compact if needed
-        if self._conversation.needs_compaction():
-            self.agent.lg.debug(
-                "compacting conversation",
-                extra={
-                    "agent": self.agent.name,
-                    "tokens_before": self._conversation.token_count,
-                },
-            )
-            self._compactor.compact(self._conversation)
-            self.agent.lg.debug(
-                "compaction complete",
-                extra={
-                    "agent": self.agent.name,
-                    "tokens_after": self._conversation.token_count,
-                    "messages": self._conversation.message_count,
-                },
-            )
-
     def reset(self) -> None:
-        """Clear conversation history (keeps system message if preserve_system=True)."""
+        """Clear conversation history and re-add system prompt if configured."""
         self._conversation.clear()
-        # Re-add system prompt if it was there
         if self.config.preserve_system:
             from .saia import SAIATrait
 
