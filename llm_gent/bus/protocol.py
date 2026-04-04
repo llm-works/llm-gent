@@ -214,6 +214,51 @@ class ErrorResponse(Response):
     acknowledged: bool = True
 
 
+# -- Agent operations (hub -> agent) --
+
+
+class AskRequest(Request):
+    """Hub asks an agent a question."""
+
+    message_type: ClassVar[str] = "ask_request"
+
+    question: str
+
+
+class AskResponse(Response):
+    """Agent responds to a question."""
+
+    message_type: ClassVar[str] = "ask_response"
+
+    response: str = ""
+
+
+class FeedbackRequest(Request):
+    """Hub sends feedback to an agent."""
+
+    message_type: ClassVar[str] = "feedback_request"
+
+    message: str
+
+
+class FeedbackResponse(Response):
+    """Agent acknowledges feedback."""
+
+    message_type: ClassVar[str] = "feedback_response"
+
+
+class ShutdownRequest(Request):
+    """Hub tells an agent to shut down."""
+
+    message_type: ClassVar[str] = "shutdown_request"
+
+
+class ShutdownResponse(Response):
+    """Agent acknowledges shutdown."""
+
+    message_type: ClassVar[str] = "shutdown_response"
+
+
 # =============================================================================
 # Message registry
 # =============================================================================
@@ -228,4 +273,10 @@ MESSAGE_REGISTRY: dict[str, type[Message]] = {
     "unregister_response": UnregisterResponse,
     "error_request": ErrorRequest,
     "error_response": ErrorResponse,
+    "ask_request": AskRequest,
+    "ask_response": AskResponse,
+    "feedback_request": FeedbackRequest,
+    "feedback_response": FeedbackResponse,
+    "shutdown_request": ShutdownRequest,
+    "shutdown_response": ShutdownResponse,
 }

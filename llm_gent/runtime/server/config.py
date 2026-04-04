@@ -137,6 +137,44 @@ class AgentConfigYAML(BaseModel):
     model_config = {"populate_by_name": True, "extra": "allow"}
 
 
+class HubConfigYAML(BaseModel):
+    """Hub/bus configuration from YAML.
+
+    Controls the ZMQ bus ports and health monitoring settings.
+
+    Example::
+
+        hub:
+          router_port: 5555
+          pub_port: 5556
+          sub_port: 5557
+          dead_timeout: 90
+          health_check_interval: 30
+          max_restarts: 3
+    """
+
+    enabled: bool = True
+    """Whether the hub bus is enabled."""
+
+    router_port: int = 5555
+    """ZMQ ROUTER port for RPC."""
+
+    pub_port: int = 5556
+    """ZMQ PUB port for broadcasts."""
+
+    sub_port: int = 5557
+    """ZMQ SUB port for heartbeats/events."""
+
+    dead_timeout: float = 90.0
+    """Seconds without heartbeat before agent is considered dead."""
+
+    health_check_interval: float = 30.0
+    """Seconds between health check sweeps."""
+
+    max_restarts: int = 3
+    """Maximum restart attempts for dead injected agents."""
+
+
 class AgentServerConfig(BaseModel):
     """Complete server configuration.
 
@@ -151,6 +189,9 @@ class AgentServerConfig(BaseModel):
 
         learn:
           db: !include './infra.yaml#dbs.main'
+
+        hub:
+          router_port: 5555
 
         agents:
           codebase-explorer:
@@ -168,6 +209,9 @@ class AgentServerConfig(BaseModel):
 
     learn: LearnBackendConfig | None = None
     """Optional learn backend for memory/feedback."""
+
+    hub: HubConfigYAML = Field(default_factory=HubConfigYAML)
+    """Hub/bus configuration."""
 
     agents: dict[str, AgentConfigYAML] = {}
     """Agent definitions keyed by name."""
@@ -202,5 +246,6 @@ class AgentServerConfig(BaseModel):
             server=server,
             llm=raw.get("llm", {}),
             learn=raw.get("learn"),
+            hub=raw.get("hub", {}),
             agents=raw.get("agents", {}),
         )

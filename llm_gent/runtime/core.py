@@ -1,34 +1,26 @@
 """Runtime core - orchestrates agent subprocess/thread lifecycle.
 
-Core is the runtime orchestrator that manages:
-- Subprocess/thread spawning and termination
-- Communication with running agents
-- Log queue for subprocess logging
+Core manages spawning agents as subprocesses or threads. Agents connect
+to the hub via the ZMQ bus for all communication.
 """
 
 from __future__ import annotations
 
 import multiprocessing as mp
-from datetime import UTC, datetime
 from multiprocessing import Queue
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from appinfra import DotDict
 from appinfra.log.mp import LogQueueListener
-from appinfra.service import (
-    ChannelError,
-    ChannelFactory,
-    ChannelTimeoutError,
-    State,
-)
+from appinfra.service import State
 
 from .handle import AgentHandle, AgentInfo
-from .messages import AgentMessage, MessageType
 
 
 if TYPE_CHECKING:
     from appinfra.log import Logger
 
+    from llm_gent.bus.transport import ZMQCoordinatorBus
     from llm_gent.core.traits.builtin.learn import LearnConfig
     from llm_gent.core.traits.builtin.llm import LLMConfig
     from llm_gent.runtime.registry import AgentRegistry
@@ -37,13 +29,8 @@ if TYPE_CHECKING:
 class Core:
     """Runtime core - orchestrates agent subprocess lifecycle.
 
-    Core manages the runtime aspects of agents:
-    - Starting/stopping agent subprocesses
-    - Communication with running agents (ask, feedback, insights)
-    - Centralized log queue for subprocess logging
-    - Graceful shutdown
-
-    It works with AgentRegistry which holds the agent configurations.
+    Spawns and terminates agent processes/threads. Agents communicate
+    with the hub via the ZMQ bus (no direct channels).
     """
 
     def __init__(
@@ -51,9 +38,11 @@ class Core:
         lg: Logger,
         registry: AgentRegistry,
         llm_config: LLMConfig,
+        bus: ZMQCoordinatorBus,
         learn_config: DotDict | None = None,
         variables: dict[str, str] | None = None,
         factory_module: str = "llm_gent.agents.default",
+        bus_config: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the runtime core.
 
@@ -61,16 +50,20 @@ class Core:
             lg: Logger instance.
             registry: Agent registry for handle lookup.
             llm_config: LLM configuration for agents.
-            learn_config: Optional learn configuration (DotDict/LearnConfig).
+            bus: Coordinator bus for sending messages to agents.
+            learn_config: Optional learn configuration.
             variables: Variable substitutions for agent configs.
-            factory_module: Module containing the agent Factory class.
+            factory_module: Default module containing the agent Factory class.
+            bus_config: Bus config dict passed to agent subprocesses.
         """
         self._lg = lg
         self._registry = registry
         self._llm_config = llm_config
+        self._bus = bus
         self._learn_config = learn_config
         self._variables = variables or {}
         self._factory_module = factory_module
+        self._bus_config = bus_config
 
         # Queue-based logging for subprocesses
         self._log_queue: Queue[Any] = Queue()
@@ -80,13 +73,11 @@ class Core:
 
     @property
     def registry(self) -> AgentRegistry:
-        """Access the agent registry for read operations."""
+        """Access the agent registry."""
         return self._registry
 
     def start(self, name: str) -> AgentInfo:
         """Start an agent process.
-
-        Spawns a new subprocess running the agent.
 
         Args:
             name: Agent name.
@@ -96,13 +87,12 @@ class Core:
 
         Raises:
             KeyError: If agent not found.
-            InvalidTransitionError: If agent cannot be started (wrong state).
+            RuntimeError: If agent already active.
         """
         handle = self._registry.get(name)
         if handle is None:
             raise KeyError(f"Agent not found: {name}")
 
-        # Reject duplicate starts - prevent orphaning running workers
         if handle.state in {State.STARTING, State.RUNNING, State.STOPPING}:
             raise RuntimeError(f"Agent already active: {name} (state={handle.state.value})")
 
@@ -110,11 +100,10 @@ class Core:
         handle.error = None
 
         try:
-            self._spawn_process(handle)
+            self._spawn(handle)
             handle.state = State.RUNNING
             self._lg.debug("agent runtime started", extra={"agent": name})
         except Exception as e:
-            self._cleanup_failed_start(handle)
             handle.state = State.FAILED
             handle.error = str(e)
             self._lg.error("failed to start agent runtime", extra={"agent": name, "exception": e})
@@ -122,9 +111,7 @@ class Core:
         return AgentInfo.from_handle(handle)
 
     def stop(self, name: str) -> AgentInfo:
-        """Stop an agent process.
-
-        Sends shutdown message and terminates the subprocess.
+        """Stop an agent process via bus shutdown request.
 
         Args:
             name: Agent name.
@@ -145,7 +132,7 @@ class Core:
         handle.state = State.STOPPING
 
         try:
-            self._terminate_process(handle)
+            self._terminate(handle)
             handle.state = State.STOPPED
             self._lg.info("agent stopped", extra={"agent": name})
         except Exception as e:
@@ -156,7 +143,7 @@ class Core:
         return AgentInfo.from_handle(handle)
 
     def ask(self, name: str, question: str, timeout: float = 60.0) -> str:
-        """Ask an agent a question.
+        """Ask an agent a question via the bus.
 
         Args:
             name: Agent name.
@@ -164,30 +151,29 @@ class Core:
             timeout: Response timeout in seconds.
 
         Returns:
-            Agent's response.
+            Agent's response string.
 
         Raises:
             KeyError: If agent not found.
-            RuntimeError: If agent not running.
-            TimeoutError: If no response within timeout.
+            RuntimeError: If agent not running or request failed.
         """
-        handle = self._get_running_handle(name)
-        assert handle.channel is not None  # Verified by _get_running_handle
+        self._require_running(name)
 
-        self._lg.debug("ask request", extra={"agent": name, "question_len": len(question)})
+        from llm_gent.bus.protocol import AskRequest, AskResponse
 
-        request = AgentMessage(type=MessageType.ASK, payload={"question": question})
+        req = AskRequest(question=question)
         try:
-            response = handle.channel.submit(request, timeout=timeout)
-        except ChannelError as e:
-            self._lg.warning("ask failed", extra={"agent": name, "error": str(e)})
+            resp = self._bus.send_to_agent(name, req, timeout=timeout)
+            if not resp.success:
+                raise RuntimeError(resp.error or "ask failed")
+            if isinstance(resp, AskResponse):
+                return resp.response
+            return ""
+        except Exception as e:
             raise RuntimeError(str(e)) from e
 
-        self._lg.debug("ask completed", extra={"agent": name})
-        return str(response.payload.get("response", ""))
-
     def feedback(self, name: str, message: str, timeout: float = 30.0) -> None:
-        """Send feedback to an agent.
+        """Send feedback to an agent via the bus.
 
         Args:
             name: Agent name.
@@ -198,66 +184,20 @@ class Core:
             KeyError: If agent not found.
             RuntimeError: If agent not running or feedback failed.
         """
-        handle = self._get_running_handle(name)
-        assert handle.channel is not None  # Verified by _get_running_handle
+        self._require_running(name)
 
-        self._lg.debug("feedback request", extra={"agent": name})
+        from llm_gent.bus.protocol import FeedbackRequest
 
-        request = AgentMessage(type=MessageType.FEEDBACK, payload={"message": message})
+        req = FeedbackRequest(message=message)
         try:
-            handle.channel.submit(request, timeout=timeout)
-        except ChannelError as e:
-            self._lg.warning("feedback failed", extra={"agent": name, "error": str(e)})
+            resp = self._bus.send_to_agent(name, req, timeout=timeout)
+            if not resp.success:
+                raise RuntimeError(resp.error or "feedback failed")
+        except Exception as e:
             raise RuntimeError(str(e)) from e
-
-        self._lg.debug("feedback sent", extra={"agent": name})
-
-    def get_insights(
-        self, name: str, limit: int = 10, timeout: float = 30.0
-    ) -> list[dict[str, Any]]:
-        """Get recent insights from an agent.
-
-        Args:
-            name: Agent name.
-            limit: Maximum insights to return.
-            timeout: Response timeout in seconds.
-
-        Returns:
-            List of insight dictionaries.
-
-        Raises:
-            KeyError: If agent not found.
-            RuntimeError: If agent not running.
-        """
-        handle = self._get_running_handle(name)
-        assert handle.channel is not None  # Verified by _get_running_handle
-
-        self._lg.debug("get_insights request", extra={"agent": name, "limit": limit})
-
-        request = AgentMessage(type=MessageType.GET_INSIGHTS, payload={"limit": limit})
-        try:
-            response = handle.channel.submit(request, timeout=timeout)
-        except ChannelError as e:
-            self._lg.warning("get_insights failed", extra={"agent": name, "error": str(e)})
-            raise RuntimeError(str(e)) from e
-
-        insights = cast(list[dict[str, Any]], response.payload.get("insights", []))
-
-        # Update handle metrics from response
-        cycle_count = response.payload.get("cycle_count")
-        if cycle_count is not None:
-            handle.cycle_count = cycle_count
-            handle.last_run = datetime.now(UTC)
-
-        self._lg.debug("get_insights completed", extra={"agent": name, "count": len(insights)})
-        return insights
 
     def shutdown(self) -> None:
-        """Shutdown all agents and clean up.
-
-        Stops all running agents gracefully.
-        """
-        self._lg.info("shutting down core")
+        """Shut down all running agents and clean up."""
         for handle in self._registry.handles():
             if handle.state == State.RUNNING:
                 try:
@@ -267,274 +207,185 @@ class Core:
                         "error stopping agent during shutdown",
                         extra={"agent": handle.name, "exception": e},
                     )
+
         self._log_listener.stop()
 
-    def _get_running_handle(self, name: str) -> AgentHandle:
-        """Get handle for a running agent.
+    # -------------------------------------------------------------------------
+    # Internal
+    # -------------------------------------------------------------------------
 
-        Args:
-            name: Agent name.
-
-        Returns:
-            AgentHandle for the running agent.
-
-        Raises:
-            KeyError: If agent not found.
-            RuntimeError: If agent not running.
-        """
+    def _require_running(self, name: str) -> AgentHandle:
+        """Get handle for a running agent, raising if not found or not running."""
         handle = self._registry.get(name)
         if handle is None:
             raise KeyError(f"Agent not found: {name}")
-
-        if handle.state != State.RUNNING or handle.channel is None:
-            raise RuntimeError(f"Agent not running: {name}")
-
+        if handle.state != State.RUNNING:
+            raise RuntimeError(f"Agent not running: {name} (state={handle.state.value})")
         return handle
 
-    def _cleanup_failed_start(self, handle: AgentHandle) -> None:
-        """Clean up IPC resources after a failed start attempt.
-
-        Called when _spawn_process raises an exception. Ensures channel
-        and process are properly closed even on partial initialization.
-        """
-        import contextlib
-
-        if handle.channel is not None:
-            with contextlib.suppress(Exception):
-                handle.channel.close()
-            handle.channel = None
-
-        if handle.process is not None:
-            with contextlib.suppress(Exception):
-                # Process has terminate/kill, Thread does not
-                if isinstance(handle.process, mp.Process):
-                    handle.process.terminate()
-                    handle.process.join(timeout=1.0)
-                    if handle.process.is_alive():
-                        handle.process.kill()
-                else:
-                    # Thread - just wait briefly (daemon thread will exit with main)
-                    handle.process.join(timeout=1.0)
-            handle.process = None
-
-    def _spawn_process(self, handle: AgentHandle) -> None:
-        """Spawn subprocess or thread for agent based on execution mode."""
+    def _spawn(self, handle: AgentHandle) -> None:
+        """Spawn subprocess or thread for agent."""
         execution_mode = handle.config.get("execution", "process")
         self._lg.debug(
             "spawning agent runtime...",
             extra={"agent": handle.name, "execution": execution_mode},
         )
 
+        config = handle.config
+        config["name"] = handle.name
+        factory_module = config.get("module", self._factory_module)
+
         if execution_mode == "thread":
-            self._spawn_thread(handle)
+            self._spawn_thread(handle, config, factory_module)
         else:
-            self._spawn_subprocess(handle)
+            self._spawn_subprocess(handle, config, factory_module)
 
-    def _spawn_subprocess(self, handle: AgentHandle) -> None:
+    def _spawn_subprocess(self, handle: AgentHandle, config: DotDict, factory_module: str) -> None:
         """Spawn subprocess for agent."""
-        pair = ChannelFactory().create_process_pair()
-        handle.channel = pair.parent
-
-        # LearnConfig can be passed directly - DotDict pickles fine
         learn_config = self._learn_config if self._learn_config else None
-
-        # Determine factory module (per-agent for programmatic, default for prompt)
-        factory_module = handle.config.get("module", self._factory_module)
 
         handle.process = mp.Process(
             target=_subprocess_entry,
             args=(
                 handle.name,
-                self._build_runner_config(handle),
-                pair.child,
+                config,
                 self._llm_config,
                 learn_config,
                 self._variables,
                 self._log_config,
-                factory_module,  # Per-agent module for programmatic agents
+                factory_module,
+                self._bus_config,
             ),
             name=f"agent-{handle.name}",
             daemon=True,
         )
         handle.process.start()
-        self._wait_for_started(pair.parent)
         self._lg.debug("spawned subprocess for agent runtime", extra={"agent": handle.name})
 
-    def _spawn_thread(self, handle: AgentHandle) -> None:
-        """Spawn thread for agent (in-process execution)."""
+    def _spawn_thread(self, handle: AgentHandle, config: DotDict, factory_module: str) -> None:
+        """Spawn thread for agent."""
         import threading
-
-        pair = ChannelFactory().create_thread_pair()
-        handle.channel = pair.parent
-
-        # Determine factory module (per-agent for programmatic, default for prompt)
-        factory_module = handle.config.get("module", self._factory_module)
 
         handle.process = threading.Thread(
             target=_thread_entry,
             args=(
                 handle.name,
-                self._build_runner_config(handle),
-                pair.child,
+                config,
                 self._llm_config,
                 self._learn_config,
                 self._variables,
-                self._lg,  # Share logger directly in-process
+                self._lg,
                 factory_module,
+                self._bus_config,
             ),
             name=f"agent-{handle.name}",
             daemon=True,
         )
         handle.process.start()
-        self._wait_for_started(pair.parent)
         self._lg.debug("spawned thread for agent runtime", extra={"agent": handle.name})
 
-    def _wait_for_started(self, channel: Any) -> None:
-        """Wait for subprocess to signal it has started."""
-        try:
-            msg = channel.recv(timeout=30.0)
-        except ChannelTimeoutError:
-            raise RuntimeError("Agent process did not start within timeout") from None
-        if msg.type == MessageType.ERROR:
-            raise RuntimeError(msg.payload.get("error", "Unknown startup error"))
-
-    def _build_runner_config(self, handle: AgentHandle) -> DotDict:
-        """Build configuration for the runner (keeps DotDict for dot notation)."""
-        config = handle.config  # Keep as DotDict
-        config["name"] = handle.name  # DotDict supports both dict and dot notation
-        return config
-
-    def _terminate_process(self, handle: AgentHandle) -> None:
-        """Terminate agent subprocess/thread."""
+    def _terminate(self, handle: AgentHandle) -> None:
+        """Terminate agent process/thread via bus shutdown + process cleanup."""
         import contextlib
 
-        self._lg.debug("terminating process", extra={"agent": handle.name})
+        # Send shutdown via bus (best-effort)
+        with contextlib.suppress(Exception):
+            from llm_gent.bus.protocol import ShutdownRequest
 
-        channel = handle.channel
-        if channel is not None:
-            with contextlib.suppress(Exception):
-                channel.send(AgentMessage(type=MessageType.SHUTDOWN))
+            self._bus.send_to_agent(handle.name, ShutdownRequest(), timeout=5.0)
 
+        # Wait for process to exit
         if handle.process is not None:
             handle.process.join(timeout=5.0)
-            # Process has terminate/kill, Thread does not (daemon=True handles cleanup)
             if handle.process.is_alive() and isinstance(handle.process, mp.Process):
                 handle.process.terminate()
                 handle.process.join(timeout=2.0)
                 if handle.process.is_alive():
                     handle.process.kill()
 
-        # Close channel after process termination to prevent FD leaks
-        if channel is not None:
-            with contextlib.suppress(Exception):
-                channel.close()
-
         handle.process = None
-        handle.channel = None
+
+
+# =============================================================================
+# Subprocess/thread entry points
+# =============================================================================
 
 
 def _subprocess_entry(
     name: str,
     config: DotDict,
-    channel: Any,
     llm_config: LLMConfig,
     learn_config: LearnConfig | None,
     variables: dict[str, str],
     log_config: dict[str, Any],
     factory_module: str,
+    bus_config: dict[str, Any] | None = None,
 ) -> None:
-    """Entry point for agent subprocess.
-
-    This runs in the subprocess - creates logger, agent, and runner, then runs.
-    Initialization errors are caught and sent back to the main process via ERROR message.
-    """
+    """Entry point for agent subprocess."""
     from appinfra.log import Logger
-
-    from llm_gent.runtime.messages import AgentMessage, MessageType
-    from llm_gent.runtime.runner import AgentRunner
 
     try:
         lg = Logger.from_queue_config(log_config, name=f"agent/{name}")
-
-        # Create platform context for this agent subprocess
-        from llm_gent.core.platform import PlatformContext
-
-        platform = PlatformContext.from_config(
-            lg=lg,
-            llm_config=llm_config,
-            learn_config=learn_config,
+        _create_and_run_agent(
+            lg, config, llm_config, learn_config, variables, factory_module, bus_config
         )
-
-        # Load and create agent using new factory architecture
-        factory = _load_agent_factory(factory_module, platform)
-        agent = factory.create(config, variables=variables)
-        agent.start()
-
-        schedule_interval = _extract_schedule_interval(config)
-        runner = AgentRunner(
-            lg=lg, agent=agent, channel=channel, schedule_interval=schedule_interval
-        )
-        runner.run()
     except Exception as e:
-        # Send error back to main process for faster feedback
-        channel.send(AgentMessage(type=MessageType.ERROR, payload={"error": str(e)}))
+        # Log to stderr as last resort -- no channel to report back
+        import sys
+
+        print(f"Agent {name} failed: {e}", file=sys.stderr)
 
 
 def _thread_entry(
     name: str,
     config: DotDict,
-    channel: Any,
     llm_config: LLMConfig,
     learn_config: LearnConfig | None,
     variables: dict[str, str],
     lg: Logger,
     factory_module: str,
+    bus_config: dict[str, Any] | None = None,
 ) -> None:
-    """Entry point for agent thread (in-process execution).
+    """Entry point for agent thread."""
+    try:
+        _create_and_run_agent(
+            lg, config, llm_config, learn_config, variables, factory_module, bus_config
+        )
+    except Exception as e:
+        lg.warning("agent thread failed", extra={"exception": e})
 
-    Similar to _subprocess_entry but runs in a thread with shared logger.
-    """
-    from llm_gent.runtime.messages import AgentMessage, MessageType
+
+def _create_and_run_agent(
+    lg: Logger,
+    config: DotDict,
+    llm_config: LLMConfig,
+    learn_config: LearnConfig | None,
+    variables: dict[str, str],
+    factory_module: str,
+    bus_config: dict[str, Any] | None,
+) -> None:
+    """Create agent from config and run it (shared by subprocess and thread entries)."""
+    from llm_gent.bus.transport import WorkerBusConfig
+    from llm_gent.core.platform import PlatformContext
     from llm_gent.runtime.runner import AgentRunner
 
-    try:
-        # Create platform context for this agent thread
-        from llm_gent.core.platform import PlatformContext
+    platform = PlatformContext.from_config(lg=lg, llm_config=llm_config, learn_config=learn_config)
+    factory = _load_agent_factory(factory_module, platform)
+    agent = factory.create(config, variables=variables)
+    agent.start()
 
-        platform = PlatformContext.from_config(
-            lg=lg,
-            llm_config=llm_config,
-            learn_config=learn_config,
-        )
-
-        # Load and create agent using factory architecture
-        factory = _load_agent_factory(factory_module, platform)
-        agent = factory.create(config, variables=variables)
-        agent.start()
-
-        schedule_interval = _extract_schedule_interval(config)
-        runner = AgentRunner(
-            lg=lg, agent=agent, channel=channel, schedule_interval=schedule_interval
-        )
-        runner.run()
-    except Exception as e:
-        # Send error back to main thread for faster feedback
-        channel.send(AgentMessage(type=MessageType.ERROR, payload={"error": str(e)}))
+    worker_bus_config = WorkerBusConfig(**bus_config) if bus_config else WorkerBusConfig()
+    runner = AgentRunner(
+        lg=lg,
+        agent=agent,
+        bus_config=worker_bus_config,
+        schedule_interval=_extract_schedule_interval(config),
+    )
+    runner.run()
 
 
 def _load_agent_factory(factory_module: str, platform: Any) -> Any:
-    """Load agent factory from module with descriptive error handling.
-
-    Args:
-        factory_module: Module path containing Factory class.
-        platform: PlatformContext instance.
-
-    Returns:
-        Factory instance.
-
-    Raises:
-        RuntimeError: If factory cannot be loaded.
-    """
+    """Load agent factory from module."""
     import importlib
 
     try:

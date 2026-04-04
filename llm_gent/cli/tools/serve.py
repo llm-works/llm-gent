@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from multiprocessing.queues import Queue
 
     from llm_gent.core.traits.builtin.learn import LearnConfig
+    from llm_gent.hub import Hub
     from llm_gent.runtime import AgentInfo, AgentRegistry, Core
     from llm_gent.runtime.server import AgentServerConfig
     from llm_gent.runtime.server.protocol.base import Request, Response
@@ -67,13 +68,18 @@ class ServeTool(Tool):
         self._apply_cli_overrides(config)
 
         learn_config = self._create_learn_config(config)
-        # Note: learn_trait removed - was a template not actually used in shutdown
         registry = self._create_registry()
-        core = self._create_core(registry, config, learn_config)
-        self._register_agents(registry, core, config)
+        hub = self._create_hub(config)
+        hub.start()
 
-        self._log_startup(config, registry)
-        self._run_server(config, core)
+        try:
+            core = self._create_core(registry, config, learn_config, hub)
+            self._register_agents(registry, core, config, hub)
+            self._log_startup(config, registry, hub)
+            self._run_server(config, core)
+        finally:
+            hub.stop()
+
         return 0
 
     def _create_learn_config(self, config: AgentServerConfig) -> LearnConfig | None:
@@ -98,6 +104,25 @@ class ServeTool(Tool):
             # Note: identity is set per-agent in factory
         )
 
+    def _create_hub(self, config: AgentServerConfig) -> Hub:
+        """Create and configure the swarm hub."""
+        from llm_gent.bus.transport import CoordinatorBusConfig
+        from llm_gent.hub import Hub, HubConfig
+
+        hub_yaml = config.hub
+        bus_config = CoordinatorBusConfig(
+            router_port=hub_yaml.router_port,
+            pub_port=hub_yaml.pub_port,
+            sub_port=hub_yaml.sub_port,
+        )
+        hub_config = HubConfig(
+            bus=bus_config,
+            dead_timeout=hub_yaml.dead_timeout,
+            health_check_interval=hub_yaml.health_check_interval,
+            max_restarts=hub_yaml.max_restarts,
+        )
+        return Hub(self.lg, hub_config)
+
     def _create_registry(self) -> AgentRegistry:
         """Create agent registry."""
         from llm_gent.runtime import AgentRegistry
@@ -109,23 +134,32 @@ class ServeTool(Tool):
         registry: AgentRegistry,
         config: AgentServerConfig,
         learn_config: LearnConfig | None,
+        hub: Hub,
     ) -> Core:
         """Create runtime core."""
         from appinfra import DotDict
 
         from llm_gent.runtime import Core
 
+        hub_yaml = config.hub
+        bus_config = {
+            "router_port": hub_yaml.router_port,
+            "pub_port": hub_yaml.pub_port,
+            "sub_port": hub_yaml.sub_port,
+        }
+
         return Core(
             lg=self.lg,
             registry=registry,
             llm_config=DotDict(config.llm),
+            bus=hub.bus,
             learn_config=learn_config,
             variables=self._parse_env_vars(),
+            bus_config=bus_config,
         )
 
-    def _log_startup(self, config: AgentServerConfig, registry: AgentRegistry) -> None:
+    def _log_startup(self, config: AgentServerConfig, registry: AgentRegistry, hub: Hub) -> None:
         """Log server startup information."""
-        # Use registry to report actually registered agents (not just config)
         registered_agents = [info.name for info in registry.list_agents()]
         self.lg.info(
             "agent server started",
@@ -133,6 +167,8 @@ class ServeTool(Tool):
                 "host": config.server.host,
                 "port": config.server.port,
                 "agents": registered_agents,
+                "bus_router_port": config.hub.router_port,
+                "bus_agents": hub.registry.count,
             },
         )
 
@@ -445,26 +481,13 @@ class ServeTool(Tool):
     def _handle_get_insights(self, core: Core, request: Request) -> Response:
         """Handle get insights request."""
         from llm_gent.runtime.server.protocol.management import (
-            GetInsightsRequest,
             GetInsightsResponse,
         )
 
-        req = (
-            request
-            if isinstance(request, GetInsightsRequest)
-            else GetInsightsRequest(**request.model_dump())
+        # TODO: Re-implement insights via bus protocol
+        return GetInsightsResponse(
+            id=request.id, success=False, error="Insights not yet supported via bus"
         )
-        try:
-            insights = core.get_insights(req.agent_name, req.limit)
-            return GetInsightsResponse(id=req.id, insights=insights)
-        except KeyError:
-            return GetInsightsResponse(
-                id=req.id,
-                success=False,
-                error=f"Agent not found: {req.agent_name}",
-            )
-        except RuntimeError as e:
-            return GetInsightsResponse(id=req.id, success=False, error=str(e))
 
     def _agent_info_to_dict(self, info: AgentInfo) -> dict[str, Any]:
         """Convert AgentInfo to dict for response."""
@@ -478,7 +501,7 @@ class ServeTool(Tool):
         }
 
     def _register_agents(
-        self, registry: AgentRegistry, core: Core, config: AgentServerConfig
+        self, registry: AgentRegistry, core: Core, config: AgentServerConfig, hub: Hub
     ) -> None:
         """Register and auto-start agents from configuration."""
         for name, agent_config in config.agents.items():
@@ -489,6 +512,7 @@ class ServeTool(Tool):
             config_dict = self._build_agent_config_dict(name, agent_config)
             try:
                 registry.register(name, config_dict)
+                hub.register_injected(name, metadata={"type": agent_config.type_})
                 # Auto-start agents with a schedule
                 if agent_config.schedule is not None:
                     core.start(name)

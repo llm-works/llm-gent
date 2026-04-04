@@ -177,6 +177,12 @@ class TestMessages:
             "unregister_response",
             "error_request",
             "error_response",
+            "ask_request",
+            "ask_response",
+            "feedback_request",
+            "feedback_response",
+            "shutdown_request",
+            "shutdown_response",
         }
         assert set(MESSAGE_REGISTRY.keys()) == expected
 

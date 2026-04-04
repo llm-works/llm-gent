@@ -30,9 +30,9 @@ learn:
         learning_rate: 0.0002
 
 # Agent definitions
-agents:
+agents: {}
   #codebase-qna: !include './agents/codebase-qna.yaml'
-  jokester: !include './agents/jokester.yaml'
+  #jokester: !include './agents/jokester.yaml'
 
 # Appinfra logging (optional, uses defaults if not specified)
 logging: !include './infra.yaml#logging'

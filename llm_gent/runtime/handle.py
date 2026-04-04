@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from appinfra import DotDict
-from appinfra.service import ProcessChannel, State, ThreadChannel
+from appinfra.service import State
 
 
 @dataclass
@@ -18,7 +18,7 @@ class AgentHandle:
 
     Contains all state needed to manage an agent's lifecycle:
     - Identity (name, config)
-    - Runtime state (state, process, channel)
+    - Runtime state (state, process)
     - Metrics (cycle_count, last_run, error)
 
     The handle is owned by the AgentRegistry and should not be
@@ -36,9 +36,6 @@ class AgentHandle:
 
     process: mp.Process | threading.Thread | None = None
     """Subprocess or thread running the agent, or None if not started."""
-
-    channel: ProcessChannel[Any, Any] | ThreadChannel[Any, Any] | None = None
-    """Communication channel to subprocess/thread, or None if not started."""
 
     cycle_count: int = 0
     """Number of scheduled cycles completed."""
