@@ -1,9 +1,12 @@
 """ZMQ bus transport for swarm communication.
 
 Three-socket pattern:
-    ROUTER/DEALER: Bidirectional RPC between hub and agents (agent-to-agent routed via hub)
+    ROUTER/DEALER: Bidirectional messaging between hub and agents
     PUB/SUB:       Hub broadcasts to agents (commands, notifications)
     SUB/PUB:       Agents publish to hub (heartbeats, events, topic messages)
+
+The bus handles raw message routing. Request/response correlation is
+delegated to appinfra's BufferedChannel which wraps the ZMQ transports.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
 import zmq
 
@@ -20,6 +23,8 @@ from .protocol import Envelope, Message, Request, Response
 
 if TYPE_CHECKING:
     from appinfra.log import Logger
+
+    from .channel import ZMQDealerTransport, ZMQRouterTransport
 
 
 # =============================================================================
@@ -86,37 +91,6 @@ RequestHandler = Callable[[Request, str | None], Response]
 MessageHandler = Callable[[Message], None]
 
 
-@runtime_checkable
-class AgentBus(Protocol):
-    """Protocol for agent-side bus operations."""
-
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    def send(self, message: Request, timeout: float | None = None) -> Response: ...
-    def publish(self, topic: str, message: Message) -> None: ...
-    def subscribe(self, topic: str, handler: MessageHandler) -> None: ...
-    def on_request(self, handler: RequestHandler) -> None: ...
-
-
-@runtime_checkable
-class CoordinatorBus(AgentBus, Protocol):
-    """Protocol for coordinator-side bus operations."""
-
-    def send_to_agent(
-        self, agent_id: str, message: Request, timeout: float | None = None
-    ) -> Response: ...
-    def broadcast(self, message: Message) -> None: ...
-
-
-@runtime_checkable
-class WorkerBus(AgentBus, Protocol):
-    """Protocol for worker-side bus operations."""
-
-    @property
-    def agent_id(self) -> str: ...
-    def publish_heartbeat(self, stats: dict[str, Any]) -> None: ...
-
-
 # =============================================================================
 # Coordinator bus (hub side)
 # =============================================================================
@@ -125,8 +99,11 @@ class WorkerBus(AgentBus, Protocol):
 class ZMQCoordinatorBus:
     """Hub-side ZMQ bus with three-socket pattern.
 
-    Binds ROUTER, PUB, and SUB sockets. Runs a polling thread
-    to dispatch incoming messages to registered handlers.
+    Binds ROUTER, PUB, and SUB sockets. Routes incoming ROUTER messages
+    to per-agent transports. Handles PUB/SUB for broadcast and topic messaging.
+
+    For request/response with agents, use create_agent_transport() to get
+    an appinfra Transport, then wrap in BufferedChannel for correlation.
     """
 
     def __init__(self, lg: Logger, config: CoordinatorBusConfig | None = None) -> None:
@@ -139,9 +116,7 @@ class ZMQCoordinatorBus:
 
         self._request_handler: RequestHandler | None = None
         self._topic_handlers: dict[str, MessageHandler] = {}
-        self._pending: dict[str, Response | None] = {}
-        self._pending_events: dict[str, threading.Event] = {}
-        self._pending_lock = threading.RLock()
+        self._agent_transports: dict[str, ZMQRouterTransport] = {}
 
         self._poll_thread: threading.Thread | None = None
         self._running = False
@@ -183,6 +158,11 @@ class ZMQCoordinatorBus:
             self._poll_thread.join(timeout=2.0)
             self._poll_thread = None
 
+        # Close all agent transports
+        for transport in self._agent_transports.values():
+            transport.close()
+        self._agent_transports.clear()
+
         for sock in (self._router, self._pub, self._sub):
             if sock is not None:
                 sock.close(linger=100)
@@ -193,60 +173,49 @@ class ZMQCoordinatorBus:
 
         self._lg.info("coordinator bus stopped")
 
+    # -------------------------------------------------------------------------
+    # Agent transports (for appinfra channel integration)
+    # -------------------------------------------------------------------------
+
+    def create_agent_transport(self, agent_id: str) -> ZMQRouterTransport:
+        """Create a transport for communicating with a specific agent.
+
+        The transport routes through the shared ROUTER socket. Incoming
+        messages from this agent are delivered to the transport's inbound
+        queue by the poll thread.
+
+        Wrap in appinfra's BufferedChannel for request/response correlation.
+
+        Args:
+            agent_id: Target agent's ZMQ identity.
+
+        Returns:
+            ZMQRouterTransport bound to this agent.
+        """
+        from .channel import ZMQRouterTransport
+
+        assert self._router is not None
+        transport = ZMQRouterTransport(self._router, agent_id)
+        self._agent_transports[agent_id] = transport
+        return transport
+
+    def remove_agent_transport(self, agent_id: str) -> None:
+        """Remove and close an agent transport."""
+        transport = self._agent_transports.pop(agent_id, None)
+        if transport is not None:
+            transport.close()
+
+    # -------------------------------------------------------------------------
+    # Pub/sub and request handling
+    # -------------------------------------------------------------------------
+
     def on_request(self, handler: RequestHandler) -> None:
-        """Register handler for incoming requests from agents."""
+        """Register handler for incoming requests not routed to a transport."""
         self._request_handler = handler
 
     def subscribe(self, topic: str, handler: MessageHandler) -> None:
         """Subscribe to messages on a topic (from SUB socket)."""
         self._topic_handlers[topic] = handler
-
-    def send_to_agent(
-        self, agent_id: str, message: Request, timeout: float | None = None
-    ) -> Response:
-        """Send request to a specific agent and wait for response.
-
-        Args:
-            agent_id: Target agent's ZMQ identity.
-            message: Request to send.
-            timeout: Seconds to wait (None = 30s default).
-
-        Returns:
-            Response from the agent.
-
-        Raises:
-            BusTimeoutError: If no response within timeout.
-        """
-        timeout = timeout if timeout is not None else 30.0
-        event = threading.Event()
-
-        with self._pending_lock:
-            self._pending[message.id] = None
-            self._pending_events[message.id] = event
-
-        envelope = message.to_envelope()
-        envelope.target = agent_id
-        assert self._router is not None
-        self._router.send_multipart(
-            [
-                agent_id.encode(),
-                b"",
-                envelope.to_bytes(),
-            ]
-        )
-
-        if not event.wait(timeout=timeout):
-            with self._pending_lock:
-                self._pending.pop(message.id, None)
-                self._pending_events.pop(message.id, None)
-            raise BusTimeoutError(f"timeout waiting for response to {message.id}")
-
-        with self._pending_lock:
-            response = self._pending.pop(message.id)
-            self._pending_events.pop(message.id, None)
-
-        assert response is not None
-        return response
 
     def broadcast(self, message: Message) -> None:
         """Broadcast a message to all agents via PUB socket."""
@@ -261,10 +230,6 @@ class ZMQCoordinatorBus:
         envelope.source = "hub"
         assert self._pub is not None
         self._pub.send_multipart([topic.encode(), envelope.to_bytes()])
-
-    def send(self, message: Request, timeout: float | None = None) -> Response:
-        """Not applicable for coordinator -- use send_to_agent()."""
-        raise NotImplementedError("coordinator uses send_to_agent()")
 
     # -------------------------------------------------------------------------
     # Polling
@@ -312,9 +277,15 @@ class ZMQCoordinatorBus:
             self._lg.warning("failed to parse envelope", extra={"exception": e})
             return
 
-        if self._resolve_pending(envelope):
+        # Route to agent transport if one exists
+        transport = self._agent_transports.get(sender_id)
+        if transport is not None:
+            msg = self._unwrap_envelope(envelope)
+            if msg is not None:
+                transport.deliver(msg)
             return
 
+        # Otherwise dispatch as incoming request (registration, etc.)
         self._dispatch_request(envelope, identity, sender_id)
 
     def _dispatch_request(self, envelope: Envelope, identity: bytes, sender_id: str) -> None:
@@ -352,21 +323,6 @@ class ZMQCoordinatorBus:
         data = frames[1]
         self._dispatch_topic(topic, data)
 
-    def _resolve_pending(self, envelope: Envelope) -> bool:
-        """Check if envelope is a response to a pending request.
-
-        Returns:
-            True if the envelope was consumed as a pending response.
-        """
-        with self._pending_lock:
-            if envelope.msg_type.endswith("_response") and "id" in envelope.payload:
-                req_id = envelope.payload["id"]
-                if req_id in self._pending:
-                    self._pending[req_id] = Response.model_validate(envelope.payload)
-                    self._pending_events[req_id].set()
-                    return True
-        return False
-
     def _dispatch_topic(self, topic: str, data: bytes) -> None:
         """Parse envelope and dispatch to topic handler."""
         try:
@@ -388,6 +344,16 @@ class ZMQCoordinatorBus:
                     extra={"topic": topic, "exception": e},
                 )
 
+    def _unwrap_envelope(self, envelope: Envelope) -> Message | None:
+        """Unwrap envelope to typed message, or None on error."""
+        try:
+            from .protocol import MESSAGE_REGISTRY
+
+            return envelope.unwrap(MESSAGE_REGISTRY)
+        except Exception as e:
+            self._lg.warning("failed to unwrap envelope", extra={"exception": e})
+            return None
+
 
 # =============================================================================
 # Worker bus (agent side)
@@ -397,8 +363,9 @@ class ZMQCoordinatorBus:
 class ZMQWorkerBus:
     """Agent-side ZMQ bus connecting to the coordinator.
 
-    Connects DEALER, SUB, and PUB sockets to the coordinator's
-    bound sockets. Runs a polling thread for incoming messages.
+    Connects DEALER, SUB, and PUB sockets. The DEALER socket is wrapped
+    as a ZMQDealerTransport for appinfra channel integration. PUB/SUB
+    handles heartbeats and topic messaging.
     """
 
     def __init__(
@@ -415,11 +382,8 @@ class ZMQWorkerBus:
         self._sub: zmq.Socket[Any] | None = None
         self._pub: zmq.Socket[Any] | None = None
 
-        self._request_handler: RequestHandler | None = None
+        self._dealer_transport: ZMQDealerTransport | None = None
         self._topic_handlers: dict[str, MessageHandler] = {}
-        self._pending: dict[str, Response | None] = {}
-        self._pending_events: dict[str, threading.Event] = {}
-        self._pending_lock = threading.RLock()
 
         self._poll_thread: threading.Thread | None = None
         self._running = False
@@ -428,24 +392,30 @@ class ZMQWorkerBus:
     def agent_id(self) -> str:
         return self._agent_id
 
+    @property
+    def transport(self) -> ZMQDealerTransport | None:
+        """The DEALER transport for appinfra channel integration."""
+        return self._dealer_transport
+
     def start(self) -> None:
         """Connect sockets and start polling thread."""
+        from .channel import ZMQDealerTransport
+
         cfg = self._config
         self._ctx = zmq.Context()
 
-        # DEALER connects to coordinator ROUTER
         self._dealer = self._ctx.socket(zmq.DEALER)
         self._dealer.setsockopt_string(zmq.IDENTITY, self._agent_id)
         self._dealer.connect(cfg.router_addr)
 
-        # SUB connects to coordinator PUB (receive broadcasts)
         self._sub = self._ctx.socket(zmq.SUB)
         self._sub.connect(cfg.pub_addr)
         self._sub.setsockopt_string(zmq.SUBSCRIBE, "broadcast")
 
-        # PUB connects to coordinator SUB (send heartbeats/events)
         self._pub = self._ctx.socket(zmq.PUB)
         self._pub.connect(cfg.sub_addr)
+
+        self._dealer_transport = ZMQDealerTransport(self._dealer, self._agent_id)
 
         self._running = True
         self._poll_thread = threading.Thread(
@@ -458,6 +428,10 @@ class ZMQWorkerBus:
     def stop(self) -> None:
         """Stop polling and close sockets."""
         self._running = False
+        if self._dealer_transport is not None:
+            self._dealer_transport.close()
+            self._dealer_transport = None
+
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=2.0)
             self._poll_thread = None
@@ -472,53 +446,11 @@ class ZMQWorkerBus:
 
         self._lg.info("worker bus stopped", extra={"agent_id": self._agent_id})
 
-    def on_request(self, handler: RequestHandler) -> None:
-        """Register handler for incoming requests from coordinator."""
-        self._request_handler = handler
-
     def subscribe(self, topic: str, handler: MessageHandler) -> None:
         """Subscribe to a topic from the coordinator's PUB socket."""
         self._topic_handlers[topic] = handler
         if self._sub is not None:
             self._sub.setsockopt_string(zmq.SUBSCRIBE, topic)
-
-    def send(self, message: Request, timeout: float | None = None) -> Response:
-        """Send request to coordinator and wait for response.
-
-        Args:
-            message: Request to send.
-            timeout: Seconds to wait (None = 30s default).
-
-        Returns:
-            Response from coordinator.
-
-        Raises:
-            BusTimeoutError: If no response within timeout.
-        """
-        timeout = timeout if timeout is not None else 30.0
-        event = threading.Event()
-
-        with self._pending_lock:
-            self._pending[message.id] = None
-            self._pending_events[message.id] = event
-
-        envelope = message.to_envelope()
-        envelope.source = self._agent_id
-        assert self._dealer is not None
-        self._dealer.send_multipart([b"", envelope.to_bytes()])
-
-        if not event.wait(timeout=timeout):
-            with self._pending_lock:
-                self._pending.pop(message.id, None)
-                self._pending_events.pop(message.id, None)
-            raise BusTimeoutError(f"timeout waiting for response to {message.id}")
-
-        with self._pending_lock:
-            response = self._pending.pop(message.id)
-            self._pending_events.pop(message.id, None)
-
-        assert response is not None
-        return response
 
     def publish(self, topic: str, message: Message) -> None:
         """Publish a message to a topic (sent to coordinator's SUB socket)."""
@@ -536,10 +468,6 @@ class ZMQWorkerBus:
             stats=AgentStats(**stats),
         )
         self.publish("heartbeat", request)
-
-    def broadcast(self, message: Message) -> None:
-        """Not applicable for workers -- use publish()."""
-        raise NotImplementedError("workers use publish(), not broadcast()")
 
     # -------------------------------------------------------------------------
     # Polling
@@ -566,7 +494,11 @@ class ZMQWorkerBus:
                 self._handle_sub()
 
     def _handle_dealer(self) -> None:
-        """Process incoming message on DEALER socket."""
+        """Process incoming message on DEALER socket.
+
+        All DEALER messages are delivered to the dealer transport
+        for appinfra's BufferedChannel to handle correlation.
+        """
         assert self._dealer is not None
         try:
             frames = self._dealer.recv_multipart(zmq.NOBLOCK)
@@ -584,54 +516,14 @@ class ZMQWorkerBus:
             self._lg.warning("failed to parse dealer envelope", extra={"exception": e})
             return
 
-        if self._resolve_pending(envelope):
-            return
-
-        self._dispatch_dealer_request(envelope)
-
-    def _dispatch_dealer_request(self, envelope: Envelope) -> None:
-        """Dispatch incoming request from coordinator and send response."""
-        if self._request_handler is None:
-            return
-        try:
-            from .protocol import MESSAGE_REGISTRY
-
-            msg = envelope.unwrap(MESSAGE_REGISTRY)
-            if isinstance(msg, Request):
-                response = self._request_handler(msg, envelope.source)
-                resp_envelope = response.to_envelope()
-                resp_envelope.target = envelope.source
-                assert self._dealer is not None
-                self._dealer.send_multipart([b"", resp_envelope.to_bytes()])
-        except Exception as e:
-            self._lg.warning(
-                "error handling dealer request",
-                extra={"type": envelope.msg_type, "exception": e},
-            )
-
-    def _resolve_pending(self, envelope: Envelope) -> bool:
-        """Check if envelope is a response to a pending request.
-
-        Returns:
-            True if the envelope was consumed as a pending response.
-        """
-        with self._pending_lock:
-            if envelope.msg_type.endswith("_response") and "id" in envelope.payload:
-                req_id = envelope.payload["id"]
-                if req_id in self._pending:
-                    from .protocol import MESSAGE_REGISTRY
-
-                    msg = envelope.unwrap(MESSAGE_REGISTRY)
-                    if isinstance(msg, Response):
-                        self._pending[req_id] = msg
-                    else:
-                        self._pending[req_id] = Response(id=req_id, success=True)
-                    self._pending_events[req_id].set()
-                    return True
-        return False
+        # Deliver to transport for BufferedChannel correlation
+        if self._dealer_transport is not None:
+            msg = self._unwrap_envelope(envelope)
+            if msg is not None:
+                self._dealer_transport.deliver(msg)
 
     def _handle_sub(self) -> None:
-        """Process incoming message on SUB socket (broadcasts from coordinator)."""
+        """Process incoming message on SUB socket (broadcasts)."""
         assert self._sub is not None
         try:
             frames = self._sub.recv_multipart(zmq.NOBLOCK)
@@ -665,3 +557,13 @@ class ZMQWorkerBus:
                     "error in topic handler",
                     extra={"topic": topic, "exception": e},
                 )
+
+    def _unwrap_envelope(self, envelope: Envelope) -> Message | None:
+        """Unwrap envelope to typed message, or None on error."""
+        try:
+            from .protocol import MESSAGE_REGISTRY
+
+            return envelope.unwrap(MESSAGE_REGISTRY)
+        except Exception as e:
+            self._lg.warning("failed to unwrap envelope", extra={"exception": e})
+            return None

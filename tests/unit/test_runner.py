@@ -1,4 +1,4 @@
-"""Tests for AgentRunner (bus-based)."""
+"""Tests for AgentRunner."""
 
 from unittest.mock import MagicMock
 
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def mock_agent():
-    """Create mock agent with required interface."""
+    """Create mock agent."""
     agent = MagicMock()
     agent.name = "test-agent"
     agent.cycle_count = 0
@@ -35,7 +35,7 @@ def bus_config():
 
 @pytest.fixture
 def runner(mock_agent, bus_config):
-    """Create runner with mocked dependencies."""
+    """Create runner (not connected to bus)."""
     lg = MagicMock()
     return AgentRunner(lg=lg, agent=mock_agent, bus_config=bus_config)
 
@@ -61,14 +61,14 @@ class TestAgentRunner:
 
 
 class TestRequestHandling:
-    """Tests for hub -> agent request handling."""
+    """Tests for _handle_request (processes requests from channel)."""
 
     def test_handle_ask(self, runner, mock_agent):
         """Ask request calls agent.ask() and returns response."""
         mock_agent.ask.return_value = "Test answer"
         req = AskRequest(question="What?")
 
-        resp = runner._handle_request(req, "hub")
+        resp = runner._handle_request(req)
 
         assert isinstance(resp, AskResponse)
         assert resp.success is True
@@ -80,7 +80,7 @@ class TestRequestHandling:
         mock_agent.ask.side_effect = RuntimeError("LLM failed")
         req = AskRequest(question="What?")
 
-        resp = runner._handle_request(req, "hub")
+        resp = runner._handle_request(req)
 
         assert isinstance(resp, AskResponse)
         assert resp.success is False
@@ -90,7 +90,7 @@ class TestRequestHandling:
         """Feedback request calls agent.record_feedback()."""
         req = FeedbackRequest(message="Good job!")
 
-        resp = runner._handle_request(req, "hub")
+        resp = runner._handle_request(req)
 
         assert isinstance(resp, FeedbackResponse)
         assert resp.success is True
@@ -101,7 +101,7 @@ class TestRequestHandling:
         runner._running = True
         req = ShutdownRequest()
 
-        resp = runner._handle_request(req, "hub")
+        resp = runner._handle_request(req)
 
         assert isinstance(resp, ShutdownResponse)
         assert resp.success is True
@@ -112,7 +112,7 @@ class TestRequestHandling:
         req = MagicMock(spec=["id"])
         req.id = "test-id"
 
-        resp = runner._handle_request(req, "hub")
+        resp = runner._handle_request(req)
 
         assert resp.success is False
         assert "unknown" in resp.error
@@ -129,7 +129,7 @@ class TestScheduling:
         assert runner._should_run_cycle() is True
 
     def test_should_run_cycle_message_only(self, runner):
-        """Message-only mode (no schedule) never runs cycle."""
+        """Message-only mode never runs cycle."""
         assert runner._should_run_cycle() is False
 
     def test_run_cycle_calls_run_once(self, runner, mock_agent):

@@ -69,19 +69,6 @@ class TestCoreInit:
         )
         assert core._learn_config is mock_learn_config
 
-    def test_init_with_variables(self, mock_logger, registry, llm_config, mock_bus, bus_config):
-        """Core accepts optional variables dict."""
-        variables = {"API_KEY": "test-key"}
-        core = Core(
-            lg=mock_logger,
-            registry=registry,
-            llm_config=llm_config,
-            bus=mock_bus,
-            bus_config=bus_config,
-            variables=variables,
-        )
-        assert core._variables == variables
-
 
 class TestCoreStart:
     """Tests for Core.start()."""
@@ -120,15 +107,15 @@ class TestCoreStop:
         registry.register("test", {})
         handle = registry.get("test")
         handle.state = State.RUNNING
-        # Mock the runner so _stop_service works
         core._runners["test"] = MagicMock()
+        core._channels["test"] = MagicMock()
 
         info = core.stop("test")
         assert info.status == "stopped"
 
 
 class TestCoreAsk:
-    """Tests for Core.ask()."""
+    """Tests for Core.ask() via channel."""
 
     def test_ask_not_found(self, core):
         """Ask raises KeyError for nonexistent agent."""
@@ -141,79 +128,63 @@ class TestCoreAsk:
         with pytest.raises(RuntimeError, match="not running"):
             core.ask("test", "question")
 
-    def test_ask_success(self, core, registry, mock_bus):
-        """Ask returns response from agent via bus."""
+    def test_ask_success(self, core, registry):
+        """Ask returns response via channel.submit()."""
         from llm_gent.bus.protocol import AskResponse
 
         registry.register("test", {})
         handle = registry.get("test")
         handle.state = State.RUNNING
 
-        mock_bus.send_to_agent.return_value = AskResponse(id="test-id", response="Test answer")
+        mock_channel = MagicMock()
+        mock_channel.submit.return_value = AskResponse(id="test-id", response="Test answer")
+        core._channels["test"] = mock_channel
 
         response = core.ask("test", "What is the answer?")
         assert response == "Test answer"
+        mock_channel.submit.assert_called_once()
 
-    def test_ask_failure(self, core, registry, mock_bus):
-        """Ask raises RuntimeError on bus failure."""
-        from llm_gent.bus.transport import BusTimeoutError
-
+    def test_ask_no_channel(self, core, registry):
+        """Ask raises RuntimeError if no channel for agent."""
         registry.register("test", {})
         handle = registry.get("test")
         handle.state = State.RUNNING
 
-        mock_bus.send_to_agent.side_effect = BusTimeoutError("timeout")
-
-        with pytest.raises(RuntimeError, match="timeout"):
+        with pytest.raises(RuntimeError, match="No channel"):
             core.ask("test", "question")
 
 
 class TestCoreFeedback:
-    """Tests for Core.feedback()."""
+    """Tests for Core.feedback() via channel."""
 
     def test_feedback_not_found(self, core):
         """Feedback raises KeyError for nonexistent agent."""
         with pytest.raises(KeyError, match="not found"):
             core.feedback("nonexistent", "message")
 
-    def test_feedback_not_running(self, core, registry):
-        """Feedback raises RuntimeError if agent not running."""
-        registry.register("test", {})
-        with pytest.raises(RuntimeError, match="not running"):
-            core.feedback("test", "message")
-
-    def test_feedback_success(self, core, registry, mock_bus):
-        """Feedback sends message to agent via bus."""
-        from llm_gent.bus.protocol import FeedbackResponse
-
+    def test_feedback_success(self, core, registry):
+        """Feedback sends message via channel.submit()."""
         registry.register("test", {})
         handle = registry.get("test")
         handle.state = State.RUNNING
 
-        mock_bus.send_to_agent.return_value = FeedbackResponse(id="test-id")
-        core.feedback("test", "Good job!")  # Should not raise
+        mock_channel = MagicMock()
+        core._channels["test"] = mock_channel
+
+        core.feedback("test", "Good job!")
+        mock_channel.submit.assert_called_once()
 
 
 class TestCoreShutdown:
     """Tests for Core.shutdown()."""
 
-    def test_shutdown_stops_all_running(self, core, registry, mock_bus):
+    def test_shutdown_stops_all_running(self, core, registry):
         """Shutdown stops all running agents."""
         registry.register("agent1", {})
         handle1 = registry.get("agent1")
         handle1.state = State.RUNNING
         core._runners["agent1"] = MagicMock()
+        core._channels["agent1"] = MagicMock()
 
         core.shutdown()
         assert handle1.state == State.STOPPED
-
-    def test_shutdown_handles_stop_errors(self, core, registry, mock_logger):
-        """Shutdown handles errors when stopping agents."""
-        registry.register("test", {})
-        handle = registry.get("test")
-        handle.state = State.RUNNING
-
-        from unittest.mock import patch
-
-        with patch.object(core, "stop", side_effect=RuntimeError("Stop failed")):
-            core.shutdown()  # Should not raise

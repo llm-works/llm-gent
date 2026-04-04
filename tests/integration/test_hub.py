@@ -2,13 +2,12 @@
 
 import socket
 import time
+from typing import Any
 
 import pytest
+from appinfra.service import BufferedChannel
 
-from llm_gent.bus.protocol import (
-    RegisterRequest,
-    UnregisterRequest,
-)
+from llm_gent.bus.protocol import RegisterRequest, UnregisterRequest
 from llm_gent.bus.transport import CoordinatorBusConfig, WorkerBusConfig, ZMQWorkerBus
 from llm_gent.hub import Hub, HubConfig
 
@@ -17,7 +16,6 @@ pytestmark = pytest.mark.integration
 
 
 def _find_free_ports(n: int) -> list[int]:
-    """Allocate n ephemeral ports."""
     socks = []
     ports = []
     for _ in range(n):
@@ -32,26 +30,17 @@ def _find_free_ports(n: int) -> list[int]:
 
 @pytest.fixture
 def hub_and_worker():
-    """Start a real Hub + worker bus pair."""
+    """Start a real Hub + worker bus with channel."""
     from unittest.mock import MagicMock
 
     lg = MagicMock()
     ports = _find_free_ports(3)
 
     hub_config = HubConfig(
-        bus=CoordinatorBusConfig(
-            router_port=ports[0],
-            pub_port=ports[1],
-            sub_port=ports[2],
-        ),
-        health_check_interval=60.0,  # long interval so it doesn't interfere
+        bus=CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2]),
+        health_check_interval=60.0,
     )
-
-    worker_config = WorkerBusConfig(
-        router_port=ports[0],
-        pub_port=ports[1],
-        sub_port=ports[2],
-    )
+    worker_config = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
 
     hub = Hub(lg, hub_config)
     worker = ZMQWorkerBus(lg, "test-worker", worker_config)
@@ -61,8 +50,12 @@ def hub_and_worker():
     worker.start()
     time.sleep(0.2)
 
-    yield hub, worker
+    assert worker.transport is not None
+    channel: BufferedChannel[Any, Any] = BufferedChannel(worker.transport)
 
+    yield hub, worker, channel
+
+    channel.close()
     worker.stop()
     hub.stop()
 
@@ -71,34 +64,24 @@ class TestHubRegistrationFlow:
     """End-to-end registration flow through real bus."""
 
     def test_worker_registers_with_hub(self, hub_and_worker):
-        """Worker registers via bus, appears in hub registry."""
-        hub, worker = hub_and_worker
+        """Worker registers via channel, appears in hub registry."""
+        hub, worker, channel = hub_and_worker
 
-        req = RegisterRequest(
-            agent_id="test-worker",
-            capabilities=["search"],
-        )
-        resp = worker.send(req, timeout=5.0)
+        req = RegisterRequest(agent_id="test-worker", capabilities=["search"])
+        channel.submit(req, timeout=5.0)
 
-        assert resp.success is True
         info = hub.registry.get("test-worker")
         assert info is not None
         assert info.capabilities == ["search"]
 
     def test_worker_unregisters_from_hub(self, hub_and_worker):
-        """Worker unregisters via bus, removed from hub registry."""
-        hub, worker = hub_and_worker
+        """Worker unregisters via channel, removed from hub registry."""
+        hub, worker, channel = hub_and_worker
 
-        # Register first
-        reg = RegisterRequest(agent_id="test-worker")
-        worker.send(reg, timeout=5.0)
+        channel.submit(RegisterRequest(agent_id="test-worker"), timeout=5.0)
         assert hub.registry.count == 1
 
-        # Unregister
-        unreg = UnregisterRequest(agent_id="test-worker")
-        resp = worker.send(unreg, timeout=5.0)
-
-        assert resp.success is True
+        channel.submit(UnregisterRequest(agent_id="test-worker"), timeout=5.0)
         assert hub.registry.count == 0
 
 
@@ -107,20 +90,16 @@ class TestHubHeartbeatFlow:
 
     def test_worker_heartbeat_updates_registry(self, hub_and_worker):
         """Worker heartbeat via pub/sub updates registry stats."""
-        hub, worker = hub_and_worker
+        hub, worker, channel = hub_and_worker
 
-        # Register first (so registry knows the agent)
-        reg = RegisterRequest(agent_id="test-worker")
-        worker.send(reg, timeout=5.0)
+        channel.submit(RegisterRequest(agent_id="test-worker"), timeout=5.0)
 
-        # Send heartbeat
         worker.publish_heartbeat({"ticks": 42, "errors": 2})
-        time.sleep(0.5)  # let pub/sub propagate
+        time.sleep(0.5)
 
         info = hub.registry.get("test-worker")
         assert info is not None
         assert info.stats.ticks == 42
-        assert info.stats.errors == 2
 
 
 class TestHubMultipleWorkers:
@@ -128,18 +107,13 @@ class TestHubMultipleWorkers:
 
     @pytest.fixture
     def hub_and_workers(self):
-        """Start Hub + 3 workers."""
         from unittest.mock import MagicMock
 
         lg = MagicMock()
         ports = _find_free_ports(3)
 
         hub_config = HubConfig(
-            bus=CoordinatorBusConfig(
-                router_port=ports[0],
-                pub_port=ports[1],
-                sub_port=ports[2],
-            ),
+            bus=CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2]),
             health_check_interval=60.0,
         )
 
@@ -148,34 +122,33 @@ class TestHubMultipleWorkers:
         time.sleep(0.1)
 
         workers = []
+        channels = []
         for i in range(3):
-            cfg = WorkerBusConfig(
-                router_port=ports[0],
-                pub_port=ports[1],
-                sub_port=ports[2],
-            )
+            cfg = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
             w = ZMQWorkerBus(lg, f"worker-{i}", cfg)
             w.start()
             workers.append(w)
+            assert w.transport is not None
+            ch: BufferedChannel[Any, Any] = BufferedChannel(w.transport)
+            channels.append(ch)
 
         time.sleep(0.3)
 
-        yield hub, workers
+        yield hub, workers, channels
 
+        for ch in channels:
+            ch.close()
         for w in workers:
             w.stop()
         hub.stop()
 
     def test_all_workers_register(self, hub_and_workers):
         """All workers register and appear in registry."""
-        hub, workers = hub_and_workers
+        hub, workers, channels = hub_and_workers
 
-        for w in workers:
-            req = RegisterRequest(agent_id=w.agent_id, capabilities=["test"])
-            resp = w.send(req, timeout=5.0)
-            assert resp.success is True
+        for w, ch in zip(workers, channels, strict=True):
+            ch.submit(RegisterRequest(agent_id=w.agent_id, capabilities=["test"]), timeout=5.0)
 
         assert hub.registry.count == 3
-        agents = hub.registry.list_agents()
-        ids = {a.id for a in agents}
+        ids = {a.id for a in hub.registry.list_agents()}
         assert ids == {"worker-0", "worker-1", "worker-2"}

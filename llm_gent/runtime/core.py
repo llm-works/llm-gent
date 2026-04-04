@@ -1,7 +1,8 @@
 """Runtime core - orchestrates agent lifecycle via appinfra.service.
 
-Core manages agent services using appinfra's ThreadRunner for lifecycle
-management. Agents communicate with the hub via the ZMQ bus.
+Core manages agent services using appinfra's ThreadRunner/ProcessRunner.
+Controller-to-agent communication uses appinfra's BufferedChannel backed
+by ZMQ transports. Pub/sub (heartbeats, broadcasts) goes through the bus.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING, Any
 
-from appinfra.service import ProcessRunner, State, ThreadRunner
+from appinfra.service import BufferedChannel, ProcessRunner, State, ThreadRunner
 
 from .handle import AgentHandle, AgentInfo
 from .service import AgentService
@@ -25,9 +26,9 @@ if TYPE_CHECKING:
 class Core:
     """Runtime core - orchestrates agent lifecycle.
 
-    Uses appinfra's ThreadRunner to manage agent services. Each agent
-    runs as an AgentService in a daemon thread. Communication with
-    agents goes through the ZMQ bus.
+    Uses appinfra's runners for process/thread management and
+    BufferedChannel over ZMQ transport for controller-to-agent
+    request/response communication.
     """
 
     def __init__(
@@ -50,6 +51,7 @@ class Core:
         self._variables = variables or {}
         self._factory_module = factory_module
         self._runners: dict[str, ThreadRunner | ProcessRunner] = {}
+        self._channels: dict[str, BufferedChannel[Any, Any]] = {}
 
     @property
     def registry(self) -> AgentRegistry:
@@ -57,7 +59,7 @@ class Core:
         return self._registry
 
     def start(self, name: str) -> AgentInfo:
-        """Start an agent as a threaded service.
+        """Start an agent as a service with a channel for communication.
 
         Args:
             name: Agent name.
@@ -123,35 +125,32 @@ class Core:
         return AgentInfo.from_handle(handle)
 
     def ask(self, name: str, question: str, timeout: float = 60.0) -> str:
-        """Ask an agent a question via the bus."""
+        """Ask an agent a question via the channel."""
         self._require_running(name)
 
         from llm_gent.bus.protocol import AskRequest, AskResponse
 
+        channel = self._channels.get(name)
+        if channel is None:
+            raise RuntimeError(f"No channel for agent: {name}")
+
         req = AskRequest(question=question)
-        try:
-            resp = self._bus.send_to_agent(name, req, timeout=timeout)
-            if not resp.success:
-                raise RuntimeError(resp.error or "ask failed")
-            if isinstance(resp, AskResponse):
-                return resp.response
-            return ""
-        except Exception as e:
-            raise RuntimeError(str(e)) from e
+        resp = channel.submit(req, timeout=timeout)
+        if isinstance(resp, AskResponse):
+            return resp.response
+        return ""
 
     def feedback(self, name: str, message: str, timeout: float = 30.0) -> None:
-        """Send feedback to an agent via the bus."""
+        """Send feedback to an agent via the channel."""
         self._require_running(name)
 
         from llm_gent.bus.protocol import FeedbackRequest
 
-        req = FeedbackRequest(message=message)
-        try:
-            resp = self._bus.send_to_agent(name, req, timeout=timeout)
-            if not resp.success:
-                raise RuntimeError(resp.error or "feedback failed")
-        except Exception as e:
-            raise RuntimeError(str(e)) from e
+        channel = self._channels.get(name)
+        if channel is None:
+            raise RuntimeError(f"No channel for agent: {name}")
+
+        channel.submit(FeedbackRequest(message=message), timeout=timeout)
 
     def shutdown(self) -> None:
         """Shut down all running agents."""
@@ -174,10 +173,15 @@ class Core:
         return handle
 
     def _start_service(self, handle: AgentHandle) -> None:
-        """Create AgentService and start it via ThreadRunner or ProcessRunner."""
+        """Create AgentService, ZMQ transport + channel, and start runner."""
         config = handle.config
         config["name"] = handle.name
         execution = config.get("execution", "process")
+
+        # Create ZMQ transport for this agent, wrap in BufferedChannel
+        transport = self._bus.create_agent_transport(handle.name)
+        channel: BufferedChannel[Any, Any] = BufferedChannel(transport)
+        self._channels[handle.name] = channel
 
         service = AgentService(
             lg=self._lg,
@@ -202,7 +206,13 @@ class Core:
         )
 
     def _stop_service(self, name: str) -> None:
-        """Stop the agent's ThreadRunner."""
+        """Stop the agent's runner and clean up channel/transport."""
         runner = self._runners.pop(name, None)
         if runner is not None:
             runner.stop()
+
+        channel = self._channels.pop(name, None)
+        if channel is not None:
+            channel.close()
+
+        self._bus.remove_agent_transport(name)

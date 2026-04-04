@@ -7,9 +7,12 @@ Usage:
 Requires a hub running (llm-gent serve) on default ports.
 """
 
+import contextlib
 import signal
 import time
 from typing import Any
+
+from appinfra.service import BufferedChannel
 
 from llm_gent.bus.protocol import RegisterRequest, UnregisterRequest
 from llm_gent.bus.transport import WorkerBusConfig, ZMQWorkerBus
@@ -31,24 +34,25 @@ class PrintLogger:
         pass
 
 
-def _connect_and_register(bus: ZMQWorkerBus, agent_id: str) -> None:
-    """Connect to bus and register with hub."""
+def _connect_and_register(bus: ZMQWorkerBus) -> BufferedChannel[Any, Any]:
+    """Connect bus, create channel, register with hub."""
     bus.start()
     time.sleep(0.3)
-    req = RegisterRequest(
-        agent_id=agent_id,
-        capabilities=["echo", "demo"],
-        metadata={"version": "0.1"},
-    )
-    resp = bus.send(req, timeout=5.0)
-    print(f"Registered: success={resp.success}")
+
+    assert bus.transport is not None
+    channel: BufferedChannel[Any, Any] = BufferedChannel(bus.transport)
+
+    req = RegisterRequest(agent_id=bus.agent_id, capabilities=["echo", "demo"])
+    channel.submit(req, timeout=5.0)
+    print(f"Registered: {bus.agent_id}")
+    return channel
 
 
 def _run_heartbeat_loop(bus: ZMQWorkerBus, agent_id: str) -> None:
     """Send heartbeats until interrupted."""
     running = True
 
-    def stop(sig, frame):
+    def stop(sig: int, frame: Any) -> None:
         nonlocal running
         running = False
 
@@ -70,16 +74,15 @@ def main() -> None:
     bus = ZMQWorkerBus(lg, agent_id, WorkerBusConfig())  # type: ignore[arg-type]
     bus.subscribe("broadcast", lambda msg: print(f"Broadcast: {msg}"))
 
-    _connect_and_register(bus, agent_id)
+    channel = _connect_and_register(bus)
     _run_heartbeat_loop(bus, agent_id)
 
     # Unregister and disconnect
-    import contextlib
-
     with contextlib.suppress(Exception):
-        bus.send(UnregisterRequest(agent_id=agent_id), timeout=2.0)
+        channel.submit(UnregisterRequest(agent_id=agent_id), timeout=2.0)
         print("Unregistered.")
 
+    channel.close()
     bus.stop()
     print("Done.")
 
