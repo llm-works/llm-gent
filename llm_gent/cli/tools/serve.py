@@ -139,23 +139,24 @@ class ServeTool(Tool):
         """Create runtime core."""
         from appinfra import DotDict
 
+        from llm_gent.bus.transport import WorkerBusConfig
         from llm_gent.runtime import Core
 
         hub_yaml = config.hub
-        bus_config = {
-            "router_port": hub_yaml.router_port,
-            "pub_port": hub_yaml.pub_port,
-            "sub_port": hub_yaml.sub_port,
-        }
+        bus_config = WorkerBusConfig(
+            router_port=hub_yaml.router_port,
+            pub_port=hub_yaml.pub_port,
+            sub_port=hub_yaml.sub_port,
+        )
 
         return Core(
             lg=self.lg,
             registry=registry,
             llm_config=DotDict(config.llm),
             bus=hub.bus,
+            bus_config=bus_config,
             learn_config=learn_config,
             variables=self._parse_env_vars(),
-            bus_config=bus_config,
         )
 
     def _log_startup(self, config: AgentServerConfig, registry: AgentRegistry, hub: Hub) -> None:

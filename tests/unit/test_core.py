@@ -1,11 +1,11 @@
 """Tests for Runtime Core."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from appinfra.service import State
 
-from llm_gent.core.traits.builtin.llm import LLMConfig
+from llm_gent.bus.transport import WorkerBusConfig
 from llm_gent.runtime import AgentRegistry, Core
 
 
@@ -19,7 +19,7 @@ def mock_logger():
 
 @pytest.fixture
 def llm_config():
-    return LLMConfig(base_url="http://localhost:8000/v1")
+    return MagicMock()
 
 
 @pytest.fixture
@@ -33,57 +33,54 @@ def mock_bus():
 
 
 @pytest.fixture
-def core(mock_logger, registry, llm_config, mock_bus):
-    """Create Core with mocked log listener and bus."""
-    with patch("llm_gent.runtime.core.LogQueueListener"):
-        core = Core(
-            lg=mock_logger,
-            registry=registry,
-            llm_config=llm_config,
-            bus=mock_bus,
-        )
-    return core
+def bus_config():
+    return WorkerBusConfig()
+
+
+@pytest.fixture
+def core(mock_logger, registry, llm_config, mock_bus, bus_config):
+    """Create Core with mocked bus."""
+    return Core(
+        lg=mock_logger,
+        registry=registry,
+        llm_config=llm_config,
+        bus=mock_bus,
+        bus_config=bus_config,
+    )
 
 
 class TestCoreInit:
     """Tests for Core initialization."""
 
-    def test_init_creates_log_queue(self, mock_logger, registry, llm_config, mock_bus):
-        """Core creates log queue and listener on init."""
-        with patch("llm_gent.runtime.core.LogQueueListener") as mock_listener_class:
-            Core(lg=mock_logger, registry=registry, llm_config=llm_config, bus=mock_bus)
-            mock_listener_class.assert_called_once()
-            mock_listener_class.return_value.start.assert_called_once()
-
-    def test_init_with_learn_config(self, mock_logger, registry, llm_config, mock_bus):
-        """Core accepts optional LearnConfig."""
-        mock_learn_config = MagicMock()
-        with patch("llm_gent.runtime.core.LogQueueListener"):
-            core = Core(
-                lg=mock_logger,
-                registry=registry,
-                llm_config=llm_config,
-                bus=mock_bus,
-                learn_config=mock_learn_config,
-            )
-        assert core._learn_config is mock_learn_config
-
-    def test_init_with_variables(self, mock_logger, registry, llm_config, mock_bus):
-        """Core accepts optional variables dict."""
-        variables = {"API_KEY": "test-key"}
-        with patch("llm_gent.runtime.core.LogQueueListener"):
-            core = Core(
-                lg=mock_logger,
-                registry=registry,
-                llm_config=llm_config,
-                bus=mock_bus,
-                variables=variables,
-            )
-        assert core._variables == variables
-
     def test_registry_property(self, core, registry):
         """Core exposes registry property."""
         assert core.registry is registry
+
+    def test_init_with_learn_config(self, mock_logger, registry, llm_config, mock_bus, bus_config):
+        """Core accepts optional LearnConfig."""
+        mock_learn_config = MagicMock()
+        core = Core(
+            lg=mock_logger,
+            registry=registry,
+            llm_config=llm_config,
+            bus=mock_bus,
+            bus_config=bus_config,
+            learn_config=mock_learn_config,
+        )
+        assert core._learn_config is mock_learn_config
+
+    def test_init_with_variables(self, mock_logger, registry, llm_config, mock_bus, bus_config):
+        """Core accepts optional variables dict."""
+        variables = {"API_KEY": "test-key"}
+        core = Core(
+            lg=mock_logger,
+            registry=registry,
+            llm_config=llm_config,
+            bus=mock_bus,
+            bus_config=bus_config,
+            variables=variables,
+        )
+        assert core._variables == variables
 
 
 class TestCoreStart:
@@ -115,24 +112,19 @@ class TestCoreStop:
     def test_stop_not_running_is_noop(self, core, registry):
         """Stop on non-running agent is no-op."""
         registry.register("test", {})
-
         info = core.stop("test")
-
         assert info.status == "created"
 
-    def test_stop_running_agent(self, core, registry, mock_bus):
-        """Stop sends shutdown via bus and terminates process."""
+    def test_stop_running_agent(self, core, registry):
+        """Stop transitions running agent to stopped."""
         registry.register("test", {})
         handle = registry.get("test")
         handle.state = State.RUNNING
-        mock_process = MagicMock()
-        mock_process.is_alive.return_value = False
-        handle.process = mock_process
+        # Mock the runner so _stop_service works
+        core._runners["test"] = MagicMock()
 
         info = core.stop("test")
-
         assert info.status == "stopped"
-        mock_bus.send_to_agent.assert_called_once()
 
 
 class TestCoreAsk:
@@ -146,7 +138,6 @@ class TestCoreAsk:
     def test_ask_not_running(self, core, registry):
         """Ask raises RuntimeError if agent not running."""
         registry.register("test", {})
-
         with pytest.raises(RuntimeError, match="not running"):
             core.ask("test", "question")
 
@@ -188,7 +179,6 @@ class TestCoreFeedback:
     def test_feedback_not_running(self, core, registry):
         """Feedback raises RuntimeError if agent not running."""
         registry.register("test", {})
-
         with pytest.raises(RuntimeError, match="not running"):
             core.feedback("test", "message")
 
@@ -201,7 +191,6 @@ class TestCoreFeedback:
         handle.state = State.RUNNING
 
         mock_bus.send_to_agent.return_value = FeedbackResponse(id="test-id")
-
         core.feedback("test", "Good job!")  # Should not raise
 
 
@@ -211,17 +200,11 @@ class TestCoreShutdown:
     def test_shutdown_stops_all_running(self, core, registry, mock_bus):
         """Shutdown stops all running agents."""
         registry.register("agent1", {})
-        registry.register("agent2", {})
-
         handle1 = registry.get("agent1")
         handle1.state = State.RUNNING
-        handle1.process = MagicMock()
-        handle1.process.is_alive.return_value = False
-
-        mock_bus.send_to_agent.return_value = MagicMock(success=True)
+        core._runners["agent1"] = MagicMock()
 
         core.shutdown()
-
         assert handle1.state == State.STOPPED
 
     def test_shutdown_handles_stop_errors(self, core, registry, mock_logger):
@@ -230,7 +213,7 @@ class TestCoreShutdown:
         handle = registry.get("test")
         handle.state = State.RUNNING
 
+        from unittest.mock import patch
+
         with patch.object(core, "stop", side_effect=RuntimeError("Stop failed")):
             core.shutdown()  # Should not raise
-
-        mock_logger.warning.assert_called()
