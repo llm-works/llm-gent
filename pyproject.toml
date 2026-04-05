@@ -26,6 +26,7 @@ dependencies = [
     "llm-kelt",
     "llm-saia",
     "pydantic>=2.0",
+    "pyzmq>=26.0",
     "rapidfuzz>=3.0",
 ]
 
