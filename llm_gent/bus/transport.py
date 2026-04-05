@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -120,6 +121,9 @@ class ZMQCoordinatorBus:
 
         self._poll_thread: threading.Thread | None = None
         self._running = False
+        self._send_lock = threading.Lock()
+        self._async_pool: ThreadPoolExecutor | None = None
+        self._async_request_types: set[str] = set()
 
     def start(self) -> None:
         """Bind sockets and start polling thread."""
@@ -136,6 +140,7 @@ class ZMQCoordinatorBus:
         self._sub.bind(f"tcp://{cfg.bind_host}:{cfg.sub_port}")
         self._sub.setsockopt_string(zmq.SUBSCRIBE, "")
 
+        self._async_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bus-async")
         self._running = True
         self._poll_thread = threading.Thread(
             target=self._poll_loop, daemon=True, name="bus-coordinator-poll"
@@ -154,6 +159,10 @@ class ZMQCoordinatorBus:
     def stop(self) -> None:
         """Stop polling and close sockets."""
         self._running = False
+        if self._async_pool is not None:
+            self._async_pool.shutdown(wait=False)
+            self._async_pool = None
+
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=2.0)
             self._poll_thread = None
@@ -194,7 +203,8 @@ class ZMQCoordinatorBus:
         """
         from .channel import ZMQRouterTransport
 
-        assert self._router is not None
+        if self._router is None:
+            raise RuntimeError("bus not started")
         transport = ZMQRouterTransport(self._router, agent_id)
         self._agent_transports[agent_id] = transport
         return transport
@@ -213,6 +223,15 @@ class ZMQCoordinatorBus:
         """Register handler for incoming requests not routed to a transport."""
         self._request_handler = handler
 
+    def register_async_request(self, msg_type: str) -> None:
+        """Register a request type to be dispatched asynchronously.
+
+        Requests of this type are handled in a thread pool so they don't
+        block the poll thread. The response is sent back via the ROUTER
+        socket from the pool thread.
+        """
+        self._async_request_types.add(msg_type)
+
     def subscribe(self, topic: str, handler: MessageHandler) -> None:
         """Subscribe to messages on a topic (from SUB socket)."""
         self._topic_handlers[topic] = handler
@@ -221,14 +240,16 @@ class ZMQCoordinatorBus:
         """Broadcast a message to all agents via PUB socket."""
         envelope = message.to_envelope()
         envelope.source = "hub"
-        assert self._pub is not None
+        if self._pub is None:
+            raise RuntimeError("bus not started")
         self._pub.send_multipart([b"broadcast", envelope.to_bytes()])
 
     def publish(self, topic: str, message: Message) -> None:
         """Publish a message to a specific topic via PUB socket."""
         envelope = message.to_envelope()
         envelope.source = "hub"
-        assert self._pub is not None
+        if self._pub is None:
+            raise RuntimeError("bus not started")
         self._pub.send_multipart([topic.encode(), envelope.to_bytes()])
 
     # -------------------------------------------------------------------------
@@ -238,7 +259,8 @@ class ZMQCoordinatorBus:
     def _poll_loop(self) -> None:
         """Background thread polling ROUTER and SUB sockets."""
         poller = zmq.Poller()
-        assert self._router is not None and self._sub is not None
+        if self._router is None or self._sub is None:
+            return
         poller.register(self._router, zmq.POLLIN)
         poller.register(self._sub, zmq.POLLIN)
 
@@ -257,7 +279,8 @@ class ZMQCoordinatorBus:
 
     def _handle_router(self) -> None:
         """Process incoming message on ROUTER socket."""
-        assert self._router is not None
+        if self._router is None:
+            return
         try:
             frames = self._router.recv_multipart(zmq.NOBLOCK)
         except zmq.Again:
@@ -287,13 +310,19 @@ class ZMQCoordinatorBus:
 
         Checks (in order):
         1. Target agent specified → agent-to-agent routing
-        2. Sender has a registered transport → response routing
+        2. Sender has a registered transport AND message is a response → response routing
+
+        Agent-initiated requests (msg_type ending with ``_request``) always
+        fall through to ``_dispatch_request`` even if the sender has a
+        pre-registered transport (e.g. injected agents).
 
         Returns True if the message was consumed.
         """
         # Agent-to-agent: forward to target via ROUTER socket
         if envelope.target and envelope.target != "hub":
-            assert self._router is not None
+            if self._router is None:
+                self._lg.warning("cannot route agent-to-agent: router not bound")
+                return False
             self._router.send_multipart(
                 [
                     envelope.target.encode(),
@@ -303,8 +332,10 @@ class ZMQCoordinatorBus:
             )
             return True
 
-        # Response from agent: route to sender's transport
-        if envelope.source:
+        # Response from agent: route to sender's transport.
+        # Requests (msg_type ending with _request) must always reach
+        # _dispatch_request so the hub can process them.
+        if envelope.source and not envelope.msg_type.endswith("_request"):
             transport = self._agent_transports.get(envelope.source)
             if transport is not None:
                 self._deliver_to_transport(transport, envelope)
@@ -319,28 +350,55 @@ class ZMQCoordinatorBus:
             transport.deliver(msg)
 
     def _dispatch_request(self, envelope: Envelope, identity: bytes, sender_id: str) -> None:
-        """Dispatch incoming request to handler and send response."""
+        """Dispatch incoming request to handler and send response.
+
+        Requests whose ``msg_type`` is registered via ``register_async_request``
+        are dispatched to a thread pool so they don't block the poll thread.
+        """
         if self._request_handler is None:
             return
         try:
             from .protocol import MESSAGE_REGISTRY
 
             msg = envelope.unwrap(MESSAGE_REGISTRY)
-            if isinstance(msg, Request):
-                response = self._request_handler(msg, sender_id)
-                resp_envelope = response.to_envelope()
-                resp_envelope.target = sender_id
-                assert self._router is not None
-                self._router.send_multipart([identity, b"", resp_envelope.to_bytes()])
+            if not isinstance(msg, Request):
+                self._lg.debug(
+                    "ignoring non-request message",
+                    extra={"sender": sender_id, "type": envelope.msg_type},
+                )
+                return
+
+            if envelope.msg_type in self._async_request_types and self._async_pool is not None:
+                self._async_pool.submit(self._handle_and_respond, msg, identity, sender_id)
+            else:
+                self._handle_and_respond(msg, identity, sender_id)
         except Exception as e:
             self._lg.warning(
                 "error handling request",
                 extra={"sender": sender_id, "type": envelope.msg_type, "exception": e},
             )
 
+    def _handle_and_respond(self, msg: Request, identity: bytes, sender_id: str) -> None:
+        """Call request handler and send response via ROUTER socket."""
+        if self._request_handler is None or self._router is None:
+            return
+        try:
+            response = self._request_handler(msg, sender_id)
+            resp_envelope = response.to_envelope()
+            resp_envelope.target = sender_id
+            data = resp_envelope.to_bytes()
+            with self._send_lock:
+                self._router.send_multipart([identity, b"", data])
+        except Exception as e:
+            self._lg.warning(
+                "error handling request",
+                extra={"sender": sender_id, "type": msg.message_type, "exception": e},
+            )
+
     def _handle_sub(self) -> None:
         """Process incoming message on SUB socket (heartbeats, events)."""
-        assert self._sub is not None
+        if self._sub is None:
+            return
         try:
             frames = self._sub.recv_multipart(zmq.NOBLOCK)
         except zmq.Again:
@@ -486,7 +544,8 @@ class ZMQWorkerBus:
         """Publish a message to a topic (sent to coordinator's SUB socket)."""
         envelope = message.to_envelope()
         envelope.source = self._agent_id
-        assert self._pub is not None
+        if self._pub is None:
+            raise RuntimeError("bus not started")
         self._pub.send_multipart([topic.encode(), envelope.to_bytes()])
 
     def send_to_agent(self, target_id: str, message: Message) -> None:
@@ -501,7 +560,8 @@ class ZMQWorkerBus:
         envelope = message.to_envelope()
         envelope.source = self._agent_id
         envelope.target = target_id
-        assert self._dealer is not None
+        if self._dealer is None:
+            raise RuntimeError("bus not started")
         self._dealer.send_multipart([b"", envelope.to_bytes()])
 
     def publish_heartbeat(self, stats: dict[str, Any]) -> None:
@@ -521,7 +581,8 @@ class ZMQWorkerBus:
     def _poll_loop(self) -> None:
         """Background thread polling DEALER and SUB sockets."""
         poller = zmq.Poller()
-        assert self._dealer is not None and self._sub is not None
+        if self._dealer is None or self._sub is None:
+            return
         poller.register(self._dealer, zmq.POLLIN)
         poller.register(self._sub, zmq.POLLIN)
 
@@ -544,7 +605,8 @@ class ZMQWorkerBus:
         All DEALER messages are delivered to the dealer transport
         for appinfra's BufferedChannel to handle correlation.
         """
-        assert self._dealer is not None
+        if self._dealer is None:
+            return
         try:
             frames = self._dealer.recv_multipart(zmq.NOBLOCK)
         except zmq.Again:
@@ -569,7 +631,8 @@ class ZMQWorkerBus:
 
     def _handle_sub(self) -> None:
         """Process incoming message on SUB socket (broadcasts)."""
-        assert self._sub is not None
+        if self._sub is None:
+            return
         try:
             frames = self._sub.recv_multipart(zmq.NOBLOCK)
         except zmq.Again:

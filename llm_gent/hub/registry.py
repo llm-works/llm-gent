@@ -14,6 +14,8 @@ from typing import Any
 
 from appinfra import DotDict
 
+from ..bus.protocol import AgentStats
+
 
 class AgentHealth(StrEnum):
     """Agent health states derived from heartbeat recency."""
@@ -28,16 +30,6 @@ class AgentType(StrEnum):
 
     INJECTED = "injected"
     EXTERNAL = "external"
-
-
-@dataclass
-class AgentStats:
-    """Runtime statistics reported by an agent via heartbeat."""
-
-    ticks: int = 0
-    errors: int = 0
-    llm_tokens_used: int = 0
-    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -57,7 +49,8 @@ class AgentEntry:
     # Health tracking
     registered_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_heartbeat: datetime = field(default_factory=lambda: datetime.now(UTC))
-    stats: AgentStats = field(default_factory=AgentStats)
+    last_run: datetime | None = None
+    stats: AgentStats = field(default_factory=lambda: AgentStats())
 
     # Lifecycle
     restart_count: int = 0
@@ -146,8 +139,11 @@ class Registry:
             entry = self._agents.get(agent_id)
             if entry is None:
                 return False
-            entry.last_heartbeat = datetime.now(UTC)
+            now = datetime.now(UTC)
+            entry.last_heartbeat = now
             if stats is not None:
+                if stats.ticks > entry.stats.ticks:
+                    entry.last_run = now
                 entry.stats = stats
             return True
 

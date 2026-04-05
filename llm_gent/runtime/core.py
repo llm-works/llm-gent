@@ -7,7 +7,6 @@ by ZMQ transports. Pub/sub (heartbeats, broadcasts) goes through the bus.
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING, Any
 
 from appinfra.service import BufferedChannel, ProcessRunner, State, ThreadRunner
@@ -156,8 +155,13 @@ class Core:
         """Shut down all running agents."""
         for handle in self._registry.handles():
             if handle.state == State.RUNNING:
-                with contextlib.suppress(Exception):
+                try:
                     self.stop(handle.name)
+                except Exception as e:
+                    self._lg.warning(
+                        "error stopping agent during shutdown",
+                        extra={"agent": handle.name, "exception": e},
+                    )
 
     # -------------------------------------------------------------------------
     # Internal
@@ -176,12 +180,27 @@ class Core:
         """Create AgentService, ZMQ transport + channel, and start runner."""
         config = handle.config
         config["name"] = handle.name
-        execution = config.get("execution", "process")
 
-        # Create ZMQ transport for this agent, wrap in BufferedChannel
         transport = self._bus.create_agent_transport(handle.name)
         channel: BufferedChannel[Any, Any] = BufferedChannel(transport)
         self._channels[handle.name] = channel
+
+        try:
+            runner = self._create_runner(handle)
+            runner.start()
+        except Exception:
+            self._channels.pop(handle.name, None)
+            channel.close()
+            self._bus.remove_agent_transport(handle.name)
+            raise
+
+        self._runners[handle.name] = runner
+        self._lg.debug("agent service started", extra={"agent": handle.name})
+
+    def _create_runner(self, handle: AgentHandle) -> ThreadRunner | ProcessRunner:
+        """Create an AgentService wrapped in a runner."""
+        config = handle.config
+        execution = config.get("execution", "process")
 
         service = AgentService(
             lg=self._lg,
@@ -193,17 +212,9 @@ class Core:
             variables=self._variables,
             factory_module=config.get("module", self._factory_module),
         )
-
         if execution == "thread":
-            runner: ThreadRunner | ProcessRunner = ThreadRunner(service)
-        else:
-            runner = ProcessRunner(service)
-
-        runner.start()
-        self._runners[handle.name] = runner
-        self._lg.debug(
-            "agent service started", extra={"agent": handle.name, "execution": execution}
-        )
+            return ThreadRunner(service)
+        return ProcessRunner(service)
 
     def _stop_service(self, name: str) -> None:
         """Stop the agent's runner and clean up channel/transport."""

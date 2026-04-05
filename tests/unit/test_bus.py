@@ -23,7 +23,6 @@ from llm_gent.bus.registry import (
     AgentRegistry,
     AgentType,
 )
-from llm_gent.bus.registry import AgentStats as RegistryAgentStats
 
 
 pytestmark = pytest.mark.unit
@@ -281,7 +280,7 @@ class TestAgentRegistry:
     def test_heartbeat_updates_stats(self, registry):
         """Heartbeat can update agent stats."""
         registry.register("agent-1")
-        stats = RegistryAgentStats(ticks=10, errors=1)
+        stats = AgentStats(ticks=10, errors=1)
         registry.heartbeat("agent-1", stats)
 
         info = registry.get("agent-1")

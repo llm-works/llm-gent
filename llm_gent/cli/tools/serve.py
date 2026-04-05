@@ -327,6 +327,7 @@ class ServeTool(Tool):
             name=entry.id,
             status=entry.health.value,
             cycle_count=entry.stats.ticks,
+            last_run=entry.last_run.isoformat() if entry.last_run else None,
             error=entry.error,
             schedule_interval=int(entry.schedule_interval) if entry.schedule_interval else None,
         )
@@ -413,6 +414,7 @@ class ServeTool(Tool):
             "name": entry.id,
             "status": entry.health.value,
             "cycle_count": entry.stats.ticks,
+            "last_run": entry.last_run.isoformat() if entry.last_run else None,
             "error": entry.error,
             "schedule_interval": entry.schedule_interval,
         }

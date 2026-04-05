@@ -58,7 +58,7 @@ class AgentRunner:
         self._lg = lg
         self._agent = agent
         self._bus_config = bus_config
-        self._running = False
+        self._stop_event = threading.Event()
         self._schedule_interval = schedule_interval
         self._heartbeat_interval = heartbeat_interval
         self._bus: ZMQWorkerBus | None = None
@@ -74,12 +74,25 @@ class AgentRunner:
         else:
             self._ticker = None
 
+    @property
+    def _running(self) -> bool:
+        """Thread-safe running check."""
+        return not self._stop_event.is_set()
+
+    @_running.setter
+    def _running(self, value: bool) -> None:
+        """Thread-safe running setter (for service.py compatibility)."""
+        if value:
+            self._stop_event.clear()
+        else:
+            self._stop_event.set()
+
     def run(self) -> None:
         """Main loop (blocking). Connect to bus, then process requests + cycles."""
         self._lg.debug("starting runner...", extra={"agent": self._agent.name})
 
         try:
-            self._running = True
+            self._stop_event.clear()
             self._connect_bus()
             self._run_loop()
         except KeyboardInterrupt:
@@ -100,10 +113,14 @@ class AgentRunner:
 
         self._bus = ZMQWorkerBus(self._lg, self._agent.name, self._bus_config)
         self._bus.start()
-        time.sleep(0.2)  # ZMQ handshake
+        # ZMQ async connect needs time to complete TCP handshake before
+        # messages can be sent reliably. 200ms is typically sufficient.
+        # TODO: Replace with ZMQ socket monitor events for deterministic connect.
+        time.sleep(0.2)
 
         # Create BufferedChannel from the DEALER transport
-        assert self._bus.transport is not None
+        if self._bus.transport is None:
+            raise RuntimeError("bus transport not available after start")
         self._channel = BufferedChannel(self._bus.transport)
 
         # Register with hub via channel (request/response)
@@ -259,7 +276,7 @@ class AgentRunner:
     def _handle_shutdown(self, request: ShutdownRequest) -> ShutdownResponse:
         """Handle shutdown request."""
         self._lg.info("shutdown requested", extra={"agent": self._agent.name})
-        self._running = False
+        self._stop_event.set()
         return ShutdownResponse(id=request.id)
 
     # -------------------------------------------------------------------------

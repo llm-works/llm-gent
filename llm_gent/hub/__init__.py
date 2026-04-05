@@ -1,7 +1,8 @@
 """Swarm hub -- coordinator for agent orchestration."""
 
+from ..bus.protocol import AgentStats
 from .hub import Hub, HubConfig
-from .registry import AgentEntry, AgentHealth, AgentStats, AgentType, Registry
+from .registry import AgentEntry, AgentHealth, AgentType, Registry
 
 
 __all__ = [

@@ -91,7 +91,8 @@ class AgentService(Service):
 
     def execute(self) -> None:
         """Run the agent runner (blocks until shutdown)."""
-        assert self._runner is not None
+        if self._runner is None:
+            raise RuntimeError("setup() must be called before execute()")
         self._healthy = True
         self._start_shutdown_watcher()
         self._runner.run()
@@ -116,7 +117,8 @@ class AgentService(Service):
             return
 
         def watch() -> None:
-            assert self._shutdown_event is not None
+            if self._shutdown_event is None:
+                return
             self._shutdown_event.wait()
             if self._runner is not None:
                 self._runner._running = False

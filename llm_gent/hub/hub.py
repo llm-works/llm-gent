@@ -36,7 +36,7 @@ from ..bus.protocol import (
 )
 from ..bus.transport import CoordinatorBusConfig, ZMQCoordinatorBus
 from ..runtime.service import AgentService
-from .registry import AgentEntry, AgentStats, AgentType, Registry
+from .registry import AgentEntry, AgentType, Registry
 
 
 if TYPE_CHECKING:
@@ -109,6 +109,7 @@ class Hub:
         """Start the hub: bind bus, begin accepting connections."""
         self._bus.start()
         self._bus.on_request(self._handle_bus_request)
+        self._bus.register_async_request("relay_request")
         self._bus.subscribe("heartbeat", self._handle_heartbeat)
         self._lg.info("hub started")
 
@@ -143,8 +144,12 @@ class Hub:
         entry = self._registry.register(agent_id=name, agent_type=AgentType.INJECTED, config=config)
 
         self._create_channel(name)
-        runner = self._create_runner(name, config, llm_config, learn_config)
-        runner.start()
+        try:
+            runner = self._create_runner(name, config, llm_config, learn_config)
+            runner.start()
+        except Exception:
+            self._cleanup_agent_resources(name)
+            raise
         self._runners[name] = runner
 
         self._lg.info("agent started", extra={"agent": name})
@@ -186,13 +191,16 @@ class Hub:
         if runner is not None:
             runner.stop()
 
+        self._cleanup_agent_resources(name)
+        self._registry.unregister(name)
+        self._lg.info("agent stopped", extra={"agent": name})
+
+    def _cleanup_agent_resources(self, name: str) -> None:
+        """Clean up channel and transport for an agent."""
         channel = self._channels.pop(name, None)
         if channel is not None:
             channel.close()
-
         self._bus.remove_agent_transport(name)
-        self._registry.unregister(name)
-        self._lg.info("agent stopped", extra={"agent": name})
 
     # =========================================================================
     # Agent communication
@@ -323,13 +331,7 @@ class Hub:
         """Handle heartbeat on pub/sub topic."""
         if not isinstance(message, HeartbeatRequest):
             return
-        stats = AgentStats(
-            ticks=message.stats.ticks,
-            errors=message.stats.errors,
-            llm_tokens_used=message.stats.llm_tokens_used,
-            extra=message.stats.extra,
-        )
-        self._registry.heartbeat(message.agent_id, stats)
+        self._registry.heartbeat(message.agent_id, message.stats)
 
     # =========================================================================
     # Internal
