@@ -277,16 +277,46 @@ class ZMQCoordinatorBus:
             self._lg.warning("failed to parse envelope", extra={"exception": e})
             return
 
-        # Route to agent transport if one exists
-        transport = self._agent_transports.get(sender_id)
-        if transport is not None:
-            msg = self._unwrap_envelope(envelope)
-            if msg is not None:
-                transport.deliver(msg)
+        if self._route_to_transport(envelope):
             return
 
-        # Otherwise dispatch as incoming request (registration, etc.)
         self._dispatch_request(envelope, identity, sender_id)
+
+    def _route_to_transport(self, envelope: Envelope) -> bool:
+        """Route envelope to an agent transport if applicable.
+
+        Checks (in order):
+        1. Target agent specified → agent-to-agent routing
+        2. Sender has a registered transport → response routing
+
+        Returns True if the message was consumed.
+        """
+        # Agent-to-agent: forward to target via ROUTER socket
+        if envelope.target and envelope.target != "hub":
+            assert self._router is not None
+            self._router.send_multipart(
+                [
+                    envelope.target.encode(),
+                    b"",
+                    envelope.to_bytes(),
+                ]
+            )
+            return True
+
+        # Response from agent: route to sender's transport
+        if envelope.source:
+            transport = self._agent_transports.get(envelope.source)
+            if transport is not None:
+                self._deliver_to_transport(transport, envelope)
+                return True
+
+        return False
+
+    def _deliver_to_transport(self, transport: ZMQRouterTransport, envelope: Envelope) -> None:
+        """Unwrap envelope and deliver to transport."""
+        msg = self._unwrap_envelope(envelope)
+        if msg is not None:
+            transport.deliver(msg)
 
     def _dispatch_request(self, envelope: Envelope, identity: bytes, sender_id: str) -> None:
         """Dispatch incoming request to handler and send response."""
@@ -458,6 +488,21 @@ class ZMQWorkerBus:
         envelope.source = self._agent_id
         assert self._pub is not None
         self._pub.send_multipart([topic.encode(), envelope.to_bytes()])
+
+    def send_to_agent(self, target_id: str, message: Message) -> None:
+        """Send a message to another agent via the coordinator.
+
+        The coordinator routes the message to the target agent's transport.
+
+        Args:
+            target_id: Target agent's ID.
+            message: Message to send.
+        """
+        envelope = message.to_envelope()
+        envelope.source = self._agent_id
+        envelope.target = target_id
+        assert self._dealer is not None
+        self._dealer.send_multipart([b"", envelope.to_bytes()])
 
     def publish_heartbeat(self, stats: dict[str, Any]) -> None:
         """Publish a heartbeat with agent stats."""

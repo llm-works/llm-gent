@@ -1,22 +1,28 @@
 """Swarm hub coordinator.
 
-The Hub is the central orchestrator for a swarm. It:
-- Owns the ZMQ coordinator bus (binds sockets)
-- Maintains the agent registry (membership, health, stats)
-- Handles bus protocol messages (register, heartbeat, unregister, error)
-- Runs periodic health monitoring
-- Delegates injected agent lifecycle to the runtime Core
+The Hub is the single coordinator for a swarm. It owns:
+- ZMQ bus (coordinator sockets)
+- Unified agent registry (membership, health, config, state)
+- appinfra Manager (injected agent lifecycle with restart policies)
+- BufferedChannel per agent (controller-to-agent request/response)
+
+All agent operations go through the Hub: start, stop, ask, feedback.
 """
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from appinfra import DotDict
+from appinfra.service import BufferedChannel, RestartPolicy, ThreadRunner
+
 from ..bus.protocol import (
+    AskRequest,
+    AskResponse,
     ErrorRequest,
     ErrorResponse,
+    FeedbackRequest,
     HeartbeatRequest,
     Message,
     RegisterRequest,
@@ -26,13 +32,15 @@ from ..bus.protocol import (
     UnregisterRequest,
     UnregisterResponse,
 )
-from ..bus.registry import AgentRegistry, AgentType
-from ..bus.registry import AgentStats as RegistryAgentStats
 from ..bus.transport import CoordinatorBusConfig, ZMQCoordinatorBus
+from ..runtime.service import AgentService
+from .registry import AgentEntry, AgentStats, AgentType, Registry
 
 
 if TYPE_CHECKING:
     from appinfra.log import Logger
+
+    from ..bus.transport import WorkerBusConfig
 
 
 @dataclass
@@ -48,70 +56,189 @@ class HubConfig:
 class Hub:
     """Swarm hub coordinator.
 
-    Manages agent registration, health monitoring, and bus communication.
-    The hub is the single coordinator for a swarm -- one hub per
-    ``llm-gent serve`` instance.
+    Single entry point for all agent operations: registration, lifecycle,
+    communication, and monitoring.
 
     Usage::
 
-        hub = Hub(lg, config)
+        hub = Hub(lg, config, bus_config)
         hub.start()
-        # ... hub runs, agents connect via bus ...
+        hub.start_agent("my-agent", agent_config, llm_config)
+        response = hub.ask("my-agent", "hello")
         hub.stop()
     """
 
-    def __init__(self, lg: Logger, config: HubConfig | None = None) -> None:
+    def __init__(
+        self,
+        lg: Logger,
+        config: HubConfig,
+        bus_config: WorkerBusConfig,
+        llm_config: Any = None,
+        learn_config: Any = None,
+        variables: dict[str, str] | None = None,
+        factory_module: str = "llm_gent.agents.default",
+    ) -> None:
         self._lg = lg
-        self._config = config or HubConfig()
-        self._bus = ZMQCoordinatorBus(lg, self._config.bus)
-        self._registry = AgentRegistry(dead_timeout=self._config.dead_timeout)
-        self._health_thread: threading.Thread | None = None
-        self._running = False
+        self._config = config
+        self._bus_config = bus_config
+        self._llm_config = llm_config
+        self._learn_config = learn_config
+        self._variables = variables or {}
+        self._factory_module = factory_module
+
+        self._bus = ZMQCoordinatorBus(lg, config.bus)
+        self._registry = Registry(dead_timeout=config.dead_timeout)
+        self._runners: dict[str, ThreadRunner] = {}
+        self._channels: dict[str, BufferedChannel[Any, Any]] = {}
 
     @property
-    def registry(self) -> AgentRegistry:
-        """Access the agent registry."""
+    def registry(self) -> Registry:
         return self._registry
 
     @property
     def bus(self) -> ZMQCoordinatorBus:
-        """Access the coordinator bus."""
         return self._bus
 
     # =========================================================================
-    # Lifecycle
+    # Hub lifecycle
     # =========================================================================
 
     def start(self) -> None:
-        """Start the hub: bind bus sockets, begin health monitoring."""
+        """Start the hub: bind bus, begin accepting connections."""
         self._bus.start()
-        self._bus.on_request(self._handle_request)
-        self._bus.subscribe("heartbeat", self._handle_heartbeat_topic)
-
-        self._running = True
-        self._health_thread = threading.Thread(
-            target=self._health_loop, daemon=True, name="hub-health"
-        )
-        self._health_thread.start()
-
+        self._bus.on_request(self._handle_bus_request)
+        self._bus.subscribe("heartbeat", self._handle_heartbeat)
         self._lg.info("hub started")
 
     def stop(self) -> None:
-        """Stop the hub: shut down health monitoring and bus."""
-        self._running = False
-        if self._health_thread is not None:
-            self._health_thread.join(timeout=5.0)
-            self._health_thread = None
+        """Stop all agents and shut down the bus."""
+        for name in list(self._runners.keys()):
+            try:
+                self.stop_agent(name)
+            except Exception as e:
+                self._lg.warning("error stopping agent", extra={"agent": name, "exception": e})
 
         self._bus.stop()
         self._lg.info("hub stopped")
 
     # =========================================================================
-    # Bus message handlers
+    # Agent lifecycle (injected agents)
     # =========================================================================
 
-    def _handle_request(self, request: Request, sender_id: str | None) -> Response:
-        """Dispatch incoming bus requests to the appropriate handler."""
+    def start_agent(
+        self,
+        name: str,
+        config: DotDict,
+        llm_config: Any | None = None,
+        learn_config: Any | None = None,
+    ) -> AgentEntry:
+        """Start an injected agent as a threaded service.
+
+        Registers the agent, creates a BufferedChannel over ZMQ transport,
+        and starts an AgentService in a ThreadRunner with restart policy.
+        """
+        config["name"] = name
+        entry = self._registry.register(agent_id=name, agent_type=AgentType.INJECTED, config=config)
+
+        self._create_channel(name)
+        runner = self._create_runner(name, config, llm_config, learn_config)
+        runner.start()
+        self._runners[name] = runner
+
+        self._lg.info("agent started", extra={"agent": name})
+        return entry
+
+    def _create_channel(self, name: str) -> None:
+        """Create ZMQ transport + BufferedChannel for an agent."""
+        transport = self._bus.create_agent_transport(name)
+        channel: BufferedChannel[Any, Any] = BufferedChannel(transport)
+        self._channels[name] = channel
+
+    def _create_runner(
+        self, name: str, config: DotDict, llm_config: Any | None, learn_config: Any | None
+    ) -> ThreadRunner:
+        """Create AgentService wrapped in a ThreadRunner with restart policy."""
+        service = AgentService(
+            lg=self._lg,
+            agent_name=name,
+            config=config,
+            llm_config=llm_config or self._llm_config,
+            bus_config=self._bus_config,
+            learn_config=learn_config or self._learn_config,
+            variables=self._variables,
+            factory_module=config.get("module", self._factory_module),
+        )
+        policy = RestartPolicy(
+            max_retries=self._config.max_restarts,
+            restart_on_failure=True,
+        )
+        return ThreadRunner(service, policy=policy)
+
+    def stop_agent(self, name: str) -> None:
+        """Stop an injected agent.
+
+        Args:
+            name: Agent name.
+        """
+        runner = self._runners.pop(name, None)
+        if runner is not None:
+            runner.stop()
+
+        channel = self._channels.pop(name, None)
+        if channel is not None:
+            channel.close()
+
+        self._bus.remove_agent_transport(name)
+        self._registry.unregister(name)
+        self._lg.info("agent stopped", extra={"agent": name})
+
+    # =========================================================================
+    # Agent communication
+    # =========================================================================
+
+    def ask(self, name: str, question: str, timeout: float = 60.0) -> str:
+        """Ask an agent a question.
+
+        Args:
+            name: Agent name.
+            question: Question text.
+            timeout: Response timeout.
+
+        Returns:
+            Agent's response string.
+        """
+        channel = self._require_channel(name)
+        req = AskRequest(question=question)
+        resp = channel.submit(req, timeout=timeout)
+        if isinstance(resp, AskResponse):
+            return resp.response
+        return ""
+
+    def feedback(self, name: str, message: str, timeout: float = 30.0) -> None:
+        """Send feedback to an agent.
+
+        Args:
+            name: Agent name.
+            message: Feedback text.
+            timeout: Response timeout.
+        """
+        channel = self._require_channel(name)
+        channel.submit(FeedbackRequest(message=message), timeout=timeout)
+
+    def broadcast(self, message: Message) -> None:
+        """Broadcast a message to all agents."""
+        self._bus.broadcast(message)
+
+    def publish(self, topic: str, message: Message) -> None:
+        """Publish a message to a topic."""
+        self._bus.publish(topic, message)
+
+    # =========================================================================
+    # Bus request handling (agent → hub)
+    # =========================================================================
+
+    def _handle_bus_request(self, request: Request, sender_id: str | None) -> Response:
+        """Dispatch incoming bus requests from agents."""
         if isinstance(request, RegisterRequest):
             return self._handle_register(request, sender_id)
         if isinstance(request, UnregisterRequest):
@@ -120,157 +247,57 @@ class Hub:
             return self._handle_error(request)
         return Response(id=request.id, success=False, error="unknown request type")
 
-    def _handle_register(self, request: RegisterRequest, sender_id: str | None) -> RegisterResponse:
-        """Handle agent registration request."""
-        info = self._registry.register(
-            agent_id=request.agent_id,
+    def _handle_register(self, req: RegisterRequest, sender_id: str | None) -> RegisterResponse:
+        """Handle external agent registration."""
+        entry = self._registry.register(
+            agent_id=req.agent_id,
             agent_type=AgentType.EXTERNAL,
-            capabilities=request.capabilities,
-            metadata=request.metadata,
-            health_url=request.health_url,
+            capabilities=req.capabilities,
+            metadata=req.metadata,
         )
         self._lg.info(
             "agent registered",
-            extra={
-                "agent_id": request.agent_id,
-                "capabilities": request.capabilities,
-                "zmq_identity": sender_id,
-            },
+            extra={"agent_id": req.agent_id, "capabilities": req.capabilities},
         )
-        return RegisterResponse(
-            id=request.id,
-            agent_id=request.agent_id,
-            registered_at=info.registered_at,
-        )
+        return RegisterResponse(id=req.id, agent_id=req.agent_id, registered_at=entry.registered_at)
 
-    def _handle_unregister(self, request: UnregisterRequest) -> UnregisterResponse:
-        """Handle agent unregistration request."""
-        removed = self._registry.unregister(request.agent_id)
-        if removed:
-            self._lg.info("agent unregistered", extra={"agent_id": request.agent_id})
-        else:
-            self._lg.warning("unregister for unknown agent", extra={"agent_id": request.agent_id})
-        return UnregisterResponse(id=request.id, agent_id=request.agent_id)
+    def _handle_unregister(self, req: UnregisterRequest) -> UnregisterResponse:
+        """Handle agent unregistration."""
+        self._registry.unregister(req.agent_id)
+        self._lg.info("agent unregistered", extra={"agent_id": req.agent_id})
+        return UnregisterResponse(id=req.id, agent_id=req.agent_id)
 
-    def _handle_error(self, request: ErrorRequest) -> ErrorResponse:
-        """Handle error escalation from an agent."""
+    def _handle_error(self, req: ErrorRequest) -> ErrorResponse:
+        """Handle error escalation from agent."""
         self._lg.warning(
-            "agent error escalation",
+            "agent error",
             extra={
-                "agent_id": request.agent_id,
-                "severity": request.error.severity,
-                "source": request.error.source,
-                "message": request.error.message,
-                "reason": request.escalation_reason,
+                "agent_id": req.agent_id,
+                "severity": req.error.severity,
+                "message": req.error.message,
             },
         )
-        return ErrorResponse(id=request.id, acknowledged=True)
+        return ErrorResponse(id=req.id, acknowledged=True)
 
-    def _handle_heartbeat_topic(self, message: Message) -> None:
-        """Handle heartbeat published on the heartbeat topic."""
+    def _handle_heartbeat(self, message: Message) -> None:
+        """Handle heartbeat on pub/sub topic."""
         if not isinstance(message, HeartbeatRequest):
             return
-
-        stats = RegistryAgentStats(
+        stats = AgentStats(
             ticks=message.stats.ticks,
             errors=message.stats.errors,
             llm_tokens_used=message.stats.llm_tokens_used,
             extra=message.stats.extra,
         )
-        known = self._registry.heartbeat(message.agent_id, stats)
-        if not known:
-            self._lg.debug("heartbeat from unknown agent", extra={"agent_id": message.agent_id})
+        self._registry.heartbeat(message.agent_id, stats)
 
     # =========================================================================
-    # Injected agent management
+    # Internal
     # =========================================================================
 
-    def register_injected(
-        self,
-        agent_id: str,
-        capabilities: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Register an injected (hub-managed) agent in the registry.
-
-        Called by the hub when spawning an agent from config, before the
-        agent connects to the bus.
-
-        Args:
-            agent_id: Agent identifier.
-            capabilities: Agent capabilities.
-            metadata: Agent metadata.
-        """
-        self._registry.register(
-            agent_id=agent_id,
-            agent_type=AgentType.INJECTED,
-            capabilities=capabilities or [],
-            metadata=metadata or {},
-        )
-        self._lg.info("injected agent registered", extra={"agent_id": agent_id})
-
-    # =========================================================================
-    # Health monitoring
-    # =========================================================================
-
-    def _health_loop(self) -> None:
-        """Periodic health check loop."""
-        import time
-
-        while self._running:
-            time.sleep(self._config.health_check_interval)
-            if not self._running:
-                break
-            self._check_health()
-
-    def _check_health(self) -> None:
-        """Check agent health and handle dead agents."""
-        dead = self._registry.get_dead()
-        for agent_info in dead:
-            self._lg.warning(
-                "agent is dead",
-                extra={
-                    "agent_id": agent_info.id,
-                    "agent_type": agent_info.agent_type,
-                    "last_heartbeat": agent_info.last_heartbeat.isoformat(),
-                },
-            )
-            if agent_info.agent_type == AgentType.INJECTED:
-                self._handle_dead_injected(agent_info.id)
-            else:
-                self._registry.unregister(agent_info.id)
-
-        unhealthy = self._registry.get_unhealthy()
-        for agent_info in unhealthy:
-            self._lg.debug(
-                "agent unhealthy",
-                extra={
-                    "agent_id": agent_info.id,
-                    "last_heartbeat": agent_info.last_heartbeat.isoformat(),
-                },
-            )
-
-    def _handle_dead_injected(self, agent_id: str) -> None:
-        """Handle a dead injected agent (restart logic)."""
-        restart_count = self._registry.increment_restart(agent_id)
-        if restart_count <= self._config.max_restarts:
-            self._lg.info(
-                "restarting dead injected agent",
-                extra={
-                    "agent_id": agent_id,
-                    "restart_count": restart_count,
-                    "max_restarts": self._config.max_restarts,
-                },
-            )
-            # TODO: trigger restart via Core
-            # For now, just log the intent. Actual restart integration
-            # comes when Hub is wired into ServeTool.
-        else:
-            self._lg.warning(
-                "injected agent exceeded max restarts, removing",
-                extra={
-                    "agent_id": agent_id,
-                    "restart_count": restart_count,
-                },
-            )
-            self._registry.unregister(agent_id)
+    def _require_channel(self, name: str) -> BufferedChannel[Any, Any]:
+        """Get channel for an agent, raising if not found."""
+        channel = self._channels.get(name)
+        if channel is None:
+            raise KeyError(f"No channel for agent: {name}")
+        return channel

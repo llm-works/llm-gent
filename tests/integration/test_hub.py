@@ -42,7 +42,7 @@ def hub_and_worker():
     )
     worker_config = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
 
-    hub = Hub(lg, hub_config)
+    hub = Hub(lg, hub_config, bus_config=worker_config)
     worker = ZMQWorkerBus(lg, "test-worker", worker_config)
 
     hub.start()
@@ -112,12 +112,13 @@ class TestHubMultipleWorkers:
         lg = MagicMock()
         ports = _find_free_ports(3)
 
+        wcfg = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
         hub_config = HubConfig(
             bus=CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2]),
             health_check_interval=60.0,
         )
 
-        hub = Hub(lg, hub_config)
+        hub = Hub(lg, hub_config, bus_config=wcfg)
         hub.start()
         time.sleep(0.1)
 

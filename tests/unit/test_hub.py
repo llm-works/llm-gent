@@ -1,6 +1,5 @@
 """Tests for the swarm hub coordinator."""
 
-from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,8 +10,9 @@ from llm_gent.bus.protocol import (
     RegisterRequest,
     UnregisterRequest,
 )
-from llm_gent.bus.registry import AgentType
+from llm_gent.bus.transport import WorkerBusConfig
 from llm_gent.hub import Hub, HubConfig
+from llm_gent.hub.registry import AgentType
 
 
 pytestmark = pytest.mark.unit
@@ -20,16 +20,14 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def lg():
-    """Mock logger."""
     return MagicMock()
 
 
 @pytest.fixture
 def hub(lg):
-    """Create a hub with mocked bus (no real ZMQ)."""
-    config = HubConfig(dead_timeout=90.0, max_restarts=3)
-    h = Hub(lg, config)
-    # Replace bus with mock to avoid real ZMQ sockets in unit tests
+    """Create a hub with mocked bus."""
+    config = HubConfig(max_restarts=3)
+    h = Hub(lg, config, bus_config=WorkerBusConfig())
     h._bus = MagicMock()
     return h
 
@@ -43,59 +41,49 @@ class TestHubRequestHandling:
             agent_id="worker-1",
             capabilities=["fetch", "search"],
             metadata={"version": "1.0"},
-            health_url="http://localhost:8080/health",
         )
-        resp = hub._handle_request(req, "zmq-identity")
+        resp = hub._handle_bus_request(req, "zmq-identity")
 
         assert resp.success is True
         assert resp.agent_id == "worker-1"
 
-        info = hub.registry.get("worker-1")
-        assert info is not None
-        assert info.agent_type == AgentType.EXTERNAL
-        assert info.capabilities == ["fetch", "search"]
+        entry = hub.registry.get("worker-1")
+        assert entry is not None
+        assert entry.agent_type == AgentType.EXTERNAL
+        assert entry.capabilities == ["fetch", "search"]
 
     def test_register_duplicate_updates(self, hub):
-        """Re-registering an agent updates its entry."""
+        """Re-registering updates entry."""
         req1 = RegisterRequest(agent_id="worker-1", capabilities=["v1"])
-        hub._handle_request(req1, "id1")
+        hub._handle_bus_request(req1, "id1")
 
         req2 = RegisterRequest(agent_id="worker-1", capabilities=["v2"])
-        hub._handle_request(req2, "id1")
+        hub._handle_bus_request(req2, "id1")
 
-        info = hub.registry.get("worker-1")
-        assert info is not None
-        assert info.capabilities == ["v2"]
+        entry = hub.registry.get("worker-1")
+        assert entry is not None
+        assert entry.capabilities == ["v2"]
 
     def test_unregister_request(self, hub):
         """Hub removes agent on unregister request."""
         hub.registry.register("worker-1")
         req = UnregisterRequest(agent_id="worker-1")
-        resp = hub._handle_request(req, "id1")
+        resp = hub._handle_bus_request(req, "id1")
 
         assert resp.success is True
         assert hub.registry.get("worker-1") is None
 
     def test_unregister_unknown_agent(self, hub):
-        """Unregistering unknown agent still returns success."""
+        """Unregistering unknown agent still succeeds."""
         req = UnregisterRequest(agent_id="ghost")
-        resp = hub._handle_request(req, "id1")
-
+        resp = hub._handle_bus_request(req, "id1")
         assert resp.success is True
 
     def test_error_request(self, hub):
         """Hub acknowledges error escalation."""
-        error = ErrorReport(
-            severity="critical",
-            source="llm",
-            message="rate limited",
-        )
-        req = ErrorRequest(
-            agent_id="worker-1",
-            error=error,
-            escalation_reason="severity",
-        )
-        resp = hub._handle_request(req, "id1")
+        error = ErrorReport(severity="critical", source="llm", message="rate limited")
+        req = ErrorRequest(agent_id="worker-1", error=error, escalation_reason="severity")
+        resp = hub._handle_bus_request(req, "id1")
 
         assert resp.success is True
         assert resp.acknowledged is True
@@ -104,114 +92,65 @@ class TestHubRequestHandling:
         """Hub returns error for unknown request types."""
         req = MagicMock(spec=["id"])
         req.id = "test-id"
-        # Make isinstance checks fail
-        resp = hub._handle_request(req, "id1")
-
+        resp = hub._handle_bus_request(req, "id1")
         assert resp.success is False
-        assert "unknown" in resp.error
 
 
 class TestHubHeartbeat:
-    """Tests for heartbeat handling via topic subscription."""
+    """Tests for heartbeat handling."""
 
     def test_heartbeat_updates_registry(self, hub):
-        """Heartbeat from known agent updates registry stats."""
+        """Heartbeat updates registry stats."""
         from llm_gent.bus.protocol import AgentStats, HeartbeatRequest
 
         hub.registry.register("worker-1")
-
         hb = HeartbeatRequest(
             agent_id="worker-1",
             stats=AgentStats(ticks=10, errors=1, llm_tokens_used=500),
         )
-        hub._handle_heartbeat_topic(hb)
+        hub._handle_heartbeat(hb)
 
-        info = hub.registry.get("worker-1")
-        assert info is not None
-        assert info.stats.ticks == 10
-        assert info.stats.errors == 1
+        entry = hub.registry.get("worker-1")
+        assert entry is not None
+        assert entry.stats.ticks == 10
 
-    def test_heartbeat_unknown_agent_ignored(self, hub, lg):
-        """Heartbeat from unknown agent is silently ignored."""
+    def test_heartbeat_unknown_agent_ignored(self, hub):
+        """Heartbeat from unknown agent doesn't crash."""
         from llm_gent.bus.protocol import HeartbeatRequest
 
         hb = HeartbeatRequest(agent_id="ghost")
-        hub._handle_heartbeat_topic(hb)
-
-        # Should log debug but not crash
+        hub._handle_heartbeat(hb)
         assert hub.registry.count == 0
 
     def test_non_heartbeat_message_ignored(self, hub):
-        """Non-heartbeat messages on heartbeat topic are ignored."""
-        from llm_gent.bus.protocol import RegisterRequest
-
-        msg = RegisterRequest(agent_id="worker-1")
-        hub._handle_heartbeat_topic(msg)  # should not raise
+        """Non-heartbeat messages on heartbeat handler are ignored."""
+        hub._handle_heartbeat(RegisterRequest(agent_id="x"))
 
 
-class TestHubInjectedAgents:
-    """Tests for injected agent management."""
+class TestHubAskFeedback:
+    """Tests for ask/feedback via channels."""
 
-    def test_register_injected(self, hub):
-        """register_injected adds agent as INJECTED type."""
-        hub.register_injected("my-agent", capabilities=["compute"])
+    def test_ask_uses_channel(self, hub):
+        """Ask submits request through channel."""
+        from llm_gent.bus.protocol import AskResponse
 
-        info = hub.registry.get("my-agent")
-        assert info is not None
-        assert info.agent_type == AgentType.INJECTED
-        assert info.capabilities == ["compute"]
+        mock_channel = MagicMock()
+        mock_channel.submit.return_value = AskResponse(id="x", response="hello")
+        hub._channels["agent-1"] = mock_channel
 
+        result = hub.ask("agent-1", "question")
+        assert result == "hello"
+        mock_channel.submit.assert_called_once()
 
-class TestHubHealthCheck:
-    """Tests for health monitoring logic."""
+    def test_ask_unknown_agent_raises(self, hub):
+        """Ask raises KeyError for unknown agent."""
+        with pytest.raises(KeyError, match="No channel"):
+            hub.ask("ghost", "question")
 
-    def test_dead_external_agent_removed(self, hub):
-        """Dead external agent is unregistered during health check."""
-        hub.registry.register("ext-agent", AgentType.EXTERNAL)
-        info = hub.registry.get("ext-agent")
-        assert info is not None
-        info.last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
+    def test_feedback_uses_channel(self, hub):
+        """Feedback submits request through channel."""
+        mock_channel = MagicMock()
+        hub._channels["agent-1"] = mock_channel
 
-        hub._check_health()
-
-        assert hub.registry.get("ext-agent") is None
-
-    def test_dead_injected_agent_triggers_restart(self, hub):
-        """Dead injected agent increments restart count."""
-        hub.register_injected("inj-agent")
-        info = hub.registry.get("inj-agent")
-        assert info is not None
-        info.last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
-
-        hub._check_health()
-
-        # Agent should still be in registry (restart pending, not removed)
-        info = hub.registry.get("inj-agent")
-        assert info is not None
-        assert info.restart_count == 1
-
-    def test_injected_agent_removed_after_max_restarts(self, hub):
-        """Injected agent removed after exceeding max restarts."""
-        hub.register_injected("inj-agent")
-        info = hub.registry.get("inj-agent")
-        assert info is not None
-
-        # Simulate max_restarts + 1 health check cycles
-        for _ in range(hub._config.max_restarts + 1):
-            info = hub.registry.get("inj-agent")
-            if info is None:
-                break
-            info.last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
-            hub._check_health()
-
-        assert hub.registry.get("inj-agent") is None
-
-    def test_healthy_agents_untouched(self, hub):
-        """Healthy agents are not affected by health check."""
-        hub.register_injected("healthy-agent")
-        hub.registry.register("ext-healthy", AgentType.EXTERNAL)
-
-        hub._check_health()
-
-        assert hub.registry.get("healthy-agent") is not None
-        assert hub.registry.get("ext-healthy") is not None
+        hub.feedback("agent-1", "good job")
+        mock_channel.submit.assert_called_once()

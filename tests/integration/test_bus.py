@@ -269,3 +269,63 @@ class TestMultiWorker:
         all_received.wait(timeout=5.0)
 
         assert len(counts) == 3
+
+
+class TestAgentToAgent:
+    """Tests for agent-to-agent messaging routed through coordinator."""
+
+    @pytest.fixture
+    def two_workers(self):
+        """Create coordinator + 2 workers with transports registered."""
+        from unittest.mock import MagicMock
+
+        lg = MagicMock()
+        ports = _find_free_ports(3)
+
+        coord_config = CoordinatorBusConfig(
+            router_port=ports[0], pub_port=ports[1], sub_port=ports[2]
+        )
+        coord = ZMQCoordinatorBus(lg, coord_config)
+        coord.start()
+        time.sleep(0.1)
+
+        workers = []
+        for name in ("alice", "bob"):
+            cfg = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
+            w = ZMQWorkerBus(lg, name, cfg)
+            w.start()
+            workers.append(w)
+            # Register transport so coordinator can route to this agent
+            coord.create_agent_transport(name)
+
+        time.sleep(0.3)
+
+        yield coord, workers[0], workers[1]
+
+        for w in workers:
+            w.stop()
+        coord.stop()
+
+    def test_agent_sends_to_agent(self, two_workers):
+        """Alice sends a message to Bob through the coordinator."""
+        coord, alice, bob = two_workers
+        received: list[Message] = []
+
+        # Bob's transport delivers to its inbound queue
+        assert bob.transport is not None
+        bob_channel: BufferedChannel[Any, Any] = BufferedChannel(bob.transport)
+
+        # Alice sends to Bob
+        msg = HeartbeatRequest(agent_id="alice", stats=AgentStats(ticks=99))
+        alice.send_to_agent("bob", msg)
+
+        # Bob receives via channel
+        try:
+            received_msg = bob_channel.recv(timeout=5.0)
+            received.append(received_msg)
+        except Exception:
+            pass
+
+        assert len(received) == 1
+        assert isinstance(received[0], HeartbeatRequest)
+        assert received[0].stats.ticks == 99
