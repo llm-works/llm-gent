@@ -197,12 +197,13 @@ class Hub:
             name: Agent name.
         """
         runner = self._runners.pop(name, None)
-        if runner is not None:
-            runner.stop()
-
-        self._cleanup_agent_resources(name)
-        self._registry.unregister(name)
-        self._lg.info("agent stopped", extra={"agent": name})
+        try:
+            if runner is not None:
+                runner.stop()
+        finally:
+            self._cleanup_agent_resources(name)
+            self._registry.unregister(name)
+            self._lg.info("agent stopped", extra={"agent": name})
 
     def _cleanup_agent_resources(self, name: str) -> None:
         """Clean up channel and transport for an agent."""
