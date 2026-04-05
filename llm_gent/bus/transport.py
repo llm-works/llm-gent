@@ -116,12 +116,14 @@ class ZMQCoordinatorBus:
         self._sub: zmq.Socket[Any] | None = None
 
         self._request_handler: RequestHandler | None = None
+        self._route_validator: Callable[[str], bool] | None = None
         self._topic_handlers: dict[str, MessageHandler] = {}
         self._agent_transports: dict[str, ZMQRouterTransport] = {}
 
         self._poll_thread: threading.Thread | None = None
         self._running = False
         self._send_lock = threading.Lock()
+        self._transports_lock = threading.Lock()
         self._async_pool: ThreadPoolExecutor | None = None
         self._async_request_types: set[str] = set()
 
@@ -168,9 +170,11 @@ class ZMQCoordinatorBus:
             self._poll_thread = None
 
         # Close all agent transports
-        for transport in self._agent_transports.values():
+        with self._transports_lock:
+            transports = list(self._agent_transports.values())
+            self._agent_transports.clear()
+        for transport in transports:
             transport.close()
-        self._agent_transports.clear()
 
         for sock in (self._router, self._pub, self._sub):
             if sock is not None:
@@ -205,13 +209,15 @@ class ZMQCoordinatorBus:
 
         if self._router is None:
             raise RuntimeError("bus not started")
-        transport = ZMQRouterTransport(self._router, agent_id)
-        self._agent_transports[agent_id] = transport
+        transport = ZMQRouterTransport(self._router, agent_id, send_lock=self._send_lock)
+        with self._transports_lock:
+            self._agent_transports[agent_id] = transport
         return transport
 
     def remove_agent_transport(self, agent_id: str) -> None:
         """Remove and close an agent transport."""
-        transport = self._agent_transports.pop(agent_id, None)
+        with self._transports_lock:
+            transport = self._agent_transports.pop(agent_id, None)
         if transport is not None:
             transport.close()
 
@@ -222,6 +228,14 @@ class ZMQCoordinatorBus:
     def on_request(self, handler: RequestHandler) -> None:
         """Register handler for incoming requests not routed to a transport."""
         self._request_handler = handler
+
+    def set_route_validator(self, validator: Callable[[str], bool]) -> None:
+        """Set a validator for agent-to-agent routing targets.
+
+        The validator receives a target agent ID and returns True if the
+        target is a known agent that can receive messages.
+        """
+        self._route_validator = validator
 
     def register_async_request(self, msg_type: str) -> None:
         """Register a request type to be dispatched asynchronously.
@@ -309,8 +323,8 @@ class ZMQCoordinatorBus:
         """Route envelope to an agent transport if applicable.
 
         Checks (in order):
-        1. Target agent specified → agent-to-agent routing
-        2. Sender has a registered transport AND message is a response → response routing
+        1. Target agent specified -> agent-to-agent routing
+        2. Sender has a registered transport AND message is a response -> response routing
 
         Agent-initiated requests (msg_type ending with ``_request``) always
         fall through to ``_dispatch_request`` even if the sender has a
@@ -318,30 +332,36 @@ class ZMQCoordinatorBus:
 
         Returns True if the message was consumed.
         """
-        # Agent-to-agent: forward to target via ROUTER socket
         if envelope.target and envelope.target != "hub":
-            if self._router is None:
-                self._lg.warning("cannot route agent-to-agent: router not bound")
-                return False
-            self._router.send_multipart(
-                [
-                    envelope.target.encode(),
-                    b"",
-                    envelope.to_bytes(),
-                ]
-            )
-            return True
+            return self._forward_to_agent(envelope)
 
         # Response from agent: route to sender's transport.
         # Requests (msg_type ending with _request) must always reach
         # _dispatch_request so the hub can process them.
         if envelope.source and not envelope.msg_type.endswith("_request"):
-            transport = self._agent_transports.get(envelope.source)
+            with self._transports_lock:
+                transport = self._agent_transports.get(envelope.source)
             if transport is not None:
                 self._deliver_to_transport(transport, envelope)
                 return True
 
         return False
+
+    def _forward_to_agent(self, envelope: Envelope) -> bool:
+        """Forward an envelope to a target agent via ROUTER socket."""
+        target = envelope.target
+        if target is None or self._router is None:
+            self._lg.warning("cannot route agent-to-agent: router not bound")
+            return False
+        if self._route_validator is not None and not self._route_validator(target):
+            self._lg.warning(
+                "agent-to-agent route rejected: unknown target",
+                extra={"source": envelope.source, "target": target},
+            )
+            return False
+        with self._send_lock:
+            self._router.send_multipart([target.encode(), b"", envelope.to_bytes()])
+        return True
 
     def _deliver_to_transport(self, transport: ZMQRouterTransport, envelope: Envelope) -> None:
         """Unwrap envelope and deliver to transport."""

@@ -12,10 +12,11 @@ All agent operations go through the Hub: start, stop, ask, feedback.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from appinfra import DotDict
-from appinfra.service import BufferedChannel, RestartPolicy, ThreadRunner
+from appinfra.service import BufferedChannel, ProcessRunner, RestartPolicy, ThreadRunner
 
 from ..bus.protocol import (
     AskRequest,
@@ -90,7 +91,7 @@ class Hub:
 
         self._bus = ZMQCoordinatorBus(lg, config.bus)
         self._registry = Registry(dead_timeout=config.dead_timeout)
-        self._runners: dict[str, ThreadRunner] = {}
+        self._runners: dict[str, ThreadRunner | ProcessRunner] = {}
         self._channels: dict[str, BufferedChannel[Any, Any]] = {}
 
     @property
@@ -109,6 +110,7 @@ class Hub:
         """Start the hub: bind bus, begin accepting connections."""
         self._bus.start()
         self._bus.on_request(self._handle_bus_request)
+        self._bus.set_route_validator(lambda agent_id: self._registry.get(agent_id) is not None)
         self._bus.register_async_request("relay_request")
         self._bus.subscribe("heartbeat", self._handle_heartbeat)
         self._lg.info("hub started")
@@ -163,8 +165,12 @@ class Hub:
 
     def _create_runner(
         self, name: str, config: DotDict, llm_config: Any | None, learn_config: Any | None
-    ) -> ThreadRunner:
-        """Create AgentService wrapped in a ThreadRunner with restart policy."""
+    ) -> ThreadRunner | ProcessRunner:
+        """Create AgentService wrapped in a runner with restart policy.
+
+        Respects the ``execution`` config field: ``"thread"`` uses ThreadRunner,
+        ``"process"`` (default) uses ProcessRunner for subprocess isolation.
+        """
         service = AgentService(
             lg=self._lg,
             agent_name=name,
@@ -179,7 +185,10 @@ class Hub:
             max_retries=self._config.max_restarts,
             restart_on_failure=True,
         )
-        return ThreadRunner(service, policy=policy)
+        execution = config.get("execution", "process")
+        if execution == "thread":
+            return ThreadRunner(service, policy=policy)
+        return ProcessRunner(service, policy=policy)
 
     def stop_agent(self, name: str) -> None:
         """Stop an injected agent.
@@ -260,13 +269,28 @@ class Hub:
         return Response(id=request.id, success=False, error="unknown request type")
 
     def _handle_register(self, req: RegisterRequest, sender_id: str | None) -> RegisterResponse:
-        """Handle external agent registration."""
-        entry = self._registry.register(
-            agent_id=req.agent_id,
-            agent_type=AgentType.EXTERNAL,
-            capabilities=req.capabilities,
-            metadata=req.metadata,
-        )
+        """Handle agent registration.
+
+        If the agent is already registered as INJECTED (started by the hub),
+        merge capabilities/metadata without overwriting the type or config.
+        External agents are registered normally.
+        """
+        existing = self._registry.get(req.agent_id)
+        if existing is not None and existing.agent_type == AgentType.INJECTED:
+            # Injected agent connecting on bus -- merge without overwriting
+            if req.capabilities:
+                existing.capabilities = req.capabilities
+            if req.metadata:
+                existing.metadata.update(req.metadata)
+            existing.last_heartbeat = datetime.now(UTC)
+            entry = existing
+        else:
+            entry = self._registry.register(
+                agent_id=req.agent_id,
+                agent_type=AgentType.EXTERNAL,
+                capabilities=req.capabilities,
+                metadata=req.metadata,
+            )
         self._lg.info(
             "agent registered",
             extra={"agent_id": req.agent_id, "capabilities": req.capabilities},
@@ -336,6 +360,27 @@ class Hub:
     # =========================================================================
     # Internal
     # =========================================================================
+
+    def get_insights(self, name: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Get available insights for an agent from registry data.
+
+        Returns stats and health information since full agent-side
+        insights (recent results) are not yet available via the bus.
+        """
+        entry = self._registry.get(name)
+        if entry is None:
+            return []
+        return [
+            {
+                "type": "stats",
+                "ticks": entry.stats.ticks,
+                "errors": entry.stats.errors,
+                "health": entry.health.value,
+                "last_heartbeat": entry.last_heartbeat.isoformat(),
+                "last_run": entry.last_run.isoformat() if entry.last_run else None,
+                "restart_count": entry.restart_count,
+            }
+        ]
 
     def _require_channel(self, name: str) -> BufferedChannel[Any, Any]:
         """Get channel for an agent, raising if not found."""

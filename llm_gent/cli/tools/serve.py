@@ -400,13 +400,17 @@ class ServeTool(Tool):
     def _handle_get_insights(self, hub: Hub, request: Request) -> Response:
         """Handle get insights request."""
         from llm_gent.runtime.server.protocol.management import (
+            GetInsightsRequest,
             GetInsightsResponse,
         )
 
-        # TODO: Re-implement insights via bus protocol
-        return GetInsightsResponse(
-            id=request.id, success=False, error="Insights not yet supported via bus"
+        req = (
+            request
+            if isinstance(request, GetInsightsRequest)
+            else GetInsightsRequest(**request.model_dump())
         )
+        insights = hub.get_insights(req.agent_name, limit=req.limit)
+        return GetInsightsResponse(id=req.id, insights=insights)
 
     def _agent_entry_to_dict(self, entry: Any) -> dict[str, Any]:
         """Convert AgentEntry to dict for response."""

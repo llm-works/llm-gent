@@ -33,10 +33,16 @@ class ZMQRouterTransport:
     frames: [agent_id, empty, payload].
     """
 
-    def __init__(self, router: zmq.Socket[Any], agent_id: str) -> None:
+    def __init__(
+        self,
+        router: zmq.Socket[Any],
+        agent_id: str,
+        send_lock: threading.Lock | None = None,
+    ) -> None:
         self._router = router
         self._agent_id = agent_id
         self._agent_id_bytes = agent_id.encode()
+        self._send_lock = send_lock
         self._closed = False
         # Inbound queue: poll thread feeds messages addressed to this agent
         self._inbound: list[Any] = []
@@ -58,7 +64,11 @@ class ZMQRouterTransport:
                 data = envelope.to_envelope().to_bytes()
             else:
                 raise TypeError(f"cannot send {type(envelope)}")
-        self._router.send_multipart([self._agent_id_bytes, b"", data])
+        if self._send_lock is not None:
+            with self._send_lock:
+                self._router.send_multipart([self._agent_id_bytes, b"", data])
+        else:
+            self._router.send_multipart([self._agent_id_bytes, b"", data])
 
     def recv(self, timeout: float | None = None) -> Any:
         """Receive next message addressed to this agent.
@@ -74,6 +84,8 @@ class ZMQRouterTransport:
             raise ChannelTimeoutError(f"recv timeout after {effective_timeout}s")
 
         with self._lock:
+            if self._closed:
+                raise ChannelClosedError("transport is closed")
             if not self._inbound:
                 raise ChannelTimeoutError("no message available")
             msg = self._inbound.pop(0)
@@ -145,6 +157,8 @@ class ZMQDealerTransport:
             raise ChannelTimeoutError(f"recv timeout after {effective_timeout}s")
 
         with self._lock:
+            if self._closed:
+                raise ChannelClosedError("transport is closed")
             if not self._inbound:
                 raise ChannelTimeoutError("no message available")
             msg = self._inbound.pop(0)

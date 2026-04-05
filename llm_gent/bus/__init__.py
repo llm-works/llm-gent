@@ -20,7 +20,6 @@ from .protocol import (
     UnregisterRequest,
     UnregisterResponse,
 )
-from .registry import AgentHealth, AgentInfo, AgentRegistry, AgentType
 from .transport import (
     BusError,
     BusTimeoutError,
@@ -54,9 +53,4 @@ __all__ = [
     "WorkerBusConfig",
     "ZMQCoordinatorBus",
     "ZMQWorkerBus",
-    # Registry
-    "AgentHealth",
-    "AgentInfo",
-    "AgentRegistry",
-    "AgentType",
 ]

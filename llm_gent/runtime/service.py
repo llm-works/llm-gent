@@ -100,7 +100,7 @@ class AgentService(Service):
     def teardown(self) -> None:
         """Signal the runner to stop."""
         if self._runner is not None:
-            self._runner._running = False
+            self._runner.request_shutdown()
         self._healthy = False
 
     def is_healthy(self) -> bool:
@@ -121,7 +121,7 @@ class AgentService(Service):
                 return
             self._shutdown_event.wait()
             if self._runner is not None:
-                self._runner._running = False
+                self._runner.request_shutdown()
 
         threading.Thread(target=watch, daemon=True, name=f"sd-{self._agent_name}").start()
 

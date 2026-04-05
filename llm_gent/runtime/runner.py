@@ -87,6 +87,10 @@ class AgentRunner:
         else:
             self._stop_event.set()
 
+    def request_shutdown(self) -> None:
+        """Request the runner to stop (thread-safe)."""
+        self._stop_event.set()
+
     def run(self) -> None:
         """Main loop (blocking). Connect to bus, then process requests + cycles."""
         self._lg.debug("starting runner...", extra={"agent": self._agent.name})
