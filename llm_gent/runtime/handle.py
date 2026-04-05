@@ -2,27 +2,25 @@
 
 from __future__ import annotations
 
-import multiprocessing as mp
-import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from appinfra import DotDict
-from appinfra.service import ProcessChannel, State, ThreadChannel
+from appinfra.service import State
 
 
 @dataclass
 class AgentHandle:
-    """Handle to a managed agent process.
+    """Handle to a managed agent.
 
-    Contains all state needed to manage an agent's lifecycle:
+    Contains state needed to manage an agent's lifecycle:
     - Identity (name, config)
-    - Runtime state (state, process, channel)
-    - Metrics (cycle_count, last_run, error)
+    - Runtime state (state, error)
+    - Metrics (cycle_count, last_run)
 
-    The handle is owned by the AgentRegistry and should not be
-    modified directly - use Core methods instead.
+    The handle is owned by the AgentRegistry. Lifecycle management
+    (start, stop) is handled by Hub via appinfra's ThreadRunner.
     """
 
     name: str
@@ -33,12 +31,6 @@ class AgentHandle:
 
     state: State = State.CREATED
     """Current lifecycle state."""
-
-    process: mp.Process | threading.Thread | None = None
-    """Subprocess or thread running the agent, or None if not started."""
-
-    channel: ProcessChannel[Any, Any] | ThreadChannel[Any, Any] | None = None
-    """Communication channel to subprocess/thread, or None if not started."""
 
     cycle_count: int = 0
     """Number of scheduled cycles completed."""

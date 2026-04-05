@@ -1,112 +1,199 @@
 """Agent runner - runs a single agent in a subprocess or thread.
 
 The AgentRunner is the entry point for agent subprocesses/threads. It:
-- Runs a sync main loop processing messages from the channel
+- Connects to the hub via ZMQ bus (pub/sub for heartbeats)
+- Uses appinfra BufferedChannel for request/response (ask, feedback, shutdown)
 - Handles scheduled execution using appinfra.time.Ticker
-- Responds to shutdown messages cleanly
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import TYPE_CHECKING, Any
 
-from appinfra.service import ChannelTimeoutError, ProcessChannel, ThreadChannel
+from appinfra.service import BufferedChannel, ChannelTimeoutError
 from appinfra.time import Ticker, TickerMode
 
-from .messages import AgentMessage, AgentResponse, MessageType
+from llm_gent.bus.protocol import (
+    AskRequest,
+    AskResponse,
+    FeedbackRequest,
+    FeedbackResponse,
+    Message,
+    RegisterRequest,
+    RelayRequest,
+    RelayResponse,
+    Request,
+    Response,
+    ShutdownRequest,
+    ShutdownResponse,
+    UnregisterRequest,
+)
 
 
 if TYPE_CHECKING:
     from appinfra.log import Logger
 
+    from llm_gent.bus.transport import WorkerBusConfig, ZMQWorkerBus
     from llm_gent.core.agent import Agent
 
 
 class AgentRunner:
-    """Runs a single agent in a subprocess.
+    """Runs a single agent in a subprocess or thread.
 
-    The runner is responsible for:
-    - Running the main message loop
-    - Handling scheduled execution
-    - Processing commands from Core
-
-    This class runs in the subprocess - it receives a channel for
-    communication with the main process (Core).
-
-    The main loop is intentionally sync and simple:
-    1. Wait for message (with timeout if scheduled)
-    2. Handle message or run scheduled cycle
-    3. Repeat until shutdown
+    Connects to the hub via ZMQ bus for pub/sub (heartbeats, events)
+    and uses appinfra BufferedChannel over the DEALER transport for
+    request/response (ask, feedback, shutdown from controller).
     """
 
     def __init__(
         self,
         lg: Logger,
         agent: Agent,
-        channel: ProcessChannel[Any, Any] | ThreadChannel[Any, Any],
+        bus_config: WorkerBusConfig,
         schedule_interval: float | None = None,
+        heartbeat_interval: float = 30.0,
     ) -> None:
-        """Initialize the runner.
-
-        Args:
-            lg: Logger instance.
-            agent: The agent to run (must be started by caller).
-            channel: Communication channel to Core.
-            schedule_interval: Optional interval in seconds for scheduled execution.
-                              None = no scheduling (message-only mode)
-                              0 = continuous execution (tight loop)
-                              >0 = scheduled with interval
-        """
         self._lg = lg
         self._agent = agent
-        self._channel = channel
-        self._running = False
+        self._bus_config = bus_config
+        self._stop_event = threading.Event()
         self._schedule_interval = schedule_interval
+        self._heartbeat_interval = heartbeat_interval
+        self._bus: ZMQWorkerBus | None = None
+        self._channel: BufferedChannel[Any, Any] | None = None
 
-        # Create Ticker for scheduled execution (not for continuous/none)
         if schedule_interval is not None and schedule_interval > 0:
             self._ticker: Ticker | None = Ticker(
                 lg,
                 secs=schedule_interval,
-                mode=TickerMode.FLEX,  # Fixed-rate timing with no catch-up
-                initial=True,  # Run immediately on first cycle
+                mode=TickerMode.FLEX,
+                initial=True,
             )
         else:
             self._ticker = None
 
-    def run(self) -> None:
-        """Main loop (blocking, sync). Called in subprocess.
+    @property
+    def _running(self) -> bool:
+        """Thread-safe running check."""
+        return not self._stop_event.is_set()
 
-        Enters the message processing loop. The agent must already be started.
-        Exits when shutdown message received or channel closes.
+    @_running.setter
+    def _running(self, value: bool) -> None:
+        """Thread-safe running setter (for service.py compatibility)."""
+        if value:
+            self._stop_event.clear()
+        else:
+            self._stop_event.set()
+
+    def request_shutdown(self) -> None:
+        """Request the runner to stop (thread-safe)."""
+        self._stop_event.set()
+
+    def run(self) -> None:
+        """Main loop (blocking). Connect to bus, then process requests + cycles.
+
+        Exceptions propagate to the caller (ThreadRunner/ProcessRunner) so
+        restart_on_failure policies can trigger.
         """
         self._lg.debug("starting runner...", extra={"agent": self._agent.name})
 
         try:
-            self._running = True
-
-            # Notify Core we're running
-            self._channel.send(
-                AgentMessage(type=MessageType.STARTED, payload={"name": self._agent.name})
-            )
-
+            self._stop_event.clear()
+            self._connect_bus()
             self._run_loop()
-
         except KeyboardInterrupt:
-            pass  # Clean shutdown, no traceback
-        except Exception as e:
-            self._lg.warning("runner error", extra={"agent": self._agent.name, "exception": e})
-            self._channel.send(
-                AgentMessage(
-                    type=MessageType.ERROR, payload={"name": self._agent.name, "error": str(e)}
-                )
-            )
+            pass
         finally:
-            self._cleanup()
+            self._stop_event.set()
+            self._disconnect_bus()
+            self._stop_agent()
+
+    # -------------------------------------------------------------------------
+    # Bus lifecycle
+    # -------------------------------------------------------------------------
+
+    def _connect_bus(self) -> None:
+        """Connect bus, create channel from DEALER transport, register with hub."""
+        from llm_gent.bus.transport import ZMQWorkerBus
+
+        self._bus = ZMQWorkerBus(self._lg, self._agent.name, self._bus_config)
+        self._bus.start()
+        # ZMQ async connect needs time to complete TCP handshake before
+        # messages can be sent reliably. 200ms is typically sufficient.
+        # TODO: Replace with ZMQ socket monitor events for deterministic connect.
+        time.sleep(0.2)
+
+        # Create BufferedChannel from the DEALER transport
+        if self._bus.transport is None:
+            raise RuntimeError("bus transport not available after start")
+        self._channel = BufferedChannel(self._bus.transport)
+
+        # Register with hub via channel (request/response)
+        req = RegisterRequest(agent_id=self._agent.name)
+        try:
+            self._channel.submit(req, timeout=5.0)
+            self._lg.info("registered on bus", extra={"agent": self._agent.name})
+        except Exception as e:
+            self._lg.warning(
+                "bus registration failed",
+                extra={"agent": self._agent.name, "exception": e},
+            )
+
+        # Start heartbeat thread (uses pub/sub, not channel)
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True, name=f"hb-{self._agent.name}"
+        )
+        self._heartbeat_thread.start()
+
+    def _disconnect_bus(self) -> None:
+        """Unregister and disconnect."""
+        import contextlib
+
+        if self._channel is not None:
+            with contextlib.suppress(Exception):
+                self._channel.submit(UnregisterRequest(agent_id=self._agent.name), timeout=2.0)
+            self._channel.close()
+            self._channel = None
+
+        if self._bus is not None:
+            self._bus.stop()
+            self._bus = None
+
+    def _stop_agent(self) -> None:
+        """Stop the agent."""
+        try:
+            self._agent.stop()
+        except Exception as e:
+            self._lg.warning("error stopping agent", extra={"exception": e})
+        self._lg.info("runner stopped", extra={"agent": self._agent.name})
+
+    def _heartbeat_loop(self) -> None:
+        """Send periodic heartbeats via pub/sub."""
+        while self._running and self._bus is not None:
+            time.sleep(self._heartbeat_interval)
+            if not self._running or self._bus is None:
+                break
+            try:
+                self._bus.publish_heartbeat(
+                    {
+                        "ticks": self._agent.cycle_count,
+                        "errors": 0,
+                    }
+                )
+            except Exception as e:
+                self._lg.debug(
+                    "heartbeat failed",
+                    extra={"agent": self._agent.name, "exception": e},
+                )
+
+    # -------------------------------------------------------------------------
+    # Main loop
+    # -------------------------------------------------------------------------
 
     def _run_loop(self) -> None:
-        """Main message processing loop."""
-        # If agent has run(), delegate loop control to agent
+        """Main execution loop: handle incoming requests + scheduled cycles."""
         if hasattr(self._agent, "run") and callable(self._agent.run):
             self._lg.debug("delegating to agent.run()", extra={"agent": self._agent.name})
             self._run_agent_loop()
@@ -115,244 +202,157 @@ class AgentRunner:
         self._run_framework_loop()
 
     def _run_framework_loop(self) -> None:
-        """Legacy framework-controlled loop for agents without run()."""
+        """Framework-controlled loop with request polling + scheduling."""
         self._lg.trace(
             "entering framework run loop",
             extra={"agent": self._agent.name, "mode": self._get_execution_mode()},
         )
         while self._running:
-            timeout = self._calculate_timeout()
-            try:
-                msg = self._channel.recv(timeout=timeout)
-                self._handle_message(msg)
-            except ChannelTimeoutError:
-                if self._should_run_cycle():
-                    self._run_cycle()
+            # Poll for incoming requests (non-blocking)
+            self._poll_requests()
+
+            if self._should_run_cycle():
+                self._run_cycle()
+            else:
+                time.sleep(min(self._calculate_sleep(), 0.5))
+
+    def _run_agent_loop(self) -> None:
+        """Delegate to agent's run() method, poll requests in background."""
+        # Start request poller in background thread
+        poller = threading.Thread(
+            target=self._request_poll_loop, daemon=True, name=f"req-{self._agent.name}"
+        )
+        poller.start()
+
+        try:
+            self._agent.run()  # type: ignore[attr-defined]
+        finally:
+            self._stop_event.set()
+
+    def _request_poll_loop(self) -> None:
+        """Background thread polling for requests (for agent-controlled loops)."""
+        while self._running:
+            self._poll_requests()
+            time.sleep(0.1)
+
+    def _poll_requests(self) -> None:
+        """Check for and handle one incoming request on the channel."""
+        if self._channel is None:
+            return
+
+        try:
+            msg = self._channel.recv(timeout=0.05)
+            if isinstance(msg, Request):
+                response = self._handle_request(msg)
+                self._channel.send(response)
+        except ChannelTimeoutError:
+            pass  # no message waiting
+        except Exception as e:
+            self._lg.debug("poll error", extra={"exception": e})
+
+    # -------------------------------------------------------------------------
+    # Request handling
+    # -------------------------------------------------------------------------
+
+    def _handle_request(self, request: Request) -> Response:
+        """Handle incoming request from controller."""
+        if isinstance(request, AskRequest):
+            return self._handle_ask(request)
+        if isinstance(request, FeedbackRequest):
+            return self._handle_feedback(request)
+        if isinstance(request, ShutdownRequest):
+            return self._handle_shutdown(request)
+        return Response(id=request.id, success=False, error="unknown request type")
+
+    def _handle_ask(self, request: AskRequest) -> AskResponse:
+        """Handle ask request."""
+        try:
+            response_text = self._agent.ask(request.question)
+            return AskResponse(id=request.id, response=response_text)
+        except Exception as e:
+            return AskResponse(id=request.id, success=False, error=str(e))
+
+    def _handle_feedback(self, request: FeedbackRequest) -> FeedbackResponse:
+        """Handle feedback request."""
+        try:
+            self._agent.record_feedback(request.message)
+            return FeedbackResponse(id=request.id)
+        except Exception as e:
+            return FeedbackResponse(id=request.id, success=False, error=str(e))
+
+    def _handle_shutdown(self, request: ShutdownRequest) -> ShutdownResponse:
+        """Handle shutdown request."""
+        self._lg.info("shutdown requested", extra={"agent": self._agent.name})
+        self._stop_event.set()
+        return ShutdownResponse(id=request.id)
+
+    # -------------------------------------------------------------------------
+    # Agent-to-agent relay
+    # -------------------------------------------------------------------------
+
+    def relay(self, to_agent: str, message: Message, timeout: float = 30.0) -> RelayResponse:
+        """Send a request to another agent via the hub relay.
+
+        The hub forwards the message to the target agent's channel,
+        waits for the response, and returns it.
+
+        Args:
+            to_agent: Target agent name.
+            message: Request to relay.
+            timeout: Seconds to wait for response.
+
+        Returns:
+            RelayResponse containing the target agent's response.
+
+        Raises:
+            RuntimeError: If not connected to bus.
+        """
+        if self._channel is None:
+            raise RuntimeError("not connected to bus")
+
+        relay_req = RelayRequest(
+            from_agent=self._agent.name,
+            to_agent=to_agent,
+            inner_type=message.message_type,
+            inner_payload=message.model_dump(mode="json"),
+        )
+        resp = self._channel.submit(relay_req, timeout=timeout)
+        if isinstance(resp, RelayResponse):
+            return resp
+        # Shouldn't happen -- hub always returns RelayResponse
+        return RelayResponse(
+            id=relay_req.id,
+            from_agent=to_agent,
+            inner_type="response",
+        )
+
+    # -------------------------------------------------------------------------
+    # Scheduling
+    # -------------------------------------------------------------------------
 
     def _get_execution_mode(self) -> str:
-        """Get execution mode string for logging."""
         if self._schedule_interval == 0:
             return "continuous"
         if self._ticker:
             return "scheduled"
         return "message-only"
 
-    def _calculate_timeout(self) -> float:
-        """Calculate recv timeout based on execution mode.
-
-        Returns:
-            float: Timeout in seconds for channel.recv()
-        """
+    def _calculate_sleep(self) -> float:
         if self._ticker is not None:
-            # Scheduled mode - use Ticker's timing (clamped to non-negative)
             return max(0.0, self._ticker.time_until_next_tick())
-        elif self._schedule_interval == 0:
-            # Continuous mode - non-blocking
+        if self._schedule_interval == 0:
             return 0.0
-        else:
-            # Message-only mode (no scheduling) - poll periodically
-            return 60.0
+        return 0.5
 
     def _should_run_cycle(self) -> bool:
-        """Check if cycle should run now.
-
-        Returns:
-            bool: True if it's time to run a cycle
-        """
         if self._ticker is not None:
-            # Scheduled mode - let Ticker decide
             return self._ticker.try_tick()
-        else:
-            # Continuous mode (interval=0) or message-only (interval=None)
-            return self._schedule_interval == 0
+        return self._schedule_interval == 0
 
     def _run_cycle(self) -> None:
         """Run one scheduled execution cycle."""
         self._lg.debug("running scheduled cycle", extra={"agent": self._agent.name})
         try:
-            result = self._agent.run_once()
-            self._channel.send(
-                AgentMessage(
-                    type=MessageType.CYCLE_COMPLETE,
-                    payload={
-                        "name": self._agent.name,
-                        "success": result.success,
-                        "iterations": result.iterations,
-                    },
-                )
-            )
+            self._agent.run_once()
         except Exception as e:
             self._lg.warning("cycle failed", extra={"agent": self._agent.name, "exception": e})
-            self._channel.send(
-                AgentMessage(
-                    type=MessageType.CYCLE_ERROR,
-                    payload={"name": self._agent.name, "error": str(e)},
-                )
-            )
-
-    def _run_agent_loop(self) -> None:
-        """Delegate loop control to agent's run() method.
-
-        Agent manages its own loop, schedule, and exit conditions.
-        """
-        try:
-            result = self._agent.run()  # type: ignore[attr-defined]
-            self._channel.send(
-                AgentMessage(
-                    type=MessageType.CYCLE_COMPLETE,
-                    payload={
-                        "name": self._agent.name,
-                        "success": result.success,
-                        "iterations": result.iterations,
-                    },
-                )
-            )
-        except Exception as e:
-            self._lg.warning("agent run failed", extra={"agent": self._agent.name, "exception": e})
-            self._channel.send(
-                AgentMessage(
-                    type=MessageType.CYCLE_ERROR,
-                    payload={"name": self._agent.name, "error": str(e)},
-                )
-            )
-
-    def _handle_message(self, msg: AgentMessage) -> None:
-        """Handle message from Core."""
-        self._lg.debug("received message", extra={"agent": self._agent.name, "type": msg.type})
-
-        match msg.type:
-            case MessageType.SHUTDOWN:
-                self._running = False
-
-            case MessageType.ASK:
-                self._handle_ask(msg)
-
-            case MessageType.FEEDBACK:
-                self._handle_feedback(msg)
-
-            case MessageType.GET_INSIGHTS:
-                self._handle_get_insights(msg)
-
-            case MessageType.RUN_CYCLE:
-                self._run_cycle()
-
-            case _:
-                self._lg.warning(
-                    "unknown message type", extra={"agent": self._agent.name, "type": msg.type}
-                )
-
-    def _handle_ask(self, msg: AgentMessage) -> None:
-        """Handle ask request."""
-        question = msg.payload.get("question", "")
-        self._lg.debug(
-            "handling ask", extra={"agent": self._agent.name, "question_len": len(question)}
-        )
-
-        try:
-            response_text = self._agent.ask(question)
-            self._lg.debug(
-                "ask completed",
-                extra={"agent": self._agent.name, "response_len": len(response_text)},
-            )
-            self._channel.send(
-                AgentResponse(
-                    id=msg.id,
-                    type=MessageType.ASK_RESPONSE,
-                    request_id=msg.id,
-                    success=True,
-                    payload={"response": response_text},
-                )
-            )
-        except Exception as e:
-            self._lg.warning("ask failed", extra={"agent": self._agent.name, "exception": e})
-            self._send_error_response(msg, str(e))
-
-    def _handle_feedback(self, msg: AgentMessage) -> None:
-        """Handle feedback request."""
-        message = msg.payload.get("message", "")
-        self._lg.debug("handling feedback", extra={"agent": self._agent.name})
-
-        try:
-            self._agent.record_feedback(message)
-            self._lg.debug("feedback recorded", extra={"agent": self._agent.name})
-            self._channel.send(
-                AgentResponse(
-                    id=msg.id,
-                    type=MessageType.FEEDBACK_RESPONSE,
-                    request_id=msg.id,
-                    success=True,
-                )
-            )
-        except Exception as e:
-            self._lg.warning("feedback failed", extra={"agent": self._agent.name, "exception": e})
-            self._send_error_response(msg, str(e))
-
-    def _handle_get_insights(self, msg: AgentMessage) -> None:
-        """Handle get_insights request."""
-        limit = msg.payload.get("limit", 10)
-        self._lg.debug("handling get_insights", extra={"agent": self._agent.name, "limit": limit})
-
-        try:
-            insights = self._build_insights(limit)
-            self._lg.debug(
-                "get_insights completed", extra={"agent": self._agent.name, "count": len(insights)}
-            )
-            self._channel.send(
-                AgentResponse(
-                    id=msg.id,
-                    type=MessageType.INSIGHTS_RESPONSE,
-                    request_id=msg.id,
-                    success=True,
-                    payload={
-                        "insights": insights,
-                        "cycle_count": self._agent.cycle_count,
-                    },
-                )
-            )
-        except Exception as e:
-            self._lg.warning(
-                "get_insights failed", extra={"agent": self._agent.name, "exception": e}
-            )
-            self._send_error_response(msg, str(e))
-
-    def _build_insights(self, limit: int) -> list[dict[str, Any]]:
-        """Build insights list from recent results."""
-        results = self._agent.get_recent_results(limit)
-        return [
-            {
-                "success": r.success,
-                "content": r.content[:500],
-                "iterations": r.iterations,
-            }
-            for r in results
-        ]
-
-    def _send_error_response(self, msg: AgentMessage, error: str) -> None:
-        """Send error response for a request."""
-        # Map request types to response types
-        response_type_map: dict[str, str] = {
-            MessageType.ASK: MessageType.ASK_RESPONSE,
-            MessageType.FEEDBACK: MessageType.FEEDBACK_RESPONSE,
-            MessageType.GET_INSIGHTS: MessageType.INSIGHTS_RESPONSE,
-        }
-        response_type = response_type_map.get(msg.type, MessageType.ERROR)
-
-        self._channel.send(
-            AgentResponse(
-                id=msg.id,
-                type=response_type,
-                request_id=msg.id,
-                success=False,
-                error=error,
-            )
-        )
-
-    def _cleanup(self) -> None:
-        """Clean up on exit."""
-        try:
-            self._agent.stop()
-        except Exception as e:
-            self._lg.warning("error stopping agent", extra={"exception": e})
-
-        self._channel.close()
-        self._lg.info("runner stopped", extra={"agent": self._agent.name})

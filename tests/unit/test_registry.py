@@ -21,8 +21,6 @@ class TestAgentHandle:
         assert handle.name == "test"
         assert handle.config == {}
         assert handle.state == State.CREATED
-        assert handle.process is None
-        assert handle.channel is None
         assert handle.cycle_count == 0
         assert handle.last_run is None
         assert handle.error is None
