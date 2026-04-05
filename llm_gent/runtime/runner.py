@@ -20,7 +20,10 @@ from llm_gent.bus.protocol import (
     AskResponse,
     FeedbackRequest,
     FeedbackResponse,
+    Message,
     RegisterRequest,
+    RelayRequest,
+    RelayResponse,
     Request,
     Response,
     ShutdownRequest,
@@ -258,6 +261,46 @@ class AgentRunner:
         self._lg.info("shutdown requested", extra={"agent": self._agent.name})
         self._running = False
         return ShutdownResponse(id=request.id)
+
+    # -------------------------------------------------------------------------
+    # Agent-to-agent relay
+    # -------------------------------------------------------------------------
+
+    def relay(self, to_agent: str, message: Message, timeout: float = 30.0) -> RelayResponse:
+        """Send a request to another agent via the hub relay.
+
+        The hub forwards the message to the target agent's channel,
+        waits for the response, and returns it.
+
+        Args:
+            to_agent: Target agent name.
+            message: Request to relay.
+            timeout: Seconds to wait for response.
+
+        Returns:
+            RelayResponse containing the target agent's response.
+
+        Raises:
+            RuntimeError: If not connected to bus.
+        """
+        if self._channel is None:
+            raise RuntimeError("not connected to bus")
+
+        relay_req = RelayRequest(
+            from_agent=self._agent.name,
+            to_agent=to_agent,
+            inner_type=message.message_type,
+            inner_payload=message.model_dump(mode="json"),
+        )
+        resp = self._channel.submit(relay_req, timeout=timeout)
+        if isinstance(resp, RelayResponse):
+            return resp
+        # Shouldn't happen -- hub always returns RelayResponse
+        return RelayResponse(
+            id=relay_req.id,
+            from_agent=to_agent,
+            inner_type="response",
+        )
 
     # -------------------------------------------------------------------------
     # Scheduling

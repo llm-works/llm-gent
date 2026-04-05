@@ -27,6 +27,8 @@ from ..bus.protocol import (
     Message,
     RegisterRequest,
     RegisterResponse,
+    RelayRequest,
+    RelayResponse,
     Request,
     Response,
     UnregisterRequest,
@@ -245,6 +247,8 @@ class Hub:
             return self._handle_unregister(request)
         if isinstance(request, ErrorRequest):
             return self._handle_error(request)
+        if isinstance(request, RelayRequest):
+            return self._handle_relay(request)
         return Response(id=request.id, success=False, error="unknown request type")
 
     def _handle_register(self, req: RegisterRequest, sender_id: str | None) -> RegisterResponse:
@@ -278,6 +282,42 @@ class Hub:
             },
         )
         return ErrorResponse(id=req.id, acknowledged=True)
+
+    def _handle_relay(self, req: RelayRequest) -> RelayResponse:
+        """Relay a request from one agent to another.
+
+        Deserializes the inner request, forwards it to the target agent
+        via the target's channel, and wraps the response back.
+        """
+        from ..bus.protocol import MESSAGE_REGISTRY
+
+        target_channel = self._channels.get(req.to_agent)
+        if target_channel is None:
+            return self._relay_error(req, f"Target agent not found: {req.to_agent}")
+
+        inner_class = MESSAGE_REGISTRY.get(req.inner_type)
+        if inner_class is None:
+            return self._relay_error(req, f"Unknown inner message type: {req.inner_type}")
+
+        try:
+            inner_msg = inner_class.model_validate(req.inner_payload)
+            inner_resp = target_channel.submit(inner_msg, timeout=30.0)
+            return RelayResponse(
+                id=req.id,
+                from_agent=req.to_agent,
+                inner_type=getattr(inner_resp, "message_type", "response"),
+                inner_payload=inner_resp.model_dump(mode="json")
+                if hasattr(inner_resp, "model_dump")
+                else {},
+            )
+        except Exception as e:
+            return self._relay_error(req, str(e))
+
+    def _relay_error(self, req: RelayRequest, error: str) -> RelayResponse:
+        """Create an error RelayResponse."""
+        return RelayResponse(
+            id=req.id, success=False, error=error, from_agent=req.to_agent, inner_type="error"
+        )
 
     def _handle_heartbeat(self, message: Message) -> None:
         """Handle heartbeat on pub/sub topic."""

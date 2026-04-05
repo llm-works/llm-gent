@@ -259,6 +259,34 @@ class ShutdownResponse(Response):
     message_type: ClassVar[str] = "shutdown_response"
 
 
+# -- Relay (agent-to-agent via hub) --
+
+
+class RelayRequest(Request):
+    """Agent asks hub to forward a request to another agent.
+
+    The hub forwards the inner payload to the target agent,
+    waits for the response, and returns it to the sender.
+    """
+
+    message_type: ClassVar[str] = "relay_request"
+
+    from_agent: str
+    to_agent: str
+    inner_type: str
+    inner_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class RelayResponse(Response):
+    """Hub returns the target agent's response to the sender."""
+
+    message_type: ClassVar[str] = "relay_response"
+
+    from_agent: str
+    inner_type: str
+    inner_payload: dict[str, Any] = Field(default_factory=dict)
+
+
 # =============================================================================
 # Message registry
 # =============================================================================
@@ -279,4 +307,6 @@ MESSAGE_REGISTRY: dict[str, type[Message]] = {
     "feedback_response": FeedbackResponse,
     "shutdown_request": ShutdownRequest,
     "shutdown_response": ShutdownResponse,
+    "relay_request": RelayRequest,
+    "relay_response": RelayResponse,
 }

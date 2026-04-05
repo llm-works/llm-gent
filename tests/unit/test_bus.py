@@ -183,6 +183,8 @@ class TestMessages:
             "feedback_response",
             "shutdown_request",
             "shutdown_response",
+            "relay_request",
+            "relay_response",
         }
         assert set(MESSAGE_REGISTRY.keys()) == expected
 
