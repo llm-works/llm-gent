@@ -7,7 +7,7 @@ their capabilities, health status, and runtime statistics.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -52,24 +52,28 @@ class AgentInfo:
     stats: AgentStats = field(default_factory=AgentStats)
     restart_count: int = 0
 
-    def is_alive(self, timeout_secs: float = 90.0) -> bool:
+    # Timeout for health derivation (seconds without heartbeat before dead).
+    dead_timeout: float = 90.0
+
+    def is_alive(self, timeout_secs: float | None = None) -> bool:
         """Check if agent has sent a heartbeat within the timeout window."""
+        threshold = timeout_secs if timeout_secs is not None else self.dead_timeout
         elapsed = (datetime.now(UTC) - self.last_heartbeat).total_seconds()
-        return elapsed < timeout_secs
+        return elapsed < threshold
 
     @property
     def health(self) -> AgentHealth:
         """Derive health from heartbeat recency.
 
-        Uses two thresholds:
-        - < 90s since last heartbeat: healthy
-        - 90-180s: unhealthy (missed heartbeats but not yet dead)
-        - > 180s: dead
+        Uses two thresholds derived from ``dead_timeout``:
+        - < dead_timeout: healthy
+        - dead_timeout .. 2*dead_timeout: unhealthy
+        - >= 2*dead_timeout: dead
         """
         elapsed = (datetime.now(UTC) - self.last_heartbeat).total_seconds()
-        if elapsed < 90.0:
+        if elapsed < self.dead_timeout:
             return AgentHealth.HEALTHY
-        elif elapsed < 180.0:
+        elif elapsed < 2 * self.dead_timeout:
             return AgentHealth.UNHEALTHY
         return AgentHealth.DEAD
 
@@ -127,6 +131,7 @@ class AgentRegistry:
                 last_heartbeat=now,
                 stats=existing.stats if existing else AgentStats(),
                 restart_count=existing.restart_count if existing else 0,
+                dead_timeout=self._dead_timeout,
             )
             self._agents[agent_id] = info
             return info
@@ -163,7 +168,7 @@ class AgentRegistry:
             return True
 
     def get(self, agent_id: str) -> AgentInfo | None:
-        """Get a single agent's info.
+        """Get a single agent's info (shallow copy).
 
         Args:
             agent_id: Agent to look up.
@@ -172,12 +177,13 @@ class AgentRegistry:
             AgentInfo or None if not registered.
         """
         with self._lock:
-            return self._agents.get(agent_id)
+            entry = self._agents.get(agent_id)
+            return replace(entry) if entry is not None else None
 
     def list_agents(self) -> list[AgentInfo]:
-        """Get all registered agents."""
+        """Get all registered agents (shallow copies)."""
         with self._lock:
-            return list(self._agents.values())
+            return [replace(a) for a in self._agents.values()]
 
     def get_healthy(self) -> list[AgentInfo]:
         """Get agents with recent heartbeats."""

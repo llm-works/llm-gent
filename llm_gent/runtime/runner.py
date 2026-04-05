@@ -92,7 +92,11 @@ class AgentRunner:
         self._stop_event.set()
 
     def run(self) -> None:
-        """Main loop (blocking). Connect to bus, then process requests + cycles."""
+        """Main loop (blocking). Connect to bus, then process requests + cycles.
+
+        Exceptions propagate to the caller (ThreadRunner/ProcessRunner) so
+        restart_on_failure policies can trigger.
+        """
         self._lg.debug("starting runner...", extra={"agent": self._agent.name})
 
         try:
@@ -101,9 +105,8 @@ class AgentRunner:
             self._run_loop()
         except KeyboardInterrupt:
             pass
-        except Exception as e:
-            self._lg.warning("runner error", extra={"agent": self._agent.name, "exception": e})
         finally:
+            self._stop_event.set()
             self._disconnect_bus()
             self._stop_agent()
 
@@ -223,8 +226,8 @@ class AgentRunner:
 
         try:
             self._agent.run()  # type: ignore[attr-defined]
-        except Exception as e:
-            self._lg.warning("agent run failed", extra={"agent": self._agent.name, "exception": e})
+        finally:
+            self._stop_event.set()
 
     def _request_poll_loop(self) -> None:
         """Background thread polling for requests (for agent-controlled loops)."""

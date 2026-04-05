@@ -20,7 +20,7 @@ class AgentHandle:
     - Metrics (cycle_count, last_run)
 
     The handle is owned by the AgentRegistry. Lifecycle management
-    (start, stop) is handled by Core via appinfra's ThreadRunner.
+    (start, stop) is handled by Hub via appinfra's ThreadRunner.
     """
 
     name: str

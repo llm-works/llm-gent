@@ -12,7 +12,6 @@ All agent operations go through the Hub: start, stop, ask, feedback.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from appinfra import DotDict
@@ -145,12 +144,13 @@ class Hub:
         config["name"] = name
         entry = self._registry.register(agent_id=name, agent_type=AgentType.INJECTED, config=config)
 
-        self._create_channel(name)
         try:
+            self._create_channel(name)
             runner = self._create_runner(name, config, llm_config, learn_config)
             runner.start()
         except Exception:
             self._cleanup_agent_resources(name)
+            self._registry.unregister(name)
             raise
         self._runners[name] = runner
 
@@ -225,11 +225,16 @@ class Hub:
 
         Returns:
             Agent's response string.
+
+        Raises:
+            RuntimeError: If the agent returned a failure response.
         """
         channel = self._require_channel(name)
         req = AskRequest(question=question)
         resp = channel.submit(req, timeout=timeout)
         if isinstance(resp, AskResponse):
+            if not resp.success:
+                raise RuntimeError(f"Agent {name} ask failed: {resp.error}")
             return resp.response
         return ""
 
@@ -240,9 +245,14 @@ class Hub:
             name: Agent name.
             message: Feedback text.
             timeout: Response timeout.
+
+        Raises:
+            RuntimeError: If the agent returned a failure response.
         """
         channel = self._require_channel(name)
-        channel.submit(FeedbackRequest(message=message), timeout=timeout)
+        resp = channel.submit(FeedbackRequest(message=message), timeout=timeout)
+        if hasattr(resp, "success") and not resp.success:
+            raise RuntimeError(f"Agent {name} feedback failed: {getattr(resp, 'error', 'unknown')}")
 
     def broadcast(self, message: Message) -> None:
         """Broadcast a message to all agents."""
@@ -271,26 +281,16 @@ class Hub:
     def _handle_register(self, req: RegisterRequest, sender_id: str | None) -> RegisterResponse:
         """Handle agent registration.
 
-        If the agent is already registered as INJECTED (started by the hub),
-        merge capabilities/metadata without overwriting the type or config.
-        External agents are registered normally.
+        Uses the registry's atomic register_or_merge to avoid TOCTOU races.
+        Injected agents get capabilities/metadata merged; external agents
+        are registered normally.
         """
-        existing = self._registry.get(req.agent_id)
-        if existing is not None and existing.agent_type == AgentType.INJECTED:
-            # Injected agent connecting on bus -- merge without overwriting
-            if req.capabilities:
-                existing.capabilities = req.capabilities
-            if req.metadata:
-                existing.metadata.update(req.metadata)
-            existing.last_heartbeat = datetime.now(UTC)
-            entry = existing
-        else:
-            entry = self._registry.register(
-                agent_id=req.agent_id,
-                agent_type=AgentType.EXTERNAL,
-                capabilities=req.capabilities,
-                metadata=req.metadata,
-            )
+        entry = self._registry.register_or_merge(
+            agent_id=req.agent_id,
+            agent_type=AgentType.EXTERNAL,
+            capabilities=req.capabilities,
+            metadata=req.metadata,
+        )
         self._lg.info(
             "agent registered",
             extra={"agent_id": req.agent_id, "capabilities": req.capabilities},

@@ -15,7 +15,12 @@ from llm_gent.hub import Hub, HubConfig
 pytestmark = pytest.mark.integration
 
 
-def _find_free_ports(n: int) -> list[int]:
+def _reserve_ports(n: int) -> tuple[list[int], list[socket.socket]]:
+    """Reserve n ephemeral ports, returning ports and open sockets.
+
+    Callers must close the returned sockets immediately before ZMQ binds
+    to minimize the TOCTOU race window between port discovery and use.
+    """
     socks = []
     ports = []
     for _ in range(n):
@@ -23,9 +28,17 @@ def _find_free_ports(n: int) -> list[int]:
         s.bind(("", 0))
         ports.append(s.getsockname()[1])
         socks.append(s)
-    for s in socks:
-        s.close()
-    return ports
+    return ports, socks
+
+
+def _wait_for_zmq_connect(seconds: float = 0.2) -> None:
+    """Wait for ZMQ async connect/bind to settle.
+
+    ZMQ connect is asynchronous and provides no readiness signal.
+    A short sleep is the only reliable way to allow the underlying
+    TCP handshake and subscription propagation to complete.
+    """
+    time.sleep(seconds)
 
 
 @pytest.fixture
@@ -34,7 +47,7 @@ def hub_and_worker():
     from unittest.mock import MagicMock
 
     lg = MagicMock()
-    ports = _find_free_ports(3)
+    ports, socks = _reserve_ports(3)
 
     hub_config = HubConfig(
         bus=CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2]),
@@ -45,10 +58,12 @@ def hub_and_worker():
     hub = Hub(lg, hub_config, bus_config=worker_config)
     worker = ZMQWorkerBus(lg, "test-worker", worker_config)
 
+    for s in socks:
+        s.close()
     hub.start()
-    time.sleep(0.1)
+    _wait_for_zmq_connect(0.1)
     worker.start()
-    time.sleep(0.2)
+    _wait_for_zmq_connect(0.2)
 
     assert worker.transport is not None
     channel: BufferedChannel[Any, Any] = BufferedChannel(worker.transport)
@@ -95,7 +110,7 @@ class TestHubHeartbeatFlow:
         channel.submit(RegisterRequest(agent_id="test-worker"), timeout=5.0)
 
         worker.publish_heartbeat({"ticks": 42, "errors": 2})
-        time.sleep(0.5)
+        _wait_for_zmq_connect(0.5)
 
         info = hub.registry.get("test-worker")
         assert info is not None
@@ -110,7 +125,7 @@ class TestHubMultipleWorkers:
         from unittest.mock import MagicMock
 
         lg = MagicMock()
-        ports = _find_free_ports(3)
+        ports, socks = _reserve_ports(3)
 
         wcfg = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
         hub_config = HubConfig(
@@ -119,8 +134,11 @@ class TestHubMultipleWorkers:
         )
 
         hub = Hub(lg, hub_config, bus_config=wcfg)
+
+        for s in socks:
+            s.close()
         hub.start()
-        time.sleep(0.1)
+        _wait_for_zmq_connect(0.1)
 
         workers = []
         channels = []
@@ -133,7 +151,7 @@ class TestHubMultipleWorkers:
             ch: BufferedChannel[Any, Any] = BufferedChannel(w.transport)
             channels.append(ch)
 
-        time.sleep(0.3)
+        _wait_for_zmq_connect(0.3)
 
         yield hub, workers, channels
 

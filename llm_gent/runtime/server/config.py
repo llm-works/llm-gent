@@ -141,6 +141,8 @@ class HubConfigYAML(BaseModel):
     """Hub/bus configuration from YAML.
 
     Controls the ZMQ bus ports and health monitoring settings.
+    The hub is always enabled — the ``enabled`` field is reserved for
+    future use.
 
     Example::
 
@@ -153,25 +155,22 @@ class HubConfigYAML(BaseModel):
           max_restarts: 3
     """
 
-    enabled: bool = True
-    """Whether the hub bus is enabled."""
-
-    router_port: int = 5555
+    router_port: int = Field(default=5555, ge=1, le=65535)
     """ZMQ ROUTER port for RPC."""
 
-    pub_port: int = 5556
+    pub_port: int = Field(default=5556, ge=1, le=65535)
     """ZMQ PUB port for broadcasts."""
 
-    sub_port: int = 5557
+    sub_port: int = Field(default=5557, ge=1, le=65535)
     """ZMQ SUB port for heartbeats/events."""
 
-    dead_timeout: float = 90.0
+    dead_timeout: float = Field(default=90.0, gt=0)
     """Seconds without heartbeat before agent is considered dead."""
 
-    health_check_interval: float = 30.0
+    health_check_interval: float = Field(default=30.0, gt=0)
     """Seconds between health check sweeps."""
 
-    max_restarts: int = 3
+    max_restarts: int = Field(default=3, ge=0)
     """Maximum restart attempts for dead injected agents."""
 
 

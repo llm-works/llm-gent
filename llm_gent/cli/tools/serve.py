@@ -376,7 +376,7 @@ class ServeTool(Tool):
         try:
             response = hub.ask(req.agent_name, req.question)
             return AskAgentResponse(id=req.id, response=response)
-        except (KeyError, RuntimeError) as e:
+        except Exception as e:
             return AskAgentResponse(id=req.id, success=False, error=str(e))
 
     def _handle_feedback_agent(self, hub: Hub, request: Request) -> Response:
@@ -394,7 +394,7 @@ class ServeTool(Tool):
         try:
             hub.feedback(req.agent_name, req.message)
             return FeedbackAgentResponse(id=req.id)
-        except (KeyError, RuntimeError) as e:
+        except Exception as e:
             return FeedbackAgentResponse(id=req.id, success=False, error=str(e))
 
     def _handle_get_insights(self, hub: Hub, request: Request) -> Response:
@@ -435,8 +435,8 @@ class ServeTool(Tool):
                 if agent_config.schedule is not None:
                     hub.start_agent(name, config_dict)
                 else:
-                    # Register without starting (no schedule)
-                    hub.registry.register(name, config=config_dict)
+                    # Message-only agent: start with runner for ask/feedback
+                    hub.start_agent(name, config_dict)
             except Exception as e:
                 self.lg.error("failed to start agent", extra={"agent": name, "exception": e})
 

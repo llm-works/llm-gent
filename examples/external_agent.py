@@ -75,16 +75,15 @@ def main() -> None:
     bus.subscribe("broadcast", lambda msg: print(f"Broadcast: {msg}"))
 
     channel = _connect_and_register(bus)
-    _run_heartbeat_loop(bus, agent_id)
-
-    # Unregister and disconnect
-    with contextlib.suppress(Exception):
-        channel.submit(UnregisterRequest(agent_id=agent_id), timeout=2.0)
-        print("Unregistered.")
-
-    channel.close()
-    bus.stop()
-    print("Done.")
+    try:
+        _run_heartbeat_loop(bus, agent_id)
+    finally:
+        with contextlib.suppress(Exception):
+            channel.submit(UnregisterRequest(agent_id=agent_id), timeout=2.0)
+            print("Unregistered.")
+        channel.close()
+        bus.stop()
+        print("Done.")
 
 
 if __name__ == "__main__":

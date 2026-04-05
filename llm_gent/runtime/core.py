@@ -136,6 +136,8 @@ class Core:
         req = AskRequest(question=question)
         resp = channel.submit(req, timeout=timeout)
         if isinstance(resp, AskResponse):
+            if not resp.success:
+                raise RuntimeError(f"Agent {name} ask failed: {resp.error}")
             return resp.response
         return ""
 
@@ -149,7 +151,9 @@ class Core:
         if channel is None:
             raise RuntimeError(f"No channel for agent: {name}")
 
-        channel.submit(FeedbackRequest(message=message), timeout=timeout)
+        resp = channel.submit(FeedbackRequest(message=message), timeout=timeout)
+        if hasattr(resp, "success") and not resp.success:
+            raise RuntimeError(f"Agent {name} feedback failed: {getattr(resp, 'error', 'unknown')}")
 
     def shutdown(self) -> None:
         """Shut down all running agents."""
@@ -217,13 +221,22 @@ class Core:
         return ProcessRunner(service)
 
     def _stop_service(self, name: str) -> None:
-        """Stop the agent's runner and clean up channel/transport."""
+        """Stop the agent's runner and clean up channel/transport.
+
+        Always cleans up channel and transport even if runner.stop() fails.
+        Re-raises runner errors after cleanup.
+        """
         runner = self._runners.pop(name, None)
-        if runner is not None:
-            runner.stop()
-
-        channel = self._channels.pop(name, None)
-        if channel is not None:
-            channel.close()
-
-        self._bus.remove_agent_transport(name)
+        runner_error: Exception | None = None
+        try:
+            if runner is not None:
+                runner.stop()
+        except Exception as e:
+            runner_error = e
+        finally:
+            channel = self._channels.pop(name, None)
+            if channel is not None:
+                channel.close()
+            self._bus.remove_agent_transport(name)
+        if runner_error is not None:
+            raise runner_error

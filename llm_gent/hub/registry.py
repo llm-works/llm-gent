@@ -56,18 +56,28 @@ class AgentEntry:
     restart_count: int = 0
     error: str | None = None
 
-    def is_alive(self, timeout_secs: float = 90.0) -> bool:
+    # Timeout for health derivation (seconds without heartbeat before dead).
+    dead_timeout: float = 90.0
+
+    def is_alive(self, timeout_secs: float | None = None) -> bool:
         """Check if agent has heartbeated within the timeout window."""
+        threshold = timeout_secs if timeout_secs is not None else self.dead_timeout
         elapsed = (datetime.now(UTC) - self.last_heartbeat).total_seconds()
-        return elapsed < timeout_secs
+        return elapsed < threshold
 
     @property
     def health(self) -> AgentHealth:
-        """Derive health from heartbeat recency."""
+        """Derive health from heartbeat recency.
+
+        Uses two thresholds derived from ``dead_timeout``:
+        - < dead_timeout: healthy
+        - dead_timeout .. 2*dead_timeout: unhealthy
+        - >= 2*dead_timeout: dead
+        """
         elapsed = (datetime.now(UTC) - self.last_heartbeat).total_seconds()
-        if elapsed < 90.0:
+        if elapsed < self.dead_timeout:
             return AgentHealth.HEALTHY
-        elif elapsed < 180.0:
+        elif elapsed < 2 * self.dead_timeout:
             return AgentHealth.UNHEALTHY
         return AgentHealth.DEAD
 
@@ -119,9 +129,40 @@ class Registry:
                 last_heartbeat=now,
                 stats=existing.stats if existing else AgentStats(),
                 restart_count=existing.restart_count if existing else 0,
+                dead_timeout=self._dead_timeout,
             )
             self._agents[agent_id] = entry
             return entry
+
+    def register_or_merge(
+        self,
+        agent_id: str,
+        agent_type: AgentType = AgentType.EXTERNAL,
+        capabilities: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentEntry:
+        """Atomically register or merge an agent.
+
+        If the agent is already registered as INJECTED, merges
+        capabilities/metadata without overwriting the type or config.
+        Otherwise registers as a new external agent.
+        """
+        now = datetime.now(UTC)
+        with self._lock:
+            existing = self._agents.get(agent_id)
+            if existing is not None and existing.agent_type == AgentType.INJECTED:
+                if capabilities:
+                    existing.capabilities = capabilities
+                if metadata:
+                    existing.metadata.update(metadata)
+                existing.last_heartbeat = now
+                return existing
+            return self.register(
+                agent_id=agent_id,
+                agent_type=agent_type,
+                capabilities=capabilities,
+                metadata=metadata,
+            )
 
     def unregister(self, agent_id: str) -> bool:
         """Remove an agent. Returns True if found."""

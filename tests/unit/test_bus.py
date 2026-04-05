@@ -310,9 +310,8 @@ class TestAgentRegistry:
         registry.register("alive")
         registry.register("dead")
 
-        dead_info = registry.get("dead")
-        assert dead_info is not None
-        dead_info.last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
+        # Mutate internal state directly (get() returns a copy).
+        registry._agents["dead"].last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
 
         healthy = registry.get_healthy()
         dead = registry.get_dead()
@@ -329,10 +328,9 @@ class TestAgentRegistry:
         registry.register("dead-1")
         registry.register("dead-2")
 
+        # Mutate internal state directly (get() returns a copy).
         for agent_id in ("dead-1", "dead-2"):
-            info = registry.get(agent_id)
-            assert info is not None
-            info.last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
+            registry._agents[agent_id].last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
 
         removed = registry.cleanup_dead()
         assert set(removed) == {"dead-1", "dead-2"}
@@ -357,9 +355,8 @@ class TestAgentRegistry:
         registry.register("b")
         registry.register("c")
 
-        info = registry.get("c")
-        assert info is not None
-        info.last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
+        # Mutate internal state directly (get() returns a copy).
+        registry._agents["c"].last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
 
         assert registry.healthy_count == 2
 
