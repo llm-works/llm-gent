@@ -68,7 +68,9 @@ class TestHubRequestHandling:
         assert notice.capabilities == ["fetch", "search"]
 
     def test_register_duplicate_updates(self, hub):
-        """Re-registering updates entry."""
+        """Re-registering updates entry without extra AgentJoined broadcast."""
+        from llm_gent.bus.protocol import AgentJoined
+
         req1 = RegisterRequest(agent_id="worker-1", capabilities=["v1"])
         hub._handle_bus_request(req1, "id1")
 
@@ -78,6 +80,12 @@ class TestHubRequestHandling:
         entry = hub.registry.get("worker-1")
         assert entry is not None
         assert entry.capabilities == ["v2"]
+
+        # Only one AgentJoined (from first registration, not re-register)
+        joined_calls = [
+            c for c in hub._bus.broadcast.call_args_list if isinstance(c[0][0], AgentJoined)
+        ]
+        assert len(joined_calls) == 1
 
     def test_unregister_request(self, hub):
         """Hub removes agent on unregister request."""
@@ -101,10 +109,19 @@ class TestHubRequestHandling:
         assert notice.reason == "voluntary"
 
     def test_unregister_unknown_agent(self, hub):
-        """Unregistering unknown agent still succeeds."""
+        """Unregistering unknown agent succeeds without phantom broadcast."""
+        from llm_gent.bus.protocol import AgentLeft
+
+        hub._bus.broadcast.reset_mock()
         req = UnregisterRequest(agent_id="ghost")
         resp = hub._handle_bus_request(req, "id1")
         assert resp.success is True
+
+        # No AgentLeft broadcast for unknown agent
+        left_calls = [
+            c for c in hub._bus.broadcast.call_args_list if isinstance(c[0][0], AgentLeft)
+        ]
+        assert len(left_calls) == 0
 
     def test_error_request(self, hub):
         """Hub acknowledges error escalation."""
