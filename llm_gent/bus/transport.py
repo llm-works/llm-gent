@@ -16,6 +16,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import zmq
 
@@ -607,7 +608,7 @@ class ZMQWorkerBus:
         from .protocol import AgentStats, HeartbeatResponse
 
         response = HeartbeatResponse(
-            id=request_id,
+            id=request_id or uuid4().hex[:12],
             agent_id=self._agent_id,
             round_id=round_id,
             stats=AgentStats(**stats),

@@ -239,7 +239,7 @@ class AgentRunner:
         """Delegate to agent's run() method, poll requests in background.
 
         Note: ShutdownNotice sets _stop_event but cannot interrupt a blocking
-        agent.run() call.  Agents using run() should check runner.stop_event
+        agent.run() call.  Agents using run() should check runner._stop_event
         periodically for cooperative cancellation.
         """
         # Start request poller in background thread
