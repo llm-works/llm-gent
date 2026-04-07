@@ -182,6 +182,7 @@ class TestMessages:
             "feedback_response",
             "shutdown_request",
             "shutdown_response",
+            "shutdown_notice",
             "relay_request",
             "relay_response",
         }

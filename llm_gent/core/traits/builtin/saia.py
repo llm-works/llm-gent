@@ -145,7 +145,7 @@ class SAIATrait(BaseTrait):
             content=saia_result.output,
             iterations=saia_result.iterations,
             tokens_used=saia_result.score.total_tokens if saia_result.score else 0,
-            trace_id=saia_result.trace_id,
+            trace_id=saia_result.trace.trace_id,
         )
 
     def _get_tools_and_executor(self) -> tuple[list[ToolDef], Any]:

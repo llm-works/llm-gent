@@ -1,7 +1,7 @@
 """E2E tests for agent execution with SAIA.
 
 These tests require:
-1. An LLM server at localhost:8000
+1. An LLM server at localhost:18100
 2. SAIA properly configured with tools/executor
 
 Tests are skipped if the environment is not properly configured.
@@ -18,7 +18,7 @@ from llm_gent.agents.default import Factory
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
-LLM_BASE_URL = "http://localhost:8000/v1"
+LLM_BASE_URL = "http://localhost:18100/v1"
 LLM_MODEL = "default"
 
 

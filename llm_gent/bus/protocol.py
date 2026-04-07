@@ -147,20 +147,34 @@ class RegisterResponse(Response):
 
 
 class HeartbeatRequest(Request):
-    """Agent liveness signal with optional stats."""
+    """Heartbeat challenge or agent-initiated liveness signal.
+
+    Two usage modes:
+    - Hub broadcast: hub publishes with round_id set, agent_id empty.
+      Agents respond with HeartbeatResponse.
+    - Agent p2p: agent sends via DEALER with agent_id and stats set.
+      Hub responds with HeartbeatResponse.
+    """
 
     message_type: ClassVar[str] = "heartbeat_request"
 
-    agent_id: str
+    agent_id: str = ""
+    round_id: str = ""
     stats: AgentStats = Field(default_factory=AgentStats)
 
 
 class HeartbeatResponse(Response):
-    """Hub acknowledges heartbeat."""
+    """Heartbeat response from agent (broadcast) or hub (p2p).
+
+    When responding to a broadcast, agent sets agent_id, round_id, and stats.
+    When hub acknowledges a p2p heartbeat, hub sets agent_id and ack_time.
+    """
 
     message_type: ClassVar[str] = "heartbeat_response"
 
-    agent_id: str
+    agent_id: str = ""
+    round_id: str = ""
+    stats: AgentStats = Field(default_factory=AgentStats)
     ack_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -248,7 +262,7 @@ class FeedbackResponse(Response):
 
 
 class ShutdownRequest(Request):
-    """Hub tells an agent to shut down."""
+    """Hub tells a specific agent to shut down (p2p via DEALER)."""
 
     message_type: ClassVar[str] = "shutdown_request"
 
@@ -257,6 +271,20 @@ class ShutdownResponse(Response):
     """Agent acknowledges shutdown."""
 
     message_type: ClassVar[str] = "shutdown_response"
+
+
+class ShutdownNotice(Message):
+    """Hub broadcasts impending shutdown to all agents.
+
+    System-tier broadcast — not a request, no response expected.
+    Agents should clean up within the grace period before the hub
+    tears down the bus.
+    """
+
+    message_type: ClassVar[str] = "shutdown_notice"
+
+    reason: str = ""
+    grace_period_secs: float = 5.0
 
 
 # -- Relay (agent-to-agent via hub) --
@@ -307,6 +335,7 @@ MESSAGE_REGISTRY: dict[str, type[Message]] = {
     "feedback_response": FeedbackResponse,
     "shutdown_request": ShutdownRequest,
     "shutdown_response": ShutdownResponse,
+    "shutdown_notice": ShutdownNotice,
     "relay_request": RelayRequest,
     "relay_response": RelayResponse,
 }

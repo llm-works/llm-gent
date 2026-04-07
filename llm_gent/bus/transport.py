@@ -584,15 +584,26 @@ class ZMQWorkerBus:
             raise RuntimeError("bus not started")
         self._dealer.send_multipart([b"", envelope.to_bytes()])
 
-    def publish_heartbeat(self, stats: dict[str, Any]) -> None:
-        """Publish a heartbeat with agent stats."""
-        from .protocol import AgentStats, HeartbeatRequest
+    def publish_heartbeat(self, stats: dict[str, Any], round_id: str = "") -> None:
+        """Publish a heartbeat response with agent stats.
 
-        request = HeartbeatRequest(
+        Used to respond to hub-initiated heartbeat broadcasts or to
+        proactively report liveness on the heartbeat topic.
+
+        Args:
+            stats: Agent statistics (ticks, errors, etc.).
+            round_id: Round ID from the hub's HeartbeatRequest (if responding
+                to a broadcast).
+        """
+        from .protocol import AgentStats, HeartbeatResponse
+
+        response = HeartbeatResponse(
+            id="",
             agent_id=self._agent_id,
+            round_id=round_id,
             stats=AgentStats(**stats),
         )
-        self.publish("heartbeat", request)
+        self.publish("heartbeat", response)
 
     # -------------------------------------------------------------------------
     # Polling

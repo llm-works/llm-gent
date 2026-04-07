@@ -11,11 +11,15 @@ All agent operations go through the Hub: start, stop, ask, feedback.
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from appinfra import DotDict
 from appinfra.service import BufferedChannel, ProcessRunner, RestartPolicy, ThreadRunner
+from appinfra.time import Ticker, TickerMode
 
 from ..bus.protocol import (
     AskRequest,
@@ -24,6 +28,7 @@ from ..bus.protocol import (
     ErrorResponse,
     FeedbackRequest,
     HeartbeatRequest,
+    HeartbeatResponse,
     Message,
     RegisterRequest,
     RegisterResponse,
@@ -31,6 +36,7 @@ from ..bus.protocol import (
     RelayResponse,
     Request,
     Response,
+    ShutdownNotice,
     UnregisterRequest,
     UnregisterResponse,
 )
@@ -53,6 +59,7 @@ class HubConfig:
     dead_timeout: float = 90.0
     health_check_interval: float = 30.0
     max_restarts: int = 3
+    shutdown_grace_secs: float = 5.0
 
 
 class Hub:
@@ -93,6 +100,11 @@ class Hub:
         self._runners: dict[str, ThreadRunner | ProcessRunner] = {}
         self._channels: dict[str, BufferedChannel[Any, Any]] = {}
 
+        # Heartbeat broadcaster state
+        self._hb_ticker = Ticker(lg, secs=config.health_check_interval, mode=TickerMode.FLEX)
+        self._hb_stop = threading.Event()
+        self._hb_thread: threading.Thread | None = None
+
     @property
     def registry(self) -> Registry:
         return self._registry
@@ -111,11 +123,28 @@ class Hub:
         self._bus.on_request(self._handle_bus_request)
         self._bus.set_route_validator(lambda agent_id: self._registry.get(agent_id) is not None)
         self._bus.register_async_request("relay_request")
-        self._bus.subscribe("heartbeat", self._handle_heartbeat)
+        self._bus.subscribe("heartbeat", self._handle_heartbeat_response)
+        self._start_heartbeat_broadcaster()
         self._lg.info("hub started")
 
-    def stop(self) -> None:
-        """Stop all agents and shut down the bus."""
+    def stop(self, reason: str = "") -> None:
+        """Stop all agents and shut down the bus.
+
+        Sequence:
+        1. Stop heartbeat broadcaster (no more challenges).
+        2. Broadcast ShutdownNotice so agents can clean up.
+        3. Wait grace period for agents to react.
+        4. Force-stop injected agent runners.
+        5. Tear down bus.
+        """
+        self._stop_heartbeat_broadcaster()
+        self._broadcast_shutdown(reason)
+
+        grace = self._config.shutdown_grace_secs
+        if grace > 0:
+            self._lg.info("waiting for agents to shut down", extra={"grace_secs": grace})
+            time.sleep(grace)
+
         for name in list(self._runners.keys()):
             try:
                 self.stop_agent(name)
@@ -124,6 +153,21 @@ class Hub:
 
         self._bus.stop()
         self._lg.info("hub stopped")
+
+    def _broadcast_shutdown(self, reason: str) -> None:
+        """Broadcast shutdown notice to all agents."""
+        notice = ShutdownNotice(
+            reason=reason,
+            grace_period_secs=self._config.shutdown_grace_secs,
+        )
+        try:
+            self._bus.broadcast(notice)
+            self._lg.info(
+                "shutdown notice broadcast",
+                extra={"grace_secs": self._config.shutdown_grace_secs},
+            )
+        except Exception as e:
+            self._lg.warning("failed to broadcast shutdown notice", extra={"exception": e})
 
     # =========================================================================
     # Agent lifecycle (injected agents)
@@ -273,6 +317,8 @@ class Hub:
             return self._handle_register(request, sender_id)
         if isinstance(request, UnregisterRequest):
             return self._handle_unregister(request)
+        if isinstance(request, HeartbeatRequest):
+            return self._handle_heartbeat_p2p(request)
         if isinstance(request, ErrorRequest):
             return self._handle_error(request)
         if isinstance(request, RelayRequest):
@@ -352,11 +398,49 @@ class Hub:
             id=req.id, success=False, error=error, from_agent=req.to_agent, inner_type="error"
         )
 
-    def _handle_heartbeat(self, message: Message) -> None:
-        """Handle heartbeat on pub/sub topic."""
-        if not isinstance(message, HeartbeatRequest):
+    def _handle_heartbeat_response(self, message: Message) -> None:
+        """Handle heartbeat response on pub/sub topic (agent responding to broadcast)."""
+        if not isinstance(message, HeartbeatResponse):
             return
         self._registry.heartbeat(message.agent_id, message.stats)
+
+    def _handle_heartbeat_p2p(self, request: HeartbeatRequest) -> HeartbeatResponse:
+        """Handle agent-initiated heartbeat via DEALER (p2p)."""
+        self._registry.heartbeat(request.agent_id, request.stats)
+        return HeartbeatResponse(id=request.id, agent_id=request.agent_id)
+
+    # =========================================================================
+    # Heartbeat broadcaster
+    # =========================================================================
+
+    def _start_heartbeat_broadcaster(self) -> None:
+        """Start background thread that broadcasts HeartbeatRequest periodically."""
+        self._hb_stop.clear()
+        self._hb_thread = threading.Thread(
+            target=self._heartbeat_broadcast_loop, daemon=True, name="hub-heartbeat"
+        )
+        self._hb_thread.start()
+
+    def _stop_heartbeat_broadcaster(self) -> None:
+        """Stop the heartbeat broadcaster thread."""
+        self._hb_stop.set()
+        if self._hb_thread is not None:
+            self._hb_thread.join(timeout=2.0)
+            self._hb_thread = None
+
+    def _heartbeat_broadcast_loop(self) -> None:
+        """Broadcast HeartbeatRequest at the configured interval."""
+        while not self._hb_stop.is_set():
+            if self._hb_ticker.try_tick():
+                round_id = uuid4().hex[:12]
+                self._bus.broadcast(HeartbeatRequest(round_id=round_id))
+                self._lg.trace(
+                    "heartbeat broadcast",
+                    extra={"round_id": round_id},
+                )
+            else:
+                wait = min(self._hb_ticker.time_until_next_tick(), 1.0)
+                self._hb_stop.wait(wait)
 
     # =========================================================================
     # Internal
