@@ -355,6 +355,18 @@ class TestExtRequestHandling:
         assert handler.shutdown_called is True
         assert ext_runner._running is False
 
+    def test_handle_shutdown_survives_handler_error(self, ext_runner, handler):
+        """Shutdown still stops runner even if handler.on_shutdown() raises."""
+        ext_runner._running = True
+        handler.on_shutdown = MagicMock(side_effect=RuntimeError("cleanup boom"))
+        req = ShutdownRequest()
+
+        resp = ext_runner._handle_request(req)
+
+        assert isinstance(resp, ShutdownResponse)
+        assert resp.success is True
+        assert ext_runner._running is False
+
     def test_handle_unknown_request(self, ext_runner):
         """Unknown request type returns error response."""
         req = MagicMock(spec=["id"])

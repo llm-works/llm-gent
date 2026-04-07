@@ -81,7 +81,6 @@ class BaseAgentRunner(ABC):
         self._stop_event = threading.Event()
         self._bus: ZMQWorkerBus | None = None
         self._channel: BufferedChannel[Any, Any] | None = None
-        self._cycle_count = 0
 
     @property
     def agent_id(self) -> str:
@@ -229,7 +228,7 @@ class BaseAgentRunner(ABC):
 
     def _get_stats(self) -> dict[str, Any]:
         """Get current agent stats for heartbeat. Override to customize."""
-        return {"ticks": self._cycle_count, "errors": 0}
+        return {"ticks": 0, "errors": 0}
 
     def _handle_shutdown_notice(self, notice: ShutdownNotice) -> None:
         """Handle hub shutdown broadcast — begin graceful shutdown."""
@@ -291,7 +290,10 @@ class BaseAgentRunner(ABC):
     def _handle_shutdown(self, request: ShutdownRequest) -> ShutdownResponse:
         """Handle shutdown request."""
         self._lg.info("shutdown requested", extra={"agent": self._agent_id})
-        self._handler.on_shutdown()
+        try:
+            self._handler.on_shutdown()
+        except Exception as e:
+            self._lg.warning("handler on_shutdown failed", extra={"exception": e})
         self._stop_event.set()
         return ShutdownResponse(id=request.id)
 
@@ -567,14 +569,12 @@ class AgentRunner(BaseAgentRunner):
         except Exception as e:
             raise ConnectionError(f"failed to fetch bus config from {url}: {e}") from e
 
+        import dataclasses
+
         from llm_gent.bus.transport import WorkerBusConfig
 
-        bus_config = WorkerBusConfig(
-            coordinator_host=data["coordinator_host"],
-            router_port=data["router_port"],
-            pub_port=data["pub_port"],
-            sub_port=data["sub_port"],
-        )
+        fields = {f.name for f in dataclasses.fields(WorkerBusConfig)}
+        bus_config = WorkerBusConfig(**{k: v for k, v in data.items() if k in fields})
         return cls(
             lg=lg,
             handler=handler,
