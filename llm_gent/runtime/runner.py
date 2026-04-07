@@ -174,6 +174,7 @@ class BaseAgentRunner(ABC):
                 "bus registration failed",
                 extra={"agent": self._agent_id, "exception": e},
             )
+            raise
 
     def _disconnect_bus(self) -> None:
         """Unregister and disconnect."""
@@ -614,7 +615,8 @@ class AgentRunner(BaseAgentRunner):
         self._stop_event.set()
         if self._bg_thread is not None:
             self._bg_thread.join(timeout=timeout)
-            self._bg_thread = None
+            if not self._bg_thread.is_alive():
+                self._bg_thread = None
 
     # -------------------------------------------------------------------------
     # Run loop
