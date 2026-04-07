@@ -559,26 +559,8 @@ class AgentRunner(BaseAgentRunner):
         Raises:
             ConnectionError: If the hub is unreachable or returns an error.
         """
-        import urllib.request
-
         url = f"{hub_url.rstrip('/')}/bus/config"
-        try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                import json
-
-                data = json.loads(resp.read())
-        except Exception as e:
-            raise ConnectionError(f"failed to fetch bus config from {url}: {e}") from e
-
-        import dataclasses
-
-        from llm_gent.bus.transport import WorkerBusConfig
-
-        fields = {f.name for f in dataclasses.fields(WorkerBusConfig)}
-        try:
-            bus_config = WorkerBusConfig(**{k: v for k, v in data.items() if k in fields})
-        except (TypeError, ValueError) as e:
-            raise ConnectionError(f"invalid bus config from {url}: {e}") from e
+        bus_config = cls._fetch_bus_config(url)
         return cls(
             lg=lg,
             handler=handler,
@@ -587,6 +569,38 @@ class AgentRunner(BaseAgentRunner):
             capabilities=capabilities,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _fetch_bus_config(url: str) -> WorkerBusConfig:
+        """Fetch and parse bus config from hub HTTP endpoint.
+
+        Raises:
+            ConnectionError: On network errors or malformed responses.
+        """
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                import json
+
+                data = json.loads(resp.read())
+        except Exception as e:
+            raise ConnectionError(f"failed to fetch bus config from {url}: {e}") from e
+
+        if not isinstance(data, dict):
+            raise ConnectionError(
+                f"invalid bus config from {url}: expected object, got {type(data).__name__}"
+            )
+
+        import dataclasses
+
+        from llm_gent.bus.transport import WorkerBusConfig as _WBC
+
+        fields = {f.name for f in dataclasses.fields(_WBC)}
+        try:
+            return _WBC(**{k: v for k, v in data.items() if k in fields})
+        except (TypeError, ValueError) as e:
+            raise ConnectionError(f"invalid bus config from {url}: {e}") from e
 
     # -------------------------------------------------------------------------
     # Background execution
