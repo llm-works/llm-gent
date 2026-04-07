@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from appinfra import DotDict
 from appinfra.service import Service
 
-from .runner import AgentRunner
+from .runner import ManagedAgentRunner
 
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ class AgentService(Service):
         self._learn_config = learn_config
         self._variables = variables or {}
         self._factory_module = factory_module
-        self._runner: AgentRunner | None = None
+        self._runner: ManagedAgentRunner | None = None
         self._healthy = False
         # Injected by ProcessRunner before execute()
         self._shutdown_event: MPEvent | None = None
@@ -81,7 +81,7 @@ class AgentService(Service):
         agent = factory.create(self._config, variables=self._variables)
         agent.start()
 
-        self._runner = AgentRunner(
+        self._runner = ManagedAgentRunner(
             lg=self._lg,
             agent=agent,
             bus_config=self._bus_config,
