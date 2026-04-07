@@ -123,6 +123,7 @@ class ZMQCoordinatorBus:
         self._poll_thread: threading.Thread | None = None
         self._running = False
         self._send_lock = threading.Lock()
+        self._pub_lock = threading.Lock()
         self._transports_lock = threading.Lock()
         self._async_pool: ThreadPoolExecutor | None = None
         self._async_request_types: set[str] = set()
@@ -254,17 +255,19 @@ class ZMQCoordinatorBus:
         """Broadcast a message to all agents via PUB socket."""
         envelope = message.to_envelope()
         envelope.source = "hub"
-        if self._pub is None:
-            raise RuntimeError("bus not started")
-        self._pub.send_multipart([b"broadcast", envelope.to_bytes()])
+        with self._pub_lock:
+            if self._pub is None:
+                raise RuntimeError("bus not started")
+            self._pub.send_multipart([b"broadcast", envelope.to_bytes()])
 
     def publish(self, topic: str, message: Message) -> None:
         """Publish a message to a specific topic via PUB socket."""
         envelope = message.to_envelope()
         envelope.source = "hub"
-        if self._pub is None:
-            raise RuntimeError("bus not started")
-        self._pub.send_multipart([topic.encode(), envelope.to_bytes()])
+        with self._pub_lock:
+            if self._pub is None:
+                raise RuntimeError("bus not started")
+            self._pub.send_multipart([topic.encode(), envelope.to_bytes()])
 
     # -------------------------------------------------------------------------
     # Polling
@@ -584,7 +587,12 @@ class ZMQWorkerBus:
             raise RuntimeError("bus not started")
         self._dealer.send_multipart([b"", envelope.to_bytes()])
 
-    def publish_heartbeat(self, stats: dict[str, Any], round_id: str = "") -> None:
+    def publish_heartbeat(
+        self,
+        stats: dict[str, Any],
+        round_id: str = "",
+        request_id: str = "",
+    ) -> None:
         """Publish a heartbeat response with agent stats.
 
         Used to respond to hub-initiated heartbeat broadcasts or to
@@ -594,11 +602,12 @@ class ZMQWorkerBus:
             stats: Agent statistics (ticks, errors, etc.).
             round_id: Round ID from the hub's HeartbeatRequest (if responding
                 to a broadcast).
+            request_id: ID of the HeartbeatRequest being responded to.
         """
         from .protocol import AgentStats, HeartbeatResponse
 
         response = HeartbeatResponse(
-            id="",
+            id=request_id,
             agent_id=self._agent_id,
             round_id=round_id,
             stats=AgentStats(**stats),

@@ -400,6 +400,13 @@ class Hub:
 
     def _handle_heartbeat_response(self, message: Message) -> None:
         """Handle heartbeat response on pub/sub topic (agent responding to broadcast)."""
+        if isinstance(message, HeartbeatRequest):
+            self._lg.warning(
+                "received HeartbeatRequest on pub/sub (old protocol); "
+                "agent should send HeartbeatResponse instead",
+                extra={"agent_id": message.agent_id},
+            )
+            return
         if not isinstance(message, HeartbeatResponse):
             return
         self._registry.heartbeat(message.agent_id, message.stats)

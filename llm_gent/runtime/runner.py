@@ -184,15 +184,11 @@ class AgentRunner:
         if self._bus is None:
             return
         try:
-            from llm_gent.bus.protocol import AgentStats, HeartbeatResponse
-
-            resp = HeartbeatResponse(
-                id=request.id,
-                agent_id=self._agent.name,
+            self._bus.publish_heartbeat(
+                stats={"ticks": self._agent.cycle_count, "errors": 0},
                 round_id=request.round_id,
-                stats=AgentStats(ticks=self._agent.cycle_count, errors=0),
+                request_id=request.id,
             )
-            self._bus.publish("heartbeat", resp)
         except Exception as e:
             self._lg.debug(
                 "heartbeat response failed",
@@ -240,7 +236,12 @@ class AgentRunner:
                 time.sleep(min(self._calculate_sleep(), 0.5))
 
     def _run_agent_loop(self) -> None:
-        """Delegate to agent's run() method, poll requests in background."""
+        """Delegate to agent's run() method, poll requests in background.
+
+        Note: ShutdownNotice sets _stop_event but cannot interrupt a blocking
+        agent.run() call.  Agents using run() should check runner.stop_event
+        periodically for cooperative cancellation.
+        """
         # Start request poller in background thread
         poller = threading.Thread(
             target=self._request_poll_loop, daemon=True, name=f"req-{self._agent.name}"

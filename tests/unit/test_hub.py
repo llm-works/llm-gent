@@ -25,7 +25,12 @@ def lg():
 
 @pytest.fixture
 def hub(lg):
-    """Create a hub with mocked bus (zero grace for fast tests)."""
+    """Create a hub with mocked bus (zero grace for fast tests).
+
+    Note: start() is intentionally not called so the heartbeat broadcaster
+    thread stays dormant.  Tests that assert broadcast call counts depend
+    on this.
+    """
     config = HubConfig(max_restarts=3, shutdown_grace_secs=0.0)
     h = Hub(lg, config, bus_config=WorkerBusConfig())
     h._bus = MagicMock()

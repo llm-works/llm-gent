@@ -12,17 +12,17 @@ periodically, and this agent responds with HeartbeatResponse.
 
 import contextlib
 import signal
+import threading
 import time
 from typing import Any
 
 from appinfra.service import BufferedChannel
 
 from llm_gent.bus.protocol import (
-    AgentStats,
     HeartbeatRequest,
-    HeartbeatResponse,
     Message,
     RegisterRequest,
+    ShutdownNotice,
     UnregisterRequest,
 )
 from llm_gent.bus.transport import WorkerBusConfig, ZMQWorkerBus
@@ -45,20 +45,22 @@ class PrintLogger:
 
 
 _tick_count = 0
+_stop = threading.Event()
 
 
-def _handle_broadcast(bus: ZMQWorkerBus, agent_id: str, message: Message) -> None:
-    """Respond to hub heartbeat broadcasts."""
-    if not isinstance(message, HeartbeatRequest):
+def _handle_broadcast(bus: ZMQWorkerBus, message: Message) -> None:
+    """Respond to hub heartbeat broadcasts and shutdown notices."""
+    if isinstance(message, HeartbeatRequest):
+        bus.publish_heartbeat(
+            stats={"ticks": _tick_count, "errors": 0},
+            round_id=message.round_id,
+            request_id=message.id,
+        )
+    elif isinstance(message, ShutdownNotice):
+        print(f"Shutdown notice: {message.reason} (grace={message.grace_period_secs}s)")
+        _stop.set()
+    else:
         print(f"Broadcast: {message}")
-        return
-    resp = HeartbeatResponse(
-        id=message.id,
-        agent_id=agent_id,
-        round_id=message.round_id,
-        stats=AgentStats(ticks=_tick_count, errors=0),
-    )
-    bus.publish("heartbeat", resp)
 
 
 def _connect_and_register(bus: ZMQWorkerBus) -> BufferedChannel[Any, Any]:
@@ -76,21 +78,19 @@ def _connect_and_register(bus: ZMQWorkerBus) -> BufferedChannel[Any, Any]:
 
 
 def _run_loop(agent_id: str) -> None:
-    """Run until interrupted."""
+    """Run until interrupted or hub sends ShutdownNotice."""
     global _tick_count
-    running = True
 
     def stop(sig: int, frame: Any) -> None:
-        nonlocal running
-        running = False
+        _stop.set()
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
     print(f"Agent '{agent_id}' running. Responding to hub heartbeats. Ctrl+C to stop.")
-    while running:
+    while not _stop.is_set():
         _tick_count += 1
-        time.sleep(5)
+        _stop.wait(5)
 
 
 def main() -> None:
@@ -98,7 +98,7 @@ def main() -> None:
     agent_id = "external-dummy"
 
     bus = ZMQWorkerBus(lg, agent_id, WorkerBusConfig())  # type: ignore[arg-type]
-    bus.subscribe("broadcast", lambda msg: _handle_broadcast(bus, agent_id, msg))
+    bus.subscribe("broadcast", lambda msg: _handle_broadcast(bus, msg))
 
     channel = _connect_and_register(bus)
     try:
