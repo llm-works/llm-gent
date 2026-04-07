@@ -19,6 +19,8 @@ from typing import Any
 from appinfra.service import BufferedChannel
 
 from llm_gent.bus.protocol import (
+    AgentJoined,
+    AgentLeft,
     HeartbeatRequest,
     Message,
     RegisterRequest,
@@ -59,6 +61,10 @@ def _handle_broadcast(bus: ZMQWorkerBus, message: Message) -> None:
     elif isinstance(message, ShutdownNotice):
         print(f"Shutdown notice: {message.reason} (grace={message.grace_period_secs}s)")
         _stop.set()
+    elif isinstance(message, AgentJoined):
+        print(f"Agent joined: {message.agent_id} caps={message.capabilities}")
+    elif isinstance(message, AgentLeft):
+        print(f"Agent left: {message.agent_id} reason={message.reason}")
     else:
         print(f"Broadcast: {message}")
 

@@ -57,8 +57,20 @@ class TestHubRequestHandling:
         assert entry.agent_type == AgentType.EXTERNAL
         assert entry.capabilities == ["fetch", "search"]
 
+        # Verify AgentJoined broadcast
+        from llm_gent.bus.protocol import AgentJoined
+
+        calls = hub._bus.broadcast.call_args_list
+        assert len(calls) == 1
+        notice = calls[0][0][0]
+        assert isinstance(notice, AgentJoined)
+        assert notice.agent_id == "worker-1"
+        assert notice.capabilities == ["fetch", "search"]
+
     def test_register_duplicate_updates(self, hub):
-        """Re-registering updates entry."""
+        """Re-registering updates entry without extra AgentJoined broadcast."""
+        from llm_gent.bus.protocol import AgentJoined
+
         req1 = RegisterRequest(agent_id="worker-1", capabilities=["v1"])
         hub._handle_bus_request(req1, "id1")
 
@@ -69,20 +81,47 @@ class TestHubRequestHandling:
         assert entry is not None
         assert entry.capabilities == ["v2"]
 
+        # Only one AgentJoined (from first registration, not re-register)
+        joined_calls = [
+            c for c in hub._bus.broadcast.call_args_list if isinstance(c[0][0], AgentJoined)
+        ]
+        assert len(joined_calls) == 1
+
     def test_unregister_request(self, hub):
         """Hub removes agent on unregister request."""
         hub.registry.register("worker-1")
+        hub._bus.broadcast.reset_mock()
+
         req = UnregisterRequest(agent_id="worker-1")
         resp = hub._handle_bus_request(req, "id1")
 
         assert resp.success is True
         assert hub.registry.get("worker-1") is None
 
+        # Verify AgentLeft broadcast
+        from llm_gent.bus.protocol import AgentLeft
+
+        calls = hub._bus.broadcast.call_args_list
+        assert len(calls) == 1
+        notice = calls[0][0][0]
+        assert isinstance(notice, AgentLeft)
+        assert notice.agent_id == "worker-1"
+        assert notice.reason == "voluntary"
+
     def test_unregister_unknown_agent(self, hub):
-        """Unregistering unknown agent still succeeds."""
+        """Unregistering unknown agent succeeds without phantom broadcast."""
+        from llm_gent.bus.protocol import AgentLeft
+
+        hub._bus.broadcast.reset_mock()
         req = UnregisterRequest(agent_id="ghost")
         resp = hub._handle_bus_request(req, "id1")
         assert resp.success is True
+
+        # No AgentLeft broadcast for unknown agent
+        left_calls = [
+            c for c in hub._bus.broadcast.call_args_list if isinstance(c[0][0], AgentLeft)
+        ]
+        assert len(left_calls) == 0
 
     def test_error_request(self, hub):
         """Hub acknowledges error escalation."""
@@ -160,6 +199,51 @@ class TestHubHeartbeat:
 
         assert isinstance(resp, HeartbeatResponse)
         assert resp.agent_id == "worker-1"
+
+
+class TestHubMembership:
+    """Tests for membership broadcast behavior."""
+
+    def test_stop_agent_no_duplicate_broadcast(self, hub):
+        """stop_agent only broadcasts AgentLeft if agent was still registered."""
+        from llm_gent.bus.protocol import AgentLeft
+
+        hub.registry.register("worker-1")
+        hub._runners["worker-1"] = MagicMock()
+        hub._bus.broadcast.reset_mock()
+
+        # Simulate runner's UnregisterRequest already removed the agent
+        hub.registry.unregister("worker-1")
+        hub._bus.broadcast.reset_mock()
+
+        hub.stop_agent("worker-1")
+
+        # No AgentLeft broadcast since agent was already unregistered
+        left_calls = [
+            c for c in hub._bus.broadcast.call_args_list if isinstance(c[0][0], AgentLeft)
+        ]
+        assert len(left_calls) == 0
+
+    def test_cleanup_dead_agents_broadcasts(self, hub):
+        """cleanup_dead_agents broadcasts AgentLeft for each dead agent."""
+        from datetime import UTC, datetime, timedelta
+
+        from llm_gent.bus.protocol import AgentLeft
+
+        entry = hub.registry.register("dead-agent")
+        # Make agent dead by backdating heartbeat
+        entry.last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
+        hub._bus.broadcast.reset_mock()
+
+        removed = hub.cleanup_dead_agents()
+
+        assert removed == ["dead-agent"]
+        calls = hub._bus.broadcast.call_args_list
+        assert len(calls) == 1
+        notice = calls[0][0][0]
+        assert isinstance(notice, AgentLeft)
+        assert notice.agent_id == "dead-agent"
+        assert notice.reason == "dead"
 
 
 class TestHubShutdown:

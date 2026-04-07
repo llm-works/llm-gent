@@ -22,6 +22,8 @@ from appinfra.service import BufferedChannel, ProcessRunner, RestartPolicy, Thre
 from appinfra.time import Ticker, TickerMode
 
 from ..bus.protocol import (
+    AgentJoined,
+    AgentLeft,
     AskRequest,
     AskResponse,
     ErrorRequest,
@@ -169,6 +171,16 @@ class Hub:
         except Exception as e:
             self._lg.warning("failed to broadcast shutdown notice", extra={"exception": e})
 
+    def _broadcast_membership(self, notice: AgentJoined | AgentLeft) -> None:
+        """Broadcast agent join/leave notice to all agents."""
+        try:
+            self._bus.broadcast(notice)
+        except Exception as e:
+            self._lg.warning(
+                "failed to broadcast membership notice",
+                extra={"agent_id": notice.agent_id, "exception": e},
+            )
+
     # =========================================================================
     # Agent lifecycle (injected agents)
     # =========================================================================
@@ -246,8 +258,18 @@ class Hub:
                 runner.stop()
         finally:
             self._cleanup_agent_resources(name)
-            self._registry.unregister(name)
+            was_registered = self._registry.unregister(name)
+            if was_registered:
+                self._broadcast_membership(AgentLeft(agent_id=name, reason="shutdown"))
             self._lg.info("agent stopped", extra={"agent": name})
+
+    def cleanup_dead_agents(self) -> list[str]:
+        """Remove dead agents from registry, free resources, and broadcast departures."""
+        dead = self._registry.cleanup_dead()
+        for agent_id in dead:
+            self._cleanup_agent_resources(agent_id)
+            self._broadcast_membership(AgentLeft(agent_id=agent_id, reason="dead"))
+        return dead
 
     def _cleanup_agent_resources(self, name: str) -> None:
         """Clean up channel and transport for an agent."""
@@ -332,6 +354,7 @@ class Hub:
         Injected agents get capabilities/metadata merged; external agents
         are registered normally.
         """
+        is_new = self._registry.get(req.agent_id) is None
         entry = self._registry.register_or_merge(
             agent_id=req.agent_id,
             agent_type=AgentType.EXTERNAL,
@@ -342,12 +365,22 @@ class Hub:
             "agent registered",
             extra={"agent_id": req.agent_id, "capabilities": req.capabilities},
         )
+        if is_new:
+            self._broadcast_membership(
+                AgentJoined(
+                    agent_id=req.agent_id,
+                    agent_type=entry.agent_type.value,
+                    capabilities=req.capabilities,
+                )
+            )
         return RegisterResponse(id=req.id, agent_id=req.agent_id, registered_at=entry.registered_at)
 
     def _handle_unregister(self, req: UnregisterRequest) -> UnregisterResponse:
         """Handle agent unregistration."""
-        self._registry.unregister(req.agent_id)
+        was_registered = self._registry.unregister(req.agent_id)
         self._lg.info("agent unregistered", extra={"agent_id": req.agent_id})
+        if was_registered:
+            self._broadcast_membership(AgentLeft(agent_id=req.agent_id, reason="voluntary"))
         return UnregisterResponse(id=req.id, agent_id=req.agent_id)
 
     def _handle_error(self, req: ErrorRequest) -> ErrorResponse:

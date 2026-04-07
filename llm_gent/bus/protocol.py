@@ -11,10 +11,30 @@ Serialization flow:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, ClassVar
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# Message tiers (FIX-style session/application separation)
+# =============================================================================
+
+
+class MessageTier(StrEnum):
+    """Classification tier for bus messages.
+
+    Inspired by FIX protocol session/application separation:
+    - SYSTEM: infrastructure (heartbeat, registration, shutdown)
+    - APPLICATION: business logic (ask, feedback, errors)
+    - CUSTOM: agent-defined protocols (relay, collaboration)
+    """
+
+    SYSTEM = "system"
+    APPLICATION = "application"
+    CUSTOM = "custom"
 
 
 # =============================================================================
@@ -26,6 +46,7 @@ class Message(BaseModel):
     """Base message type for bus communication."""
 
     message_type: ClassVar[str] = "base"
+    tier: ClassVar[MessageTier] = MessageTier.SYSTEM
 
     def to_envelope(self, version: int = 1) -> Envelope:
         """Wrap this message in an envelope for transport.
@@ -39,6 +60,7 @@ class Message(BaseModel):
         return Envelope(
             version=version,
             msg_type=self.message_type,
+            tier=self.tier.value,
             payload=self.model_dump(mode="json"),
         )
 
@@ -75,6 +97,7 @@ class Envelope(BaseModel):
 
     version: int = Field(default=1, ge=1)
     msg_type: str
+    tier: str = "system"
     source: str | None = None
     target: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -214,6 +237,7 @@ class ErrorRequest(Request):
     """Agent escalates an error to the hub."""
 
     message_type: ClassVar[str] = "error_request"
+    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
 
     agent_id: str
     error: ErrorReport
@@ -224,6 +248,7 @@ class ErrorResponse(Response):
     """Hub acknowledges error receipt."""
 
     message_type: ClassVar[str] = "error_response"
+    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
 
     acknowledged: bool = True
 
@@ -235,6 +260,7 @@ class AskRequest(Request):
     """Hub asks an agent a question."""
 
     message_type: ClassVar[str] = "ask_request"
+    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
 
     question: str
 
@@ -243,6 +269,7 @@ class AskResponse(Response):
     """Agent responds to a question."""
 
     message_type: ClassVar[str] = "ask_response"
+    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
 
     response: str = ""
 
@@ -251,6 +278,7 @@ class FeedbackRequest(Request):
     """Hub sends feedback to an agent."""
 
     message_type: ClassVar[str] = "feedback_request"
+    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
 
     message: str
 
@@ -259,18 +287,21 @@ class FeedbackResponse(Response):
     """Agent acknowledges feedback."""
 
     message_type: ClassVar[str] = "feedback_response"
+    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
 
 
 class ShutdownRequest(Request):
     """Hub tells a specific agent to shut down (p2p via DEALER)."""
 
     message_type: ClassVar[str] = "shutdown_request"
+    tier: ClassVar[MessageTier] = MessageTier.SYSTEM
 
 
 class ShutdownResponse(Response):
     """Agent acknowledges shutdown."""
 
     message_type: ClassVar[str] = "shutdown_response"
+    tier: ClassVar[MessageTier] = MessageTier.SYSTEM
 
 
 class ShutdownNotice(Message):
@@ -287,6 +318,34 @@ class ShutdownNotice(Message):
     grace_period_secs: float = 5.0
 
 
+# -- Swarm membership notices --
+
+
+class AgentJoined(Message):
+    """Hub broadcasts when an agent joins the swarm.
+
+    System-tier broadcast — no response expected.
+    """
+
+    message_type: ClassVar[str] = "agent_joined"
+
+    agent_id: str
+    agent_type: str = "external"
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class AgentLeft(Message):
+    """Hub broadcasts when an agent leaves the swarm.
+
+    System-tier broadcast — no response expected.
+    """
+
+    message_type: ClassVar[str] = "agent_left"
+
+    agent_id: str
+    reason: str = "voluntary"  # voluntary | dead | shutdown
+
+
 # -- Relay (agent-to-agent via hub) --
 
 
@@ -298,6 +357,7 @@ class RelayRequest(Request):
     """
 
     message_type: ClassVar[str] = "relay_request"
+    tier: ClassVar[MessageTier] = MessageTier.CUSTOM
 
     from_agent: str
     to_agent: str
@@ -309,6 +369,7 @@ class RelayResponse(Response):
     """Hub returns the target agent's response to the sender."""
 
     message_type: ClassVar[str] = "relay_response"
+    tier: ClassVar[MessageTier] = MessageTier.CUSTOM
 
     from_agent: str
     inner_type: str
@@ -336,6 +397,8 @@ MESSAGE_REGISTRY: dict[str, type[Message]] = {
     "shutdown_request": ShutdownRequest,
     "shutdown_response": ShutdownResponse,
     "shutdown_notice": ShutdownNotice,
+    "agent_joined": AgentJoined,
+    "agent_left": AgentLeft,
     "relay_request": RelayRequest,
     "relay_response": RelayResponse,
 }

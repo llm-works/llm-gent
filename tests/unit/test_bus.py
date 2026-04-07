@@ -183,10 +183,58 @@ class TestMessages:
             "shutdown_request",
             "shutdown_response",
             "shutdown_notice",
+            "agent_joined",
+            "agent_left",
             "relay_request",
             "relay_response",
         }
         assert set(MESSAGE_REGISTRY.keys()) == expected
+
+    def test_message_tier_classification(self):
+        """Message tiers are correctly assigned per FIX-style classification."""
+        from llm_gent.bus.protocol import (
+            AgentJoined,
+            AgentLeft,
+            AskRequest,
+            FeedbackResponse,
+            HeartbeatRequest,
+            MessageTier,
+            RelayRequest,
+            RelayResponse,
+            ShutdownNotice,
+            ShutdownRequest,
+        )
+
+        # System tier: infrastructure messages
+        assert HeartbeatRequest.tier == MessageTier.SYSTEM
+        assert ShutdownNotice.tier == MessageTier.SYSTEM
+        assert ShutdownRequest.tier == MessageTier.SYSTEM
+        assert AgentJoined.tier == MessageTier.SYSTEM
+        assert AgentLeft.tier == MessageTier.SYSTEM
+
+        # Application tier: business messages
+        assert AskRequest.tier == MessageTier.APPLICATION
+        assert FeedbackResponse.tier == MessageTier.APPLICATION
+
+        # Custom tier: agent-defined protocols
+        assert RelayRequest.tier == MessageTier.CUSTOM
+        assert RelayResponse.tier == MessageTier.CUSTOM
+
+    def test_envelope_carries_tier(self):
+        """Envelope includes tier from the message class."""
+        from llm_gent.bus.protocol import AskRequest, RelayRequest
+
+        # System tier (default from Message base)
+        env = HeartbeatRequest(agent_id="x").to_envelope()
+        assert env.tier == "system"
+
+        # Application tier
+        env = AskRequest(question="hi").to_envelope()
+        assert env.tier == "application"
+
+        # Custom tier
+        env = RelayRequest(from_agent="a", to_agent="b", inner_type="t").to_envelope()
+        assert env.tier == "custom"
 
 
 # =============================================================================
