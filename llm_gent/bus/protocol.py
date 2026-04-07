@@ -60,6 +60,7 @@ class Message(BaseModel):
         return Envelope(
             version=version,
             msg_type=self.message_type,
+            tier=self.tier.value,
             payload=self.model_dump(mode="json"),
         )
 
@@ -96,6 +97,7 @@ class Envelope(BaseModel):
 
     version: int = Field(default=1, ge=1)
     msg_type: str
+    tier: str = "system"
     source: str | None = None
     target: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -292,14 +294,14 @@ class ShutdownRequest(Request):
     """Hub tells a specific agent to shut down (p2p via DEALER)."""
 
     message_type: ClassVar[str] = "shutdown_request"
-    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
+    tier: ClassVar[MessageTier] = MessageTier.SYSTEM
 
 
 class ShutdownResponse(Response):
     """Agent acknowledges shutdown."""
 
     message_type: ClassVar[str] = "shutdown_response"
-    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
+    tier: ClassVar[MessageTier] = MessageTier.SYSTEM
 
 
 class ShutdownNotice(Message):

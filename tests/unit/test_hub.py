@@ -184,6 +184,51 @@ class TestHubHeartbeat:
         assert resp.agent_id == "worker-1"
 
 
+class TestHubMembership:
+    """Tests for membership broadcast behavior."""
+
+    def test_stop_agent_no_duplicate_broadcast(self, hub):
+        """stop_agent only broadcasts AgentLeft if agent was still registered."""
+        from llm_gent.bus.protocol import AgentLeft
+
+        hub.registry.register("worker-1")
+        hub._runners["worker-1"] = MagicMock()
+        hub._bus.broadcast.reset_mock()
+
+        # Simulate runner's UnregisterRequest already removed the agent
+        hub.registry.unregister("worker-1")
+        hub._bus.broadcast.reset_mock()
+
+        hub.stop_agent("worker-1")
+
+        # No AgentLeft broadcast since agent was already unregistered
+        left_calls = [
+            c for c in hub._bus.broadcast.call_args_list if isinstance(c[0][0], AgentLeft)
+        ]
+        assert len(left_calls) == 0
+
+    def test_cleanup_dead_agents_broadcasts(self, hub):
+        """cleanup_dead_agents broadcasts AgentLeft for each dead agent."""
+        from datetime import UTC, datetime, timedelta
+
+        from llm_gent.bus.protocol import AgentLeft
+
+        entry = hub.registry.register("dead-agent")
+        # Make agent dead by backdating heartbeat
+        entry.last_heartbeat = datetime.now(UTC) - timedelta(seconds=200)
+        hub._bus.broadcast.reset_mock()
+
+        removed = hub.cleanup_dead_agents()
+
+        assert removed == ["dead-agent"]
+        calls = hub._bus.broadcast.call_args_list
+        assert len(calls) == 1
+        notice = calls[0][0][0]
+        assert isinstance(notice, AgentLeft)
+        assert notice.agent_id == "dead-agent"
+        assert notice.reason == "dead"
+
+
 class TestHubShutdown:
     """Tests for hub shutdown sequence."""
 

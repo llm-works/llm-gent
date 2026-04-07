@@ -258,9 +258,17 @@ class Hub:
                 runner.stop()
         finally:
             self._cleanup_agent_resources(name)
-            self._registry.unregister(name)
-            self._broadcast_membership(AgentLeft(agent_id=name, reason="shutdown"))
+            was_registered = self._registry.unregister(name)
+            if was_registered:
+                self._broadcast_membership(AgentLeft(agent_id=name, reason="shutdown"))
             self._lg.info("agent stopped", extra={"agent": name})
+
+    def cleanup_dead_agents(self) -> list[str]:
+        """Remove dead agents from registry and broadcast departures."""
+        dead = self._registry.cleanup_dead()
+        for agent_id in dead:
+            self._broadcast_membership(AgentLeft(agent_id=agent_id, reason="dead"))
+        return dead
 
     def _cleanup_agent_resources(self, name: str) -> None:
         """Clean up channel and transport for an agent."""

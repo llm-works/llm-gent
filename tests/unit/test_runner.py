@@ -5,10 +5,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from llm_gent.bus.protocol import (
+    AgentJoined,
+    AgentLeft,
     AskRequest,
     AskResponse,
     FeedbackRequest,
     FeedbackResponse,
+    HeartbeatRequest,
+    ShutdownNotice,
     ShutdownRequest,
     ShutdownResponse,
 )
@@ -116,6 +120,53 @@ class TestRequestHandling:
 
         assert resp.success is False
         assert "unknown" in resp.error
+
+
+class TestBroadcastHandling:
+    """Tests for _handle_broadcast (processes hub broadcasts)."""
+
+    def test_handle_heartbeat_broadcast(self, runner):
+        """HeartbeatRequest triggers heartbeat response."""
+        runner._bus = MagicMock()
+        req = HeartbeatRequest(round_id="r1")
+
+        runner._handle_broadcast(req)
+
+        runner._bus.publish_heartbeat.assert_called_once()
+
+    def test_handle_shutdown_notice(self, runner):
+        """ShutdownNotice sets stop event."""
+        notice = ShutdownNotice(reason="test", grace_period_secs=1.0)
+
+        runner._handle_broadcast(notice)
+
+        assert runner._running is False
+
+    def test_handle_agent_joined(self, runner):
+        """AgentJoined logs and doesn't crash."""
+        msg = AgentJoined(agent_id="peer-1", capabilities=["search"])
+
+        runner._handle_broadcast(msg)
+
+        runner._lg.info.assert_called()
+        call_args = runner._lg.info.call_args
+        assert "joined" in call_args[0][0]
+
+    def test_handle_agent_left(self, runner):
+        """AgentLeft logs and doesn't crash."""
+        msg = AgentLeft(agent_id="peer-1", reason="voluntary")
+
+        runner._handle_broadcast(msg)
+
+        runner._lg.info.assert_called()
+        call_args = runner._lg.info.call_args
+        assert "left" in call_args[0][0]
+
+    def test_handle_unknown_broadcast(self, runner):
+        """Unknown broadcast type is silently ignored."""
+        msg = MagicMock(spec=[])
+
+        runner._handle_broadcast(msg)  # Should not raise
 
 
 class TestScheduling:
