@@ -57,6 +57,16 @@ class TestHubRequestHandling:
         assert entry.agent_type == AgentType.EXTERNAL
         assert entry.capabilities == ["fetch", "search"]
 
+        # Verify AgentJoined broadcast
+        from llm_gent.bus.protocol import AgentJoined
+
+        calls = hub._bus.broadcast.call_args_list
+        assert len(calls) == 1
+        notice = calls[0][0][0]
+        assert isinstance(notice, AgentJoined)
+        assert notice.agent_id == "worker-1"
+        assert notice.capabilities == ["fetch", "search"]
+
     def test_register_duplicate_updates(self, hub):
         """Re-registering updates entry."""
         req1 = RegisterRequest(agent_id="worker-1", capabilities=["v1"])
@@ -72,11 +82,23 @@ class TestHubRequestHandling:
     def test_unregister_request(self, hub):
         """Hub removes agent on unregister request."""
         hub.registry.register("worker-1")
+        hub._bus.broadcast.reset_mock()
+
         req = UnregisterRequest(agent_id="worker-1")
         resp = hub._handle_bus_request(req, "id1")
 
         assert resp.success is True
         assert hub.registry.get("worker-1") is None
+
+        # Verify AgentLeft broadcast
+        from llm_gent.bus.protocol import AgentLeft
+
+        calls = hub._bus.broadcast.call_args_list
+        assert len(calls) == 1
+        notice = calls[0][0][0]
+        assert isinstance(notice, AgentLeft)
+        assert notice.agent_id == "worker-1"
+        assert notice.reason == "voluntary"
 
     def test_unregister_unknown_agent(self, hub):
         """Unregistering unknown agent still succeeds."""

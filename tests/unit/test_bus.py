@@ -183,10 +183,42 @@ class TestMessages:
             "shutdown_request",
             "shutdown_response",
             "shutdown_notice",
+            "agent_joined",
+            "agent_left",
             "relay_request",
             "relay_response",
         }
         assert set(MESSAGE_REGISTRY.keys()) == expected
+
+    def test_message_tier_classification(self):
+        """Message tiers are correctly assigned per FIX-style classification."""
+        from llm_gent.bus.protocol import (
+            AgentJoined,
+            AgentLeft,
+            AskRequest,
+            FeedbackResponse,
+            HeartbeatRequest,
+            MessageTier,
+            RelayRequest,
+            RelayResponse,
+            ShutdownNotice,
+            ShutdownRequest,
+        )
+
+        # System tier: infrastructure messages
+        assert HeartbeatRequest.tier == MessageTier.SYSTEM
+        assert ShutdownNotice.tier == MessageTier.SYSTEM
+        assert AgentJoined.tier == MessageTier.SYSTEM
+        assert AgentLeft.tier == MessageTier.SYSTEM
+
+        # Application tier: business messages
+        assert AskRequest.tier == MessageTier.APPLICATION
+        assert FeedbackResponse.tier == MessageTier.APPLICATION
+        assert ShutdownRequest.tier == MessageTier.APPLICATION
+
+        # Custom tier: agent-defined protocols
+        assert RelayRequest.tier == MessageTier.CUSTOM
+        assert RelayResponse.tier == MessageTier.CUSTOM
 
 
 # =============================================================================

@@ -5,6 +5,8 @@ and agent-to-hub communication within a swarm.
 """
 
 from .protocol import (
+    AgentJoined,
+    AgentLeft,
     AgentStats,
     Envelope,
     ErrorReport,
@@ -13,6 +15,7 @@ from .protocol import (
     HeartbeatRequest,
     HeartbeatResponse,
     Message,
+    MessageTier,
     RegisterRequest,
     RegisterResponse,
     Request,
@@ -33,6 +36,8 @@ from .transport import (
 
 __all__ = [
     # Protocol
+    "AgentJoined",
+    "AgentLeft",
     "AgentStats",
     "Envelope",
     "ErrorReport",
@@ -41,6 +46,7 @@ __all__ = [
     "HeartbeatRequest",
     "HeartbeatResponse",
     "Message",
+    "MessageTier",
     "RegisterRequest",
     "RegisterResponse",
     "Request",

@@ -22,6 +22,8 @@ from appinfra.service import BufferedChannel, ProcessRunner, RestartPolicy, Thre
 from appinfra.time import Ticker, TickerMode
 
 from ..bus.protocol import (
+    AgentJoined,
+    AgentLeft,
     AskRequest,
     AskResponse,
     ErrorRequest,
@@ -169,6 +171,16 @@ class Hub:
         except Exception as e:
             self._lg.warning("failed to broadcast shutdown notice", extra={"exception": e})
 
+    def _broadcast_membership(self, notice: AgentJoined | AgentLeft) -> None:
+        """Broadcast agent join/leave notice to all agents."""
+        try:
+            self._bus.broadcast(notice)
+        except Exception as e:
+            self._lg.warning(
+                "failed to broadcast membership notice",
+                extra={"agent_id": notice.agent_id, "exception": e},
+            )
+
     # =========================================================================
     # Agent lifecycle (injected agents)
     # =========================================================================
@@ -247,6 +259,7 @@ class Hub:
         finally:
             self._cleanup_agent_resources(name)
             self._registry.unregister(name)
+            self._broadcast_membership(AgentLeft(agent_id=name, reason="shutdown"))
             self._lg.info("agent stopped", extra={"agent": name})
 
     def _cleanup_agent_resources(self, name: str) -> None:
@@ -342,12 +355,20 @@ class Hub:
             "agent registered",
             extra={"agent_id": req.agent_id, "capabilities": req.capabilities},
         )
+        self._broadcast_membership(
+            AgentJoined(
+                agent_id=req.agent_id,
+                agent_type=entry.agent_type.value,
+                capabilities=req.capabilities,
+            )
+        )
         return RegisterResponse(id=req.id, agent_id=req.agent_id, registered_at=entry.registered_at)
 
     def _handle_unregister(self, req: UnregisterRequest) -> UnregisterResponse:
         """Handle agent unregistration."""
         self._registry.unregister(req.agent_id)
         self._lg.info("agent unregistered", extra={"agent_id": req.agent_id})
+        self._broadcast_membership(AgentLeft(agent_id=req.agent_id, reason="voluntary"))
         return UnregisterResponse(id=req.id, agent_id=req.agent_id)
 
     def _handle_error(self, req: ErrorRequest) -> ErrorResponse:

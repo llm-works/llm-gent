@@ -17,6 +17,8 @@ from appinfra.service import BufferedChannel, ChannelTimeoutError
 from appinfra.time import Ticker, TickerMode
 
 from llm_gent.bus.protocol import (
+    AgentJoined,
+    AgentLeft,
     AskRequest,
     AskResponse,
     FeedbackRequest,
@@ -173,11 +175,16 @@ class AgentRunner:
         Responds to:
         - HeartbeatRequest: reply with stats on heartbeat topic.
         - ShutdownNotice: initiate graceful shutdown.
+        - AgentJoined/AgentLeft: log membership changes.
         """
         if isinstance(message, HeartbeatRequest):
             self._respond_heartbeat(message)
         elif isinstance(message, ShutdownNotice):
             self._handle_shutdown_notice(message)
+        elif isinstance(message, AgentJoined):
+            self._lg.info("agent joined swarm", extra={"agent_id": message.agent_id})
+        elif isinstance(message, AgentLeft):
+            self._lg.info("agent left swarm", extra={"agent_id": message.agent_id})
 
     def _respond_heartbeat(self, request: HeartbeatRequest) -> None:
         """Respond to hub heartbeat broadcast with agent stats."""
