@@ -25,8 +25,13 @@ def lg():
 
 @pytest.fixture
 def hub(lg):
-    """Create a hub with mocked bus."""
-    config = HubConfig(max_restarts=3)
+    """Create a hub with mocked bus (zero grace for fast tests).
+
+    Note: start() is intentionally not called so the heartbeat broadcaster
+    thread stays dormant.  Tests that assert broadcast call counts depend
+    on this.
+    """
+    config = HubConfig(max_restarts=3, shutdown_grace_secs=0.0)
     h = Hub(lg, config, bus_config=WorkerBusConfig())
     h._bus = MagicMock()
     return h
@@ -99,32 +104,86 @@ class TestHubRequestHandling:
 class TestHubHeartbeat:
     """Tests for heartbeat handling."""
 
-    def test_heartbeat_updates_registry(self, hub):
-        """Heartbeat updates registry stats."""
-        from llm_gent.bus.protocol import AgentStats, HeartbeatRequest
+    def test_heartbeat_response_updates_registry(self, hub):
+        """Heartbeat response from broadcast updates registry stats."""
+        from llm_gent.bus.protocol import AgentStats, HeartbeatResponse
 
         hub.registry.register("worker-1")
-        hb = HeartbeatRequest(
+        resp = HeartbeatResponse(
+            id="r1",
             agent_id="worker-1",
+            round_id="abc123",
             stats=AgentStats(ticks=10, errors=1, llm_tokens_used=500),
         )
-        hub._handle_heartbeat(hb)
+        hub._handle_heartbeat_response(resp)
 
         entry = hub.registry.get("worker-1")
         assert entry is not None
         assert entry.stats.ticks == 10
 
+    def test_heartbeat_p2p_updates_registry(self, hub):
+        """Agent-initiated p2p heartbeat updates registry and returns response."""
+        from llm_gent.bus.protocol import AgentStats, HeartbeatRequest, HeartbeatResponse
+
+        hub.registry.register("worker-1")
+        req = HeartbeatRequest(
+            agent_id="worker-1",
+            stats=AgentStats(ticks=5, errors=0),
+        )
+        resp = hub._handle_heartbeat_p2p(req)
+
+        assert isinstance(resp, HeartbeatResponse)
+        assert resp.agent_id == "worker-1"
+        entry = hub.registry.get("worker-1")
+        assert entry is not None
+        assert entry.stats.ticks == 5
+
     def test_heartbeat_unknown_agent_ignored(self, hub):
         """Heartbeat from unknown agent doesn't crash."""
-        from llm_gent.bus.protocol import HeartbeatRequest
+        from llm_gent.bus.protocol import HeartbeatResponse
 
-        hb = HeartbeatRequest(agent_id="ghost")
-        hub._handle_heartbeat(hb)
+        resp = HeartbeatResponse(id="r1", agent_id="ghost")
+        hub._handle_heartbeat_response(resp)
         assert hub.registry.count == 0
 
     def test_non_heartbeat_message_ignored(self, hub):
         """Non-heartbeat messages on heartbeat handler are ignored."""
-        hub._handle_heartbeat(RegisterRequest(agent_id="x"))
+        hub._handle_heartbeat_response(RegisterRequest(agent_id="x"))
+
+    def test_heartbeat_p2p_via_bus_request(self, hub):
+        """HeartbeatRequest on DEALER is dispatched to p2p handler."""
+        from llm_gent.bus.protocol import AgentStats, HeartbeatRequest, HeartbeatResponse
+
+        hub.registry.register("worker-1")
+        req = HeartbeatRequest(agent_id="worker-1", stats=AgentStats(ticks=7))
+        resp = hub._handle_bus_request(req, "worker-1")
+
+        assert isinstance(resp, HeartbeatResponse)
+        assert resp.agent_id == "worker-1"
+
+
+class TestHubShutdown:
+    """Tests for hub shutdown sequence."""
+
+    def test_stop_broadcasts_shutdown_notice(self, hub):
+        """Hub broadcasts ShutdownNotice before stopping."""
+        from llm_gent.bus.protocol import ShutdownNotice
+
+        hub.stop(reason="test shutdown")
+
+        calls = hub._bus.broadcast.call_args_list
+        assert len(calls) == 1
+        notice = calls[0][0][0]
+        assert isinstance(notice, ShutdownNotice)
+        assert notice.reason == "test shutdown"
+        assert notice.grace_period_secs == hub._config.shutdown_grace_secs
+
+    def test_stop_with_zero_grace_skips_wait(self, hub):
+        """Hub with 0 grace period doesn't sleep."""
+        hub._config.shutdown_grace_secs = 0.0
+        hub.stop()
+        hub._bus.broadcast.assert_called_once()
+        hub._bus.stop.assert_called_once()
 
 
 class TestHubAskFeedback:

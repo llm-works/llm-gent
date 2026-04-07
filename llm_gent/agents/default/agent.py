@@ -248,7 +248,7 @@ class Agent(BaseAgent):
                 "the steps taken. Output only factual findings."
             ),
         )
-        return summary_result.summary.strip()
+        return summary_result.value.summary.strip()
 
     def _record_solution(
         self,

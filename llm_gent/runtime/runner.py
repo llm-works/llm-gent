@@ -1,7 +1,8 @@
 """Agent runner - runs a single agent in a subprocess or thread.
 
 The AgentRunner is the entry point for agent subprocesses/threads. It:
-- Connects to the hub via ZMQ bus (pub/sub for heartbeats)
+- Connects to the hub via ZMQ bus
+- Responds to hub-initiated heartbeat broadcasts
 - Uses appinfra BufferedChannel for request/response (ask, feedback, shutdown)
 - Handles scheduled execution using appinfra.time.Ticker
 """
@@ -20,12 +21,14 @@ from llm_gent.bus.protocol import (
     AskResponse,
     FeedbackRequest,
     FeedbackResponse,
+    HeartbeatRequest,
     Message,
     RegisterRequest,
     RelayRequest,
     RelayResponse,
     Request,
     Response,
+    ShutdownNotice,
     ShutdownRequest,
     ShutdownResponse,
     UnregisterRequest,
@@ -53,14 +56,12 @@ class AgentRunner:
         agent: Agent,
         bus_config: WorkerBusConfig,
         schedule_interval: float | None = None,
-        heartbeat_interval: float = 30.0,
     ) -> None:
         self._lg = lg
         self._agent = agent
         self._bus_config = bus_config
         self._stop_event = threading.Event()
         self._schedule_interval = schedule_interval
-        self._heartbeat_interval = heartbeat_interval
         self._bus: ZMQWorkerBus | None = None
         self._channel: BufferedChannel[Any, Any] | None = None
 
@@ -130,6 +131,9 @@ class AgentRunner:
             raise RuntimeError("bus transport not available after start")
         self._channel = BufferedChannel(self._bus.transport)
 
+        # Subscribe to broadcast topic for hub-initiated heartbeats
+        self._bus.subscribe("broadcast", self._handle_broadcast)
+
         # Register with hub via channel (request/response)
         req = RegisterRequest(agent_id=self._agent.name)
         try:
@@ -140,12 +144,6 @@ class AgentRunner:
                 "bus registration failed",
                 extra={"agent": self._agent.name, "exception": e},
             )
-
-        # Start heartbeat thread (uses pub/sub, not channel)
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, daemon=True, name=f"hb-{self._agent.name}"
-        )
-        self._heartbeat_thread.start()
 
     def _disconnect_bus(self) -> None:
         """Unregister and disconnect."""
@@ -169,24 +167,45 @@ class AgentRunner:
             self._lg.warning("error stopping agent", extra={"exception": e})
         self._lg.info("runner stopped", extra={"agent": self._agent.name})
 
-    def _heartbeat_loop(self) -> None:
-        """Send periodic heartbeats via pub/sub."""
-        while self._running and self._bus is not None:
-            time.sleep(self._heartbeat_interval)
-            if not self._running or self._bus is None:
-                break
-            try:
-                self._bus.publish_heartbeat(
-                    {
-                        "ticks": self._agent.cycle_count,
-                        "errors": 0,
-                    }
-                )
-            except Exception as e:
-                self._lg.debug(
-                    "heartbeat failed",
-                    extra={"agent": self._agent.name, "exception": e},
-                )
+    def _handle_broadcast(self, message: Message) -> None:
+        """Handle broadcast messages from hub (system-tier).
+
+        Responds to:
+        - HeartbeatRequest: reply with stats on heartbeat topic.
+        - ShutdownNotice: initiate graceful shutdown.
+        """
+        if isinstance(message, HeartbeatRequest):
+            self._respond_heartbeat(message)
+        elif isinstance(message, ShutdownNotice):
+            self._handle_shutdown_notice(message)
+
+    def _respond_heartbeat(self, request: HeartbeatRequest) -> None:
+        """Respond to hub heartbeat broadcast with agent stats."""
+        if self._bus is None:
+            return
+        try:
+            self._bus.publish_heartbeat(
+                stats={"ticks": self._agent.cycle_count, "errors": 0},
+                round_id=request.round_id,
+                request_id=request.id,
+            )
+        except Exception as e:
+            self._lg.debug(
+                "heartbeat response failed",
+                extra={"agent": self._agent.name, "exception": e},
+            )
+
+    def _handle_shutdown_notice(self, notice: ShutdownNotice) -> None:
+        """Handle hub shutdown broadcast — begin graceful shutdown."""
+        self._lg.info(
+            "hub shutdown notice received",
+            extra={
+                "agent": self._agent.name,
+                "reason": notice.reason,
+                "grace_secs": notice.grace_period_secs,
+            },
+        )
+        self._stop_event.set()
 
     # -------------------------------------------------------------------------
     # Main loop
@@ -217,7 +236,12 @@ class AgentRunner:
                 time.sleep(min(self._calculate_sleep(), 0.5))
 
     def _run_agent_loop(self) -> None:
-        """Delegate to agent's run() method, poll requests in background."""
+        """Delegate to agent's run() method, poll requests in background.
+
+        Note: ShutdownNotice sets _stop_event but cannot interrupt a blocking
+        agent.run() call.  Agents using run() should check runner._stop_event
+        periodically for cooperative cancellation.
+        """
         # Start request poller in background thread
         poller = threading.Thread(
             target=self._request_poll_loop, daemon=True, name=f"req-{self._agent.name}"

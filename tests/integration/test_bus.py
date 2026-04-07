@@ -162,7 +162,7 @@ class TestPubSub:
         assert len(received) == 1
 
     def test_worker_heartbeat_received_by_coordinator(self, bus_pair):
-        """Worker publishes heartbeat, coordinator receives it."""
+        """Worker publishes heartbeat response, coordinator receives it."""
         coord, worker, _ = bus_pair
         received: list[Message] = []
         event = threading.Event()
@@ -178,7 +178,7 @@ class TestPubSub:
         event.wait(timeout=5.0)
 
         assert len(received) == 1
-        assert isinstance(received[0], HeartbeatRequest)
+        assert isinstance(received[0], HeartbeatResponse)
         assert received[0].stats.ticks == 5
 
     def test_topic_publish_subscribe(self, bus_pair):
