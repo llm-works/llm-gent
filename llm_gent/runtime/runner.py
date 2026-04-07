@@ -575,7 +575,10 @@ class AgentRunner(BaseAgentRunner):
         from llm_gent.bus.transport import WorkerBusConfig
 
         fields = {f.name for f in dataclasses.fields(WorkerBusConfig)}
-        bus_config = WorkerBusConfig(**{k: v for k, v in data.items() if k in fields})
+        try:
+            bus_config = WorkerBusConfig(**{k: v for k, v in data.items() if k in fields})
+        except (TypeError, ValueError) as e:
+            raise ConnectionError(f"invalid bus config from {url}: {e}") from e
         return cls(
             lg=lg,
             handler=handler,
