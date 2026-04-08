@@ -16,6 +16,12 @@ def mock_lg():
     return MagicMock()
 
 
+@pytest.fixture()
+def web_fetch(mock_lg):
+    """Create WebFetchTool for WebSearchTool tests."""
+    return WebFetchTool(mock_lg)
+
+
 # ---------------------------------------------------------------------------
 # WebFetchTool tests
 # ---------------------------------------------------------------------------
@@ -209,21 +215,21 @@ _SAMPLE_DDG_HTML = """
 class TestWebSearchTool:
     """Tests for WebSearchTool."""
 
-    def test_tool_properties(self, mock_lg):
-        tool = WebSearchTool(mock_lg)
+    def test_tool_properties(self, mock_lg, web_fetch):
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch)
         assert tool.name == "web_search"
         assert "search" in tool.description.lower()
         assert tool.parameters["required"] == ["query"]
 
-    def test_protocol_compliance(self, mock_lg):
+    def test_protocol_compliance(self, mock_lg, web_fetch):
         from llm_gent import Tool
 
-        tool = WebSearchTool(mock_lg)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch)
         assert isinstance(tool, Tool)
 
-    def test_search_success(self, mock_lg):
+    def test_search_success(self, mock_lg, web_fetch):
         """Search returns structured results."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
             mock_fetch.return_value = ToolResult(success=True, output=_SAMPLE_DDG_HTML)
@@ -235,9 +241,9 @@ class TestWebSearchTool:
         assert "https://example.com/page1" in result.output
         assert "first snippet" in result.output
 
-    def test_search_max_results(self, mock_lg):
+    def test_search_max_results(self, mock_lg, web_fetch):
         """max_results limits the number of results."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
             mock_fetch.return_value = ToolResult(success=True, output=_SAMPLE_DDG_HTML)
@@ -247,9 +253,9 @@ class TestWebSearchTool:
         assert "First Result Title" in result.output
         assert "Second Result" not in result.output
 
-    def test_search_no_results(self, mock_lg):
+    def test_search_no_results(self, mock_lg, web_fetch):
         """Empty search results."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
         empty_html = "<html><body>No results</body></html>"
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
@@ -259,9 +265,9 @@ class TestWebSearchTool:
         assert result.success is True
         assert "No results found" in result.output
 
-    def test_search_fetch_error(self, mock_lg):
+    def test_search_fetch_error(self, mock_lg, web_fetch):
         """Search propagates fetch errors."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
             mock_fetch.return_value = ToolResult(success=False, output="", error="Timeout")
@@ -270,21 +276,21 @@ class TestWebSearchTool:
         assert result.success is False
         assert "Timeout" in result.error
 
-    def test_search_missing_query(self, mock_lg):
-        tool = WebSearchTool(mock_lg)
+    def test_search_missing_query(self, mock_lg, web_fetch):
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch)
         result = tool.execute()
         assert result.success is False
         assert "query" in result.error.lower()
 
-    def test_search_empty_query(self, mock_lg):
-        tool = WebSearchTool(mock_lg)
+    def test_search_empty_query(self, mock_lg, web_fetch):
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch)
         result = tool.execute(query="   ")
         assert result.success is False
         assert "query" in result.error.lower()
 
-    def test_search_max_results_none(self, mock_lg):
+    def test_search_max_results_none(self, mock_lg, web_fetch):
         """max_results=None (LLM sends null) should default to 5, not crash."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
             mock_fetch.return_value = ToolResult(success=True, output=_SAMPLE_DDG_HTML)
@@ -292,9 +298,9 @@ class TestWebSearchTool:
 
         assert result.success is True
 
-    def test_rate_limiting(self, mock_lg):
+    def test_rate_limiting(self, mock_lg, web_fetch):
         """Rate limiter blocks after exceeding limit."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=2)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=2)
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
             mock_fetch.return_value = ToolResult(success=True, output=_SAMPLE_DDG_HTML)
@@ -310,9 +316,9 @@ class TestWebSearchTool:
             assert r3.success is False
             assert "Rate limited" in r3.error
 
-    def test_rate_limiting_disabled(self, mock_lg):
+    def test_rate_limiting_disabled(self, mock_lg, web_fetch):
         """Rate limiting can be disabled with 0."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
             mock_fetch.return_value = ToolResult(success=True, output=_SAMPLE_DDG_HTML)
@@ -321,9 +327,9 @@ class TestWebSearchTool:
                 result = tool.execute(query="query")
                 assert result.success is True
 
-    def test_max_results_clamped(self, mock_lg):
+    def test_max_results_clamped(self, mock_lg, web_fetch):
         """max_results is clamped to 1-8 range."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
             mock_fetch.return_value = ToolResult(success=True, output=_SAMPLE_DDG_HTML)
@@ -336,21 +342,21 @@ class TestWebSearchTool:
             result = tool.execute(query="test", max_results=0)
             assert result.success is True
 
-    def test_shared_web_fetch(self, mock_lg):
+    def test_shared_web_fetch(self, mock_lg, web_fetch):
         """WebSearchTool can share a WebFetchTool instance."""
         web_fetch = WebFetchTool(mock_lg, allowed_domains=["duckduckgo.com"])
         tool = WebSearchTool(mock_lg, web_fetch=web_fetch)
         assert tool._web_fetch is web_fetch
 
-    def test_to_openai_function(self, mock_lg):
-        tool = WebSearchTool(mock_lg)
+    def test_to_openai_function(self, mock_lg, web_fetch):
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch)
         func = tool.to_openai_function()
         assert func["function"]["name"] == "web_search"
         assert "query" in func["function"]["parameters"]["properties"]
 
-    def test_search_url_encoding(self, mock_lg):
+    def test_search_url_encoding(self, mock_lg, web_fetch):
         """Query is URL-encoded in the request."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:
             mock_fetch.return_value = ToolResult(success=True, output=_SAMPLE_DDG_HTML)
@@ -360,9 +366,9 @@ class TestWebSearchTool:
             assert "hello+world" in call_url
             assert " " not in call_url
 
-    def test_parse_warning_on_large_empty_response(self, mock_lg):
+    def test_parse_warning_on_large_empty_response(self, mock_lg, web_fetch):
         """Large DDG response with 0 parsed results should log a warning."""
-        tool = WebSearchTool(mock_lg, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, web_fetch=web_fetch, max_queries_per_minute=0)
         large_html = "<html><body>" + "x" * 10_000 + "</body></html>"
 
         with patch.object(tool._web_fetch, "fetch_raw") as mock_fetch:

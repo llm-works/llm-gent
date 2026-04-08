@@ -133,7 +133,8 @@ class WebSearchTool(BaseTool):
     rate limiting to avoid being blocked during long agent loops.
 
     Example:
-        tool = WebSearchTool()
+        web_fetch = WebFetchTool(lg)
+        tool = WebSearchTool(lg, web_fetch=web_fetch)
         result = tool.execute(query="Python asyncio tutorial")
         # result.output contains formatted search results
     """
@@ -162,21 +163,20 @@ class WebSearchTool(BaseTool):
     def __init__(
         self,
         lg: Logger,
+        web_fetch: WebFetchTool,
         max_queries_per_minute: int = 5,
-        web_fetch: WebFetchTool | None = None,
     ) -> None:
         """Initialize web search tool.
 
         Args:
             lg: Logger instance.
+            web_fetch: WebFetchTool instance for HTTP requests.
             max_queries_per_minute: Rate limit. Set 0 to disable.
-            web_fetch: Optional WebFetchTool instance to reuse. If None,
-                creates one with default settings.
         """
         self._lg = lg
         self._rate_limit = max_queries_per_minute
         self._query_timestamps: list[float] = []
-        self._web_fetch = web_fetch or WebFetchTool(lg=lg)
+        self._web_fetch = web_fetch
 
     def execute(self, **kwargs: Any) -> ToolResult:
         """Search DuckDuckGo and return structured results.
@@ -192,7 +192,10 @@ class WebSearchTool(BaseTool):
             return ToolResult(success=False, output="", error="Missing or empty 'query' argument")
 
         raw = kwargs.get("max_results")
-        max_results = max(min(int(raw) if raw is not None else 5, 8), 1)
+        try:
+            max_results = max(min(int(raw) if raw is not None else 5, 8), 1)
+        except (ValueError, TypeError):
+            max_results = 5
 
         if error := self._check_rate_limit():
             return error

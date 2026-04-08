@@ -9,7 +9,7 @@ from appinfra.log import Logger
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.tools.base import Tool
+    from llm_gent.core.tools.base import BaseTool, Tool
     from llm_gent.core.traits.builtin.learn import LearnTrait
 
 
@@ -55,29 +55,74 @@ class ToolFactory:
             lg: Logger instance, passed through to tools that need it.
         """
         self._lg = lg
-        self._creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
+        self._custom_creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
         self._learn_trait: LearnTrait | None = None
-        self._register_builtins()
+        self._init_shared_tools()
 
-    def _register_builtins(self) -> None:
-        """Register built-in tool creators."""
+    def _init_shared_tools(self) -> None:
+        """Create shared tool instances used as dependencies by other tools."""
+        from llm_gent.core.tools.builtin import WebFetchTool
+
+        self._web_fetch = WebFetchTool(lg=self._lg)
+
+    # ------------------------------------------------------------------
+    # Built-in tool creators
+    # ------------------------------------------------------------------
+
+    def _create_simple(self, tool_type: str, config: dict[str, Any]) -> Tool:
+        """Create a tool whose __init__ takes only config kwargs."""
         from llm_gent.core.tools.builtin import (
-            CompleteTaskTool,
             FileReadTool,
             FileWriteTool,
             HTTPFetchTool,
             ShellTool,
-            WebFetchTool,
-            WebSearchTool,
         )
 
-        self._creators[self.SHELL] = lambda c: ShellTool(**c)
-        self._creators[self.READ_FILE] = lambda c: FileReadTool(**c)
-        self._creators[self.WRITE_FILE] = lambda c: FileWriteTool(**c)
-        self._creators[self.HTTP_FETCH] = lambda c: HTTPFetchTool(**c)
-        self._creators[self.WEB_FETCH] = lambda c: WebFetchTool(lg=self._lg, **c)
-        self._creators[self.WEB_SEARCH] = lambda c: WebSearchTool(lg=self._lg, **c)
-        self._creators[self.COMPLETE_TASK] = lambda _: CompleteTaskTool()
+        classes: dict[str, type[BaseTool]] = {
+            self.SHELL: ShellTool,
+            self.READ_FILE: FileReadTool,
+            self.WRITE_FILE: FileWriteTool,
+            self.HTTP_FETCH: HTTPFetchTool,
+        }
+        return classes[tool_type](**config)
+
+    def _create_web_fetch(self, config: dict[str, Any]) -> Tool:
+        """Create WebFetchTool — new instance if config provided, shared otherwise."""
+        from llm_gent.core.tools.builtin import WebFetchTool
+
+        if config:
+            return WebFetchTool(lg=self._lg, **config)
+        return self._web_fetch
+
+    def _create_web_search(self, config: dict[str, Any]) -> Tool:
+        """Create WebSearchTool with the shared WebFetchTool."""
+        from llm_gent.core.tools.builtin import WebSearchTool
+
+        return WebSearchTool(lg=self._lg, web_fetch=self._web_fetch, **config)
+
+    def _create_complete_task(self) -> Tool:
+        """Create CompleteTaskTool (takes no config)."""
+        from llm_gent.core.tools.builtin import CompleteTaskTool
+
+        return CompleteTaskTool()
+
+    def _create_memory_tool(self, tool_type: str) -> Tool | None:
+        """Create remember or recall tool.
+
+        Returns None if LearnTrait not available (tool will be skipped).
+        """
+        from llm_gent.core.tools.builtin import RecallTool, RememberTool
+
+        if self._learn_trait is None:
+            return None
+
+        if tool_type == self.REMEMBER:
+            return RememberTool(self._learn_trait)
+        return RecallTool(self._learn_trait)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def set_learn_trait(self, learn_trait: LearnTrait | None) -> None:
         """Set LearnTrait for memory tools (remember/recall).
@@ -97,7 +142,7 @@ class ToolFactory:
         Example:
             factory.register("my_tool", lambda c: MyTool(**c))
         """
-        self._creators[tool_type] = creator
+        self._custom_creators[tool_type] = creator
 
     def create(self, tool_type: str, config: dict[str, Any] | None = None) -> Tool | None:
         """Create a tool from type and configuration.
@@ -114,28 +159,22 @@ class ToolFactory:
             ValueError: If tool type is unknown.
         """
         config = config or {}
-        canonical_type = self._ALIASES.get(tool_type, tool_type)
+        canonical = self._ALIASES.get(tool_type, tool_type)
 
-        # Handle memory tools specially (need LearnTrait)
-        if canonical_type in (self.REMEMBER, self.RECALL):
-            return self._create_memory_tool(canonical_type)
+        if canonical in (self.REMEMBER, self.RECALL):
+            return self._create_memory_tool(canonical)
+        if canonical in (self.SHELL, self.READ_FILE, self.WRITE_FILE, self.HTTP_FETCH):
+            return self._create_simple(canonical, config)
+        if canonical == self.WEB_FETCH:
+            return self._create_web_fetch(config)
+        if canonical == self.WEB_SEARCH:
+            return self._create_web_search(config)
+        if canonical == self.COMPLETE_TASK:
+            return self._create_complete_task()
 
-        creator = self._creators.get(canonical_type)
-        if creator is None:
-            raise ValueError(f"Unknown tool type: {tool_type}")
+        # Custom-registered tools
+        custom = self._custom_creators.get(canonical)
+        if custom is not None:
+            return custom(config)
 
-        return creator(config)
-
-    def _create_memory_tool(self, tool_type: str) -> Tool | None:
-        """Create remember or recall tool.
-
-        Returns None if LearnTrait not available (tool will be skipped).
-        """
-        from llm_gent.core.tools.builtin import RecallTool, RememberTool
-
-        if self._learn_trait is None:
-            return None  # Caller should skip this tool
-
-        if tool_type == self.REMEMBER:
-            return RememberTool(self._learn_trait)
-        return RecallTool(self._learn_trait)
+        raise ValueError(f"Unknown tool type: {tool_type}")
