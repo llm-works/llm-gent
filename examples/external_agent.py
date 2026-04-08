@@ -10,6 +10,12 @@ Heartbeats are hub-initiated: the hub broadcasts HeartbeatRequest
 periodically, and this agent responds with HeartbeatResponse.
 """
 
+import sys
+from pathlib import Path
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import contextlib
 import signal
 import threading

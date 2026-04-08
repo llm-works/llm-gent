@@ -107,6 +107,9 @@ class _PinnedIPTransport(httpx.BaseTransport):
         self, core_response: httpcore.Response, request: httpx.Request
     ) -> httpx.Response:
         """Convert httpcore Response to httpx Response."""
+        # Read the stream before wrapping — httpcore responses are streaming
+        # and .content raises if the stream hasn't been consumed yet.
+        core_response.read()
         return httpx.Response(
             status_code=core_response.status,
             headers=core_response.headers,
