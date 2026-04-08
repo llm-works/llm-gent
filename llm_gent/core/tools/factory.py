@@ -126,8 +126,9 @@ class ToolFactory:
         from llm_gent.core.tools.builtin import WebSearchTool
 
         web_fetch = self._get_or_create_web_fetch()
+        tool = WebSearchTool(lg=self._lg, web_fetch=web_fetch, **config)
         self._web_fetch_shared = True
-        return WebSearchTool(lg=self._lg, web_fetch=web_fetch, **config)
+        return tool
 
     def _create_complete_task(self) -> Tool:
         """Create CompleteTaskTool (takes no config)."""

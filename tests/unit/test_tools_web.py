@@ -48,22 +48,18 @@ class TestWebFetchTool:
     def test_fetch_html_extracts_content(self, mock_lg):
         """HTML content should be extracted to readable text."""
         tool = WebFetchTool(mock_lg)
-        html_content = (
-            "<html><head><title>Test</title></head>"
-            "<body><nav>Menu</nav>"
-            "<article><p>Hello World</p><p>Main content here.</p></article>"
-            "<script>bad();</script>"
-            "<footer>Copyright</footer></body></html>"
-        )
+        html_content = "<html><body><p>Hello World</p></body></html>"
 
-        with patch.object(tool._http, "execute") as mock_fetch:
+        with (
+            patch.object(tool._http, "execute") as mock_fetch,
+            patch("trafilatura.extract", return_value="Hello World") as mock_extract,
+        ):
             mock_fetch.return_value = self._mock_http_result(html_content)
             result = tool.execute(url="https://example.com")
 
         assert result.success is True
-        assert "Hello World" in result.output
-        assert "<p>" not in result.output
-        assert "bad()" not in result.output
+        assert result.output == "Hello World"
+        mock_extract.assert_called_once()
 
     def test_fetch_json_passthrough(self, mock_lg):
         """JSON content should not be converted."""
@@ -112,7 +108,7 @@ class TestWebFetchTool:
             result = tool.execute(url="https://example.com")
 
         assert result.success is True
-        assert len(result.output) < len(long_text)
+        assert len(result.output) <= 100
         assert "(truncated" in result.output
 
     def test_no_truncation_when_within_limit(self, mock_lg):
@@ -159,15 +155,16 @@ class TestWebFetchTool:
     def test_html_extraction_fallback(self, mock_lg):
         """When trafilatura returns None, raw content is returned."""
         tool = WebFetchTool(mock_lg)
-        # Minimal HTML that trafilatura can't extract content from
         html = "<html><body></body></html>"
 
-        with patch.object(tool._http, "execute") as mock_fetch:
+        with (
+            patch.object(tool._http, "execute") as mock_fetch,
+            patch("trafilatura.extract", return_value=None),
+        ):
             mock_fetch.return_value = self._mock_http_result(html)
             result = tool.execute(url="https://example.com")
 
         assert result.success is True
-        # Should fall back to raw content
         assert result.output == html
 
     def test_fetch_raw(self, mock_lg):

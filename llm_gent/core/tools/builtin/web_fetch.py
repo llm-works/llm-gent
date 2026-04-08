@@ -150,11 +150,9 @@ class WebFetchTool(BaseTool):
         return extracted if extracted else content
 
     def _truncate(self, text: str) -> ToolResult:
-        """Truncate text to max length."""
+        """Truncate text to max length, including the suffix."""
         if len(text) <= self._max_text_length:
             return ToolResult(success=True, output=text)
-        truncated = text[: self._max_text_length]
-        return ToolResult(
-            success=True,
-            output=truncated + f"\n\n(truncated, max {self._max_text_length} chars)",
-        )
+        suffix = f"\n\n(truncated, max {self._max_text_length} chars)"
+        truncated = text[: self._max_text_length - len(suffix)]
+        return ToolResult(success=True, output=truncated + suffix)
