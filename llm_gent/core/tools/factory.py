@@ -10,6 +10,7 @@ from appinfra.log import Logger
 
 if TYPE_CHECKING:
     from llm_gent.core.tools.base import BaseTool, Tool
+    from llm_gent.core.tools.builtin.web_fetch import WebFetchTool
     from llm_gent.core.traits.builtin.learn import LearnTrait
 
 
@@ -57,20 +58,18 @@ class ToolFactory:
         self._lg = lg
         self._custom_creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
         self._learn_trait: LearnTrait | None = None
-        self._init_shared_tools()
-
-    def _init_shared_tools(self) -> None:
-        """Create shared tool instances used as dependencies by other tools."""
-        from llm_gent.core.tools.builtin import WebFetchTool
-
-        self._web_fetch = WebFetchTool(lg=self._lg)
+        self._web_fetch: WebFetchTool | None = None
 
     # ------------------------------------------------------------------
     # Built-in tool creators
     # ------------------------------------------------------------------
 
     def _create_simple(self, tool_type: str, config: dict[str, Any]) -> Tool:
-        """Create a tool whose __init__ takes only config kwargs."""
+        """Create a tool whose __init__ takes only config kwargs.
+
+        Note: these tools predate the Logger-injection pattern used by web
+        tools.  Adding ``lg`` here is a follow-up task, not a regression.
+        """
         from llm_gent.core.tools.builtin import (
             FileReadTool,
             FileWriteTool,
@@ -86,19 +85,37 @@ class ToolFactory:
         }
         return classes[tool_type](**config)
 
-    def _create_web_fetch(self, config: dict[str, Any]) -> Tool:
-        """Create WebFetchTool — new instance if config provided, shared otherwise."""
-        from llm_gent.core.tools.builtin import WebFetchTool
+    def _get_or_create_web_fetch(self) -> WebFetchTool:
+        """Return the cached WebFetchTool, creating a default lazily."""
+        if self._web_fetch is None:
+            from llm_gent.core.tools.builtin import WebFetchTool
 
-        if config:
-            return WebFetchTool(lg=self._lg, **config)
+            self._web_fetch = WebFetchTool(lg=self._lg)
         return self._web_fetch
 
+    def _create_web_fetch(self, config: dict[str, Any]) -> Tool:
+        """Create WebFetchTool — new instance if config provided, cached otherwise.
+
+        When custom config is supplied the new instance replaces the cached
+        one so that a subsequent ``web_search`` creation inherits the same
+        security constraints (allowed_domains, block_private_ips, etc.).
+        """
+        if config:
+            from llm_gent.core.tools.builtin import WebFetchTool
+
+            self._web_fetch = WebFetchTool(lg=self._lg, **config)
+            return self._web_fetch
+        return self._get_or_create_web_fetch()
+
     def _create_web_search(self, config: dict[str, Any]) -> Tool:
-        """Create WebSearchTool with the shared WebFetchTool."""
+        """Create WebSearchTool using the agent's WebFetchTool.
+
+        If ``web_fetch`` was already created (possibly with custom security
+        config), that instance is reused.  Otherwise a default is created.
+        """
         from llm_gent.core.tools.builtin import WebSearchTool
 
-        return WebSearchTool(lg=self._lg, web_fetch=self._web_fetch, **config)
+        return WebSearchTool(lg=self._lg, web_fetch=self._get_or_create_web_fetch(), **config)
 
     def _create_complete_task(self) -> Tool:
         """Create CompleteTaskTool (takes no config)."""

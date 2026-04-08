@@ -447,3 +447,27 @@ class TestToolFactoryWeb:
         tool = factory.create("web_search", {"max_queries_per_minute": 10})
         assert isinstance(tool, WebSearchTool)
         assert tool._rate_limit == 10
+
+    def test_factory_web_search_inherits_web_fetch_config(self, mock_lg):
+        """web_search should use the same WebFetchTool instance as web_fetch."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        # Create web_fetch with restricted domains first
+        fetch_tool = factory.create("web_fetch", {"allowed_domains": ["docs.python.org"]})
+        # web_search should reuse that restricted instance
+        search_tool = factory.create("web_search")
+        assert search_tool._web_fetch is fetch_tool
+
+    def test_factory_lazy_web_fetch(self, mock_lg):
+        """WebFetchTool is not created until needed (lazy init)."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        assert factory._web_fetch is None
+        # Creating a non-web tool should not trigger WebFetchTool creation
+        factory.create("shell")
+        assert factory._web_fetch is None
+        # Creating web_search triggers lazy creation
+        factory.create("web_search")
+        assert factory._web_fetch is not None

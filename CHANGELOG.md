@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `ToolFactory` now requires a `Logger` argument: `ToolFactory(lg)` instead of
+  `ToolFactory()`
 - Refactored runtime to use `appinfra.service` for IPC and state management, removing ~780 lines
   of custom transport and state code
 - Replaced local conversation layer with `llm-kelt` conversation module, delegating compaction to
