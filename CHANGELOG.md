@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `WebFetchTool` — fetches web pages and extracts main content as readable text using trafilatura
+  (boilerplate removal, nav/footer stripping); non-HTML content passes through as-is
+- `WebSearchTool` — searches DuckDuckGo (HTML scrape, no API key) and returns structured
+  `{title, url, snippet}` results with rate limiting; agent drives multi-step research via
+  search → fetch loops
+- `examples/web_search.py` — runnable demo with `--fetch` flag to read result pages
+- `trafilatura>=2.0` dependency for web content extraction
+
+### Fixed
+
+- `_PinnedIPTransport` now reads the httpcore response stream before accessing `.content`,
+  fixing a crash on real HTTP calls (only surfaced with IP pinning enabled)
+
 ### Changed
 
 - Refactored runtime to use `appinfra.service` for IPC and state management, removing ~780 lines

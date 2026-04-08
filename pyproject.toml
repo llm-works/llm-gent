@@ -28,6 +28,7 @@ dependencies = [
     "pydantic>=2.0",
     "pyzmq>=26.0",
     "rapidfuzz>=3.0",
+    "trafilatura>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -121,6 +122,7 @@ lines-after-imports = 2
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG001", "ARG002"]
+"examples/*" = ["E402", "I001"]
 
 [tool.coverage.run]
 source = ["llm_gent"]

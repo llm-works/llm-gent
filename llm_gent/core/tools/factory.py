@@ -33,6 +33,8 @@ class ToolFactory:
     READ_FILE = "read_file"
     WRITE_FILE = "write_file"
     HTTP_FETCH = "http_fetch"
+    WEB_FETCH = "web_fetch"
+    WEB_SEARCH = "web_search"
     COMPLETE_TASK = "complete_task"
     REMEMBER = "remember"
     RECALL = "recall"
@@ -58,12 +60,16 @@ class ToolFactory:
             FileWriteTool,
             HTTPFetchTool,
             ShellTool,
+            WebFetchTool,
+            WebSearchTool,
         )
 
         self._creators[self.SHELL] = lambda c: ShellTool(**c)
         self._creators[self.READ_FILE] = lambda c: FileReadTool(**c)
         self._creators[self.WRITE_FILE] = lambda c: FileWriteTool(**c)
         self._creators[self.HTTP_FETCH] = lambda c: HTTPFetchTool(**c)
+        self._creators[self.WEB_FETCH] = lambda c: WebFetchTool(**c)
+        self._creators[self.WEB_SEARCH] = lambda c: WebSearchTool(**c)
         self._creators[self.COMPLETE_TASK] = lambda _: CompleteTaskTool()
 
     def set_learn_trait(self, learn_trait: LearnTrait | None) -> None:
