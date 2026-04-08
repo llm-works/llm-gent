@@ -142,7 +142,7 @@ class Factory(BaseFactory):
 
     def _build_system_prompt(self, agent: Agent) -> str | None:
         """Build system prompt from identity and method traits."""
-        # Absolute import to avoid circular dependency
+        # Deferred import to avoid circular dependency
         from ...core.traits.builtin.directive import DirectiveTrait, MethodTrait
 
         parts: list[str] = []
