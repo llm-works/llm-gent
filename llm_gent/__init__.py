@@ -18,6 +18,7 @@ from .core.llm import (
 from .core.task import Task, TaskCompletion, TaskResult, TaskStatus
 from .core.tools import (
     BaseTool,
+    BraveSearchBackend,
     CompleteTaskTool,
     FileReadTool,
     FileWriteTool,
@@ -73,6 +74,7 @@ __all__ = [
     "TraitFactory",
     # Tools
     "BaseTool",
+    "BraveSearchBackend",
     "CompleteTaskTool",
     "FileReadTool",
     "FileWriteTool",

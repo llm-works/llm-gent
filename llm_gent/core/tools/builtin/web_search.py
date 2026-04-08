@@ -76,7 +76,7 @@ class WebSearchTool(BaseTool):
         lg: Logger,
         backend: WebSearchBackend,
         max_queries_per_minute: int = 3,
-        retry_delay: float = 60.0,
+        retry_delay: float = 5.0,
     ) -> None:
         """Initialize web search tool.
 

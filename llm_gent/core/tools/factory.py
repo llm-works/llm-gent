@@ -121,14 +121,15 @@ class ToolFactory:
         """
         from llm_gent.core.tools.builtin import WebSearchTool
 
-        backend = config.pop("backend", None) or self._web_search_backend
+        backend = config.get("backend") or self._web_search_backend
         if backend is None:
             raise ValueError(
                 "WebSearchTool requires a search backend. Call "
                 "factory.set_web_search_backend(backend) or pass "
                 "'backend' in config before creating 'web_search'."
             )
-        return WebSearchTool(lg=self._lg, backend=backend, **config)
+        rest = {k: v for k, v in config.items() if k != "backend"}
+        return WebSearchTool(lg=self._lg, backend=backend, **rest)
 
     def _create_complete_task(self) -> Tool:
         """Create CompleteTaskTool (takes no config)."""

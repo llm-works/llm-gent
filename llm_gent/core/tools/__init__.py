@@ -4,6 +4,7 @@ from enum import StrEnum
 
 from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult, WebSearchBackend
 from .builtin import (
+    BraveSearchBackend,
     CompleteTaskTool,
     FileReadTool,
     FileWriteTool,
@@ -67,6 +68,7 @@ __all__ = [
     "SimpleToolExecutor",
     "ToolExecutionResult",
     # Built-in tools
+    "BraveSearchBackend",
     "CompleteTaskTool",
     "FileReadTool",
     "FileWriteTool",

@@ -1,10 +1,11 @@
-"""Tests for WebFetchTool and WebSearchTool."""
+"""Tests for WebFetchTool, WebSearchTool, and BraveSearchBackend."""
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
-from llm_gent import ToolResult, WebFetchTool, WebSearchTool
+from llm_gent import BraveSearchBackend, ToolResult, WebFetchTool, WebSearchTool
 
 
 pytestmark = pytest.mark.unit
@@ -442,3 +443,164 @@ class TestToolFactoryWeb:
 
         backend = MockSearchBackend()
         assert isinstance(backend, WebSearchBackend)
+
+    def test_factory_config_not_mutated(self, mock_lg):
+        """create('web_search', config) must not mutate the caller's dict."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        backend = MockSearchBackend()
+        config = {"backend": backend, "max_queries_per_minute": 10}
+        factory.create("web_search", config)
+        assert "backend" in config, "config dict was mutated by factory.create()"
+
+
+# ---------------------------------------------------------------------------
+# BraveSearchBackend tests
+# ---------------------------------------------------------------------------
+
+_BRAVE_RESPONSE = {
+    "web": {
+        "results": [
+            {
+                "title": "Python Tutorial",
+                "url": "https://docs.python.org/3/tutorial/",
+                "description": "The official Python tutorial.",
+            },
+            {
+                "title": "Real Python",
+                "url": "https://realpython.com/",
+                "description": "Learn Python programming.",
+            },
+        ]
+    }
+}
+
+
+class TestBraveSearchBackend:
+    """Tests for BraveSearchBackend."""
+
+    def test_protocol_compliance(self, mock_lg):
+        from llm_gent import WebSearchBackend
+
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        assert isinstance(backend, WebSearchBackend)
+
+    def test_api_key_required(self, mock_lg, monkeypatch):
+        """Must raise ValueError if no API key provided."""
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        with pytest.raises(ValueError, match="API key required"):
+            BraveSearchBackend(mock_lg)
+
+    def test_api_key_from_env(self, mock_lg, monkeypatch):
+        """API key can come from environment variable."""
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "env-key")
+        backend = BraveSearchBackend(mock_lg)
+        assert backend._api_key == "env-key"
+
+    def test_api_key_constructor_overrides_env(self, mock_lg, monkeypatch):
+        """Explicit api_key takes precedence over env var."""
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "env-key")
+        backend = BraveSearchBackend(mock_lg, api_key="explicit-key")
+        assert backend._api_key == "explicit-key"
+
+    def test_search_success(self, mock_lg):
+        """Successful API response returns structured results."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, json=_BRAVE_RESPONSE)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("python tutorial", 5)
+
+        assert results is not None
+        assert len(results) == 2
+        assert results[0]["title"] == "Python Tutorial"
+        assert results[0]["url"] == "https://docs.python.org/3/tutorial/"
+        assert results[0]["snippet"] == "The official Python tutorial."
+        assert results[1]["title"] == "Real Python"
+
+    def test_search_no_results(self, mock_lg):
+        """Empty web results returns empty list."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, json={"web": {"results": []}})
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("xyzzy", 5)
+
+        assert results == []
+
+    def test_search_no_web_key(self, mock_lg):
+        """Response without 'web' key returns empty list."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, json={"query": {"original": "test"}})
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert results == []
+
+    def test_search_rate_limited(self, mock_lg):
+        """429 response returns None (retriable)."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(429)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert results is None
+
+    def test_search_server_error(self, mock_lg):
+        """5xx responses return None (retriable)."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        for status in (500, 502, 503, 504):
+            response = httpx.Response(status)
+            with patch.object(backend, "_request", return_value=response):
+                assert backend.search("test", 5) is None
+
+    def test_search_client_error(self, mock_lg):
+        """4xx (non-429) returns empty list (non-retriable)."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(403)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert results == []
+
+    def test_search_timeout(self, mock_lg):
+        """Timeout returns None (retriable)."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(backend, "_request", side_effect=httpx.TimeoutException("")):
+            results = backend.search("test", 5)
+
+        assert results is None
+
+    def test_search_connection_error(self, mock_lg):
+        """Connection error returns None (retriable)."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(backend, "_request", side_effect=httpx.ConnectError("")):
+            results = backend.search("test", 5)
+
+        assert results is None
+
+    def test_skips_results_without_title_or_url(self, mock_lg):
+        """Results missing title or url should be skipped."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        data = {
+            "web": {
+                "results": [
+                    {"title": "", "url": "https://example.com", "description": "no title"},
+                    {"title": "No URL", "url": "", "description": "missing url"},
+                    {"title": "Valid", "url": "https://example.com", "description": "ok"},
+                ]
+            }
+        }
+        response = httpx.Response(200, json=data)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert len(results) == 1
+        assert results[0]["title"] == "Valid"

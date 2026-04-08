@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Demo: web search with a custom backend.
+"""Demo: web search with BraveSearchBackend.
 
-Shows how to implement a ``WebSearchBackend`` and wire it into ``WebSearchTool``.
-The stub backend below returns hardcoded results — replace it with a real
-provider (Brave Search API, SerpAPI, etc.) for production use.
+Uses ``BraveSearchBackend`` when ``BRAVE_SEARCH_API_KEY`` is set, otherwise
+falls back to a stub backend that returns hardcoded results.
 
 Usage:
+    export BRAVE_SEARCH_API_KEY="BSA..."
     python examples/web_search.py "python asyncio tutorial"
     python examples/web_search.py "rust vs go performance" --fetch 1
 
@@ -14,6 +14,7 @@ Flags:
     --fetch N         Fetch the Nth result page and print readable text
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,11 +25,11 @@ import argparse
 
 from appinfra.log import create_lg
 
-from llm_gent import WebFetchTool, WebSearchTool
+from llm_gent import BraveSearchBackend, WebFetchTool, WebSearchBackend, WebSearchTool
 
 
 # ---------------------------------------------------------------------------
-# Example search backend (stub — replace with a real provider)
+# Stub backend (used when no API key is available)
 # ---------------------------------------------------------------------------
 
 
@@ -36,7 +37,7 @@ class StubSearchBackend:
     """Minimal backend that returns hardcoded results for demonstration."""
 
     def search(self, query: str, max_results: int) -> list[dict[str, str]]:
-        """Return canned results. A real backend would make HTTP requests here."""
+        """Return canned results. Set BRAVE_SEARCH_API_KEY for real search."""
         all_results = [
             {
                 "title": f"Result 1 for: {query}",
@@ -97,7 +98,16 @@ def main() -> None:
     args = _parse_args()
 
     lg = create_lg("web_search_demo", "info")
-    backend = StubSearchBackend()
+
+    api_key = os.environ.get("BRAVE_SEARCH_API_KEY")
+    backend: WebSearchBackend
+    if api_key:
+        backend = BraveSearchBackend(lg=lg, api_key=api_key)
+        print("(using Brave Search API)\n")
+    else:
+        backend = StubSearchBackend()
+        print("(using stub backend — set BRAVE_SEARCH_API_KEY for real results)\n")
+
     web_fetch = WebFetchTool(lg=lg)
     web_search = WebSearchTool(lg=lg, backend=backend, max_queries_per_minute=0)
 
