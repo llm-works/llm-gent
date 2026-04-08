@@ -113,21 +113,21 @@ class ToolFactory:
         """
         self._web_search_backend = backend
 
-    def _create_web_search(self, config: dict[str, Any]) -> Tool:
+    def _create_web_search(self, config: dict[str, Any]) -> Tool | None:
         """Create WebSearchTool using an injected search backend.
 
-        Raises:
-            ValueError: If no backend has been set via ``set_web_search_backend()``.
+        Returns ``None`` when no backend has been configured, allowing the
+        agent factory to skip web_search gracefully.
         """
         from llm_gent.core.tools.builtin import WebSearchTool
 
         backend = config.get("backend") or self._web_search_backend
         if backend is None:
-            raise ValueError(
-                "WebSearchTool requires a search backend. Call "
-                "factory.set_web_search_backend(backend) or pass "
-                "'backend' in config before creating 'web_search'."
+            self._lg.warning(
+                "web_search skipped: no search backend configured — call "
+                "factory.set_web_search_backend() or pass 'backend' in config"
             )
+            return None
         rest = {k: v for k, v in config.items() if k != "backend"}
         return WebSearchTool(lg=self._lg, backend=backend, **rest)
 

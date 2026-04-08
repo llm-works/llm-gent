@@ -58,6 +58,11 @@ class BraveSearchBackend:
                 "BRAVE_SEARCH_API_KEY environment variable"
             )
         self._timeout = timeout
+        self._client = httpx.Client(timeout=self._timeout)
+
+    def close(self) -> None:
+        """Close the underlying HTTP client."""
+        self._client.close()
 
     def search(self, query: str, max_results: int) -> list[dict[str, str]] | None:
         """Query Brave Web Search and return structured results.
@@ -69,13 +74,17 @@ class BraveSearchBackend:
         """
         try:
             response = self._request(query, max_results)
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        except httpx.TransportError as exc:
             self._lg.warning(
                 "brave search request failed",
                 extra={"error": str(exc), "query": query},
             )
             return None
 
+        return self._handle_response(response, query)
+
+    def _handle_response(self, response: httpx.Response, query: str) -> list[dict[str, str]] | None:
+        """Interpret HTTP response: check status, parse JSON body."""
         if response.status_code in _RETRIABLE_STATUS_CODES:
             self._lg.warning(
                 "brave search returned retriable status",
@@ -90,7 +99,14 @@ class BraveSearchBackend:
             )
             return []
 
-        return self._parse(response.json())
+        try:
+            return self._parse(response.json())
+        except (ValueError, KeyError):
+            self._lg.warning(
+                "brave search returned unparseable response",
+                extra={"query": query},
+            )
+            return None
 
     def _request(self, query: str, max_results: int) -> httpx.Response:
         """Execute the HTTP request to Brave Search API."""
@@ -100,8 +116,7 @@ class BraveSearchBackend:
             "X-Subscription-Token": self._api_key,
         }
         params: dict[str, str | int] = {"q": query, "count": max_results}
-        with httpx.Client(timeout=self._timeout) as client:
-            return client.get(_API_URL, headers=headers, params=params)
+        return self._client.get(_API_URL, headers=headers, params=params)
 
     @staticmethod
     def _parse(data: dict[str, Any]) -> list[dict[str, str]]:

@@ -402,13 +402,13 @@ class TestToolFactoryWeb:
         tool = factory.create("web_search")
         assert isinstance(tool, WebSearchTool)
 
-    def test_factory_web_search_requires_backend(self, mock_lg):
-        """Creating web_search without a backend should raise ValueError."""
+    def test_factory_web_search_returns_none_without_backend(self, mock_lg):
+        """Creating web_search without a backend returns None (skip gracefully)."""
         from llm_gent import ToolFactory
 
         factory = ToolFactory(mock_lg)
-        with pytest.raises(ValueError, match="requires a search backend"):
-            factory.create("web_search")
+        assert factory.create("web_search") is None
+        mock_lg.warning.assert_called_once()
 
     def test_factory_web_fetch_with_config(self, mock_lg):
         from llm_gent import ToolFactory
@@ -581,6 +581,24 @@ class TestBraveSearchBackend:
         backend = BraveSearchBackend(mock_lg, api_key="test-key")
 
         with patch.object(backend, "_request", side_effect=httpx.ConnectError("")):
+            results = backend.search("test", 5)
+
+        assert results is None
+
+    def test_search_other_transport_error(self, mock_lg):
+        """Non-timeout, non-connect transport errors return None (retriable)."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+
+        for exc_cls in (httpx.ReadError, httpx.ProxyError, httpx.ProtocolError):
+            with patch.object(backend, "_request", side_effect=exc_cls("")):
+                assert backend.search("test", 5) is None
+
+    def test_search_unparseable_json(self, mock_lg):
+        """Malformed JSON response returns None instead of crashing."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, text="<html>not json</html>")
+
+        with patch.object(backend, "_request", return_value=response):
             results = backend.search("test", 5)
 
         assert results is None
