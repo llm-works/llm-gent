@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import trafilatura
 from appinfra.log import Logger
 
 from ..base import BaseTool, ToolResult
@@ -139,6 +138,8 @@ class WebFetchTool(BaseTool):
         stripped = content.lstrip()
         if not stripped or stripped[0] != "<":
             return content
+
+        import trafilatura
 
         extracted = trafilatura.extract(
             content,

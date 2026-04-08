@@ -59,6 +59,7 @@ class ToolFactory:
         self._custom_creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
         self._learn_trait: LearnTrait | None = None
         self._web_fetch: WebFetchTool | None = None
+        self._web_fetch_shared = False  # True once handed to another tool
 
     # ------------------------------------------------------------------
     # Built-in tool creators
@@ -99,8 +100,17 @@ class ToolFactory:
         When custom config is supplied the new instance replaces the cached
         one so that a subsequent ``web_search`` creation inherits the same
         security constraints (allowed_domains, block_private_ips, etc.).
+
+        Raises:
+            ValueError: If reconfiguring after the instance was already shared
+                with another tool (e.g., WebSearchTool).
         """
         if config:
+            if self._web_fetch_shared:
+                raise ValueError(
+                    "Cannot reconfigure WebFetchTool after it was already shared "
+                    "with WebSearchTool. Create web_fetch before web_search."
+                )
             from llm_gent.core.tools.builtin import WebFetchTool
 
             self._web_fetch = WebFetchTool(lg=self._lg, **config)
@@ -115,7 +125,9 @@ class ToolFactory:
         """
         from llm_gent.core.tools.builtin import WebSearchTool
 
-        return WebSearchTool(lg=self._lg, web_fetch=self._get_or_create_web_fetch(), **config)
+        web_fetch = self._get_or_create_web_fetch()
+        self._web_fetch_shared = True
+        return WebSearchTool(lg=self._lg, web_fetch=web_fetch, **config)
 
     def _create_complete_task(self) -> Tool:
         """Create CompleteTaskTool (takes no config)."""

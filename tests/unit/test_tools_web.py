@@ -471,3 +471,12 @@ class TestToolFactoryWeb:
         # Creating web_search triggers lazy creation
         factory.create("web_search")
         assert factory._web_fetch is not None
+
+    def test_factory_rejects_late_web_fetch_reconfig(self, mock_lg):
+        """Cannot reconfigure WebFetchTool after web_search captured it."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        factory.create("web_search")  # captures shared WebFetchTool
+        with pytest.raises(ValueError, match="already shared"):
+            factory.create("web_fetch", {"allowed_domains": ["example.com"]})
