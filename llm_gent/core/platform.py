@@ -63,7 +63,7 @@ class PlatformContext:
         self._config = config
 
         # Create factories for trait/tool creation
-        self._tool_factory = ToolFactory()
+        self._tool_factory = ToolFactory(lg)
         self._trait_factory = TraitFactory(platform=self)
 
         self._lg.info("platform context initialized")

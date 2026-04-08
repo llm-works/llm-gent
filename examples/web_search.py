@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 
+from appinfra.log import create_lg
+
 from llm_gent import WebFetchTool, WebSearchTool
 
 
@@ -61,8 +63,9 @@ def _fetch_result_page(web_fetch: WebFetchTool, urls: list[str], index: int) -> 
 def main() -> None:
     args = _parse_args()
 
-    web_fetch = WebFetchTool()
-    web_search = WebSearchTool(max_queries_per_minute=0, web_fetch=web_fetch)
+    lg = create_lg("web_search_demo", "info")
+    web_fetch = WebFetchTool(lg=lg)
+    web_search = WebSearchTool(lg=lg, max_queries_per_minute=0, web_fetch=web_fetch)
 
     print(f"Searching: {args.query}\n")
     result = web_search.execute(query=args.query, max_results=args.max_results)

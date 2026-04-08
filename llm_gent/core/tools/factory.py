@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from appinfra.log import Logger
+
 
 if TYPE_CHECKING:
     from llm_gent.core.tools.base import Tool
@@ -17,7 +19,7 @@ class ToolFactory:
     Supports built-in tool types and custom tool registration.
 
     Example:
-        factory = ToolFactory()
+        factory = ToolFactory(lg)
 
         # Create built-in tools
         shell = factory.create(ToolFactory.SHELL, {"allowed_commands": ["ls", "grep"]})
@@ -46,8 +48,13 @@ class ToolFactory:
         "fetch": HTTP_FETCH,
     }
 
-    def __init__(self) -> None:
-        """Initialize factory with built-in tool creators."""
+    def __init__(self, lg: Logger) -> None:
+        """Initialize factory with built-in tool creators.
+
+        Args:
+            lg: Logger instance, passed through to tools that need it.
+        """
+        self._lg = lg
         self._creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
         self._learn_trait: LearnTrait | None = None
         self._register_builtins()
@@ -68,8 +75,8 @@ class ToolFactory:
         self._creators[self.READ_FILE] = lambda c: FileReadTool(**c)
         self._creators[self.WRITE_FILE] = lambda c: FileWriteTool(**c)
         self._creators[self.HTTP_FETCH] = lambda c: HTTPFetchTool(**c)
-        self._creators[self.WEB_FETCH] = lambda c: WebFetchTool(**c)
-        self._creators[self.WEB_SEARCH] = lambda c: WebSearchTool(**c)
+        self._creators[self.WEB_FETCH] = lambda c: WebFetchTool(lg=self._lg, **c)
+        self._creators[self.WEB_SEARCH] = lambda c: WebSearchTool(lg=self._lg, **c)
         self._creators[self.COMPLETE_TASK] = lambda _: CompleteTaskTool()
 
     def set_learn_trait(self, learn_trait: LearnTrait | None) -> None:

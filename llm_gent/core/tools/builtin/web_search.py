@@ -1,7 +1,7 @@
 """Web search tool using DuckDuckGo HTML scraping.
 
 Searches DuckDuckGo and returns structured {title, url, snippet} results.
-Uses WebFetchTool's underlying HTTPFetchTool for the actual HTTP request.
+Uses WebFetchTool for the actual HTTP request.
 No API key needed.
 """
 
@@ -13,6 +13,8 @@ from html import unescape as html_unescape
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, urlparse
+
+from appinfra.log import Logger
 
 from ..base import BaseTool, ToolResult
 from .web_fetch import WebFetchTool
@@ -71,7 +73,10 @@ def _unwrap_ddg_url(raw_url: str) -> str:
     return decoded
 
 
-def _parse_ddg_results(html: str, max_results: int) -> list[dict[str, str]]:
+_PARSE_WARN_THRESHOLD = 5_000  # bytes — DDG responses with results are typically >10KB
+
+
+def _parse_ddg_results(lg: Logger, html: str, max_results: int) -> list[dict[str, str]]:
     """Parse DuckDuckGo HTML search results into structured data."""
     results: list[dict[str, str]] = []
 
@@ -91,6 +96,12 @@ def _parse_ddg_results(html: str, max_results: int) -> list[dict[str, str]]:
 
         if url and title:
             results.append({"title": title, "url": url, "snippet": snippet})
+
+    if not results and len(html) > _PARSE_WARN_THRESHOLD:
+        lg.warning(
+            "DDG returned large response but 0 results parsed, HTML structure may have changed",
+            extra={"html_size": len(html)},
+        )
 
     return results
 
@@ -150,19 +161,22 @@ class WebSearchTool(BaseTool):
 
     def __init__(
         self,
+        lg: Logger,
         max_queries_per_minute: int = 5,
         web_fetch: WebFetchTool | None = None,
     ) -> None:
         """Initialize web search tool.
 
         Args:
+            lg: Logger instance.
             max_queries_per_minute: Rate limit. Set 0 to disable.
             web_fetch: Optional WebFetchTool instance to reuse. If None,
                 creates one with default settings.
         """
+        self._lg = lg
         self._rate_limit = max_queries_per_minute
         self._query_timestamps: list[float] = []
-        self._web_fetch = web_fetch or WebFetchTool()
+        self._web_fetch = web_fetch or WebFetchTool(lg=lg)
 
     def execute(self, **kwargs: Any) -> ToolResult:
         """Search DuckDuckGo and return structured results.
@@ -177,8 +191,8 @@ class WebSearchTool(BaseTool):
         if not isinstance(query, str) or not query.strip():
             return ToolResult(success=False, output="", error="Missing or empty 'query' argument")
 
-        max_results = min(int(kwargs.get("max_results", 5)), 8)
-        max_results = max(max_results, 1)
+        raw = kwargs.get("max_results")
+        max_results = max(min(int(raw) if raw is not None else 5, 8), 1)
 
         if error := self._check_rate_limit():
             return error
@@ -210,9 +224,8 @@ class WebSearchTool(BaseTool):
         """Execute search and parse results."""
         url = f"{_DDG_URL}?q={quote_plus(query)}"
 
-        # Use the underlying HTTPFetchTool directly — we want raw HTML to parse,
-        # not the text-converted output from WebFetchTool.
-        fetch_result = self._web_fetch._http.execute(url=url)
+        # Use fetch_raw to get unparsed HTML for our own regex extraction.
+        fetch_result = self._web_fetch.fetch_raw(url=url)
 
         if not fetch_result.success:
             return ToolResult(
@@ -221,7 +234,7 @@ class WebSearchTool(BaseTool):
                 error=f"Search request failed: {fetch_result.error}",
             )
 
-        results = _parse_ddg_results(fetch_result.output, max_results)
+        results = _parse_ddg_results(self._lg, fetch_result.output, max_results)
         if not results:
             return ToolResult(success=True, output="No results found.")
 
