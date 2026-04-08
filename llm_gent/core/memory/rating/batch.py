@@ -14,9 +14,8 @@ from appinfra.db.pg import PG
 from appinfra.log import Logger
 from sqlalchemy import text
 
-from llm_gent.core.llm import LLMCaller
-from llm_gent.core.training import StarRatedItem
-
+from ...llm import LLMCaller
+from ...training import StarRatedItem
 from ..schema import validate_schema_name
 from .models import BatchItem, BatchRequest, Result
 from .service import Service as CoreRatingService

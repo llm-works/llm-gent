@@ -10,7 +10,7 @@ from appinfra.app.tools import Tool, ToolConfig
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Factory
+    from ...core.agent import Factory
 
 
 class AgentTool(Tool):

@@ -24,7 +24,7 @@ from .llm import _resolve_llm_defaults
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent, Identity
+    from ...agent import Agent, Identity
 
 
 from appinfra import DotDict
@@ -145,7 +145,7 @@ class LearnTrait(BaseTrait):
 
     def on_start(self) -> None:
         """Create learn client, LLM client, and embedder on agent start."""
-        from llm_gent.core.errors import ConfigError
+        from ...errors import ConfigError
 
         # Create database from config
         if self.config.db is None:

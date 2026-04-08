@@ -12,7 +12,7 @@ from ..base import BaseTrait
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent
+    from ...agent import Agent
 
 
 class StorageTrait(BaseTrait):

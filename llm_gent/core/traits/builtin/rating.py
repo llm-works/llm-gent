@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from appinfra import DotDict
 
-from llm_gent.core.memory.rating import (
+from ...memory.rating import (
     AtomicFactsBackend,
     BatchConfig,
     BatchItem,
@@ -18,15 +18,14 @@ from llm_gent.core.memory.rating import (
     ProviderConfig,
     ProviderType,
 )
-from llm_gent.core.memory.rating import Request as RatingRequest
-from llm_gent.core.memory.rating import Result as RatingResult
-from llm_gent.core.memory.rating import Service as RatingService
-
+from ...memory.rating import Request as RatingRequest
+from ...memory.rating import Result as RatingResult
+from ...memory.rating import Service as RatingService
 from ..base import BaseTrait
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent
+    from ...agent import Agent
 
 
 # Type alias for Rating configuration
@@ -139,8 +138,7 @@ class RatingTrait(BaseTrait):
         Raises:
             TraitNotFoundError: If LearnTrait or LLMTrait are not attached.
         """
-        from llm_gent.core.llm import LLMCaller
-
+        from ...llm import LLMCaller
         from .learn import LearnTrait
         from .llm import LLMTrait
 

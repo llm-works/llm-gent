@@ -11,7 +11,7 @@ from ..base import BaseTool, ToolResult
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.traits.builtin.learn import LearnTrait
+    from ...traits.builtin.learn import LearnTrait
 
 
 class RememberTool(BaseTool):

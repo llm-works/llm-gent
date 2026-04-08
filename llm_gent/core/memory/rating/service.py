@@ -11,13 +11,12 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from appinfra.log import Logger
 
-from llm_gent.core.llm.json_cleaner import JSONCleaner
-
+from ...llm.json_cleaner import JSONCleaner
 from .models import BatchItem, BatchRequest, Criteria, ProviderType, Request, Result
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.llm import LLMCaller
+    from ...llm import LLMCaller
 
 
 def stars_to_signal(stars: int) -> tuple[Literal["positive", "negative", "dismiss"], float]:
