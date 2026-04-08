@@ -9,10 +9,16 @@ a free or paid API key (``BRAVE_SEARCH_API_KEY`` env-var or constructor arg).
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from appinfra.log import Logger
+
+from .backend import WebSearchBackendFactory
+
+
+if TYPE_CHECKING:
+    from appinfra import DotDict
 
 
 # Brave Web Search endpoint
@@ -129,3 +135,30 @@ class BraveSearchBackend:
             if title and url:
                 results.append({"title": title, "url": url, "snippet": snippet})
         return results
+
+
+class Factory(WebSearchBackendFactory):
+    """Factory for creating :class:`BraveSearchBackend` from configuration.
+
+    Config keys:
+        api_key: Brave Search API key (falls back to ``BRAVE_SEARCH_API_KEY``
+            env-var if omitted).
+        timeout: HTTP request timeout in seconds (default 10.0).
+    """
+
+    @classmethod
+    def create(cls, lg: Logger, config: DotDict) -> BraveSearchBackend:
+        """Create a BraveSearchBackend from config.
+
+        Args:
+            lg: Logger instance.
+            config: Backend configuration (``api_key``, ``timeout``).
+
+        Returns:
+            Configured BraveSearchBackend.
+        """
+        return BraveSearchBackend(
+            lg=lg,
+            api_key=config.get("api_key"),
+            timeout=config.get("timeout", 10.0),
+        )

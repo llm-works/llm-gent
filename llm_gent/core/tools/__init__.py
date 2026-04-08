@@ -2,7 +2,7 @@
 
 from enum import StrEnum
 
-from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult, WebSearchBackend
+from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult
 from .builtin import (
     BraveSearchBackend,
     CompleteTaskTool,
@@ -13,6 +13,8 @@ from .builtin import (
     RememberTool,
     ShellTool,
     WebFetchTool,
+    WebSearchBackend,
+    WebSearchBackendFactory,
     WebSearchTool,
 )
 from .executor import SimpleToolExecutor, ToolExecutionResult
@@ -78,5 +80,6 @@ __all__ = [
     "ShellTool",
     "WebFetchTool",
     "WebSearchBackend",
+    "WebSearchBackendFactory",
     "WebSearchTool",
 ]

@@ -25,7 +25,12 @@ import argparse
 
 from appinfra.log import create_lg
 
-from llm_gent import BraveSearchBackend, WebFetchTool, WebSearchBackend, WebSearchTool
+from llm_gent import (
+    BraveSearchBackend,
+    WebFetchTool,
+    WebSearchBackend,
+    WebSearchTool,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +114,7 @@ def main() -> None:
         print("(using stub backend — set BRAVE_SEARCH_API_KEY for real results)\n")
 
     web_fetch = WebFetchTool(lg=lg)
-    web_search = WebSearchTool(lg=lg, backend=backend, max_queries_per_minute=0)
+    web_search = WebSearchTool(lg=lg, backend=backend)
 
     print(f"Searching: {args.query}\n")
     result = web_search.execute(query=args.query, max_results=args.max_results)

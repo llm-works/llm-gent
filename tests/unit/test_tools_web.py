@@ -238,15 +238,10 @@ class TestWebSearchTool:
         tool = WebSearchTool(mock_lg, backend=MockSearchBackend())
         assert isinstance(tool, Tool)
 
-    def test_default_rate_limit(self, mock_lg):
-        """Default rate limit should be conservative for long-running agents."""
-        tool = WebSearchTool(mock_lg, backend=MockSearchBackend())
-        assert tool._rate_limit == 3
-
     def test_search_success(self, mock_lg):
         """Search returns structured results from backend."""
         backend = MockSearchBackend()
-        tool = WebSearchTool(mock_lg, backend=backend, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, backend=backend)
         result = tool.execute(query="test search")
 
         assert result.success is True
@@ -259,7 +254,7 @@ class TestWebSearchTool:
     def test_search_max_results(self, mock_lg):
         """max_results is forwarded to the backend."""
         backend = MockSearchBackend()
-        tool = WebSearchTool(mock_lg, backend=backend, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, backend=backend)
         result = tool.execute(query="test", max_results=1)
 
         assert result.success is True
@@ -270,7 +265,7 @@ class TestWebSearchTool:
     def test_search_no_results(self, mock_lg):
         """Empty results from backend."""
         backend = MockSearchBackend(results=[])
-        tool = WebSearchTool(mock_lg, backend=backend, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, backend=backend)
         result = tool.execute(query="xyzzy nonexistent")
 
         assert result.success is True
@@ -291,37 +286,16 @@ class TestWebSearchTool:
     def test_search_max_results_none(self, mock_lg):
         """max_results=None (LLM sends null) should default to 5, not crash."""
         backend = MockSearchBackend()
-        tool = WebSearchTool(mock_lg, backend=backend, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, backend=backend)
         result = tool.execute(query="test", max_results=None)
 
         assert result.success is True
         assert backend.last_max_results == 5
 
-    def test_rate_limiting(self, mock_lg):
-        """Rate limiter blocks after exceeding limit."""
-        tool = WebSearchTool(mock_lg, backend=MockSearchBackend(), max_queries_per_minute=2)
-
-        r1 = tool.execute(query="query1")
-        r2 = tool.execute(query="query2")
-        assert r1.success is True
-        assert r2.success is True
-
-        r3 = tool.execute(query="query3")
-        assert r3.success is False
-        assert "Rate limited" in r3.error
-
-    def test_rate_limiting_disabled(self, mock_lg):
-        """Rate limiting can be disabled with 0."""
-        tool = WebSearchTool(mock_lg, backend=MockSearchBackend(), max_queries_per_minute=0)
-
-        for _ in range(10):
-            result = tool.execute(query="query")
-            assert result.success is True
-
     def test_max_results_clamped(self, mock_lg):
         """max_results is clamped to 1-8 range."""
         backend = MockSearchBackend()
-        tool = WebSearchTool(mock_lg, backend=backend, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, backend=backend)
 
         tool.execute(query="test", max_results=100)
         assert backend.last_max_results == 8
@@ -332,9 +306,9 @@ class TestWebSearchTool:
     def test_retry_on_retriable_failure(self, mock_lg):
         """Backend returning None triggers backoff + retry; succeeds on second attempt."""
         backend = MockSearchBackend(side_effects=[None, _SAMPLE_RESULTS])
-        tool = WebSearchTool(mock_lg, backend=backend, max_queries_per_minute=0, retry_delay=0.0)
+        tool = WebSearchTool(mock_lg, backend=backend, retry_delay=0.0)
 
-        with patch("llm_gent.core.tools.builtin.web_search.time.sleep") as mock_sleep:
+        with patch("llm_gent.core.tools.builtin.web.search.time.sleep") as mock_sleep:
             result = tool.execute(query="test query")
 
         assert result.success is True
@@ -345,9 +319,9 @@ class TestWebSearchTool:
     def test_retry_exhausted(self, mock_lg):
         """Backend returning None twice should fail with clear error."""
         backend = MockSearchBackend(side_effects=[None, None])
-        tool = WebSearchTool(mock_lg, backend=backend, max_queries_per_minute=0, retry_delay=0.0)
+        tool = WebSearchTool(mock_lg, backend=backend, retry_delay=0.0)
 
-        with patch("llm_gent.core.tools.builtin.web_search.time.sleep"):
+        with patch("llm_gent.core.tools.builtin.web.search.time.sleep"):
             result = tool.execute(query="test")
 
         assert result.success is False
@@ -363,7 +337,7 @@ class TestWebSearchTool:
     def test_query_is_stripped(self, mock_lg):
         """Leading/trailing whitespace in query should be stripped."""
         backend = MockSearchBackend()
-        tool = WebSearchTool(mock_lg, backend=backend, max_queries_per_minute=0)
+        tool = WebSearchTool(mock_lg, backend=backend)
         tool.execute(query="  hello world  ")
         assert backend.last_query == "hello world"
 
@@ -424,9 +398,9 @@ class TestToolFactoryWeb:
 
         factory = ToolFactory(mock_lg)
         backend = MockSearchBackend()
-        tool = factory.create("web_search", {"backend": backend, "max_queries_per_minute": 10})
+        tool = factory.create("web_search", {"backend": backend, "retry_delay": 1.0})
         assert isinstance(tool, WebSearchTool)
-        assert tool._rate_limit == 10
+        assert tool._retry_delay == 1.0
 
     def test_factory_lazy_web_fetch(self, mock_lg):
         """WebFetchTool is not created until needed (lazy init)."""
@@ -450,7 +424,7 @@ class TestToolFactoryWeb:
 
         factory = ToolFactory(mock_lg)
         backend = MockSearchBackend()
-        config = {"backend": backend, "max_queries_per_minute": 10}
+        config = {"backend": backend, "retry_delay": 1.0}
         factory.create("web_search", config)
         assert "backend" in config, "config dict was mutated by factory.create()"
 
@@ -622,3 +596,164 @@ class TestBraveSearchBackend:
 
         assert len(results) == 1
         assert results[0]["title"] == "Valid"
+
+
+# ---------------------------------------------------------------------------
+# BraveSearchBackend Factory tests
+# ---------------------------------------------------------------------------
+
+
+class TestBraveSearchFactory:
+    """Tests for BraveSearchBackend.Factory."""
+
+    def test_create_from_config(self, mock_lg, monkeypatch):
+        """Factory.create builds a BraveSearchBackend from DotDict config."""
+        from appinfra import DotDict
+
+        from llm_gent.core.tools.builtin.web.brave import Factory
+
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "factory-key")
+        config = DotDict({"timeout": 5.0})
+        backend = Factory.create(mock_lg, config)
+        assert isinstance(backend, BraveSearchBackend)
+        assert backend._timeout == 5.0
+
+    def test_create_with_api_key(self, mock_lg):
+        """Factory passes api_key from config to constructor."""
+        from appinfra import DotDict
+
+        from llm_gent.core.tools.builtin.web.brave import Factory
+
+        config = DotDict({"api_key": "explicit-key", "timeout": 3.0})
+        backend = Factory.create(mock_lg, config)
+        assert backend._api_key == "explicit-key"
+        assert backend._timeout == 3.0
+
+    def test_factory_is_subclass(self):
+        """Factory must be a WebSearchBackendFactory subclass."""
+        from llm_gent import WebSearchBackendFactory
+        from llm_gent.core.tools.builtin.web.brave import Factory
+
+        assert issubclass(Factory, WebSearchBackendFactory)
+
+
+# ---------------------------------------------------------------------------
+# ToolFactory backend resolution tests
+# ---------------------------------------------------------------------------
+
+
+class TestToolFactoryBackendResolution:
+    """Tests for ToolFactory resolving backends from config dicts."""
+
+    def test_resolve_type_brave(self, mock_lg, monkeypatch):
+        """type: brave resolves via lazy backend registry."""
+        from llm_gent import ToolFactory
+
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+        factory = ToolFactory(mock_lg)
+        tool = factory.create(
+            "web_search",
+            {
+                "backend": {"type": "brave"},
+            },
+        )
+        assert tool is not None
+        assert tool.name == "web_search"
+
+    def test_resolve_type_brave_with_config(self, mock_lg):
+        """type: brave with nested config passes config to Factory.create."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        tool = factory.create(
+            "web_search",
+            {
+                "backend": {
+                    "type": "brave",
+                    "config": {"api_key": "from-config", "timeout": 3.0},
+                },
+            },
+        )
+        assert tool is not None
+
+    def test_resolve_factory_dynamic_import(self, mock_lg, monkeypatch):
+        """factory: dotted.path dynamically imports and calls create()."""
+        from llm_gent import ToolFactory
+
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+        factory = ToolFactory(mock_lg)
+        tool = factory.create(
+            "web_search",
+            {
+                "backend": {
+                    "factory": "llm_gent.core.tools.builtin.web.brave.Factory",
+                },
+            },
+        )
+        assert tool is not None
+        assert tool.name == "web_search"
+
+    def test_resolve_unknown_type_raises(self, mock_lg):
+        """Unknown type name raises ValueError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(ValueError, match="Unknown web_search backend type"):
+            factory.create("web_search", {"backend": {"type": "nonexistent"}})
+
+    def test_resolve_missing_type_and_factory_raises(self, mock_lg):
+        """Backend dict without type or factory raises ValueError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(ValueError, match="must include 'type' or 'factory'"):
+            factory.create("web_search", {"backend": {}})
+
+    def test_resolve_invalid_factory_path_raises(self, mock_lg):
+        """Invalid factory dotted path raises ImportError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(ImportError):
+            factory.create(
+                "web_search",
+                {
+                    "backend": {"factory": "NoModule"},
+                },
+            )
+
+    def test_backward_compat_direct_backend(self, mock_lg):
+        """Passing a WebSearchBackend instance directly still works."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        backend = MockSearchBackend()
+        tool = factory.create("web_search", {"backend": backend})
+        assert tool is not None
+        assert tool.name == "web_search"
+
+    def test_backward_compat_set_web_search_backend(self, mock_lg):
+        """set_web_search_backend() still works for programmatic injection."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        backend = MockSearchBackend()
+        factory.set_web_search_backend(backend)
+        tool = factory.create("web_search")
+        assert tool is not None
+
+    def test_tool_config_passes_through(self, mock_lg, monkeypatch):
+        """Tool-level config (retry_delay) passes to WebSearchTool."""
+        from llm_gent import ToolFactory
+
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+        factory = ToolFactory(mock_lg)
+        tool = factory.create(
+            "web_search",
+            {
+                "backend": {"type": "brave"},
+                "retry_delay": 2.0,
+            },
+        )
+        assert tool is not None
+        assert tool._retry_delay == 2.0
