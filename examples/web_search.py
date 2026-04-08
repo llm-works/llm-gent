@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Demo: search the web and fetch a result page.
+"""Demo: web search with a custom backend.
+
+Shows how to implement a ``WebSearchBackend`` and wire it into ``WebSearchTool``.
+The stub backend below returns hardcoded results — replace it with a real
+provider (Brave Search API, SerpAPI, etc.) for production use.
 
 Usage:
     python examples/web_search.py "python asyncio tutorial"
     python examples/web_search.py "rust vs go performance" --fetch 1
-    python examples/web_search.py "site:github.com llm agent" --max-results 3
 
 Flags:
     --max-results N   Number of search results (1-8, default 5)
@@ -22,6 +25,36 @@ import argparse
 from appinfra.log import create_lg
 
 from llm_gent import WebFetchTool, WebSearchTool
+
+
+# ---------------------------------------------------------------------------
+# Example search backend (stub — replace with a real provider)
+# ---------------------------------------------------------------------------
+
+
+class StubSearchBackend:
+    """Minimal backend that returns hardcoded results for demonstration."""
+
+    def search(self, query: str, max_results: int) -> list[dict[str, str]]:
+        """Return canned results. A real backend would make HTTP requests here."""
+        all_results = [
+            {
+                "title": f"Result 1 for: {query}",
+                "url": "https://example.com/page1",
+                "snippet": "This is a sample search result snippet.",
+            },
+            {
+                "title": f"Result 2 for: {query}",
+                "url": "https://example.com/page2",
+                "snippet": "Another example result with relevant content.",
+            },
+            {
+                "title": f"Result 3 for: {query}",
+                "url": "https://example.com/page3",
+                "snippet": "Third result demonstrating the search interface.",
+            },
+        ]
+        return all_results[:max_results]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -64,8 +97,9 @@ def main() -> None:
     args = _parse_args()
 
     lg = create_lg("web_search_demo", "info")
+    backend = StubSearchBackend()
     web_fetch = WebFetchTool(lg=lg)
-    web_search = WebSearchTool(lg=lg, max_queries_per_minute=0, web_fetch=web_fetch)
+    web_search = WebSearchTool(lg=lg, backend=backend, max_queries_per_minute=0)
 
     print(f"Searching: {args.query}\n")
     result = web_search.execute(query=args.query, max_results=args.max_results)

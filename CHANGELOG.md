@@ -11,10 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `WebFetchTool` — fetches web pages and extracts main content as readable text using trafilatura
   (boilerplate removal, nav/footer stripping); non-HTML content passes through as-is
-- `WebSearchTool` — searches DuckDuckGo (HTML scrape, no API key) and returns structured
-  `{title, url, snippet}` results with rate limiting; agent drives multi-step research via
-  search → fetch loops
-- `examples/web_search.py` — runnable demo with `--fetch` flag to read result pages
+- `WebSearchTool` — web search tool with pluggable `WebSearchBackend` protocol; returns structured
+  `{title, url, snippet}` results with rate limiting and automatic retry on retriable failures
+- `WebSearchBackend` — protocol for search provider implementations (Brave, SerpAPI, etc.)
+- `examples/web_search.py` — demo showing how to implement a search backend and use WebSearchTool
 - `trafilatura>=2.0` dependency for web content extraction
 
 ### Fixed

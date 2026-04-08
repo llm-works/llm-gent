@@ -2,7 +2,7 @@
 
 from enum import StrEnum
 
-from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult
+from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult, WebSearchBackend
 from .builtin import (
     CompleteTaskTool,
     FileReadTool,
@@ -75,5 +75,6 @@ __all__ = [
     "RememberTool",
     "ShellTool",
     "WebFetchTool",
+    "WebSearchBackend",
     "WebSearchTool",
 ]

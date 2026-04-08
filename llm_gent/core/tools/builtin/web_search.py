@@ -1,109 +1,21 @@
-"""Web search tool using DuckDuckGo HTML scraping.
+"""Web search tool with pluggable backend.
 
-Searches DuckDuckGo and returns structured {title, url, snippet} results.
-Uses WebFetchTool for the actual HTTP request.
-No API key needed.
+Provides ``WebSearchTool`` — an LLM-facing tool that delegates actual search
+to a ``WebSearchBackend`` implementation.  The tool handles rate limiting,
+input validation, result formatting, and automatic retry on retriable failures.
+
+The search backend is injected at construction time, keeping provider-specific
+code (API keys, HTML parsing, etc.) out of this module.
 """
 
 from __future__ import annotations
 
-import re
 import time
-from html import unescape as html_unescape
-from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, urlparse
 
 from appinfra.log import Logger
 
-from ..base import BaseTool, ToolResult
-from .web_fetch import WebFetchTool
-
-
-# ---------------------------------------------------------------------------
-# DuckDuckGo HTML result parsing
-# ---------------------------------------------------------------------------
-
-_DDG_URL = "https://html.duckduckgo.com/html/"
-
-_RESULT_BLOCK_RE = re.compile(
-    r'<div[^>]+class="result\s[^"]*results_links[^"]*"[^>]*>(.*?)</div>\s*</div>',
-    re.DOTALL,
-)
-_RESULT_LINK_RE = re.compile(
-    r'<a[^>]+class="result__a"[^>]+href="([^"]*)"[^>]*>(.*?)</a>',
-    re.DOTALL,
-)
-_RESULT_SNIPPET_RE = re.compile(
-    r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-    re.DOTALL,
-)
-
-
-class _TagStripper(HTMLParser):
-    """Minimal HTML tag stripper for short strings (titles, snippets)."""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._parts: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self._parts.append(data)
-
-
-def _strip_tags(html: str) -> str:
-    """Remove HTML tags and decode entities for short strings."""
-    parser = _TagStripper()
-    parser.feed(html)
-    return " ".join("".join(parser._parts).split())
-
-
-def _unwrap_ddg_url(raw_url: str) -> str:
-    """Extract the real URL from a DDG redirect link.
-
-    DDG wraps result URLs as //duckduckgo.com/l/?uddg=<encoded_url>&...
-    This extracts the actual destination URL.
-    """
-    decoded = html_unescape(raw_url)
-    parsed = urlparse(decoded)
-    uddg = parse_qs(parsed.query).get("uddg")
-    if uddg:
-        return uddg[0]
-    # Not a redirect — return cleaned URL
-    return decoded
-
-
-_PARSE_WARN_THRESHOLD = 5_000  # bytes — DDG responses with results are typically >10KB
-
-
-def _parse_ddg_results(lg: Logger, html: str, max_results: int) -> list[dict[str, str]]:
-    """Parse DuckDuckGo HTML search results into structured data."""
-    results: list[dict[str, str]] = []
-
-    for block in _RESULT_BLOCK_RE.findall(html):
-        if len(results) >= max_results:
-            break
-
-        link_match = _RESULT_LINK_RE.search(block)
-        if not link_match:
-            continue
-
-        url = _unwrap_ddg_url(link_match.group(1))
-        title = _strip_tags(link_match.group(2))
-
-        snippet_match = _RESULT_SNIPPET_RE.search(block)
-        snippet = _strip_tags(snippet_match.group(1)) if snippet_match else ""
-
-        if url and title:
-            results.append({"title": title, "url": url, "snippet": snippet})
-
-    if not results and len(html) > _PARSE_WARN_THRESHOLD:
-        lg.warning(
-            "DDG returned large response but 0 results parsed, HTML structure may have changed",
-            extra={"html_size": len(html)},
-        )
-
-    return results
+from ..base import BaseTool, ToolResult, WebSearchBackend
 
 
 def _format_results(results: list[dict[str, str]]) -> str:
@@ -124,17 +36,16 @@ def _format_results(results: list[dict[str, str]]) -> str:
 
 
 class WebSearchTool(BaseTool):
-    """Search the web using DuckDuckGo and return structured results.
+    """Search the web and return structured results.
 
     Returns a list of {title, url, snippet} results. The agent can then
     use WebFetchTool to read interesting pages — "dumb tools, smart agent".
 
-    Uses DuckDuckGo's HTML interface (no API key needed). Includes simple
-    rate limiting to avoid being blocked during long agent loops.
+    Requires a ``WebSearchBackend`` that handles provider-specific search
+    logic (HTTP requests, response parsing, etc.).
 
     Example:
-        web_fetch = WebFetchTool(lg)
-        tool = WebSearchTool(lg, web_fetch=web_fetch)
+        tool = WebSearchTool(lg, backend=my_backend)
         result = tool.execute(query="Python asyncio tutorial")
         # result.output contains formatted search results
     """
@@ -163,23 +74,26 @@ class WebSearchTool(BaseTool):
     def __init__(
         self,
         lg: Logger,
-        web_fetch: WebFetchTool,
-        max_queries_per_minute: int = 5,
+        backend: WebSearchBackend,
+        max_queries_per_minute: int = 3,
+        retry_delay: float = 60.0,
     ) -> None:
         """Initialize web search tool.
 
         Args:
             lg: Logger instance.
-            web_fetch: WebFetchTool instance for HTTP requests.
+            backend: Search backend implementation.
             max_queries_per_minute: Rate limit. Set 0 to disable.
+            retry_delay: Seconds to wait before retrying after a retriable failure.
         """
         self._lg = lg
+        self._backend = backend
         self._rate_limit = max_queries_per_minute
+        self._retry_delay = retry_delay
         self._query_timestamps: list[float] = []
-        self._web_fetch = web_fetch
 
     def execute(self, **kwargs: Any) -> ToolResult:
-        """Search DuckDuckGo and return structured results.
+        """Search the web and return structured results.
 
         Args:
             **kwargs: Must contain 'query'. Optional: 'max_results' (1-8, default 5).
@@ -224,21 +138,31 @@ class WebSearchTool(BaseTool):
         return None
 
     def _search(self, query: str, max_results: int) -> ToolResult:
-        """Execute search and parse results."""
-        url = f"{_DDG_URL}?q={quote_plus(query)}"
+        """Execute search with one automatic retry on retriable failures."""
+        results = self._backend.search(query, max_results)
+        if results is not None:
+            return self._format(results)
 
-        # Use fetch_raw to get unparsed HTML for our own regex extraction.
-        fetch_result = self._web_fetch.fetch_raw(url=url)
+        self._lg.info(
+            "search backend returned retriable failure, backing off before retry",
+            extra={"retry_delay": self._retry_delay},
+        )
+        time.sleep(self._retry_delay)
 
-        if not fetch_result.success:
-            return ToolResult(
-                success=False,
-                output="",
-                error=f"Search request failed: {fetch_result.error}",
-            )
+        results = self._backend.search(query, max_results)
+        if results is not None:
+            return self._format(results)
 
-        results = _parse_ddg_results(self._lg, fetch_result.output, max_results)
+        return ToolResult(
+            success=False,
+            output="",
+            error="Search backend returned a retriable error twice. "
+            "Try a different query or wait before searching again.",
+        )
+
+    @staticmethod
+    def _format(results: list[dict[str, str]]) -> ToolResult:
+        """Convert backend results to ToolResult."""
         if not results:
             return ToolResult(success=True, output="No results found.")
-
         return ToolResult(success=True, output=_format_results(results))
