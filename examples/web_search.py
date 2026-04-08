@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Demo: search the web and fetch a result page.
+"""Demo: web search with BraveSearchBackend.
+
+Uses ``BraveSearchBackend`` when ``BRAVE_SEARCH_API_KEY`` is set, otherwise
+falls back to a stub backend that returns hardcoded results.
 
 Usage:
+    export BRAVE_SEARCH_API_KEY="BSA..."
     python examples/web_search.py "python asyncio tutorial"
     python examples/web_search.py "rust vs go performance" --fetch 1
-    python examples/web_search.py "site:github.com llm agent" --max-results 3
 
 Flags:
     --max-results N   Number of search results (1-8, default 5)
     --fetch N         Fetch the Nth result page and print readable text
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -21,7 +25,37 @@ import argparse
 
 from appinfra.log import create_lg
 
-from llm_gent import WebFetchTool, WebSearchTool
+from llm_gent import BraveSearchBackend, WebFetchTool, WebSearchBackend, WebSearchTool
+
+
+# ---------------------------------------------------------------------------
+# Stub backend (used when no API key is available)
+# ---------------------------------------------------------------------------
+
+
+class StubSearchBackend:
+    """Minimal backend that returns hardcoded results for demonstration."""
+
+    def search(self, query: str, max_results: int) -> list[dict[str, str]]:
+        """Return canned results. Set BRAVE_SEARCH_API_KEY for real search."""
+        all_results = [
+            {
+                "title": f"Result 1 for: {query}",
+                "url": "https://example.com/page1",
+                "snippet": "This is a sample search result snippet.",
+            },
+            {
+                "title": f"Result 2 for: {query}",
+                "url": "https://example.com/page2",
+                "snippet": "Another example result with relevant content.",
+            },
+            {
+                "title": f"Result 3 for: {query}",
+                "url": "https://example.com/page3",
+                "snippet": "Third result demonstrating the search interface.",
+            },
+        ]
+        return all_results[:max_results]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -64,8 +98,18 @@ def main() -> None:
     args = _parse_args()
 
     lg = create_lg("web_search_demo", "info")
+
+    api_key = os.environ.get("BRAVE_SEARCH_API_KEY")
+    backend: WebSearchBackend
+    if api_key:
+        backend = BraveSearchBackend(lg=lg, api_key=api_key)
+        print("(using Brave Search API)\n")
+    else:
+        backend = StubSearchBackend()
+        print("(using stub backend — set BRAVE_SEARCH_API_KEY for real results)\n")
+
     web_fetch = WebFetchTool(lg=lg)
-    web_search = WebSearchTool(lg=lg, max_queries_per_minute=0, web_fetch=web_fetch)
+    web_search = WebSearchTool(lg=lg, backend=backend, max_queries_per_minute=0)
 
     print(f"Searching: {args.query}\n")
     result = web_search.execute(query=args.query, max_results=args.max_results)

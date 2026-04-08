@@ -53,6 +53,33 @@ class ToolCallResult(BaseModel):
 
 
 @runtime_checkable
+class WebSearchBackend(Protocol):
+    """Backend for web search providers.
+
+    Implementations handle the actual HTTP requests and result parsing for a
+    specific search provider (e.g. Brave Search API, SerpAPI, custom scraper).
+
+    Return conventions:
+        - ``list[dict]``: successful results (may be empty for genuine no-results)
+        - ``None``: retriable failure (e.g. rate limit, challenge page) — the
+          caller will back off and retry once before giving up.
+    """
+
+    def search(self, query: str, max_results: int) -> list[dict[str, str]] | None:
+        """Execute a search query.
+
+        Args:
+            query: Search query string.
+            max_results: Maximum number of results to return.
+
+        Returns:
+            List of ``{"title": ..., "url": ..., "snippet": ...}`` dicts,
+            empty list for no results, or ``None`` to signal a retriable failure.
+        """
+        ...
+
+
+@runtime_checkable
 class Tool(Protocol):
     """Protocol for tools that agents can use.
 

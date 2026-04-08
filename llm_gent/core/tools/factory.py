@@ -9,7 +9,7 @@ from appinfra.log import Logger
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.tools.base import BaseTool, Tool
+    from llm_gent.core.tools.base import BaseTool, Tool, WebSearchBackend
     from llm_gent.core.tools.builtin.web_fetch import WebFetchTool
     from llm_gent.core.traits.builtin.learn import LearnTrait
 
@@ -59,7 +59,7 @@ class ToolFactory:
         self._custom_creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
         self._learn_trait: LearnTrait | None = None
         self._web_fetch: WebFetchTool | None = None
-        self._web_fetch_shared = False  # True once handed to another tool
+        self._web_search_backend: WebSearchBackend | None = None
 
     # ------------------------------------------------------------------
     # Built-in tool creators
@@ -95,40 +95,41 @@ class ToolFactory:
         return self._web_fetch
 
     def _create_web_fetch(self, config: dict[str, Any]) -> Tool:
-        """Create WebFetchTool — new instance if config provided, cached otherwise.
-
-        When custom config is supplied the new instance replaces the cached
-        one so that a subsequent ``web_search`` creation inherits the same
-        security constraints (allowed_domains, block_private_ips, etc.).
-
-        Raises:
-            ValueError: If reconfiguring after the instance was already shared
-                with another tool (e.g., WebSearchTool).
-        """
+        """Create WebFetchTool — new instance if config provided, cached otherwise."""
         if config:
-            if self._web_fetch_shared:
-                raise ValueError(
-                    "Cannot reconfigure WebFetchTool after it was already shared "
-                    "with WebSearchTool. Create web_fetch before web_search."
-                )
             from llm_gent.core.tools.builtin import WebFetchTool
 
             self._web_fetch = WebFetchTool(lg=self._lg, **config)
             return self._web_fetch
         return self._get_or_create_web_fetch()
 
-    def _create_web_search(self, config: dict[str, Any]) -> Tool:
-        """Create WebSearchTool using the agent's WebFetchTool.
+    def set_web_search_backend(self, backend: WebSearchBackend) -> None:
+        """Set the search backend for WebSearchTool creation.
 
-        If ``web_fetch`` was already created (possibly with custom security
-        config), that instance is reused.  Otherwise a default is created.
+        Must be called before ``create("web_search", ...)``.
+
+        Args:
+            backend: Search backend implementation.
+        """
+        self._web_search_backend = backend
+
+    def _create_web_search(self, config: dict[str, Any]) -> Tool | None:
+        """Create WebSearchTool using an injected search backend.
+
+        Returns ``None`` when no backend has been configured, allowing the
+        agent factory to skip web_search gracefully.
         """
         from llm_gent.core.tools.builtin import WebSearchTool
 
-        web_fetch = self._get_or_create_web_fetch()
-        tool = WebSearchTool(lg=self._lg, web_fetch=web_fetch, **config)
-        self._web_fetch_shared = True
-        return tool
+        backend = config.get("backend") or self._web_search_backend
+        if backend is None:
+            self._lg.warning(
+                "web_search skipped: no search backend configured — call "
+                "factory.set_web_search_backend() or pass 'backend' in config"
+            )
+            return None
+        rest = {k: v for k, v in config.items() if k != "backend"}
+        return WebSearchTool(lg=self._lg, backend=backend, **rest)
 
     def _create_complete_task(self) -> Tool:
         """Create CompleteTaskTool (takes no config)."""
