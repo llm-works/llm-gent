@@ -16,7 +16,7 @@ from ..base import BaseTrait
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent
+    from ...agent import Agent
 
 
 from appinfra import DotDict

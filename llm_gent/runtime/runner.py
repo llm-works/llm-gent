@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from appinfra.service import BufferedChannel, ChannelTimeoutError
 from appinfra.time import Ticker, TickerMode
 
-from llm_gent.bus.protocol import (
+from ..bus.protocol import (
     AgentJoined,
     AgentLeft,
     AskRequest,
@@ -39,15 +39,14 @@ from llm_gent.bus.protocol import (
     ShutdownResponse,
     UnregisterRequest,
 )
-
 from .handler import Handler
 
 
 if TYPE_CHECKING:
     from appinfra.log import Logger
 
-    from llm_gent.bus.transport import WorkerBusConfig, ZMQWorkerBus
-    from llm_gent.core.agent import Agent
+    from ..bus.transport import WorkerBusConfig, ZMQWorkerBus
+    from ..core.agent import Agent
 
 
 # =============================================================================
@@ -139,7 +138,7 @@ class BaseAgentRunner(ABC):
 
     def _connect_bus(self) -> None:
         """Connect bus, create channel from DEALER transport, register with hub."""
-        from llm_gent.bus.transport import ZMQWorkerBus
+        from ..bus.transport import ZMQWorkerBus
 
         self._bus = ZMQWorkerBus(self._lg, self._agent_id, self._bus_config)
         self._bus.start()
@@ -594,7 +593,7 @@ class AgentRunner(BaseAgentRunner):
 
         import dataclasses
 
-        from llm_gent.bus.transport import WorkerBusConfig as _WBC
+        from ..bus.transport import WorkerBusConfig as _WBC
 
         fields = {f.name for f in dataclasses.fields(_WBC)}
         try:

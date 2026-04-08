@@ -18,8 +18,8 @@ from .service import AgentService
 if TYPE_CHECKING:
     from appinfra.log import Logger
 
-    from llm_gent.bus.transport import WorkerBusConfig, ZMQCoordinatorBus
-    from llm_gent.runtime.registry import AgentRegistry
+    from ..bus.transport import WorkerBusConfig, ZMQCoordinatorBus
+    from .registry import AgentRegistry
 
 
 class Core:
@@ -127,7 +127,7 @@ class Core:
         """Ask an agent a question via the channel."""
         self._require_running(name)
 
-        from llm_gent.bus.protocol import AskRequest, AskResponse
+        from ..bus.protocol import AskRequest, AskResponse
 
         channel = self._channels.get(name)
         if channel is None:
@@ -145,7 +145,7 @@ class Core:
         """Send feedback to an agent via the channel."""
         self._require_running(name)
 
-        from llm_gent.bus.protocol import FeedbackRequest
+        from ..bus.protocol import FeedbackRequest
 
         channel = self._channels.get(name)
         if channel is None:

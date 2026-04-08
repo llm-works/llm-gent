@@ -9,9 +9,9 @@ from appinfra.log import Logger
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.tools.base import BaseTool, Tool, WebSearchBackend
-    from llm_gent.core.tools.builtin.web_fetch import WebFetchTool
-    from llm_gent.core.traits.builtin.learn import LearnTrait
+    from ..traits.builtin.learn import LearnTrait
+    from .base import BaseTool, Tool, WebSearchBackend
+    from .builtin.web_fetch import WebFetchTool
 
 
 class ToolFactory:
@@ -71,7 +71,7 @@ class ToolFactory:
         Note: these tools predate the Logger-injection pattern used by web
         tools.  Adding ``lg`` here is a follow-up task, not a regression.
         """
-        from llm_gent.core.tools.builtin import (
+        from .builtin import (
             FileReadTool,
             FileWriteTool,
             HTTPFetchTool,
@@ -89,7 +89,7 @@ class ToolFactory:
     def _get_or_create_web_fetch(self) -> WebFetchTool:
         """Return the cached WebFetchTool, creating a default lazily."""
         if self._web_fetch is None:
-            from llm_gent.core.tools.builtin import WebFetchTool
+            from .builtin import WebFetchTool
 
             self._web_fetch = WebFetchTool(lg=self._lg)
         return self._web_fetch
@@ -97,7 +97,7 @@ class ToolFactory:
     def _create_web_fetch(self, config: dict[str, Any]) -> Tool:
         """Create WebFetchTool — new instance if config provided, cached otherwise."""
         if config:
-            from llm_gent.core.tools.builtin import WebFetchTool
+            from .builtin import WebFetchTool
 
             self._web_fetch = WebFetchTool(lg=self._lg, **config)
             return self._web_fetch
@@ -119,7 +119,7 @@ class ToolFactory:
         Returns ``None`` when no backend has been configured, allowing the
         agent factory to skip web_search gracefully.
         """
-        from llm_gent.core.tools.builtin import WebSearchTool
+        from .builtin import WebSearchTool
 
         backend = config.get("backend") or self._web_search_backend
         if backend is None:
@@ -133,7 +133,7 @@ class ToolFactory:
 
     def _create_complete_task(self) -> Tool:
         """Create CompleteTaskTool (takes no config)."""
-        from llm_gent.core.tools.builtin import CompleteTaskTool
+        from .builtin import CompleteTaskTool
 
         return CompleteTaskTool()
 
@@ -142,7 +142,7 @@ class ToolFactory:
 
         Returns None if LearnTrait not available (tool will be skipped).
         """
-        from llm_gent.core.tools.builtin import RecallTool, RememberTool
+        from .builtin import RecallTool, RememberTool
 
         if self._learn_trait is None:
             return None

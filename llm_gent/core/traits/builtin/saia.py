@@ -20,8 +20,8 @@ from ..base import BaseTrait
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent
-    from llm_gent.core.tools.registry import Registry
+    from ...agent import Agent
+    from ...tools.registry import Registry
 
 
 @dataclass

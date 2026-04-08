@@ -17,10 +17,10 @@ from appinfra.app.tools import Tool, ToolConfig
 if TYPE_CHECKING:
     from multiprocessing.queues import Queue
 
-    from llm_gent.core.traits.builtin.learn import LearnConfig
-    from llm_gent.hub import Hub
-    from llm_gent.runtime.server import AgentServerConfig
-    from llm_gent.runtime.server.protocol.base import Request, Response
+    from ...core.traits.builtin.learn import LearnConfig
+    from ...hub import Hub
+    from ...runtime.server import AgentServerConfig
+    from ...runtime.server.protocol.base import Request, Response
 
 
 class ServeTool(Tool):
@@ -60,7 +60,7 @@ class ServeTool(Tool):
         return env_vars
 
     def run(self, **kwargs: Any) -> int:
-        from llm_gent.runtime.server import AgentServerConfig
+        from ...runtime.server import AgentServerConfig
 
         raw_config = self.app.config if self.app.config else DotDict()
         config = AgentServerConfig.from_dict(raw_config)
@@ -85,7 +85,7 @@ class ServeTool(Tool):
         Creates a template config with global settings (llm, db, embedder).
         Each agent will resolve its own identity from agent YAML.
         """
-        from llm_gent.core.traits.builtin.learn import LearnConfig
+        from ...core.traits.builtin.learn import LearnConfig
 
         if config.learn is None:
             return None
@@ -105,8 +105,8 @@ class ServeTool(Tool):
         """Create and configure the swarm hub."""
         from appinfra import DotDict
 
-        from llm_gent.bus.transport import CoordinatorBusConfig, WorkerBusConfig
-        from llm_gent.hub import Hub, HubConfig
+        from ...bus.transport import CoordinatorBusConfig, WorkerBusConfig
+        from ...hub import Hub, HubConfig
 
         hub_yaml = config.hub
         hub_config = HubConfig(
@@ -200,7 +200,7 @@ class ServeTool(Tool):
         """Build the FastAPI server with subprocess mode and IPC."""
         from appinfra.app.fastapi.runtime.server import Server
 
-        from llm_gent.runtime.server.management import create_management_routes
+        from ...runtime.server.management import create_management_routes
 
         server: Server = (
             ServerBuilder(self.lg, "agent-gateway")
@@ -235,7 +235,7 @@ class ServeTool(Tool):
             except Exception:
                 self.lg.exception("IPC processing error")
                 if request is not None:
-                    from llm_gent.runtime.server.protocol.base import Response
+                    from ...runtime.server.protocol.base import Response
 
                     error_resp = Response(
                         id=getattr(request, "id", "unknown"),
@@ -246,7 +246,7 @@ class ServeTool(Tool):
 
     def _get_ipc_handlers(self) -> dict[str, Callable[..., Response]]:
         """Get mapping of message types to handlers."""
-        from llm_gent.runtime.server.protocol.management import (
+        from ...runtime.server.protocol.management import (
             AskAgentRequest,
             FeedbackAgentRequest,
             GetAgentRequest,
@@ -270,7 +270,7 @@ class ServeTool(Tool):
 
     def _handle_request(self, hub: Hub, request: Request) -> Response:
         """Dispatch IPC request to appropriate handler."""
-        from llm_gent.runtime.server.protocol.base import Response
+        from ...runtime.server.protocol.base import Response
 
         handler = self._get_ipc_handlers().get(request.message_type)
         if handler is None:
@@ -284,7 +284,7 @@ class ServeTool(Tool):
 
     def _handle_health(self, hub: Hub, request: Request) -> Response:
         """Handle health check request."""
-        from llm_gent.runtime.server.protocol.management import MgmtHealthResponse
+        from ...runtime.server.protocol.management import MgmtHealthResponse
 
         return MgmtHealthResponse(
             id=request.id,
@@ -294,7 +294,7 @@ class ServeTool(Tool):
 
     def _handle_list_agents(self, hub: Hub, request: Request) -> Response:
         """Handle list agents request."""
-        from llm_gent.runtime.server.protocol.management import ListAgentsResponse
+        from ...runtime.server.protocol.management import ListAgentsResponse
 
         agents = hub.registry.list_agents()
         return ListAgentsResponse(
@@ -304,7 +304,7 @@ class ServeTool(Tool):
 
     def _handle_get_agent(self, hub: Hub, request: Request) -> Response:
         """Handle get agent request."""
-        from llm_gent.runtime.server.protocol.management import (
+        from ...runtime.server.protocol.management import (
             GetAgentRequest,
             GetAgentResponse,
         )
@@ -334,7 +334,7 @@ class ServeTool(Tool):
 
     def _handle_start_agent(self, hub: Hub, request: Request) -> Response:
         """Handle start agent request."""
-        from llm_gent.runtime.server.protocol.management import StartAgentResponse
+        from ...runtime.server.protocol.management import StartAgentResponse
 
         # TODO: start_agent needs config -- this HTTP handler needs rework
         return StartAgentResponse(
@@ -343,7 +343,7 @@ class ServeTool(Tool):
 
     def _handle_stop_agent(self, hub: Hub, request: Request) -> Response:
         """Handle stop agent request."""
-        from llm_gent.runtime.server.protocol.management import (
+        from ...runtime.server.protocol.management import (
             StopAgentRequest,
             StopAgentResponse,
         )
@@ -363,7 +363,7 @@ class ServeTool(Tool):
 
     def _handle_ask_agent(self, hub: Hub, request: Request) -> Response:
         """Handle ask agent request."""
-        from llm_gent.runtime.server.protocol.management import (
+        from ...runtime.server.protocol.management import (
             AskAgentRequest,
             AskAgentResponse,
         )
@@ -381,7 +381,7 @@ class ServeTool(Tool):
 
     def _handle_feedback_agent(self, hub: Hub, request: Request) -> Response:
         """Handle feedback request."""
-        from llm_gent.runtime.server.protocol.management import (
+        from ...runtime.server.protocol.management import (
             FeedbackAgentRequest,
             FeedbackAgentResponse,
         )
@@ -399,7 +399,7 @@ class ServeTool(Tool):
 
     def _handle_get_insights(self, hub: Hub, request: Request) -> Response:
         """Handle get insights request."""
-        from llm_gent.runtime.server.protocol.management import (
+        from ...runtime.server.protocol.management import (
             GetInsightsRequest,
             GetInsightsResponse,
         )

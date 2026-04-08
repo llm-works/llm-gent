@@ -9,12 +9,12 @@ from appinfra import DotDict
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent, Identity
-    from llm_gent.core.platform import PlatformContext
-    from llm_gent.core.traits import TraitName
-    from llm_gent.core.traits.builtin.directive import Directive, DirectiveTrait, MethodTrait
-    from llm_gent.core.traits.builtin.learn import LearnConfig, LearnTrait
-    from llm_gent.core.traits.builtin.llm import LLMConfig, LLMTrait
+    from ..agent import Agent, Identity
+    from ..platform import PlatformContext
+    from . import TraitName
+    from .builtin.directive import Directive, DirectiveTrait, MethodTrait
+    from .builtin.learn import LearnConfig, LearnTrait
+    from .builtin.llm import LLMConfig, LLMTrait
 
 from .base import Trait
 

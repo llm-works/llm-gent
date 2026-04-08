@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from appinfra.log import Logger
 
-    from llm_gent.bus.transport import WorkerBusConfig
+    from ..bus.transport import WorkerBusConfig
 
 
 class AgentService(Service):
@@ -70,7 +70,7 @@ class AgentService(Service):
 
     def setup(self) -> None:
         """Create platform, load factory, create and start agent."""
-        from llm_gent.core.platform import PlatformContext
+        from ..core.platform import PlatformContext
 
         platform = PlatformContext.from_config(
             lg=self._lg,

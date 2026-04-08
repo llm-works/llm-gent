@@ -13,7 +13,7 @@ from .management import create_management_routes
 
 
 if TYPE_CHECKING:
-    from llm_gent.runtime import Core
+    from .. import Core
 
 
 def create_app(
