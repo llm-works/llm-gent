@@ -14,7 +14,7 @@ External backend authors implement both:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 
 if TYPE_CHECKING:
@@ -85,3 +85,19 @@ class WebSearchBackendFactory(ABC):
             Configured backend instance satisfying :class:`WebSearchBackend`.
         """
         ...
+
+
+def validated_factory(cls: Any, label: str) -> type[WebSearchBackendFactory]:
+    """Verify *cls* is a :class:`WebSearchBackendFactory` subclass.
+
+    Args:
+        cls: Candidate class to validate.
+        label: Human-readable label for error messages (e.g. dotted path
+            or built-in type name).
+
+    Raises:
+        TypeError: If *cls* is not a ``WebSearchBackendFactory`` subclass.
+    """
+    if not (isinstance(cls, type) and issubclass(cls, WebSearchBackendFactory)):
+        raise TypeError(f"{label} resolved to {cls!r}, not a WebSearchBackendFactory subclass")
+    return cls

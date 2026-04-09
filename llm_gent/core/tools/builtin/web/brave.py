@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from appinfra.log import Logger
+from appinfra.rate_limit import RateLimiter
 
 from .backend import WebSearchBackendFactory
 
@@ -40,6 +41,7 @@ class BraveSearchBackend:
         api_key: Brave Search API key.  Falls back to
             ``BRAVE_SEARCH_API_KEY`` environment variable.
         timeout: HTTP request timeout in seconds.
+        per_minute: Maximum queries per minute (default 3.0).
 
     Raises:
         ValueError: If no API key is provided or found in the environment.
@@ -55,6 +57,7 @@ class BraveSearchBackend:
         lg: Logger,
         api_key: str | None = None,
         timeout: float = 10.0,
+        per_minute: float = 3.0,
     ) -> None:
         self._lg = lg
         self._api_key = api_key or os.environ.get("BRAVE_SEARCH_API_KEY", "")
@@ -64,6 +67,7 @@ class BraveSearchBackend:
                 "BRAVE_SEARCH_API_KEY environment variable"
             )
         self._timeout = timeout
+        self._rate_limiter = RateLimiter(lg, per_minute=per_minute, initial=True)
         self._client = httpx.Client(timeout=self._timeout)
 
     def close(self) -> None:
@@ -78,6 +82,10 @@ class BraveSearchBackend:
             or ``None`` on retriable failures (rate-limit, server error,
             timeout).
         """
+        if not self._rate_limiter.try_next():
+            self._lg.trace("brave search rate-limited", extra={"query": query})
+            return None
+
         try:
             response = self._request(query, max_results)
         except httpx.TransportError as exc:
@@ -144,6 +152,7 @@ class Factory(WebSearchBackendFactory):
         api_key: Brave Search API key (falls back to ``BRAVE_SEARCH_API_KEY``
             env-var if omitted).
         timeout: HTTP request timeout in seconds (default 10.0).
+        per_minute: Maximum queries per minute (default 3.0).
     """
 
     @classmethod
@@ -152,7 +161,8 @@ class Factory(WebSearchBackendFactory):
 
         Args:
             lg: Logger instance.
-            config: Backend configuration (``api_key``, ``timeout``).
+            config: Backend configuration (``api_key``, ``timeout``,
+                ``per_minute``).
 
         Returns:
             Configured BraveSearchBackend.
@@ -161,4 +171,5 @@ class Factory(WebSearchBackendFactory):
             lg=lg,
             api_key=config.get("api_key"),
             timeout=config.get("timeout", 10.0),
+            per_minute=config.get("per_minute", 3.0),
         )

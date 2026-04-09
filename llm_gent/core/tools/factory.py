@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
 
@@ -175,8 +175,10 @@ class ToolFactory:
         """
         if backend_type in self._lazy_backends:
             module_path, class_name = self._lazy_backends[backend_type]
+            from .builtin.web.backend import validated_factory
+
             module = importlib.import_module(module_path)
-            return cast(type["WebSearchBackendFactory"], getattr(module, class_name))
+            return validated_factory(getattr(module, class_name), f"built-in type {backend_type!r}")
 
         available = ", ".join(sorted(self._lazy_backends))
         raise ValueError(
@@ -201,8 +203,10 @@ class ToolFactory:
         module_path, _, class_name = dotted_path.rpartition(".")
         if not module_path:
             raise ImportError(f"Invalid factory path {dotted_path!r}: expected 'module.ClassName'")
+        from .builtin.web.backend import validated_factory
+
         module = importlib.import_module(module_path)
-        return cast(type["WebSearchBackendFactory"], getattr(module, class_name))
+        return validated_factory(getattr(module, class_name), dotted_path)
 
     def _create_web_search(self, config: dict[str, Any]) -> Tool | None:
         """Create WebSearchTool using a search backend.
