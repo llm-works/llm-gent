@@ -144,19 +144,25 @@ class ToolFactory:
 
         Raises:
             ValueError: If neither ``type`` nor ``factory`` is specified,
-                or if the type name is unknown.
+                both are specified, or the type name is unknown.
             ImportError: If the factory path cannot be imported.
         """
         from appinfra import DotDict
 
+        has_factory = "factory" in backend_config
+        has_type = "type" in backend_config
+
+        if has_factory and has_type:
+            raise ValueError("web_search backend config must specify 'type' or 'factory', not both")
+
         config = DotDict(backend_config.get("config") or {})
 
-        if factory_path := backend_config.get("factory"):
-            factory_cls = self._import_factory(factory_path)
+        if has_factory:
+            factory_cls = self._import_factory(backend_config["factory"])
             return factory_cls.create(self._lg, config)
 
-        if backend_type := backend_config.get("type"):
-            factory_cls = self._ensure_backend_registered(backend_type)
+        if has_type:
+            factory_cls = self._ensure_backend_registered(backend_config["type"])
             return factory_cls.create(self._lg, config)
 
         raise ValueError("web_search backend config must include 'type' or 'factory' key")

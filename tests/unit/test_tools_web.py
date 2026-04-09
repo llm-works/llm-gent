@@ -709,6 +709,28 @@ class TestToolFactoryBackendResolution:
         with pytest.raises(ValueError, match="must include 'type' or 'factory'"):
             factory.create("web_search", {"backend": {}})
 
+    def test_resolve_both_type_and_factory_raises(self, mock_lg):
+        """Backend dict with both type and factory raises ValueError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(ValueError, match="not both"):
+            factory.create(
+                "web_search",
+                {"backend": {"type": "brave", "factory": "some.path.Factory"}},
+            )
+
+    def test_resolve_non_factory_class_raises(self, mock_lg):
+        """Factory path to a non-WebSearchBackendFactory class raises TypeError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(TypeError, match="not a WebSearchBackendFactory subclass"):
+            factory.create(
+                "web_search",
+                {"backend": {"factory": "llm_gent.core.tools.factory.ToolFactory"}},
+            )
+
     def test_resolve_invalid_factory_path_raises(self, mock_lg):
         """Invalid factory dotted path raises ImportError."""
         from llm_gent import ToolFactory
