@@ -1,13 +1,21 @@
 """Tests for the swarm hub coordinator."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from llm_gent.bus.protocol import (
+    AgentJoined,
+    AgentLeft,
+    AskResponse,
     ErrorReport,
     ErrorRequest,
+    HeartbeatRequest,
+    HeartbeatResponse,
     RegisterRequest,
+    RelayRequest,
+    RelayResponse,
+    ShutdownNotice,
     UnregisterRequest,
 )
 from llm_gent.bus.transport import WorkerBusConfig
@@ -145,7 +153,7 @@ class TestHubHeartbeat:
 
     def test_heartbeat_response_updates_registry(self, hub):
         """Heartbeat response from broadcast updates registry stats."""
-        from llm_gent.bus.protocol import AgentStats, HeartbeatResponse
+        from llm_gent.bus.protocol import AgentStats
 
         hub.registry.register("worker-1")
         resp = HeartbeatResponse(
@@ -162,7 +170,7 @@ class TestHubHeartbeat:
 
     def test_heartbeat_p2p_updates_registry(self, hub):
         """Agent-initiated p2p heartbeat updates registry and returns response."""
-        from llm_gent.bus.protocol import AgentStats, HeartbeatRequest, HeartbeatResponse
+        from llm_gent.bus.protocol import AgentStats, HeartbeatRequest
 
         hub.registry.register("worker-1")
         req = HeartbeatRequest(
@@ -179,7 +187,6 @@ class TestHubHeartbeat:
 
     def test_heartbeat_unknown_agent_ignored(self, hub):
         """Heartbeat from unknown agent doesn't crash."""
-        from llm_gent.bus.protocol import HeartbeatResponse
 
         resp = HeartbeatResponse(id="r1", agent_id="ghost")
         hub._handle_heartbeat_response(resp)
@@ -191,7 +198,7 @@ class TestHubHeartbeat:
 
     def test_heartbeat_p2p_via_bus_request(self, hub):
         """HeartbeatRequest on DEALER is dispatched to p2p handler."""
-        from llm_gent.bus.protocol import AgentStats, HeartbeatRequest, HeartbeatResponse
+        from llm_gent.bus.protocol import AgentStats, HeartbeatRequest
 
         hub.registry.register("worker-1")
         req = HeartbeatRequest(agent_id="worker-1", stats=AgentStats(ticks=7))
@@ -297,3 +304,424 @@ class TestHubAskFeedback:
 
         hub.feedback("agent-1", "good job")
         mock_channel.submit.assert_called_once()
+
+    def test_ask_failure_raises_runtime_error(self, hub):
+        """Ask raises RuntimeError when agent returns failure response."""
+        mock_channel = MagicMock()
+        mock_channel.submit.return_value = AskResponse(id="x", success=False, error="oops")
+        hub._channels["agent-1"] = mock_channel
+
+        with pytest.raises(RuntimeError, match="ask failed: oops"):
+            hub.ask("agent-1", "question")
+
+    def test_ask_non_ask_response_returns_empty(self, hub):
+        """Ask returns empty string when response is not AskResponse."""
+        mock_channel = MagicMock()
+        mock_channel.submit.return_value = MagicMock(spec=[])  # not AskResponse
+        hub._channels["agent-1"] = mock_channel
+
+        result = hub.ask("agent-1", "question")
+        assert result == ""
+
+    def test_feedback_failure_raises_runtime_error(self, hub):
+        """Feedback raises RuntimeError when agent returns failure."""
+        mock_channel = MagicMock()
+        resp = MagicMock()
+        resp.success = False
+        resp.error = "bad feedback"
+        mock_channel.submit.return_value = resp
+        hub._channels["agent-1"] = mock_channel
+
+        with pytest.raises(RuntimeError, match="feedback failed"):
+            hub.feedback("agent-1", "msg")
+
+    def test_feedback_unknown_agent_raises(self, hub):
+        """Feedback raises KeyError for unknown agent."""
+        with pytest.raises(KeyError, match="No channel"):
+            hub.feedback("ghost", "msg")
+
+
+class TestHubBroadcastPublish:
+    """Tests for broadcast and publish passthrough."""
+
+    def test_broadcast_delegates_to_bus(self, hub):
+        """broadcast() passes message to bus.broadcast."""
+        msg = ShutdownNotice(reason="test")
+        hub.broadcast(msg)
+        hub._bus.broadcast.assert_called_once_with(msg)
+
+    def test_publish_delegates_to_bus(self, hub):
+        """publish() passes topic and message to bus.publish."""
+        msg = ShutdownNotice(reason="test")
+        hub.publish("my-topic", msg)
+        hub._bus.publish.assert_called_once_with("my-topic", msg)
+
+
+class TestHubBusProperty:
+    """Tests for Hub properties."""
+
+    def test_bus_property_returns_bus(self, hub):
+        """bus property returns the internal bus object."""
+        assert hub.bus is hub._bus
+
+
+class TestHubStart:
+    """Tests for Hub.start()."""
+
+    def test_start_configures_bus(self, hub):
+        """start() calls bus.start and wires up handlers."""
+        hub.start()
+
+        hub._bus.start.assert_called_once()
+        hub._bus.on_request.assert_called_once()
+        hub._bus.set_route_validator.assert_called_once()
+        hub._bus.register_async_request.assert_called_once_with("relay_request")
+        hub._bus.subscribe.assert_called_once_with("heartbeat", hub._handle_heartbeat_response)
+
+        # Cleanup: stop heartbeat broadcaster thread
+        hub._stop_heartbeat_broadcaster()
+
+
+class TestHubStopExtended:
+    """Extended stop tests covering grace period and agent error handling."""
+
+    def test_stop_with_grace_period(self, hub):
+        """stop() sleeps when grace > 0."""
+        hub._config.shutdown_grace_secs = 0.01  # small but >0
+        with patch("llm_gent.hub.hub.time.sleep") as mock_sleep:
+            hub.stop()
+            mock_sleep.assert_called_once_with(0.01)
+
+    def test_stop_catches_agent_stop_errors(self, hub, lg):
+        """stop() logs warning but continues when stop_agent raises."""
+        hub._runners["bad-agent"] = MagicMock()
+        hub._runners["bad-agent"].stop.side_effect = RuntimeError("boom")
+        hub.registry.register("bad-agent")
+
+        hub.stop()
+
+        # Should still have called bus.stop despite the error
+        hub._bus.stop.assert_called_once()
+        # Warning logged for the failing agent
+        lg.warning.assert_called()
+
+
+class TestBroadcastErrorPaths:
+    """Tests for _broadcast_shutdown and _broadcast_membership error paths."""
+
+    def test_broadcast_shutdown_catches_bus_error(self, hub, lg):
+        """_broadcast_shutdown logs warning when bus.broadcast raises."""
+        hub._bus.broadcast.side_effect = RuntimeError("bus down")
+        hub._broadcast_shutdown("reason")
+
+        lg.warning.assert_called()
+        assert "failed to broadcast shutdown notice" in lg.warning.call_args[0][0]
+
+    def test_broadcast_membership_catches_bus_error(self, hub, lg):
+        """_broadcast_membership logs warning when bus.broadcast raises."""
+        hub._bus.broadcast.side_effect = RuntimeError("bus down")
+        notice = AgentJoined(agent_id="x", agent_type="external", capabilities=[])
+        hub._broadcast_membership(notice)
+
+        lg.warning.assert_called()
+        assert "failed to broadcast membership notice" in lg.warning.call_args[0][0]
+
+
+class TestHubRelay:
+    """Tests for _handle_relay and _relay_error."""
+
+    def test_relay_target_not_found(self, hub):
+        """Relay returns error when target agent has no channel."""
+        req = RelayRequest(
+            from_agent="a", to_agent="missing", inner_type="ask_request", inner_payload={}
+        )
+        resp = hub._handle_relay(req)
+
+        assert resp.success is False
+        assert "not found" in resp.error
+
+    def test_relay_unknown_inner_type(self, hub):
+        """Relay returns error for unknown inner message type."""
+        hub._channels["target"] = MagicMock()
+        req = RelayRequest(
+            from_agent="a", to_agent="target", inner_type="nonexistent_type", inner_payload={}
+        )
+        resp = hub._handle_relay(req)
+
+        assert resp.success is False
+        assert "Unknown inner message type" in resp.error
+
+    def test_relay_success(self, hub):
+        """Relay forwards inner message to target channel and returns response."""
+        mock_channel = MagicMock()
+        inner_resp = MagicMock()
+        inner_resp.message_type = "ask_response"
+        inner_resp.model_dump.return_value = {"response": "hi"}
+        mock_channel.submit.return_value = inner_resp
+        hub._channels["target"] = mock_channel
+
+        req = RelayRequest(
+            from_agent="sender",
+            to_agent="target",
+            inner_type="ask_request",
+            inner_payload={"question": "hello"},
+        )
+        resp = hub._handle_relay(req)
+
+        assert resp.success is True
+        assert resp.from_agent == "target"
+        assert resp.inner_type == "ask_response"
+        assert resp.inner_payload == {"response": "hi"}
+
+    def test_relay_submit_exception(self, hub):
+        """Relay catches exception from channel.submit and returns error."""
+        mock_channel = MagicMock()
+        mock_channel.submit.side_effect = TimeoutError("timed out")
+        hub._channels["target"] = mock_channel
+
+        req = RelayRequest(
+            from_agent="sender",
+            to_agent="target",
+            inner_type="ask_request",
+            inner_payload={"question": "hello"},
+        )
+        resp = hub._handle_relay(req)
+
+        assert resp.success is False
+        assert "timed out" in resp.error
+
+    def test_relay_dispatched_from_bus_request(self, hub):
+        """RelayRequest is dispatched through _handle_bus_request."""
+        hub._channels["target"] = MagicMock()
+        hub._channels["target"].submit.return_value = MagicMock(
+            message_type="ask_response",
+            model_dump=MagicMock(return_value={}),
+        )
+        req = RelayRequest(
+            from_agent="a", to_agent="target", inner_type="ask_request", inner_payload={}
+        )
+        resp = hub._handle_bus_request(req, "sender-id")
+        assert isinstance(resp, RelayResponse)
+
+    def test_relay_error_creates_error_response(self, hub):
+        """_relay_error creates a RelayResponse with failure fields."""
+        req = RelayRequest(from_agent="a", to_agent="b", inner_type="ask_request", inner_payload={})
+        resp = hub._relay_error(req, "some error")
+
+        assert resp.success is False
+        assert resp.error == "some error"
+        assert resp.from_agent == "b"
+        assert resp.inner_type == "error"
+
+
+class TestHeartbeatResponseOldProtocol:
+    """Tests for heartbeat response handler edge cases."""
+
+    def test_heartbeat_request_on_pubsub_logs_warning(self, hub, lg):
+        """HeartbeatRequest on pub/sub logs old protocol warning."""
+        req = HeartbeatRequest(agent_id="old-agent")
+        hub._handle_heartbeat_response(req)
+
+        lg.warning.assert_called()
+        msg = lg.warning.call_args[0][0]
+        assert "old protocol" in msg
+
+
+class TestHubStartAgent:
+    """Tests for start_agent lifecycle."""
+
+    def test_start_agent_registers_and_starts(self, hub):
+        """start_agent registers agent, creates channel, starts runner."""
+        from appinfra import DotDict
+
+        with (
+            patch.object(hub, "_create_channel") as mock_ch,
+            patch.object(hub, "_create_runner") as mock_runner_fn,
+        ):
+            mock_runner = MagicMock()
+            mock_runner_fn.return_value = mock_runner
+
+            entry = hub.start_agent("test-agent", DotDict({}))
+
+            assert entry is not None
+            assert entry.agent_type == AgentType.INJECTED
+            mock_ch.assert_called_once_with("test-agent")
+            mock_runner_fn.assert_called_once()
+            mock_runner.start.assert_called_once()
+            assert hub._runners["test-agent"] is mock_runner
+
+    def test_start_agent_cleanup_on_runner_failure(self, hub):
+        """start_agent cleans up on runner creation failure."""
+        from appinfra import DotDict
+
+        with (
+            patch.object(hub, "_create_channel"),
+            patch.object(hub, "_create_runner", side_effect=RuntimeError("no runner")),
+            patch.object(hub, "_cleanup_agent_resources") as mock_cleanup,
+        ):
+            with pytest.raises(RuntimeError, match="no runner"):
+                hub.start_agent("bad-agent", DotDict({}))
+
+            mock_cleanup.assert_called_once_with("bad-agent")
+            # Agent should be unregistered after failure
+            assert hub.registry.get("bad-agent") is None
+
+    def test_start_agent_cleanup_on_channel_failure(self, hub):
+        """start_agent cleans up on channel creation failure."""
+        from appinfra import DotDict
+
+        with (
+            patch.object(hub, "_create_channel", side_effect=RuntimeError("zmq fail")),
+            patch.object(hub, "_cleanup_agent_resources") as mock_cleanup,
+        ):
+            with pytest.raises(RuntimeError, match="zmq fail"):
+                hub.start_agent("bad-agent", DotDict({}))
+
+            mock_cleanup.assert_called_once_with("bad-agent")
+            assert hub.registry.get("bad-agent") is None
+
+
+class TestHubCreateRunner:
+    """Tests for _create_runner execution modes."""
+
+    def test_create_runner_thread_mode(self, hub):
+        """Thread execution mode creates ThreadRunner."""
+        from appinfra import DotDict
+
+        with (
+            patch("llm_gent.hub.hub.AgentService"),
+            patch("llm_gent.hub.hub.ThreadRunner") as mock_tr,
+            patch("llm_gent.hub.hub.ProcessRunner"),
+        ):
+            config = DotDict({"execution": "thread"})
+            runner = hub._create_runner("agent-1", config, None, None)
+            mock_tr.assert_called_once()
+            assert runner is mock_tr.return_value
+
+    def test_create_runner_process_mode_default(self, hub):
+        """Default execution mode creates ProcessRunner."""
+        from appinfra import DotDict
+
+        with (
+            patch("llm_gent.hub.hub.AgentService"),
+            patch("llm_gent.hub.hub.ThreadRunner"),
+            patch("llm_gent.hub.hub.ProcessRunner") as mock_pr,
+        ):
+            config = DotDict({})
+            runner = hub._create_runner("agent-1", config, None, None)
+            mock_pr.assert_called_once()
+            assert runner is mock_pr.return_value
+
+    def test_create_runner_explicit_process_mode(self, hub):
+        """Explicit 'process' execution mode creates ProcessRunner."""
+        from appinfra import DotDict
+
+        with (
+            patch("llm_gent.hub.hub.AgentService"),
+            patch("llm_gent.hub.hub.ThreadRunner"),
+            patch("llm_gent.hub.hub.ProcessRunner") as mock_pr,
+        ):
+            config = DotDict({"execution": "process"})
+            runner = hub._create_runner("agent-1", config, None, None)
+            mock_pr.assert_called_once()
+            assert runner is mock_pr.return_value
+
+
+class TestHubCreateChannel:
+    """Tests for _create_channel."""
+
+    def test_create_channel_stores_channel(self, hub):
+        """_create_channel creates transport + BufferedChannel and stores it."""
+        with patch("llm_gent.hub.hub.BufferedChannel") as mock_bc:
+            mock_transport = MagicMock()
+            hub._bus.create_agent_transport.return_value = mock_transport
+
+            hub._create_channel("agent-1")
+
+            hub._bus.create_agent_transport.assert_called_once_with("agent-1")
+            mock_bc.assert_called_once_with(mock_transport)
+            assert hub._channels["agent-1"] is mock_bc.return_value
+
+
+class TestHubStopAgent:
+    """Tests for stop_agent."""
+
+    def test_stop_agent_with_runner(self, hub):
+        """stop_agent stops runner, cleans up, unregisters, broadcasts."""
+        hub.registry.register("agent-1")
+        mock_runner = MagicMock()
+        hub._runners["agent-1"] = mock_runner
+        hub._channels["agent-1"] = MagicMock()
+        hub._bus.broadcast.reset_mock()
+
+        hub.stop_agent("agent-1")
+
+        mock_runner.stop.assert_called_once()
+        assert "agent-1" not in hub._runners
+        assert "agent-1" not in hub._channels
+        assert hub.registry.get("agent-1") is None
+        # AgentLeft broadcast
+        left_calls = [
+            c for c in hub._bus.broadcast.call_args_list if isinstance(c[0][0], AgentLeft)
+        ]
+        assert len(left_calls) == 1
+        assert left_calls[0][0][0].reason == "shutdown"
+
+    def test_stop_agent_without_runner(self, hub):
+        """stop_agent works even if no runner exists for the agent."""
+        hub.registry.register("agent-1")
+        hub._bus.broadcast.reset_mock()
+
+        hub.stop_agent("agent-1")
+
+        assert hub.registry.get("agent-1") is None
+
+    def test_stop_agent_cleanup_on_runner_error(self, hub):
+        """stop_agent cleans up even if runner.stop() raises."""
+        hub.registry.register("agent-1")
+        mock_runner = MagicMock()
+        mock_runner.stop.side_effect = RuntimeError("stop failed")
+        hub._runners["agent-1"] = mock_runner
+        hub._bus.broadcast.reset_mock()
+
+        with pytest.raises(RuntimeError, match="stop failed"):
+            hub.stop_agent("agent-1")
+
+        # Cleanup still happens despite error (finally block)
+        assert "agent-1" not in hub._runners
+        assert hub.registry.get("agent-1") is None
+
+
+class TestHubGetInsights:
+    """Tests for get_insights."""
+
+    def test_get_insights_known_agent(self, hub):
+        """get_insights returns stats for known agent."""
+        hub.registry.register("agent-1")
+        insights = hub.get_insights("agent-1")
+
+        assert len(insights) == 1
+        assert insights[0]["type"] == "stats"
+        assert "ticks" in insights[0]
+        assert "errors" in insights[0]
+        assert "health" in insights[0]
+
+    def test_get_insights_unknown_agent(self, hub):
+        """get_insights returns empty list for unknown agent."""
+        insights = hub.get_insights("ghost")
+        assert insights == []
+
+
+class TestRequireChannel:
+    """Tests for _require_channel."""
+
+    def test_require_channel_found(self, hub):
+        """_require_channel returns channel when it exists."""
+        mock_channel = MagicMock()
+        hub._channels["agent-1"] = mock_channel
+        assert hub._require_channel("agent-1") is mock_channel
+
+    def test_require_channel_not_found(self, hub):
+        """_require_channel raises KeyError when channel missing."""
+        with pytest.raises(KeyError, match="No channel"):
+            hub._require_channel("ghost")
