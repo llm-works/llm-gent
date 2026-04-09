@@ -574,7 +574,8 @@ class TestCheckAdapterFallback:
     def test_first_fallback_warns(self):
         agent = MagicMock()
         trait = LLMTrait(agent, {})
-        trait._last_adapter_fallback_warning = 0.0
+        # Ensure enough elapsed time even on fresh CI containers where monotonic() starts near 0
+        trait._last_adapter_fallback_warning = -600.0
 
         response = MagicMock()
         response.adapter.fallback = True
