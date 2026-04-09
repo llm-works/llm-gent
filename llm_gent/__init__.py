@@ -34,6 +34,7 @@ from .core.tools import (
     ToolResult,
     WebFetchTool,
     WebSearchBackend,
+    WebSearchBackendFactory,
     WebSearchTool,
 )
 from .core.tools.factory import ToolFactory
@@ -84,6 +85,7 @@ __all__ = [
     "ShellTool",
     "WebFetchTool",
     "WebSearchBackend",
+    "WebSearchBackendFactory",
     "WebSearchTool",
     "Tool",
     "ToolCall",

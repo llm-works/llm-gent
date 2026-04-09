@@ -14,8 +14,8 @@ from typing import Any
 
 from appinfra.log import Logger
 
-from ..base import BaseTool, ToolResult
-from .http import HTTPFetchTool
+from ...base import BaseTool, ToolResult
+from ..http import HTTPFetchTool
 
 
 _DEFAULT_USER_AGENT = (

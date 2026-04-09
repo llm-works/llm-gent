@@ -12,10 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WebFetchTool` — fetches web pages and extracts main content as readable text using trafilatura
   (boilerplate removal, nav/footer stripping); non-HTML content passes through as-is
 - `WebSearchTool` — web search tool with pluggable `WebSearchBackend` protocol; returns structured
-  `{title, url, snippet}` results with rate limiting and automatic retry on retriable failures
+  `{title, url, snippet}` results with automatic retry on retriable failures
 - `WebSearchBackend` — protocol for search provider implementations
-- `BraveSearchBackend` — production search backend using the Brave Web Search API; pass
-  `api_key=` or set `BRAVE_SEARCH_API_KEY` environment variable
+- `WebSearchBackendFactory` ABC — factory pattern for creating search backends from YAML config;
+  supports `type:` (built-in registry) and `factory:` (dynamic import) resolution
+- `BraveSearchBackend` — production search backend using the Brave Web Search API; includes
+  `Factory` for config-driven instantiation
 - `examples/web_search.py` — demo showing `BraveSearchBackend` usage and custom backend
   implementation
 - `trafilatura>=2.0` dependency for web content extraction
