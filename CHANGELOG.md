@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Unit test coverage from 59% to 75%; coverage threshold raised from 50% to 70%
 - **Breaking:** `ToolFactory` now requires a `Logger` argument: `ToolFactory(lg)` instead of
   `ToolFactory()`
 - Refactored runtime to use `appinfra.service` for IPC and state management, removing ~780 lines
