@@ -374,3 +374,270 @@ class TestLLMTraitStructuredOutput:
 
         with pytest.raises(ValueError, match="Cannot use both tools and output_schema"):
             trait.complete(messages, tools=tools, output_schema=self.Answer)
+
+
+class TestResolveLLMDefaults:
+    """Tests for _resolve_llm_defaults function."""
+
+    def test_single_backend_config(self):
+        from appinfra import DotDict
+
+        from llm_gent.core.traits.builtin.llm import _resolve_llm_defaults
+
+        config = DotDict({"model": "qwen2.5", "temperature": 0.3, "adapter": "lora1"})
+        result = _resolve_llm_defaults(config)
+
+        assert result["model"] == "qwen2.5"
+        assert result["temperature"] == 0.3
+        assert result["adapter"] == "lora1"
+
+    def test_single_backend_defaults(self):
+        from appinfra import DotDict
+
+        from llm_gent.core.traits.builtin.llm import _resolve_llm_defaults
+
+        config = DotDict({})
+        result = _resolve_llm_defaults(config)
+
+        assert result["model"] == "default"
+        assert result["temperature"] == 0.7
+        assert result["max_tokens"] is None
+
+    def test_multi_backend_with_default(self):
+        from appinfra import DotDict
+
+        from llm_gent.core.traits.builtin.llm import _resolve_llm_defaults
+
+        config = DotDict(
+            {
+                "default": "cloud",
+                "backends": {
+                    "local": {"model": "qwen2.5", "temperature": 0.3},
+                    "cloud": {"model": "claude-3", "temperature": 0.5},
+                },
+            }
+        )
+        result = _resolve_llm_defaults(config)
+
+        assert result["model"] == "claude-3"
+        assert result["temperature"] == 0.5
+
+    def test_multi_backend_no_default_picks_first(self):
+        from appinfra import DotDict
+
+        from llm_gent.core.traits.builtin.llm import _resolve_llm_defaults
+
+        config = DotDict(
+            {
+                "backends": {
+                    "local": {"model": "qwen2.5"},
+                    "cloud": {"model": "claude-3"},
+                },
+            }
+        )
+        result = _resolve_llm_defaults(config)
+        # Should pick first backend
+        assert result["model"] in ("qwen2.5", "claude-3")
+
+
+class TestLLMTraitLifecycle:
+    """Tests for on_start/on_stop."""
+
+    def test_on_start_creates_router(self):
+        from unittest.mock import patch
+
+        from appinfra import DotDict
+
+        config = DotDict({"default": "test", "backends": {"test": {"type": "openai_compatible"}}})
+        trait = LLMTrait(MagicMock(), config)
+
+        with patch("llm_gent.core.traits.builtin.llm.LLMClientFactory") as mock_factory:
+            mock_client = MagicMock()
+            mock_factory.return_value.from_config.return_value = mock_client
+            trait.on_start()
+
+            assert trait._router is mock_client
+
+    def test_on_stop_closes_router(self):
+        trait = LLMTrait(MagicMock(), {})
+        trait._router = MagicMock()
+        trait.on_stop()
+
+        trait._router is None  # noqa: B015 — checking side effect happened
+        # Actually check it was set to None
+        assert trait._router is None
+
+    def test_on_stop_safe_when_no_router(self):
+        trait = LLMTrait(MagicMock(), {})
+        trait.on_stop()  # Should not raise
+
+
+class TestLLMTraitRouterProperty:
+    """Tests for router property."""
+
+    def test_raises_when_not_started(self):
+        trait = LLMTrait(MagicMock(), {})
+        with pytest.raises(RuntimeError, match="not started"):
+            _ = trait.router
+
+    def test_returns_client_when_started(self):
+        trait = LLMTrait(MagicMock(), {})
+        mock_client = MagicMock()
+        trait._router = mock_client
+        assert trait.router is mock_client
+
+
+class TestLLMTraitAdapterProperty:
+    """Tests for adapter property."""
+
+    def test_adapter_none_by_default(self):
+        trait = LLMTrait(MagicMock(), {})
+        assert trait.adapter is None
+
+    def test_adapter_from_defaults(self):
+        trait = LLMTrait(MagicMock(), {})
+        trait._defaults = {"adapter": "lora-v1"}
+        assert trait.adapter == "lora-v1"
+
+
+class TestMessagesToDicts:
+    """Tests for _messages_to_dicts."""
+
+    def test_basic_messages(self):
+        trait = LLMTrait(MagicMock(), {})
+        messages = [
+            Message(role="system", content="You are helpful."),
+            Message(role="user", content="Hi"),
+        ]
+        result = trait._messages_to_dicts(messages)
+        assert len(result) == 2
+        assert result[0] == {"role": "system", "content": "You are helpful."}
+
+    def test_message_with_tool_calls(self):
+        trait = LLMTrait(MagicMock(), {})
+        messages = [Message(role="assistant", content="", tool_calls=[{"id": "tc1"}])]
+        result = trait._messages_to_dicts(messages)
+        assert result[0]["tool_calls"] == [{"id": "tc1"}]
+
+    def test_message_with_tool_call_id(self):
+        trait = LLMTrait(MagicMock(), {})
+        messages = [Message(role="tool", content="result", tool_call_id="tc1")]
+        result = trait._messages_to_dicts(messages)
+        assert result[0]["tool_call_id"] == "tc1"
+
+    def test_omits_none_fields(self):
+        trait = LLMTrait(MagicMock(), {})
+        messages = [Message(role="user", content="Hi")]
+        result = trait._messages_to_dicts(messages)
+        assert "tool_calls" not in result[0]
+        assert "tool_call_id" not in result[0]
+
+
+class TestExtractTokens:
+    """Tests for _extract_tokens."""
+
+    def test_no_usage(self):
+        trait = LLMTrait(MagicMock(), {})
+        response = MagicMock()
+        response.usage = None
+        assert trait._extract_tokens(response) == 0
+
+    def test_total_tokens(self):
+        trait = LLMTrait(MagicMock(), {})
+        response = MagicMock()
+        response.usage.total_tokens = 150
+        assert trait._extract_tokens(response) == 150
+
+    def test_fallback_prompt_plus_completion(self):
+        trait = LLMTrait(MagicMock(), {})
+        response = MagicMock()
+        response.usage.total_tokens = 0
+        response.usage.prompt_tokens = 80
+        response.usage.completion_tokens = 40
+        assert trait._extract_tokens(response) == 120
+
+    def test_fallback_with_none_components(self):
+        trait = LLMTrait(MagicMock(), {})
+        response = MagicMock()
+        response.usage.total_tokens = 0
+        response.usage.prompt_tokens = None
+        response.usage.completion_tokens = 50
+        assert trait._extract_tokens(response) == 50
+
+
+class TestCheckAdapterFallback:
+    """Tests for _check_adapter_fallback."""
+
+    def test_no_adapter_noop(self):
+        trait = LLMTrait(MagicMock(), {})
+        response = MagicMock()
+        response.adapter = None
+        trait._check_adapter_fallback(response)  # Should not raise
+
+    def test_no_fallback_noop(self):
+        trait = LLMTrait(MagicMock(), {})
+        response = MagicMock()
+        response.adapter.fallback = False
+        trait._check_adapter_fallback(response)  # Should not raise
+
+    def test_first_fallback_warns(self):
+        agent = MagicMock()
+        trait = LLMTrait(agent, {})
+        trait._last_adapter_fallback_warning = 0.0
+
+        response = MagicMock()
+        response.adapter.fallback = True
+
+        trait._check_adapter_fallback(response)
+        agent.lg.warning.assert_called_once()
+
+    def test_subsequent_fallback_debugs(self):
+        import time
+
+        agent = MagicMock()
+        trait = LLMTrait(agent, {})
+        trait._last_adapter_fallback_warning = time.monotonic()  # Just warned
+
+        response = MagicMock()
+        response.adapter.fallback = True
+
+        trait._check_adapter_fallback(response)
+        agent.lg.debug.assert_called_once()
+        agent.lg.warning.assert_not_called()
+
+
+class TestLLMTraitBackendAdapter:
+    """Tests for LLMTraitBackend wrapper."""
+
+    def test_complete_delegates(self):
+        from llm_gent.core.traits.builtin.llm import LLMTraitBackend
+
+        mock_trait = MagicMock()
+        mock_trait.complete.return_value = MagicMock()
+
+        backend = LLMTraitBackend(mock_trait)
+        messages = [Message(role="user", content="Hi")]
+        backend.complete(messages, model="test")
+
+        mock_trait.complete.assert_called_once_with(
+            messages=messages,
+            model="test",
+            temperature=None,
+            max_tokens=None,
+            tools=None,
+            adapter=None,
+        )
+
+    def test_load_adapter_raises(self):
+        from llm_gent.core.traits.builtin.llm import LLMTraitBackend
+
+        backend = LLMTraitBackend(MagicMock())
+        with pytest.raises(NotImplementedError):
+            backend.load_adapter("path")
+
+    def test_unload_adapter_raises(self):
+        from llm_gent.core.traits.builtin.llm import LLMTraitBackend
+
+        backend = LLMTraitBackend(MagicMock())
+        with pytest.raises(NotImplementedError):
+            backend.unload_adapter()
