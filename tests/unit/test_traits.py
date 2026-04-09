@@ -427,8 +427,8 @@ class TestResolveLLMDefaults:
             }
         )
         result = _resolve_llm_defaults(config)
-        # Should pick first backend
-        assert result["model"] in ("qwen2.5", "claude-3")
+        # Should pick first configured backend (insertion order)
+        assert result["model"] == "qwen2.5"
 
 
 class TestLLMTraitLifecycle:
@@ -451,11 +451,11 @@ class TestLLMTraitLifecycle:
 
     def test_on_stop_closes_router(self):
         trait = LLMTrait(MagicMock(), {})
-        trait._router = MagicMock()
+        router = MagicMock()
+        trait._router = router
         trait.on_stop()
 
-        trait._router is None  # noqa: B015 — checking side effect happened
-        # Actually check it was set to None
+        router.close.assert_called_once()
         assert trait._router is None
 
     def test_on_stop_safe_when_no_router(self):
