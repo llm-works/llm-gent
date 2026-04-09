@@ -75,32 +75,41 @@ class TestSAIATraitInit:
 
 
 class TestSAIATraitLifecycle:
-    def test_on_start_builds_saia(self):
+    @pytest.fixture
+    def mock_saia_builder(self):
+        """Create a fluent mock builder that returns itself for all chained calls."""
+        with patch("llm_gent.core.traits.builtin.saia.SAIA") as mock_saia_cls:
+            mock_builder = MagicMock()
+            mock_saia_cls.builder.return_value = mock_builder
+            # Fluent API: every method returns the builder itself
+            for method in (
+                "backend",
+                "max_iterations",
+                "timeout",
+                "logger",
+                "system",
+                "terminal_tool",
+                "tools",
+            ):
+                getattr(mock_builder, method).return_value = mock_builder
+            mock_builder.build.return_value = MagicMock()
+            yield mock_builder
+
+    def test_on_start_builds_saia(self, mock_saia_builder):
         agent = MagicMock()
         agent.get_trait.return_value = None  # no ToolsTrait
 
         backend = MagicMock()
         trait = SAIATrait(agent, backend, config=SAIAConfig(system_prompt="Be helpful"))
 
-        with patch("llm_gent.core.traits.builtin.saia.SAIA") as mock_saia_cls:
-            mock_builder = MagicMock()
-            mock_saia_cls.builder.return_value = mock_builder
-            mock_builder.backend.return_value = mock_builder
-            mock_builder.max_iterations.return_value = mock_builder
-            mock_builder.timeout.return_value = mock_builder
-            mock_builder.logger.return_value = mock_builder
-            mock_builder.system.return_value = mock_builder
-            mock_builder.terminal_tool.return_value = mock_builder
-            mock_builder.build.return_value = MagicMock()
+        trait.on_start()
 
-            trait.on_start()
+        mock_saia_builder.backend.assert_called_once_with(backend)
+        mock_saia_builder.system.assert_called_once_with("Be helpful")
+        mock_saia_builder.terminal_tool.assert_called_once_with("complete_task")
+        assert trait._saia is not None
 
-            mock_builder.backend.assert_called_once_with(backend)
-            mock_builder.system.assert_called_once_with("Be helpful")
-            mock_builder.terminal_tool.assert_called_once_with("complete_task")
-            assert trait._saia is not None
-
-    def test_on_start_with_tools(self):
+    def test_on_start_with_tools(self, mock_saia_builder):
         agent = MagicMock()
         tools_trait = MagicMock()
         tools_trait.has_tools.return_value = True
@@ -114,40 +123,19 @@ class TestSAIATraitLifecycle:
         backend = MagicMock()
         trait = SAIATrait(agent, backend)
 
-        with patch("llm_gent.core.traits.builtin.saia.SAIA") as mock_saia_cls:
-            mock_builder = MagicMock()
-            mock_saia_cls.builder.return_value = mock_builder
-            mock_builder.backend.return_value = mock_builder
-            mock_builder.max_iterations.return_value = mock_builder
-            mock_builder.timeout.return_value = mock_builder
-            mock_builder.logger.return_value = mock_builder
-            mock_builder.terminal_tool.return_value = mock_builder
-            mock_builder.tools.return_value = mock_builder
-            mock_builder.build.return_value = MagicMock()
+        trait.on_start()
 
-            trait.on_start()
+        mock_saia_builder.tools.assert_called_once()
 
-            mock_builder.tools.assert_called_once()
-
-    def test_on_start_no_system_prompt(self):
+    def test_on_start_no_system_prompt(self, mock_saia_builder):
         agent = MagicMock()
         agent.get_trait.return_value = None
 
         trait = SAIATrait(agent, MagicMock(), config=SAIAConfig(system_prompt=None))
 
-        with patch("llm_gent.core.traits.builtin.saia.SAIA") as mock_saia_cls:
-            mock_builder = MagicMock()
-            mock_saia_cls.builder.return_value = mock_builder
-            mock_builder.backend.return_value = mock_builder
-            mock_builder.max_iterations.return_value = mock_builder
-            mock_builder.timeout.return_value = mock_builder
-            mock_builder.logger.return_value = mock_builder
-            mock_builder.terminal_tool.return_value = mock_builder
-            mock_builder.build.return_value = MagicMock()
+        trait.on_start()
 
-            trait.on_start()
-
-            mock_builder.system.assert_not_called()
+        mock_saia_builder.system.assert_not_called()
 
     def test_on_stop(self):
         agent = MagicMock()

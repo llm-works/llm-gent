@@ -19,13 +19,14 @@ from llm_gent.core.traits.builtin.llm import LLMTrait
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture
+def mock_agent():
+    """Create a mock agent."""
+    return MagicMock()
+
+
 class TestBaseTrait:
     """Tests for BaseTrait."""
-
-    @pytest.fixture
-    def mock_agent(self):
-        """Create a mock agent."""
-        return MagicMock()
 
     def test_init(self, mock_agent):
         """BaseTrait requires agent in constructor."""
@@ -91,11 +92,6 @@ class TestDirective:
 class TestDirectiveTrait:
     """Tests for DirectiveTrait."""
 
-    @pytest.fixture
-    def mock_agent(self):
-        """Create a mock agent."""
-        return MagicMock()
-
     def test_init_with_identity_object(self, mock_agent):
         identity = Directive(prompt="Test identity")
         trait = DirectiveTrait(mock_agent, identity)
@@ -128,11 +124,6 @@ class TestDirectiveTrait:
 
 class TestMethodTrait:
     """Tests for MethodTrait."""
-
-    @pytest.fixture
-    def mock_agent(self):
-        """Create a mock agent."""
-        return MagicMock()
 
     def test_init(self, mock_agent):
         trait = MethodTrait(mock_agent, "- Step 1\n- Step 2")

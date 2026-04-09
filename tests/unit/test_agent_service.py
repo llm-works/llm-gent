@@ -312,25 +312,28 @@ class TestLoadFactory:
 
 
 class TestExtractSchedule:
-    def test_valid_interval(self, lg, llm_config, bus_config):
-        cfg = DotDict({"schedule": {"interval": 60}})
-        svc = AgentService(
+    def _make_service(self, cfg, lg, llm_config, bus_config):
+        """Create AgentService with the given config and standard defaults."""
+        return AgentService(
             lg=lg,
             agent_name="a",
             config=cfg,
             llm_config=llm_config,
             bus_config=bus_config,
         )
+
+    def test_valid_interval(self, lg, llm_config, bus_config):
+        svc = self._make_service(
+            DotDict({"schedule": {"interval": 60}}), lg, llm_config, bus_config
+        )
         assert svc._extract_schedule() == 60.0
 
     def test_string_interval(self, lg, llm_config, bus_config):
-        cfg = DotDict({"schedule": {"interval": "45"}})
-        svc = AgentService(
-            lg=lg,
-            agent_name="a",
-            config=cfg,
-            llm_config=llm_config,
-            bus_config=bus_config,
+        svc = self._make_service(
+            DotDict({"schedule": {"interval": "45"}}),
+            lg,
+            llm_config,
+            bus_config,
         )
         assert svc._extract_schedule() == 45.0
 
@@ -338,34 +341,28 @@ class TestExtractSchedule:
         assert service._extract_schedule() is None
 
     def test_schedule_without_interval(self, lg, llm_config, bus_config):
-        cfg = DotDict({"schedule": {"other": "value"}})
-        svc = AgentService(
-            lg=lg,
-            agent_name="a",
-            config=cfg,
-            llm_config=llm_config,
-            bus_config=bus_config,
+        svc = self._make_service(
+            DotDict({"schedule": {"other": "value"}}),
+            lg,
+            llm_config,
+            bus_config,
         )
         assert svc._extract_schedule() is None
 
     def test_non_numeric_interval(self, lg, llm_config, bus_config):
-        cfg = DotDict({"schedule": {"interval": "not-a-number"}})
-        svc = AgentService(
-            lg=lg,
-            agent_name="a",
-            config=cfg,
-            llm_config=llm_config,
-            bus_config=bus_config,
+        svc = self._make_service(
+            DotDict({"schedule": {"interval": "not-a-number"}}),
+            lg,
+            llm_config,
+            bus_config,
         )
         assert svc._extract_schedule() is None
 
     def test_schedule_not_dict(self, lg, llm_config, bus_config):
-        cfg = DotDict({"schedule": "cron-string"})
-        svc = AgentService(
-            lg=lg,
-            agent_name="a",
-            config=cfg,
-            llm_config=llm_config,
-            bus_config=bus_config,
+        svc = self._make_service(
+            DotDict({"schedule": "cron-string"}),
+            lg,
+            llm_config,
+            bus_config,
         )
         assert svc._extract_schedule() is None

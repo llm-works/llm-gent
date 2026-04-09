@@ -5,6 +5,12 @@ from unittest.mock import MagicMock
 import pytest
 from appinfra import DotDict
 
+from llm_gent.core.agent.factory import Factory
+from llm_gent.core.agent.helpers import _substitute_in_dict
+from llm_gent.core.dispatcher import Dispatcher
+from llm_gent.core.llm.caller import LLMCaller
+from llm_gent.core.platform import PlatformContext
+
 
 pytestmark = pytest.mark.unit
 
@@ -16,8 +22,6 @@ pytestmark = pytest.mark.unit
 
 class TestPlatformContext:
     def test_init(self):
-        from llm_gent.core.platform import PlatformContext
-
         lg = MagicMock()
         ctx = PlatformContext(lg, config={"llm": {"model": "test"}})
 
@@ -27,8 +31,6 @@ class TestPlatformContext:
         assert ctx.tool_factory is not None
 
     def test_from_config(self):
-        from llm_gent.core.platform import PlatformContext
-
         lg = MagicMock()
         ctx = PlatformContext.from_config(
             lg, llm_config={"model": "test"}, learn_config={"db": "x"}
@@ -38,20 +40,14 @@ class TestPlatformContext:
         assert ctx.learn_config() == {"db": "x"}
 
     def test_llm_config_default(self):
-        from llm_gent.core.platform import PlatformContext
-
         ctx = PlatformContext(MagicMock(), config={})
         assert ctx.llm_config() == {}
 
     def test_learn_config_none(self):
-        from llm_gent.core.platform import PlatformContext
-
         ctx = PlatformContext(MagicMock(), config={})
         assert ctx.learn_config() is None
 
     def test_cleanup(self):
-        from llm_gent.core.platform import PlatformContext
-
         lg = MagicMock()
         ctx = PlatformContext(lg, config={})
         ctx.cleanup()  # Should not raise
@@ -64,42 +60,30 @@ class TestPlatformContext:
 
 class TestSubstituteInDict:
     def test_string(self):
-        from llm_gent.core.agent.helpers import _substitute_in_dict
-
         result = _substitute_in_dict("Hello {{NAME}}", {"NAME": "World"})
         assert result == "Hello World"
 
     def test_dict(self):
-        from llm_gent.core.agent.helpers import _substitute_in_dict
-
         data = {"greeting": "Hello {{NAME}}"}
         result = _substitute_in_dict(data, {"NAME": "World"})
         assert result == {"greeting": "Hello World"}
 
     def test_list(self):
-        from llm_gent.core.agent.helpers import _substitute_in_dict
-
         data = ["Hello {{NAME}}", "Bye {{NAME}}"]
         result = _substitute_in_dict(data, {"NAME": "World"})
         assert result == ["Hello World", "Bye World"]
 
     def test_passthrough(self):
-        from llm_gent.core.agent.helpers import _substitute_in_dict
-
         assert _substitute_in_dict(42, {}) == 42
         assert _substitute_in_dict(None, {}) is None
         assert _substitute_in_dict(True, {}) is True
 
     def test_env_fallback(self, monkeypatch):
-        from llm_gent.core.agent.helpers import _substitute_in_dict
-
         monkeypatch.setenv("TEST_VAR_XYZ", "from_env")
         result = _substitute_in_dict("{{TEST_VAR_XYZ}}", {})
         assert result == "from_env"
 
     def test_missing_raises(self):
-        from llm_gent.core.agent.helpers import _substitute_in_dict
-
         with pytest.raises(ValueError, match="not found"):
             _substitute_in_dict("{{NONEXISTENT_VAR_ABC}}", {})
 
@@ -112,8 +96,6 @@ class TestSubstituteInDict:
 class TestDispatcher:
     @pytest.mark.asyncio
     async def test_register_and_trigger(self):
-        from llm_gent.core.dispatcher import Dispatcher
-
         d = Dispatcher()
 
         async def handler(x: int) -> int:
@@ -125,15 +107,11 @@ class TestDispatcher:
 
     @pytest.mark.asyncio
     async def test_unknown_event_raises(self):
-        from llm_gent.core.dispatcher import Dispatcher
-
         d = Dispatcher()
         with pytest.raises(ValueError, match="No handler registered"):
             await d.trigger("unknown")
 
     def test_has_handler(self):
-        from llm_gent.core.dispatcher import Dispatcher
-
         d = Dispatcher()
 
         async def handler() -> None:
@@ -151,8 +129,6 @@ class TestDispatcher:
 
 class TestLLMCaller:
     def test_init(self):
-        from llm_gent.core.llm.caller import LLMCaller
-
         lg = MagicMock()
         router = MagicMock()
         caller = LLMCaller(lg, router)
@@ -160,8 +136,6 @@ class TestLLMCaller:
         assert caller.dry_run is False
 
     def test_dry_run_mode(self):
-        from llm_gent.core.llm.caller import LLMCaller
-
         caller = LLMCaller(MagicMock(), MagicMock(), dry_run=True)
         assert caller.dry_run is True
 
@@ -173,8 +147,6 @@ class TestLLMCaller:
         caller.router.chat.assert_not_called()
 
     def test_normal_call(self):
-        from llm_gent.core.llm.caller import LLMCaller
-
         lg = MagicMock()
         router = MagicMock()
         response = MagicMock()
@@ -201,8 +173,6 @@ class TestLLMCaller:
         router.chat.assert_called_once()
 
     def test_backend_and_extra_body_kwargs(self):
-        from llm_gent.core.llm.caller import LLMCaller
-
         router = MagicMock()
         response = MagicMock()
         response.content = "ok"
@@ -224,8 +194,6 @@ class TestLLMCaller:
         assert call_kwargs.kwargs["extra_body"] == {"foo": "bar"}
 
     def test_to_result_with_tool_calls(self):
-        from llm_gent.core.llm.caller import LLMCaller
-
         router = MagicMock()
         tc = MagicMock()
         tc.function.name = "search"
@@ -245,8 +213,6 @@ class TestLLMCaller:
         assert result.tool_calls[0]["name"] == "search"
 
     def test_to_result_none_content(self):
-        from llm_gent.core.llm.caller import LLMCaller
-
         router = MagicMock()
         response = MagicMock()
         response.content = None
@@ -262,8 +228,6 @@ class TestLLMCaller:
         assert result.model == "unknown"
 
     def test_close(self):
-        from llm_gent.core.llm.caller import LLMCaller
-
         router = MagicMock()
         caller = LLMCaller(MagicMock(), router)
         caller.close()
@@ -277,9 +241,6 @@ class TestLLMCaller:
 
 class TestCoreAgentFactory:
     def test_agent_class_not_set_raises(self):
-        from llm_gent.core.agent.factory import Factory
-        from llm_gent.core.platform import PlatformContext
-
         platform = PlatformContext(MagicMock(), config={"llm": {}})
 
         class BadFactory(Factory):
@@ -290,8 +251,6 @@ class TestCoreAgentFactory:
             f.create(DotDict({"identity": {"name": "test"}}))
 
     def test_variable_substitution(self):
-        from llm_gent.core.agent.helpers import _substitute_in_dict
-
         config = {"directive": "Hello {{NAME}}", "method": "Step {{NUM}}"}
         result = _substitute_in_dict(config, {"NAME": "World", "NUM": "1"})
         assert result["directive"] == "Hello World"
