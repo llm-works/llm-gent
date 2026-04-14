@@ -74,7 +74,7 @@ class BraveSearchBackend:
         """Close the underlying HTTP client."""
         self._client.close()
 
-    def search(self, query: str, max_results: int) -> list[dict[str, str]] | None:
+    def search(self, query: str, max_results: int, offset: int = 0) -> list[dict[str, str]] | None:
         """Query Brave Web Search and return structured results.
 
         Returns:
@@ -87,7 +87,7 @@ class BraveSearchBackend:
             return None
 
         try:
-            response = self._request(query, max_results)
+            response = self._request(query, max_results, offset)
         except httpx.TransportError as exc:
             self._lg.warning(
                 "brave search request failed",
@@ -122,7 +122,7 @@ class BraveSearchBackend:
             )
             return None
 
-    def _request(self, query: str, max_results: int) -> httpx.Response:
+    def _request(self, query: str, max_results: int, offset: int = 0) -> httpx.Response:
         """Execute the HTTP request to Brave Search API."""
         headers = {
             "Accept": "application/json",
@@ -130,6 +130,8 @@ class BraveSearchBackend:
             "X-Subscription-Token": self._api_key,
         }
         params: dict[str, str | int] = {"q": query, "count": max_results}
+        if offset > 0:
+            params["offset"] = offset
         return self._client.get(_API_URL, headers=headers, params=params)
 
     @staticmethod

@@ -41,32 +41,24 @@ from llm_gent import (
 class StubSearchBackend:
     """Minimal backend that returns hardcoded results for demonstration."""
 
-    def search(self, query: str, max_results: int) -> list[dict[str, str]]:
+    def search(self, query: str, max_results: int, offset: int = 0) -> list[dict[str, str]]:
         """Return canned results. Set BRAVE_SEARCH_API_KEY for real search."""
         all_results = [
             {
-                "title": f"Result 1 for: {query}",
-                "url": "https://example.com/page1",
-                "snippet": "This is a sample search result snippet.",
-            },
-            {
-                "title": f"Result 2 for: {query}",
-                "url": "https://example.com/page2",
-                "snippet": "Another example result with relevant content.",
-            },
-            {
-                "title": f"Result 3 for: {query}",
-                "url": "https://example.com/page3",
-                "snippet": "Third result demonstrating the search interface.",
-            },
+                "title": f"Result {i} for: {query}",
+                "url": f"https://example.com/page{i}",
+                "snippet": f"Sample search result snippet #{i}.",
+            }
+            for i in range(1, 11)
         ]
-        return all_results[:max_results]
+        return all_results[offset : offset + max_results]
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Web search + fetch demo")
     parser.add_argument("query", help="Search query")
-    parser.add_argument("--max-results", type=int, default=5, help="Number of results (1-8)")
+    parser.add_argument("--max-results", type=int, default=5, help="Number of results (1-20)")
+    parser.add_argument("--offset", type=int, default=0, help="Skip first N results (pagination)")
     parser.add_argument("--fetch", type=int, default=0, help="Fetch the Nth result page (1-based)")
     return parser.parse_args()
 
@@ -117,7 +109,7 @@ def main() -> None:
     web_search = WebSearchTool(lg=lg, backend=backend)
 
     print(f"Searching: {args.query}\n")
-    result = web_search.execute(query=args.query, max_results=args.max_results)
+    result = web_search.execute(query=args.query, max_results=args.max_results, offset=args.offset)
 
     if not result.success:
         print(f"Search failed: {result.error}", file=sys.stderr)
