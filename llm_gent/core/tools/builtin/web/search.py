@@ -66,10 +66,12 @@ class WebSearchTool(BaseTool):
             },
             "max_results": {
                 "type": "integer",
+                "minimum": 1,
                 "description": "Maximum number of results to return (default 5)",
             },
             "offset": {
                 "type": "integer",
+                "minimum": 0,
                 "description": "Skip first N results for pagination (default 0)",
             },
         },
