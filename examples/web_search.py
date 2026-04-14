@@ -57,7 +57,7 @@ class StubSearchBackend:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Web search + fetch demo")
     parser.add_argument("query", help="Search query")
-    parser.add_argument("--max-results", type=int, default=5, help="Number of results (1-20)")
+    parser.add_argument("--max-results", type=int, default=5, help="Number of results (default 5)")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N results (pagination)")
     parser.add_argument("--fetch", type=int, default=0, help="Fetch the Nth result page (1-based)")
     return parser.parse_args()

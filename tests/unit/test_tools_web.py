@@ -294,13 +294,13 @@ class TestWebSearchTool:
         assert result.success is True
         assert backend.last_max_results == 5
 
-    def test_max_results_clamped(self, mock_lg):
-        """max_results is clamped to 1-20 range."""
+    def test_max_results_floor_clamped(self, mock_lg):
+        """max_results below 1 is clamped to 1; no upper cap."""
         backend = MockSearchBackend()
         tool = WebSearchTool(mock_lg, backend=backend)
 
         tool.execute(query="test", max_results=100)
-        assert backend.last_max_results == 20
+        assert backend.last_max_results == 100
 
         tool.execute(query="test", max_results=0)
         assert backend.last_max_results == 1

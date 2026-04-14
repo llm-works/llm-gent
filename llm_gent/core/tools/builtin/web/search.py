@@ -66,7 +66,7 @@ class WebSearchTool(BaseTool):
             },
             "max_results": {
                 "type": "integer",
-                "description": "Maximum number of results to return (default 5, max 20)",
+                "description": "Maximum number of results to return (default 5)",
             },
             "offset": {
                 "type": "integer",
@@ -97,8 +97,8 @@ class WebSearchTool(BaseTool):
         """Search the web and return structured results.
 
         Args:
-            **kwargs: Must contain 'query'. Optional: 'max_results' (1-20,
-                default 5), 'offset' (default 0).
+            **kwargs: Must contain 'query'. Optional: 'max_results' (default 5,
+                min 1), 'offset' (default 0).
 
         Returns:
             ToolResult with formatted search results or error.
@@ -109,7 +109,7 @@ class WebSearchTool(BaseTool):
 
         raw = kwargs.get("max_results")
         try:
-            max_results = max(min(int(raw) if raw is not None else 5, 20), 1)
+            max_results = max(int(raw) if raw is not None else 5, 1)
         except (ValueError, TypeError):
             max_results = 5
 

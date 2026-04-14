@@ -122,7 +122,7 @@ class BraveSearchBackend:
             )
             return None
 
-    def _request(self, query: str, max_results: int, offset: int = 0) -> httpx.Response:
+    def _request(self, query: str, max_results: int, offset: int) -> httpx.Response:
         """Execute the HTTP request to Brave Search API."""
         headers = {
             "Accept": "application/json",
