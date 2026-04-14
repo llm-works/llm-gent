@@ -35,12 +35,13 @@ class WebSearchBackend(Protocol):
           caller will back off and retry once before giving up.
     """
 
-    def search(self, query: str, max_results: int) -> list[dict[str, str]] | None:
+    def search(self, query: str, max_results: int, offset: int = 0) -> list[dict[str, str]] | None:
         """Execute a search query.
 
         Args:
             query: Search query string.
             max_results: Maximum number of results to return.
+            offset: Number of results to skip (for pagination).
 
         Returns:
             List of ``{"title": ..., "url": ..., "snippet": ...}`` dicts,

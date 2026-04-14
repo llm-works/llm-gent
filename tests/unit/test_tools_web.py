@@ -50,14 +50,16 @@ class MockSearchBackend:
         self.call_count = 0
         self.last_query: str | None = None
         self.last_max_results: int | None = None
+        self.last_offset: int | None = None
 
-    def search(self, query: str, max_results: int) -> list[dict[str, str]] | None:
+    def search(self, query: str, max_results: int, offset: int = 0) -> list[dict[str, str]] | None:
         self.call_count += 1
         self.last_query = query
         self.last_max_results = max_results
+        self.last_offset = offset
         if self._side_effects:
             return self._side_effects.pop(0)
-        return self._results[:max_results]
+        return self._results[offset : offset + max_results]
 
 
 # ---------------------------------------------------------------------------
@@ -292,13 +294,13 @@ class TestWebSearchTool:
         assert result.success is True
         assert backend.last_max_results == 5
 
-    def test_max_results_clamped(self, mock_lg):
-        """max_results is clamped to 1-8 range."""
+    def test_max_results_floor_clamped(self, mock_lg):
+        """max_results below 1 is clamped to 1; no upper cap."""
         backend = MockSearchBackend()
         tool = WebSearchTool(mock_lg, backend=backend)
 
         tool.execute(query="test", max_results=100)
-        assert backend.last_max_results == 8
+        assert backend.last_max_results == 100
 
         tool.execute(query="test", max_results=0)
         assert backend.last_max_results == 1
@@ -333,6 +335,41 @@ class TestWebSearchTool:
         func = tool.to_openai_function()
         assert func["function"]["name"] == "web_search"
         assert "query" in func["function"]["parameters"]["properties"]
+
+    def test_offset_forwarded(self, mock_lg):
+        """offset is forwarded to the backend."""
+        backend = MockSearchBackend()
+        tool = WebSearchTool(mock_lg, backend=backend)
+        tool.execute(query="test", offset=8)
+        assert backend.last_offset == 8
+
+    def test_offset_default_zero(self, mock_lg):
+        """offset defaults to 0 when not provided."""
+        backend = MockSearchBackend()
+        tool = WebSearchTool(mock_lg, backend=backend)
+        tool.execute(query="test")
+        assert backend.last_offset == 0
+
+    def test_offset_none(self, mock_lg):
+        """offset=None (LLM sends null) should default to 0."""
+        backend = MockSearchBackend()
+        tool = WebSearchTool(mock_lg, backend=backend)
+        tool.execute(query="test", offset=None)
+        assert backend.last_offset == 0
+
+    def test_offset_negative_clamped(self, mock_lg):
+        """Negative offset is clamped to 0."""
+        backend = MockSearchBackend()
+        tool = WebSearchTool(mock_lg, backend=backend)
+        tool.execute(query="test", offset=-5)
+        assert backend.last_offset == 0
+
+    def test_offset_invalid_string(self, mock_lg):
+        """Non-numeric offset falls back to 0."""
+        backend = MockSearchBackend()
+        tool = WebSearchTool(mock_lg, backend=backend)
+        tool.execute(query="test", offset="abc")
+        assert backend.last_offset == 0
 
     def test_query_is_stripped(self, mock_lg):
         """Leading/trailing whitespace in query should be stripped."""
@@ -576,6 +613,40 @@ class TestBraveSearchBackend:
             results = backend.search("test", 5)
 
         assert results is None
+
+    def test_search_with_offset(self, mock_lg):
+        """Offset parameter is passed to the API request."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, json=_BRAVE_RESPONSE)
+
+        with patch.object(backend, "_request", return_value=response) as mock_req:
+            backend.search("test", 5, offset=10)
+
+        mock_req.assert_called_once_with("test", 5, 10)
+
+    def test_search_offset_zero_omitted(self, mock_lg):
+        """Offset=0 should not add offset param to API request."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(
+            backend._client, "get", return_value=httpx.Response(200, json=_BRAVE_RESPONSE)
+        ) as mock_get:
+            backend.search("test", 5, offset=0)
+
+        call_params = mock_get.call_args[1]["params"]
+        assert "offset" not in call_params
+
+    def test_search_offset_nonzero_included(self, mock_lg):
+        """Offset>0 adds offset param to API request."""
+        backend = BraveSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(
+            backend._client, "get", return_value=httpx.Response(200, json=_BRAVE_RESPONSE)
+        ) as mock_get:
+            backend.search("test", 5, offset=8)
+
+        call_params = mock_get.call_args[1]["params"]
+        assert call_params["offset"] == 8
 
     def test_skips_results_without_title_or_url(self, mock_lg):
         """Results missing title or url should be skipped."""

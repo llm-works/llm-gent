@@ -66,7 +66,13 @@ class WebSearchTool(BaseTool):
             },
             "max_results": {
                 "type": "integer",
-                "description": "Maximum number of results to return (default 5, max 8)",
+                "minimum": 1,
+                "description": "Maximum number of results to return (default 5)",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Skip first N results for pagination (default 0)",
             },
         },
         "required": ["query"],
@@ -93,7 +99,8 @@ class WebSearchTool(BaseTool):
         """Search the web and return structured results.
 
         Args:
-            **kwargs: Must contain 'query'. Optional: 'max_results' (1-8, default 5).
+            **kwargs: Must contain 'query'. Optional: 'max_results' (default 5,
+                min 1), 'offset' (default 0).
 
         Returns:
             ToolResult with formatted search results or error.
@@ -104,15 +111,21 @@ class WebSearchTool(BaseTool):
 
         raw = kwargs.get("max_results")
         try:
-            max_results = max(min(int(raw) if raw is not None else 5, 8), 1)
+            max_results = max(int(raw) if raw is not None else 5, 1)
         except (ValueError, TypeError):
             max_results = 5
 
-        return self._search(query.strip(), max_results)
+        raw_offset = kwargs.get("offset")
+        try:
+            offset = max(int(raw_offset) if raw_offset is not None else 0, 0)
+        except (ValueError, TypeError):
+            offset = 0
 
-    def _search(self, query: str, max_results: int) -> ToolResult:
+        return self._search(query.strip(), max_results, offset)
+
+    def _search(self, query: str, max_results: int, offset: int) -> ToolResult:
         """Execute search with one automatic retry on retriable failures."""
-        results = self._backend.search(query, max_results)
+        results = self._backend.search(query, max_results, offset)
         if results is not None:
             return self._format(results)
 
@@ -122,7 +135,7 @@ class WebSearchTool(BaseTool):
         )
         time.sleep(self._retry_delay)
 
-        results = self._backend.search(query, max_results)
+        results = self._backend.search(query, max_results, offset)
         if results is not None:
             return self._format(results)
 
