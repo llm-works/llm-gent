@@ -76,26 +76,37 @@ class SerperSearchBackend:
     def search(self, query: str, max_results: int, offset: int = 0) -> list[dict[str, str]] | None:
         """Query Serper Google Search and return structured results.
 
-        Note:
-            The Serper API does not support pagination via offset.  If
-            *offset* > 0 a trace-level log is emitted and the parameter is
-            ignored.
+        Args:
+            query: Search query string.
+            max_results: Maximum number of results to return (must be >= 1).
+            offset: Number of results to skip. Serper only supports page-based
+                pagination, so offset is rounded down to the nearest page
+                boundary (multiple of max_results). Non-aligned offsets log
+                a warning.
 
         Returns:
-            List of result dicts, empty list when the query matched nothing,
-            or ``None`` on retriable failures (server error, timeout).
+            List of result dicts, empty list when the query matched nothing
+            or max_results <= 0, or ``None`` on retriable failures.
         """
+        if max_results <= 0:
+            return []
+
+        if offset > 0 and offset % max_results != 0:
+            effective_offset = (offset // max_results) * max_results
+            self._lg.warning(
+                "serper pagination rounds offset to page boundary",
+                extra={
+                    "query": query,
+                    "requested_offset": offset,
+                    "effective_offset": effective_offset,
+                },
+            )
+
         if self._rate_limiter:
             self._rate_limiter.next()
 
-        if offset > 0:
-            self._lg.trace(
-                "serper search ignoring offset (unsupported)",
-                extra={"query": query, "offset": offset},
-            )
-
         try:
-            response = self._request(query, max_results)
+            response = self._request(query, max_results, offset)
         except httpx.TransportError as exc:
             self._lg.warning(
                 "serper search request failed",
@@ -130,13 +141,15 @@ class SerperSearchBackend:
             )
             return None
 
-    def _request(self, query: str, max_results: int) -> httpx.Response:
+    def _request(self, query: str, max_results: int, offset: int) -> httpx.Response:
         """Execute the HTTP request to Serper API."""
         headers = {
             "X-API-KEY": self._api_key,
             "Content-Type": "application/json",
         }
         payload: dict[str, str | int] = {"q": query, "num": max_results}
+        if offset > 0:
+            payload["page"] = (offset // max_results) + 1
         return self._client.post(_API_URL, headers=headers, json=payload)
 
     @staticmethod
