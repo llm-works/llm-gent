@@ -7,6 +7,7 @@ from .learn import RecallTool, RememberTool
 from .shell import ShellTool
 from .web import (
     BraveSearchBackend,
+    SerperSearchBackend,
     WebFetchTool,
     WebSearchBackend,
     WebSearchBackendFactory,
@@ -16,6 +17,7 @@ from .web import (
 
 __all__ = [
     "BraveSearchBackend",
+    "SerperSearchBackend",
     "CompleteTaskTool",
     "FileReadTool",
     "FileWriteTool",
