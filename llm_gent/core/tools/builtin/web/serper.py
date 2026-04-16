@@ -143,7 +143,7 @@ class SerperSearchBackend:
     def _parse(data: dict[str, Any]) -> list[dict[str, str]]:
         """Extract ``{title, url, snippet}`` dicts from Serper API JSON."""
         results: list[dict[str, str]] = []
-        for item in data.get("organic", []):
+        for item in data.get("organic") or []:
             title = item.get("title", "")
             url = item.get("link", "")
             snippet = item.get("snippet", "")
