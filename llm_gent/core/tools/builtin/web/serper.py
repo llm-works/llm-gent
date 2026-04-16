@@ -144,6 +144,8 @@ class SerperSearchBackend:
         """Extract ``{title, url, snippet}`` dicts from Serper API JSON."""
         results: list[dict[str, str]] = []
         for item in data.get("organic") or []:
+            if not isinstance(item, dict):
+                continue
             title = item.get("title", "")
             url = item.get("link", "")
             snippet = item.get("snippet", "")
@@ -159,8 +161,8 @@ class Factory(WebSearchBackendFactory):
         api_key: Serper API key (falls back to ``SERPER_API_KEY`` env-var
             if omitted).
         timeout: HTTP request timeout in seconds (default 10.0).
-        per_minute: Maximum queries per minute (default 60.0).  Set to 0 or
-            omit to disable rate limiting.
+        per_minute: Maximum queries per minute (default 60.0).  Set to 0
+            to disable rate limiting.
     """
 
     @classmethod
