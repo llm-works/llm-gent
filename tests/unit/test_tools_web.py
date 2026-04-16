@@ -5,7 +5,13 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from llm_gent import BraveSearchBackend, ToolResult, WebFetchTool, WebSearchTool
+from llm_gent import (
+    BraveSearchBackend,
+    SerperSearchBackend,
+    ToolResult,
+    WebFetchTool,
+    WebSearchTool,
+)
 
 
 pytestmark = pytest.mark.unit
@@ -850,3 +856,302 @@ class TestToolFactoryBackendResolution:
         )
         assert tool is not None
         assert tool._retry_delay == 2.0
+
+
+# ---------------------------------------------------------------------------
+# SerperSearchBackend tests
+# ---------------------------------------------------------------------------
+
+_SERPER_RESPONSE = {
+    "organic": [
+        {
+            "title": "Python Tutorial",
+            "link": "https://docs.python.org/3/tutorial/",
+            "snippet": "The official Python tutorial.",
+        },
+        {
+            "title": "Real Python",
+            "link": "https://realpython.com/",
+            "snippet": "Learn Python programming.",
+        },
+    ]
+}
+
+
+class TestSerperSearchBackend:
+    """Tests for SerperSearchBackend."""
+
+    def test_protocol_compliance(self, mock_lg):
+        from llm_gent import WebSearchBackend
+
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        assert isinstance(backend, WebSearchBackend)
+
+    def test_api_key_required(self, mock_lg, monkeypatch):
+        """Must raise ValueError if no API key provided."""
+        monkeypatch.delenv("SERPER_API_KEY", raising=False)
+        with pytest.raises(ValueError, match="API key required"):
+            SerperSearchBackend(mock_lg)
+
+    def test_api_key_from_env(self, mock_lg, monkeypatch):
+        """API key can come from environment variable."""
+        monkeypatch.setenv("SERPER_API_KEY", "env-key")
+        backend = SerperSearchBackend(mock_lg)
+        assert backend._api_key == "env-key"
+
+    def test_api_key_constructor_overrides_env(self, mock_lg, monkeypatch):
+        """Explicit api_key takes precedence over env var."""
+        monkeypatch.setenv("SERPER_API_KEY", "env-key")
+        backend = SerperSearchBackend(mock_lg, api_key="explicit-key")
+        assert backend._api_key == "explicit-key"
+
+    def test_search_success(self, mock_lg):
+        """Successful API response returns structured results."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, json=_SERPER_RESPONSE)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("python tutorial", 5)
+
+        assert results is not None
+        assert len(results) == 2
+        assert results[0]["title"] == "Python Tutorial"
+        assert results[0]["url"] == "https://docs.python.org/3/tutorial/"
+        assert results[0]["snippet"] == "The official Python tutorial."
+        assert results[1]["title"] == "Real Python"
+
+    def test_search_maps_link_to_url(self, mock_lg):
+        """Serper 'link' field is mapped to 'url' in results."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        data = {"organic": [{"title": "Test", "link": "https://example.com", "snippet": "s"}]}
+        response = httpx.Response(200, json=data)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert results[0]["url"] == "https://example.com"
+        assert "link" not in results[0]
+
+    def test_search_no_results(self, mock_lg):
+        """Empty organic results returns empty list."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, json={"organic": []})
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("xyzzy", 5)
+
+        assert results == []
+
+    def test_search_no_organic_key(self, mock_lg):
+        """Response without 'organic' key returns empty list."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, json={"searchParameters": {"q": "test"}})
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert results == []
+
+    def test_search_rate_limited(self, mock_lg):
+        """429 response returns None (retriable)."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(429)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert results is None
+
+    def test_search_server_error(self, mock_lg):
+        """5xx responses return None (retriable)."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        for status in (500, 502, 503, 504):
+            response = httpx.Response(status)
+            with patch.object(backend, "_request", return_value=response):
+                assert backend.search("test", 5) is None
+
+    def test_search_client_error(self, mock_lg):
+        """4xx (non-429) returns empty list (non-retriable)."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(403)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert results == []
+
+    def test_search_timeout(self, mock_lg):
+        """Timeout returns None (retriable)."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(backend, "_request", side_effect=httpx.TimeoutException("")):
+            results = backend.search("test", 5)
+
+        assert results is None
+
+    def test_search_connection_error(self, mock_lg):
+        """Connection error returns None (retriable)."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(backend, "_request", side_effect=httpx.ConnectError("")):
+            results = backend.search("test", 5)
+
+        assert results is None
+
+    def test_search_unparseable_json(self, mock_lg):
+        """Malformed JSON response returns None instead of crashing."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, text="<html>not json</html>")
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert results is None
+
+    def test_search_offset_ignored_with_trace(self, mock_lg):
+        """Offset > 0 is ignored (Serper has no pagination) with trace log."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        response = httpx.Response(200, json=_SERPER_RESPONSE)
+
+        with patch.object(backend, "_request", return_value=response) as mock_req:
+            results = backend.search("test", 5, offset=10)
+
+        assert results is not None
+        # _request is called without offset parameter
+        mock_req.assert_called_once_with("test", 5)
+
+    def test_search_uses_post(self, mock_lg):
+        """Serper API uses POST, not GET."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(
+            backend._client, "post", return_value=httpx.Response(200, json=_SERPER_RESPONSE)
+        ) as mock_post:
+            backend.search("test", 5)
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args[1]
+        assert call_kwargs["json"] == {"q": "test", "num": 5}
+        assert call_kwargs["headers"]["X-API-KEY"] == "test-key"
+
+    def test_skips_results_without_title_or_link(self, mock_lg):
+        """Results missing title or link should be skipped."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+        data = {
+            "organic": [
+                {"title": "", "link": "https://example.com", "snippet": "no title"},
+                {"title": "No Link", "link": "", "snippet": "missing link"},
+                {"title": "Valid", "link": "https://example.com", "snippet": "ok"},
+            ]
+        }
+        response = httpx.Response(200, json=data)
+
+        with patch.object(backend, "_request", return_value=response):
+            results = backend.search("test", 5)
+
+        assert len(results) == 1
+        assert results[0]["title"] == "Valid"
+
+
+# ---------------------------------------------------------------------------
+# SerperSearchBackend Factory tests
+# ---------------------------------------------------------------------------
+
+
+class TestSerperSearchFactory:
+    """Tests for SerperSearchBackend.Factory."""
+
+    def test_create_from_config(self, mock_lg, monkeypatch):
+        """Factory.create builds a SerperSearchBackend from DotDict config."""
+        from appinfra import DotDict
+
+        from llm_gent.core.tools.builtin.web.serper import Factory
+
+        monkeypatch.setenv("SERPER_API_KEY", "factory-key")
+        config = DotDict({"timeout": 5.0})
+        backend = Factory.create(mock_lg, config)
+        assert isinstance(backend, SerperSearchBackend)
+        assert backend._timeout == 5.0
+
+    def test_create_with_api_key(self, mock_lg):
+        """Factory passes api_key from config to constructor."""
+        from appinfra import DotDict
+
+        from llm_gent.core.tools.builtin.web.serper import Factory
+
+        config = DotDict({"api_key": "explicit-key", "timeout": 3.0})
+        backend = Factory.create(mock_lg, config)
+        assert backend._api_key == "explicit-key"
+        assert backend._timeout == 3.0
+
+    def test_factory_is_subclass(self):
+        """Factory must be a WebSearchBackendFactory subclass."""
+        from llm_gent import WebSearchBackendFactory
+        from llm_gent.core.tools.builtin.web.serper import Factory
+
+        assert issubclass(Factory, WebSearchBackendFactory)
+
+    def test_create_default_per_minute(self, mock_lg):
+        """Default per_minute is 60.0 (much higher than Brave's 3.0)."""
+        from appinfra import DotDict
+
+        from llm_gent.core.tools.builtin.web.serper import Factory
+
+        config = DotDict({"api_key": "test-key"})
+        backend = Factory.create(mock_lg, config)
+        assert backend._rate_limiter.per_minute == 60.0
+
+
+# ---------------------------------------------------------------------------
+# ToolFactory Serper backend resolution tests
+# ---------------------------------------------------------------------------
+
+
+class TestToolFactorySerperResolution:
+    """Tests for ToolFactory resolving Serper backend from config."""
+
+    def test_resolve_type_serper(self, mock_lg, monkeypatch):
+        """type: serper resolves via lazy backend registry."""
+        from llm_gent import ToolFactory
+
+        monkeypatch.setenv("SERPER_API_KEY", "test-key")
+        factory = ToolFactory(mock_lg)
+        tool = factory.create(
+            "web_search",
+            {"backend": {"type": "serper"}},
+        )
+        assert tool is not None
+        assert tool.name == "web_search"
+
+    def test_resolve_type_serper_with_config(self, mock_lg):
+        """type: serper with nested config passes config to Factory.create."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        tool = factory.create(
+            "web_search",
+            {
+                "backend": {
+                    "type": "serper",
+                    "config": {"api_key": "from-config", "timeout": 3.0},
+                },
+            },
+        )
+        assert tool is not None
+
+    def test_resolve_factory_dynamic_import(self, mock_lg, monkeypatch):
+        """factory: dotted.path dynamically imports Serper factory."""
+        from llm_gent import ToolFactory
+
+        monkeypatch.setenv("SERPER_API_KEY", "test-key")
+        factory = ToolFactory(mock_lg)
+        tool = factory.create(
+            "web_search",
+            {
+                "backend": {
+                    "factory": "llm_gent.core.tools.builtin.web.serper.Factory",
+                },
+            },
+        )
+        assert tool is not None
+        assert tool.name == "web_search"

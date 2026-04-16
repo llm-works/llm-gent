@@ -111,6 +111,10 @@ class ToolFactory:
             "llm_gent.core.tools.builtin.web.brave",
             "Factory",
         ),
+        "serper": (
+            "llm_gent.core.tools.builtin.web.serper",
+            "Factory",
+        ),
     }
 
     def set_web_search_backend(self, backend: WebSearchBackend) -> None:
