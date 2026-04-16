@@ -78,13 +78,30 @@ class SerperSearchBackend:
 
         Args:
             query: Search query string.
-            max_results: Maximum number of results to return.
-            offset: Number of results to skip (mapped to Serper's page param).
+            max_results: Maximum number of results to return (must be >= 1).
+            offset: Number of results to skip. Serper only supports page-based
+                pagination, so offset is rounded down to the nearest page
+                boundary (multiple of max_results). Non-aligned offsets log
+                a warning.
 
         Returns:
-            List of result dicts, empty list when the query matched nothing,
-            or ``None`` on retriable failures (server error, timeout).
+            List of result dicts, empty list when the query matched nothing
+            or max_results <= 0, or ``None`` on retriable failures.
         """
+        if max_results <= 0:
+            return []
+
+        if offset > 0 and offset % max_results != 0:
+            effective_offset = (offset // max_results) * max_results
+            self._lg.warning(
+                "serper pagination rounds offset to page boundary",
+                extra={
+                    "query": query,
+                    "requested_offset": offset,
+                    "effective_offset": effective_offset,
+                },
+            )
+
         if self._rate_limiter:
             self._rate_limiter.next()
 

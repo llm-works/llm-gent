@@ -1045,6 +1045,42 @@ class TestSerperSearchBackend:
         assert call_kwargs["json"] == {"q": "test", "num": 10}
         assert "page" not in call_kwargs["json"]
 
+    def test_search_max_results_zero_returns_empty(self, mock_lg):
+        """max_results <= 0 returns empty list without making request."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(backend._client, "post") as mock_post:
+            result = backend.search("test", 0, offset=10)
+
+        assert result == []
+        mock_post.assert_not_called()
+
+    def test_search_non_aligned_offset_logs_warning(self, mock_lg):
+        """Non-page-aligned offset logs warning with effective offset."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(
+            backend._client, "post", return_value=httpx.Response(200, json=_SERPER_RESPONSE)
+        ):
+            backend.search("test", 10, offset=15)
+
+        mock_lg.warning.assert_called_once()
+        call_args = mock_lg.warning.call_args
+        assert "rounds offset to page boundary" in call_args[0][0]
+        assert call_args[1]["extra"]["requested_offset"] == 15
+        assert call_args[1]["extra"]["effective_offset"] == 10
+
+    def test_search_aligned_offset_no_warning(self, mock_lg):
+        """Page-aligned offset does not log warning."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(
+            backend._client, "post", return_value=httpx.Response(200, json=_SERPER_RESPONSE)
+        ):
+            backend.search("test", 10, offset=20)
+
+        mock_lg.warning.assert_not_called()
+
     def test_search_uses_post(self, mock_lg):
         """Serper API uses POST, not GET."""
         backend = SerperSearchBackend(mock_lg, api_key="test-key")
