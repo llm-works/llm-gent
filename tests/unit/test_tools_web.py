@@ -1008,17 +1008,42 @@ class TestSerperSearchBackend:
 
         assert results is None
 
-    def test_search_offset_ignored_with_trace(self, mock_lg):
-        """Offset > 0 is ignored (Serper has no pagination) with trace log."""
+    def test_search_pagination_via_page_param(self, mock_lg):
+        """Offset > 0 is mapped to Serper's page parameter."""
         backend = SerperSearchBackend(mock_lg, api_key="test-key")
         response = httpx.Response(200, json=_SERPER_RESPONSE)
 
         with patch.object(backend, "_request", return_value=response) as mock_req:
-            results = backend.search("test", 5, offset=10)
+            results = backend.search("test", 10, offset=20)
 
         assert results is not None
-        # _request is called without offset parameter
-        mock_req.assert_called_once_with("test", 5)
+        # _request is called with offset, which maps to page=3 (20 // 10 + 1)
+        mock_req.assert_called_once_with("test", 10, 20)
+
+    def test_search_pagination_page_calculation(self, mock_lg):
+        """Page parameter is correctly calculated from offset and max_results."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(
+            backend._client, "post", return_value=httpx.Response(200, json=_SERPER_RESPONSE)
+        ) as mock_post:
+            backend.search("test", 10, offset=30)
+
+        call_kwargs = mock_post.call_args[1]
+        assert call_kwargs["json"] == {"q": "test", "num": 10, "page": 4}
+
+    def test_search_no_page_param_when_offset_zero(self, mock_lg):
+        """Page parameter is omitted when offset is 0."""
+        backend = SerperSearchBackend(mock_lg, api_key="test-key")
+
+        with patch.object(
+            backend._client, "post", return_value=httpx.Response(200, json=_SERPER_RESPONSE)
+        ) as mock_post:
+            backend.search("test", 10, offset=0)
+
+        call_kwargs = mock_post.call_args[1]
+        assert call_kwargs["json"] == {"q": "test", "num": 10}
+        assert "page" not in call_kwargs["json"]
 
     def test_search_uses_post(self, mock_lg):
         """Serper API uses POST, not GET."""
