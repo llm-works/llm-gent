@@ -91,19 +91,15 @@ class SerperSearchBackend:
         if max_results <= 0:
             return []
 
-        if offset > 0 and offset % max_results != 0:
-            effective_offset = (offset // max_results) * max_results
-            self._lg.warning(
-                "serper pagination rounds offset to page boundary",
-                extra={
-                    "query": query,
-                    "requested_offset": offset,
-                    "effective_offset": effective_offset,
-                },
-            )
+        self._warn_if_offset_not_aligned(query, max_results, offset)
 
         if self._rate_limiter:
             self._rate_limiter.next()
+
+        self._lg.trace(
+            "serper search",
+            extra={"query": query, "max_results": max_results, "offset": offset},
+        )
 
         try:
             response = self._request(query, max_results, offset)
@@ -116,30 +112,44 @@ class SerperSearchBackend:
 
         return self._handle_response(response, query)
 
+    def _warn_if_offset_not_aligned(self, query: str, max_results: int, offset: int) -> None:
+        """Log warning if offset is not aligned to page boundary."""
+        if offset > 0 and offset % max_results != 0:
+            self._lg.warning(
+                "serper pagination rounds offset to page boundary",
+                extra={
+                    "query": query,
+                    "requested_offset": offset,
+                    "effective_offset": (offset // max_results) * max_results,
+                },
+            )
+
     def _handle_response(self, response: httpx.Response, query: str) -> list[dict[str, str]] | None:
         """Interpret HTTP response: check status, parse JSON body."""
         if response.status_code in _RETRIABLE_STATUS_CODES:
-            self._lg.warning(
-                "serper search returned retriable status",
-                extra={"status": response.status_code, "query": query},
-            )
+            self._log_response_error("serper search returned retriable status", response, query)
             return None
 
         if not response.is_success:
-            self._lg.warning(
-                "serper search returned error",
-                extra={"status": response.status_code, "query": query},
-            )
+            self._log_response_error("serper search returned error", response, query)
             return []
 
         try:
             return self._parse(response.json())
         except (ValueError, KeyError):
-            self._lg.warning(
-                "serper search returned unparseable response",
-                extra={"query": query},
-            )
+            self._log_response_error("serper search returned unparseable response", response, query)
             return None
+
+    def _log_response_error(self, msg: str, response: httpx.Response, query: str) -> None:
+        """Log a warning with response details for debugging."""
+        self._lg.warning(
+            msg,
+            extra={
+                "status": response.status_code,
+                "query": query,
+                "body": response.text[:500] if response.text else None,
+            },
+        )
 
     def _request(self, query: str, max_results: int, offset: int) -> httpx.Response:
         """Execute the HTTP request to Serper API."""
