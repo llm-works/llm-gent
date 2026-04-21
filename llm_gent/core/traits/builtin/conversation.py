@@ -76,7 +76,7 @@ class ConversationTrait(BaseTrait):
             min_recent_messages=self.config.min_recent_messages,
         )
         compactor = self._create_compactor()
-        self._conversation = Conversation(config=conv_config, compactor=compactor)
+        self._conversation = Conversation(self.agent.lg, config=conv_config, compactor=compactor)
 
     def _create_compactor(self) -> Compactor:
         """Create compactor from config."""
