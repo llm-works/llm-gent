@@ -139,8 +139,14 @@ class ToolFactory:
         if "factory" not in backend_config:
             raise ValueError("web_search backend config must include 'factory' key")
 
+        factory_path = backend_config["factory"]
+        if not isinstance(factory_path, str):
+            raise ValueError(
+                f"web_search backend 'factory' must be a string, got {type(factory_path).__name__}"
+            )
+
         config = DotDict(backend_config.get("config") or {})
-        factory_cls = self._import_factory(backend_config["factory"])
+        factory_cls = self._import_factory(factory_path)
         return factory_cls.create(self._lg, config)
 
     @staticmethod

@@ -40,7 +40,7 @@ class StubSearchBackend:
     """Minimal backend that returns hardcoded results for demonstration."""
 
     def search(self, query: str, max_results: int, offset: int = 0) -> list[dict[str, str]]:
-        """Return canned results. Set BRAVE_SEARCH_API_KEY for real search."""
+        """Return canned results; replace this stub with your own backend for real search."""
         all_results = [
             {
                 "title": f"Result {i} for: {query}",

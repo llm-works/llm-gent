@@ -467,3 +467,64 @@ class TestToolFactoryWeb:
         config = {"backend": backend, "retry_delay": 1.0}
         factory.create("web_search", config)
         assert "backend" in config, "config dict was mutated by factory.create()"
+
+    def test_factory_backend_dict_missing_factory_key(self, mock_lg):
+        """Backend dict without 'factory' key raises ValueError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(ValueError, match="must include 'factory' key"):
+            factory.create("web_search", {"backend": {}})
+
+    def test_factory_backend_dict_factory_not_string(self, mock_lg):
+        """Backend dict with non-string 'factory' raises ValueError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(ValueError, match="'factory' must be a string"):
+            factory.create("web_search", {"backend": {"factory": 123}})
+
+    def test_factory_backend_dict_invalid_factory_path(self, mock_lg):
+        """Backend dict with invalid factory path raises ImportError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(ImportError):
+            factory.create("web_search", {"backend": {"factory": "nonexistent.module.Factory"}})
+
+    def test_factory_backend_dict_non_factory_class(self, mock_lg):
+        """Backend dict pointing to non-WebSearchBackendFactory raises TypeError."""
+        from llm_gent import ToolFactory
+
+        factory = ToolFactory(mock_lg)
+        with pytest.raises(TypeError, match="not a WebSearchBackendFactory subclass"):
+            factory.create(
+                "web_search",
+                {"backend": {"factory": "llm_gent.core.tools.factory.ToolFactory"}},
+            )
+
+    def test_factory_backend_dict_valid_factory(self, mock_lg):
+        """Backend dict with valid factory path creates tool successfully."""
+        from unittest.mock import MagicMock
+
+        from llm_gent import ToolFactory, WebSearchBackendFactory
+
+        # Create a mock factory class
+        mock_backend = MockSearchBackend()
+        mock_factory_cls = MagicMock(spec=WebSearchBackendFactory)
+        mock_factory_cls.create.return_value = mock_backend
+
+        factory = ToolFactory(mock_lg)
+        with patch.object(factory, "_import_factory", return_value=mock_factory_cls):
+            tool = factory.create(
+                "web_search",
+                {"backend": {"factory": "some.module.Factory", "config": {"timeout": 5.0}}},
+            )
+
+        assert tool is not None
+        assert tool.name == "web_search"
+        mock_factory_cls.create.assert_called_once()
+        # Verify config was passed
+        call_args = mock_factory_cls.create.call_args
+        assert call_args[0][0] == mock_lg  # Logger
+        assert call_args[0][1].get("timeout") == 5.0  # Config

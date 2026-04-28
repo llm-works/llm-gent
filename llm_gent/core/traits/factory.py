@@ -123,7 +123,7 @@ class Factory:
             for backend_name, backend_override in override["backends"].items():
                 if backend_name in result_backends:
                     # Skip None backends (from YAML with all content commented out)
-                    if backend_override:
+                    if backend_override and result_backends[backend_name] is not None:
                         result_backends[backend_name].update(backend_override)
                 else:
                     result_backends[backend_name] = backend_override
