@@ -59,7 +59,7 @@ class Factory(BaseFactory):
             from llm_infer.client import SAIAAdapter
 
             llm_router = LLMClientFactory(self._lg).from_config(self._platform.llm_config())
-            self._backend = SAIAAdapter(client=llm_router)  # type: ignore[arg-type]  # ChatClient is API-compatible
+            self._backend = SAIAAdapter(client=llm_router)
         return self._backend
 
     def create(

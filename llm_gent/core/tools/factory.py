@@ -105,12 +105,6 @@ class ToolFactory:
             return self._web_fetch
         return self._get_or_create_web_fetch()
 
-    # Lazy-loaded backend factories: type name -> (module_path, class_name)
-    # No built-in backends. Implement WebSearchBackendFactory and configure via:
-    #   backend:
-    #     factory: my_package.websearch.Factory
-    _lazy_backends: dict[str, tuple[str, str]] = {}
-
     def set_web_search_backend(self, backend: WebSearchBackend) -> None:
         """Set the search backend for WebSearchTool creation.
 
@@ -124,70 +118,30 @@ class ToolFactory:
     def _resolve_backend(self, backend_config: dict[str, Any]) -> WebSearchBackend:
         """Resolve a search backend from a config dict.
 
-        Supports two resolution modes:
-
-        - ``type``: look up a built-in backend factory by name (e.g. ``brave``).
-        - ``factory``: dynamic-import a dotted path to a
-          :class:`WebSearchBackendFactory` subclass.
-
-        Remaining keys under ``config`` are passed to the factory's
-        ``create()`` method.
+        Dynamic-imports a dotted path to a :class:`WebSearchBackendFactory`
+        subclass via the ``factory`` key. Remaining keys under ``config``
+        are passed to the factory's ``create()`` method.
 
         Args:
-            backend_config: Dict with ``type`` or ``factory`` key and
-                optional ``config`` sub-dict.
+            backend_config: Dict with ``factory`` key (dotted path like
+                ``"my_package.websearch.Factory"``) and optional ``config``
+                sub-dict.
 
         Returns:
             Constructed backend instance.
 
         Raises:
-            ValueError: If neither ``type`` nor ``factory`` is specified,
-                both are specified, or the type name is unknown.
+            ValueError: If ``factory`` key is missing.
             ImportError: If the factory path cannot be imported.
         """
         from appinfra import DotDict
 
-        has_factory = "factory" in backend_config
-        has_type = "type" in backend_config
-
-        if has_factory and has_type:
-            raise ValueError("web_search backend config must specify 'type' or 'factory', not both")
+        if "factory" not in backend_config:
+            raise ValueError("web_search backend config must include 'factory' key")
 
         config = DotDict(backend_config.get("config") or {})
-
-        if has_factory:
-            factory_cls = self._import_factory(backend_config["factory"])
-            return factory_cls.create(self._lg, config)
-
-        if has_type:
-            factory_cls = self._ensure_backend_registered(backend_config["type"])
-            return factory_cls.create(self._lg, config)
-
-        raise ValueError("web_search backend config must include 'type' or 'factory' key")
-
-    def _ensure_backend_registered(self, backend_type: str) -> type[WebSearchBackendFactory]:
-        """Look up a backend factory by type name, lazy-loading if needed.
-
-        Args:
-            backend_type: Registered backend type name (e.g. ``"brave"``).
-
-        Returns:
-            The factory class.
-
-        Raises:
-            ValueError: If the type name is not registered.
-        """
-        if backend_type in self._lazy_backends:
-            module_path, class_name = self._lazy_backends[backend_type]
-            from .builtin.web.backend import validated_factory
-
-            module = importlib.import_module(module_path)
-            return validated_factory(getattr(module, class_name), f"built-in type {backend_type!r}")
-
-        available = ", ".join(sorted(self._lazy_backends))
-        raise ValueError(
-            f"Unknown web_search backend type: {backend_type!r}. Available: {available}"
-        )
+        factory_cls = self._import_factory(backend_config["factory"])
+        return factory_cls.create(self._lg, config)
 
     @staticmethod
     def _import_factory(dotted_path: str) -> type[WebSearchBackendFactory]:
@@ -219,8 +173,8 @@ class ToolFactory:
 
         1. ``config["backend"]`` is already a :class:`WebSearchBackend`
            instance (programmatic injection, backward-compatible).
-        2. ``config["backend"]`` is a dict with ``type`` or ``factory``
-           key — resolved via :meth:`_resolve_backend`.
+        2. ``config["backend"]`` is a dict with ``factory`` key — resolved
+           via :meth:`_resolve_backend`.
         3. A backend was previously set via :meth:`set_web_search_backend`.
 
         Returns ``None`` when no backend has been configured, allowing the
