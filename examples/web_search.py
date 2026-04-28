@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Demo: web search with BraveSearchBackend.
+"""Demo: web search with pluggable backend.
 
-Uses ``BraveSearchBackend`` when ``BRAVE_SEARCH_API_KEY`` is set, otherwise
-falls back to a stub backend that returns hardcoded results.
+Demonstrates the WebSearchTool with a stub backend. Real backends (Brave,
+Serper, etc.) must be implemented separately and satisfy the WebSearchBackend
+protocol.
 
 Usage:
-    export BRAVE_SEARCH_API_KEY="BSA..."
     python examples/web_search.py "python asyncio tutorial"
     python examples/web_search.py "rust vs go performance" --fetch 1
 
@@ -14,7 +14,6 @@ Flags:
     --fetch N         Fetch the Nth result page and print readable text
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -26,7 +25,6 @@ import argparse
 from appinfra.log import create_lg
 
 from llm_gent import (
-    BraveSearchBackend,
     WebFetchTool,
     WebSearchBackend,
     WebSearchTool,
@@ -42,7 +40,7 @@ class StubSearchBackend:
     """Minimal backend that returns hardcoded results for demonstration."""
 
     def search(self, query: str, max_results: int, offset: int = 0) -> list[dict[str, str]]:
-        """Return canned results. Set BRAVE_SEARCH_API_KEY for real search."""
+        """Return canned results; replace this stub with your own backend for real search."""
         all_results = [
             {
                 "title": f"Result {i} for: {query}",
@@ -96,14 +94,8 @@ def main() -> None:
 
     lg = create_lg("web_search_demo", "info")
 
-    api_key = os.environ.get("BRAVE_SEARCH_API_KEY")
-    backend: WebSearchBackend
-    if api_key:
-        backend = BraveSearchBackend(lg=lg, api_key=api_key)
-        print("(using Brave Search API)\n")
-    else:
-        backend = StubSearchBackend()
-        print("(using stub backend — set BRAVE_SEARCH_API_KEY for real results)\n")
+    backend: WebSearchBackend = StubSearchBackend()
+    print("(using stub backend — implement WebSearchBackend for real results)\n")
 
     web_fetch = WebFetchTool(lg=lg)
     web_search = WebSearchTool(lg=lg, backend=backend)
