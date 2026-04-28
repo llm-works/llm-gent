@@ -4,14 +4,12 @@ from enum import StrEnum
 
 from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult
 from .builtin import (
-    BraveSearchBackend,
     CompleteTaskTool,
     FileReadTool,
     FileWriteTool,
     HTTPFetchTool,
     RecallTool,
     RememberTool,
-    SerperSearchBackend,
     ShellTool,
     WebFetchTool,
     WebSearchBackend,
@@ -71,14 +69,12 @@ __all__ = [
     "SimpleToolExecutor",
     "ToolExecutionResult",
     # Built-in tools
-    "BraveSearchBackend",
     "CompleteTaskTool",
     "FileReadTool",
     "FileWriteTool",
     "HTTPFetchTool",
     "RecallTool",
     "RememberTool",
-    "SerperSearchBackend",
     "ShellTool",
     "WebFetchTool",
     "WebSearchBackend",

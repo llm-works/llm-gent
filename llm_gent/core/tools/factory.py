@@ -106,16 +106,10 @@ class ToolFactory:
         return self._get_or_create_web_fetch()
 
     # Lazy-loaded backend factories: type name -> (module_path, class_name)
-    _lazy_backends: dict[str, tuple[str, str]] = {
-        "brave": (
-            "llm_gent.core.tools.builtin.web.brave",
-            "Factory",
-        ),
-        "serper": (
-            "llm_gent.core.tools.builtin.web.serper",
-            "Factory",
-        ),
-    }
+    # No built-in backends. Implement WebSearchBackendFactory and configure via:
+    #   backend:
+    #     factory: my_package.websearch.Factory
+    _lazy_backends: dict[str, tuple[str, str]] = {}
 
     def set_web_search_backend(self, backend: WebSearchBackend) -> None:
         """Set the search backend for WebSearchTool creation.

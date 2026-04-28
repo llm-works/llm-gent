@@ -18,7 +18,6 @@ from .core.llm import (
 from .core.task import Task, TaskCompletion, TaskResult, TaskStatus
 from .core.tools import (
     BaseTool,
-    BraveSearchBackend,
     CompleteTaskTool,
     FileReadTool,
     FileWriteTool,
@@ -26,7 +25,6 @@ from .core.tools import (
     RecallTool,
     Registry,
     RememberTool,
-    SerperSearchBackend,
     ShellTool,
     Tool,
     ToolCall,
@@ -76,14 +74,12 @@ __all__ = [
     "TraitFactory",
     # Tools
     "BaseTool",
-    "BraveSearchBackend",
     "CompleteTaskTool",
     "FileReadTool",
     "FileWriteTool",
     "HTTPFetchTool",
     "RecallTool",
     "RememberTool",
-    "SerperSearchBackend",
     "ShellTool",
     "WebFetchTool",
     "WebSearchBackend",

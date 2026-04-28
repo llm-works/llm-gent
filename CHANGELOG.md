@@ -15,11 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{title, url, snippet}` results with automatic retry on retriable failures
 - `WebSearchBackend` — protocol for search provider implementations
 - `WebSearchBackendFactory` ABC — factory pattern for creating search backends from YAML config;
-  supports `type:` (built-in registry) and `factory:` (dynamic import) resolution
-- `BraveSearchBackend` — production search backend using the Brave Web Search API; includes
-  `Factory` for config-driven instantiation
-- `examples/web_search.py` — demo showing `BraveSearchBackend` usage and custom backend
-  implementation
+  supports `factory:` (dynamic import) resolution for external backend implementations
+- `examples/web_search.py` — demo showing `WebSearchBackend` protocol with stub implementation
 - `trafilatura>=2.0` dependency for web content extraction
 
 ### Fixed
@@ -29,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `BraveSearchBackend` and `SerperSearchBackend` removed from llm-gent; search
+  backends must now be provided externally via `factory:` config path (e.g.,
+  `factory: my_package.websearch.Factory`)
 - Unit test coverage from 59% to 75%; coverage threshold raised from 50% to 70%
 - **Breaking:** `ToolFactory` now requires a `Logger` argument: `ToolFactory(lg)` instead of
   `ToolFactory()`
