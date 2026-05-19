@@ -444,7 +444,7 @@ class LearnTrait(BaseTrait):
             self.kelt.atomic.embeddings.set_embedding(
                 fact_id=fact_id,
                 embedding=embedding.embedding,
-                model_name=self._embedder.model,
+                model=self._embedder.model,
             )
 
         return fact_id
@@ -489,7 +489,7 @@ class LearnTrait(BaseTrait):
         client = self.kelt if schema is None else self.kelt.with_schema(schema)
         return client.atomic.embeddings.search_similar(
             query=embedding.embedding,
-            model_name=self._embedder.model,
+            model=self._embedder.model,
             top_k=top_k,
             min_similarity=min_similarity,
             categories=categories,
