@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal
 
 from appinfra.db.pg import PG
-from llm_infer.client import ChatClient, ChatResponse
+from llm_infer.client import ChatClient, ChatResponse, EmbeddingClient
 from llm_infer.client import Factory as LLMClientFactory
 from llm_infer.client.types import AdapterInfo
 from llm_kelt import Client as KeltClient
 from llm_kelt.core import Database
 from llm_kelt.core.types import ScoredEntity
-from llm_kelt.inference import ContextBuilder, EmbeddingClient
+from llm_kelt.inference import ContextBuilder
 from llm_kelt.memory.atomic import EmbeddingFilter, Fact
 from llm_kelt.memory.isolation import ClientContext
 from llm_kelt.scoped_client import ScopedClient
@@ -160,8 +160,7 @@ class LearnTrait(BaseTrait):
 
         # Create embedder if URL provided (before Client)
         if self.config.embedder_url:
-            self._embedder = EmbeddingClient(
-                self.agent.lg,
+            self._embedder = LLMClientFactory(self.agent.lg).embeddings(
                 base_url=self.config.embedder_url,
                 model=self.config.embedder_model,
                 timeout=self.config.embedder_timeout,

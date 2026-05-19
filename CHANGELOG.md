@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `LearnTrait` now uses `EmbeddingClient` instead of deprecated `Embedder` from llm-kelt, fixing
-  import errors for downstream consumers
+- `LearnTrait` now uses `LLMClientFactory.embeddings()` to create embedding clients, compatible
+  with the new backend-based `EmbeddingClient` API in llm-infer
 - `_PinnedIPTransport` now reads the httpcore response stream before accessing `.content`,
   fixing a crash on real HTTP calls (only surfaced with IP pinning enabled)
 
