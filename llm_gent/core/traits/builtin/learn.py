@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal
 
 from appinfra.db.pg import PG
-from llm_infer.client import ChatClient, ChatResponse
+from llm_infer.client import ChatClient, ChatResponse, EmbeddingClient
 from llm_infer.client import Factory as LLMClientFactory
 from llm_infer.client.types import AdapterInfo
 from llm_kelt import Client as KeltClient
 from llm_kelt.core import Database
 from llm_kelt.core.types import ScoredEntity
-from llm_kelt.inference import ContextBuilder, Embedder
+from llm_kelt.inference import ContextBuilder
 from llm_kelt.memory.atomic import EmbeddingFilter, Fact
 from llm_kelt.memory.isolation import ClientContext
 from llm_kelt.scoped_client import ScopedClient
@@ -24,7 +24,7 @@ from .llm import _resolve_llm_defaults
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent, Identity
+    from ...agent import Agent, Identity
 
 
 from appinfra import DotDict
@@ -56,7 +56,7 @@ Expected fields:
 class LearnTrait(BaseTrait):
     """Learn capability trait for memory, feedback, and learned completions.
 
-    Wraps llm_kelt.Client, ChatClient, and Embedder to provide
+    Wraps llm_kelt.Client, ChatClient, and EmbeddingClient to provide
     learning-enabled completions with memory and feedback.
 
     Capabilities:
@@ -86,8 +86,8 @@ class LearnTrait(BaseTrait):
         agent.get_trait(LearnTrait).remember("User prefers concise answers")
 
     Lifecycle:
-        - on_start(): Creates Client, ChatClient, Embedder, ContextBuilder
-        - on_stop(): Closes ChatClient and Embedder
+        - on_start(): Creates Client, ChatClient, EmbeddingClient, ContextBuilder
+        - on_stop(): Closes ChatClient and EmbeddingClient
     """
 
     def __init__(self, agent: Agent, config: LearnConfig) -> None:
@@ -102,19 +102,19 @@ class LearnTrait(BaseTrait):
         self._database: Database | None = None
         self._kelt: KeltClient | None = None
         self._train_factory: TrainFactory | None = None  # initialized in on_start
-        self._embedder: Embedder | None = None
+        self._embedder: EmbeddingClient | None = None
         self._context: ContextBuilder | None = None
         self._client: ChatClient | None = None
         self._llm_defaults: dict[str, Any] = {}
 
     def _create_kelt_client(
-        self, database: Database, embedder: Embedder | None, llm_client: ChatClient | None
+        self, database: Database, embedder: EmbeddingClient | None, llm_client: ChatClient | None
     ) -> KeltClient:
         """Create schema-agnostic kelt client.
 
         Args:
             database: Database instance.
-            embedder: Embedder instance (None if not configured).
+            embedder: EmbeddingClient instance (None if not configured).
             llm_client: LLM client instance (None if not configured).
 
         Returns:
@@ -145,7 +145,7 @@ class LearnTrait(BaseTrait):
 
     def on_start(self) -> None:
         """Create learn client, LLM client, and embedder on agent start."""
-        from llm_gent.core.errors import ConfigError
+        from ...errors import ConfigError
 
         # Create database from config
         if self.config.db is None:
@@ -160,7 +160,7 @@ class LearnTrait(BaseTrait):
 
         # Create embedder if URL provided (before Client)
         if self.config.embedder_url:
-            self._embedder = Embedder(
+            self._embedder = LLMClientFactory(self.agent.lg).embeddings(
                 base_url=self.config.embedder_url,
                 model=self.config.embedder_model,
                 timeout=self.config.embedder_timeout,
@@ -298,7 +298,7 @@ class LearnTrait(BaseTrait):
         return self._kelt
 
     @property
-    def embedder(self) -> Embedder | None:
+    def embedder(self) -> EmbeddingClient | None:
         """Access the embedder (None if not configured)."""
         return self._embedder
 
@@ -444,7 +444,7 @@ class LearnTrait(BaseTrait):
             self.kelt.atomic.embeddings.set_embedding(
                 fact_id=fact_id,
                 embedding=embedding.embedding,
-                model_name=self._embedder.model,
+                model=self._embedder.model,
             )
 
         return fact_id
@@ -489,7 +489,7 @@ class LearnTrait(BaseTrait):
         client = self.kelt if schema is None else self.kelt.with_schema(schema)
         return client.atomic.embeddings.search_similar(
             query=embedding.embedding,
-            model_name=self._embedder.model,
+            model=self._embedder.model,
             top_k=top_k,
             min_similarity=min_similarity,
             categories=categories,

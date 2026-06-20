@@ -1,0 +1,154 @@
+"""Web search tool with pluggable backend.
+
+Provides ``WebSearchTool`` — an LLM-facing tool that delegates actual search
+to a ``WebSearchBackend`` implementation.  The tool handles input validation,
+result formatting, and automatic retry on retriable failures.
+
+The search backend is injected at construction time, keeping provider-specific
+code (API keys, HTML parsing, rate limiting, etc.) out of this module.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from appinfra.log import Logger
+
+from ...base import BaseTool, ToolResult
+from .backend import WebSearchBackend
+
+
+def _format_results(results: list[dict[str, str]]) -> str:
+    """Format search results for LLM consumption."""
+    lines: list[str] = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r['title']}")
+        lines.append(f"   URL: {r['url']}")
+        if r.get("snippet"):
+            lines.append(f"   {r['snippet']}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+# ---------------------------------------------------------------------------
+# WebSearchTool
+# ---------------------------------------------------------------------------
+
+
+class WebSearchTool(BaseTool):
+    """Search the web and return structured results.
+
+    Returns a list of {title, url, snippet} results. The agent can then
+    use WebFetchTool to read interesting pages — "dumb tools, smart agent".
+
+    Requires a ``WebSearchBackend`` that handles provider-specific search
+    logic (HTTP requests, response parsing, etc.).
+
+    Example:
+        tool = WebSearchTool(lg, backend=my_backend)
+        result = tool.execute(query="Python asyncio tutorial")
+        # result.output contains formatted search results
+    """
+
+    name = "web_search"
+    description = (
+        "Search the web and return a list of results with title, URL, and snippet. "
+        "Use for: finding information, researching topics, discovering relevant pages. "
+        "Follow up with web_fetch to read full page content."
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query",
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of results to return (default 5)",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Skip first N results for pagination (default 0)",
+            },
+        },
+        "required": ["query"],
+    }
+
+    def __init__(
+        self,
+        lg: Logger,
+        backend: WebSearchBackend,
+        retry_delay: float = 5.0,
+    ) -> None:
+        """Initialize web search tool.
+
+        Args:
+            lg: Logger instance.
+            backend: Search backend implementation.
+            retry_delay: Seconds to wait before retrying after a retriable failure.
+        """
+        self._lg = lg
+        self._backend = backend
+        self._retry_delay = retry_delay
+
+    def execute(self, **kwargs: Any) -> ToolResult:
+        """Search the web and return structured results.
+
+        Args:
+            **kwargs: Must contain 'query'. Optional: 'max_results' (default 5,
+                min 1), 'offset' (default 0).
+
+        Returns:
+            ToolResult with formatted search results or error.
+        """
+        query = kwargs.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return ToolResult(success=False, output="", error="Missing or empty 'query' argument")
+
+        raw = kwargs.get("max_results")
+        try:
+            max_results = max(int(raw) if raw is not None else 5, 1)
+        except (ValueError, TypeError):
+            max_results = 5
+
+        raw_offset = kwargs.get("offset")
+        try:
+            offset = max(int(raw_offset) if raw_offset is not None else 0, 0)
+        except (ValueError, TypeError):
+            offset = 0
+
+        return self._search(query.strip(), max_results, offset)
+
+    def _search(self, query: str, max_results: int, offset: int) -> ToolResult:
+        """Execute search with one automatic retry on retriable failures."""
+        results = self._backend.search(query, max_results, offset)
+        if results is not None:
+            return self._format(results)
+
+        self._lg.info(
+            "search backend returned retriable failure, backing off before retry",
+            extra={"retry_delay": self._retry_delay},
+        )
+        time.sleep(self._retry_delay)
+
+        results = self._backend.search(query, max_results, offset)
+        if results is not None:
+            return self._format(results)
+
+        return ToolResult(
+            success=False,
+            output="",
+            error="Search backend returned a retriable error twice. "
+            "Try a different query or wait before searching again.",
+        )
+
+    @staticmethod
+    def _format(results: list[dict[str, str]]) -> ToolResult:
+        """Convert backend results to ToolResult."""
+        if not results:
+            return ToolResult(success=True, output="No results found.")
+        return ToolResult(success=True, output=_format_results(results))

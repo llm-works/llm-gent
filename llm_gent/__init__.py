@@ -31,6 +31,10 @@ from .core.tools import (
     ToolCallResult,
     ToolExecutionResult,
     ToolResult,
+    WebFetchTool,
+    WebSearchBackend,
+    WebSearchBackendFactory,
+    WebSearchTool,
 )
 from .core.tools.factory import ToolFactory
 from .core.traits import (
@@ -77,6 +81,10 @@ __all__ = [
     "RecallTool",
     "RememberTool",
     "ShellTool",
+    "WebFetchTool",
+    "WebSearchBackend",
+    "WebSearchBackendFactory",
+    "WebSearchTool",
     "Tool",
     "ToolCall",
     "ToolCallResult",

@@ -10,7 +10,7 @@ from appinfra.app.tools import Tool, ToolConfig
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Factory
+    from ...core.agent import Factory
 
 
 class AgentTool(Tool):
@@ -23,8 +23,8 @@ class AgentTool(Tool):
         ./llm-gent.py agent <agent-name> <command> [args]
 
     Example:
-        ./llm-gent.py agent jokester-p stats
-        ./llm-gent.py agent jokester-p pairs-sync --dry-run
+        ./llm-gent.py agent my-agent stats
+        ./llm-gent.py agent my-agent pairs-sync --dry-run
     """
 
     def __init__(self, parent: Any = None) -> None:
@@ -35,7 +35,7 @@ class AgentTool(Tool):
     def add_args(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "agent_name",
-            help="Name of the agent (e.g., 'jokester-p')",
+            help="Name of the agent",
         )
         # Capture remaining args for the agent's CLI tool
         parser.add_argument(

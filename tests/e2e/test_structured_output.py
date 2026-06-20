@@ -1,6 +1,6 @@
 """E2E tests for structured output with real LLM.
 
-These tests require an LLM server at localhost:8000 that supports JSON mode.
+These tests require an LLM server at localhost:18100 that supports JSON mode.
 Tests are skipped if no server is available.
 """
 
@@ -15,7 +15,7 @@ from llm_gent.core.traits.builtin.llm import LLMTrait
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
-LLM_BASE_URL = "http://localhost:8000/v1"
+LLM_BASE_URL = "http://localhost:18100/v1"
 LLM_MODEL = "default"
 
 
@@ -30,7 +30,7 @@ def llm_available() -> bool:
 
 skip_no_llm = pytest.mark.skipif(
     not llm_available(),
-    reason="LLM server not available at localhost:8000",
+    reason="LLM server not available at localhost:18100",
 )
 
 

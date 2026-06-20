@@ -10,7 +10,7 @@ from appinfra.app.tools import Tool, ToolConfig
 from appinfra.db.pg import PG
 from llm_kelt.core import Database
 
-from llm_gent.core.memory.rating import (
+from ...core.memory.rating import (
     AtomicFactsBackend,
     ConfigParser,
     ProviderType,
@@ -45,7 +45,7 @@ class RateTool(Tool):
     def add_args(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "agent_name",
-            help="Name of the agent to rate content from (e.g., 'jokester-p')",
+            help="Name of the agent to rate content from",
         )
         parser.add_argument(
             "--cont",
@@ -376,7 +376,7 @@ class RateTool(Tool):
         """Create LLM client and run auto rating."""
         from llm_infer.client import Factory as LLMClientFactory
 
-        from llm_gent.core.llm import LLMCaller
+        from ...core.llm import LLMCaller
 
         llm_config = self.app.config.get("llm", {})
         router = LLMClientFactory(self.lg).from_config(llm_config)
@@ -506,7 +506,7 @@ class RateTool(Tool):
             stars: Star rating (1-5).
         """
         assert self._backend is not None
-        from llm_gent.core.memory.rating import Result
+        from ...core.memory.rating import Result
 
         result = Result(
             fact=fact_id,

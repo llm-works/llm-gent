@@ -75,6 +75,7 @@ class AgentConfigYAML(BaseModel):
     Example:
         codebase-explorer:
           class: prompt
+          enabled: true
           identity: |
             You are a codebase exploration agent.
             You value curiosity over speed, insight over coverage.
@@ -90,11 +91,17 @@ class AgentConfigYAML(BaseModel):
             interval: 600
     """
 
+    enabled: bool = True
+    """Whether this agent is enabled. Disabled agents are not registered."""
+
+    execution: Literal["process", "thread"] = "process"
+    """Execution mode: 'process' for subprocess isolation, 'thread' for in-process."""
+
     type_: Literal["prompt", "programmatic"] = Field(alias="type", default="prompt")
     """Agent type: 'prompt' for YAML-only, 'programmatic' for custom Python."""
 
     module: str | None = None
-    """Module path for programmatic agents (e.g., 'llm_gent.agents.jokester_p')."""
+    """Module path for programmatic agents (e.g., 'my_agents.my_agent')."""
 
     factory: str = "Factory"
     """Factory class name for programmatic agents (default: 'Factory')."""
@@ -130,6 +137,43 @@ class AgentConfigYAML(BaseModel):
     model_config = {"populate_by_name": True, "extra": "allow"}
 
 
+class HubConfigYAML(BaseModel):
+    """Hub/bus configuration from YAML.
+
+    Controls the ZMQ bus ports and health monitoring settings.
+    The hub is always enabled — the ``enabled`` field is reserved for
+    future use.
+
+    Example::
+
+        hub:
+          router_port: 5555
+          pub_port: 5556
+          sub_port: 5557
+          dead_timeout: 90
+          health_check_interval: 30
+          max_restarts: 3
+    """
+
+    router_port: int = Field(default=5555, ge=1, le=65535)
+    """ZMQ ROUTER port for RPC."""
+
+    pub_port: int = Field(default=5556, ge=1, le=65535)
+    """ZMQ PUB port for broadcasts."""
+
+    sub_port: int = Field(default=5557, ge=1, le=65535)
+    """ZMQ SUB port for heartbeats/events."""
+
+    dead_timeout: float = Field(default=90.0, gt=0)
+    """Seconds without heartbeat before agent is considered dead."""
+
+    health_check_interval: float = Field(default=30.0, gt=0)
+    """Seconds between health check sweeps."""
+
+    max_restarts: int = Field(default=3, ge=0)
+    """Maximum restart attempts for dead injected agents."""
+
+
 class AgentServerConfig(BaseModel):
     """Complete server configuration.
 
@@ -144,6 +188,9 @@ class AgentServerConfig(BaseModel):
 
         learn:
           db: !include './infra.yaml#dbs.main'
+
+        hub:
+          router_port: 5555
 
         agents:
           codebase-explorer:
@@ -161,6 +208,9 @@ class AgentServerConfig(BaseModel):
 
     learn: LearnBackendConfig | None = None
     """Optional learn backend for memory/feedback."""
+
+    hub: HubConfigYAML = Field(default_factory=HubConfigYAML)
+    """Hub/bus configuration."""
 
     agents: dict[str, AgentConfigYAML] = {}
     """Agent definitions keyed by name."""
@@ -195,5 +245,6 @@ class AgentServerConfig(BaseModel):
             server=server,
             llm=raw.get("llm", {}),
             learn=raw.get("learn"),
+            hub=raw.get("hub", {}),
             agents=raw.get("agents", {}),
         )

@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from appinfra import DotDict
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent, Identity
-    from llm_gent.core.platform import PlatformContext
-    from llm_gent.core.traits import TraitName
-    from llm_gent.core.traits.builtin.directive import Directive, DirectiveTrait, MethodTrait
-    from llm_gent.core.traits.builtin.learn import LearnConfig, LearnTrait
-    from llm_gent.core.traits.builtin.llm import LLMConfig, LLMTrait
+    from ..agent import Agent, Identity
+    from ..platform import PlatformContext
+    from . import TraitName
+    from .builtin.directive import Directive, DirectiveTrait, MethodTrait
+    from .builtin.learn import LearnConfig, LearnTrait
+    from .builtin.llm import LLMConfig, LLMTrait
 
 from .base import Trait
 
@@ -119,13 +119,14 @@ class Factory:
 
         # Merge backends
         if "backends" in override and "backends" in result:
+            result_backends = cast(dict[str, Any], result["backends"])
             for backend_name, backend_override in override["backends"].items():
-                if backend_name in result["backends"]:
+                if backend_name in result_backends:
                     # Skip None backends (from YAML with all content commented out)
-                    if backend_override:
-                        result["backends"][backend_name].update(backend_override)
+                    if backend_override and result_backends[backend_name] is not None:
+                        result_backends[backend_name].update(backend_override)
                 else:
-                    result["backends"][backend_name] = backend_override
+                    result_backends[backend_name] = backend_override
         elif "backends" in override:
             result["backends"] = override["backends"]
 

@@ -9,9 +9,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from appinfra import DotDict
+from appinfra.service import State
 
 from .handle import AgentHandle, AgentInfo
-from .state import AgentState
 
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ class AgentRegistry:
     def register(self, name: str, config: DotDict) -> AgentHandle:
         """Register an agent configuration.
 
-        The agent is registered in IDLE state.
+        The agent is registered in CREATED state.
 
         Args:
             name: Unique agent name.
@@ -67,7 +67,7 @@ class AgentRegistry:
         handle = AgentHandle(
             name=name,
             config=config,
-            state=AgentState.IDLE,
+            state=State.CREATED,
             schedule_interval=schedule_interval,
         )
         self._agents[name] = handle
@@ -96,7 +96,7 @@ class AgentRegistry:
     def unregister(self, name: str) -> None:
         """Remove an agent from the registry.
 
-        The agent must be in IDLE or STOPPED state.
+        The agent must be in CREATED or STOPPED state.
 
         Args:
             name: Agent name.
@@ -109,10 +109,10 @@ class AgentRegistry:
         if handle is None:
             raise KeyError(f"Agent not found: {name}")
 
-        if handle.state not in (AgentState.IDLE, AgentState.STOPPED):
+        if handle.state not in (State.CREATED, State.STOPPED):
             raise RuntimeError(
                 f"Cannot unregister agent '{name}' in state {handle.state.value}. "
-                f"Agent must be IDLE or STOPPED."
+                f"Agent must be CREATED or STOPPED."
             )
 
         del self._agents[name]

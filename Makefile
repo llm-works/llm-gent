@@ -10,7 +10,7 @@ INFRA_DEV_PKG_NAME := llm_gent
 INFRA_DEV_CQ_STRICT := true
 
 # PyTest and Docstring coverage thresholds
-INFRA_PYTEST_COVERAGE_THRESHOLD := 50
+INFRA_PYTEST_COVERAGE_THRESHOLD := 70
 INFRA_DEV_DOCSTRING_THRESHOLD := 95
 
 # Include framework
@@ -20,4 +20,5 @@ include $(infra)/make/Makefile.help
 include $(infra)/make/Makefile.utils
 include $(infra)/make/Makefile.dev
 include $(infra)/make/Makefile.pytest
+include $(infra)/make/Makefile.install
 include $(infra)/make/Makefile.clean

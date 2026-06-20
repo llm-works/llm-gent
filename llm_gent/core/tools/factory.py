@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from appinfra.log import Logger
+
 
 if TYPE_CHECKING:
-    from llm_gent.core.tools.base import Tool
-    from llm_gent.core.traits.builtin.learn import LearnTrait
+    from ..traits.builtin.learn import LearnTrait
+    from .base import BaseTool, Tool
+    from .builtin.web.backend import WebSearchBackend, WebSearchBackendFactory
+    from .builtin.web.fetch import WebFetchTool
 
 
 class ToolFactory:
@@ -17,7 +22,7 @@ class ToolFactory:
     Supports built-in tool types and custom tool registration.
 
     Example:
-        factory = ToolFactory()
+        factory = ToolFactory(lg)
 
         # Create built-in tools
         shell = factory.create(ToolFactory.SHELL, {"allowed_commands": ["ls", "grep"]})
@@ -33,6 +38,8 @@ class ToolFactory:
     READ_FILE = "read_file"
     WRITE_FILE = "write_file"
     HTTP_FETCH = "http_fetch"
+    WEB_FETCH = "web_fetch"
+    WEB_SEARCH = "web_search"
     COMPLETE_TASK = "complete_task"
     REMEMBER = "remember"
     RECALL = "recall"
@@ -44,27 +51,191 @@ class ToolFactory:
         "fetch": HTTP_FETCH,
     }
 
-    def __init__(self) -> None:
-        """Initialize factory with built-in tool creators."""
-        self._creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
-        self._learn_trait: LearnTrait | None = None
-        self._register_builtins()
+    def __init__(self, lg: Logger) -> None:
+        """Initialize factory with built-in tool creators.
 
-    def _register_builtins(self) -> None:
-        """Register built-in tool creators."""
-        from llm_gent.core.tools.builtin import (
-            CompleteTaskTool,
+        Args:
+            lg: Logger instance, passed through to tools that need it.
+        """
+        self._lg = lg
+        self._custom_creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
+        self._learn_trait: LearnTrait | None = None
+        self._web_fetch: WebFetchTool | None = None
+        self._web_search_backend: WebSearchBackend | None = None
+
+    # ------------------------------------------------------------------
+    # Built-in tool creators
+    # ------------------------------------------------------------------
+
+    def _create_simple(self, tool_type: str, config: dict[str, Any]) -> Tool:
+        """Create a tool whose __init__ takes only config kwargs.
+
+        Note: these tools predate the Logger-injection pattern used by web
+        tools.  Adding ``lg`` here is a follow-up task, not a regression.
+        """
+        from .builtin import (
             FileReadTool,
             FileWriteTool,
             HTTPFetchTool,
             ShellTool,
         )
 
-        self._creators[self.SHELL] = lambda c: ShellTool(**c)
-        self._creators[self.READ_FILE] = lambda c: FileReadTool(**c)
-        self._creators[self.WRITE_FILE] = lambda c: FileWriteTool(**c)
-        self._creators[self.HTTP_FETCH] = lambda c: HTTPFetchTool(**c)
-        self._creators[self.COMPLETE_TASK] = lambda _: CompleteTaskTool()
+        classes: dict[str, type[BaseTool]] = {
+            self.SHELL: ShellTool,
+            self.READ_FILE: FileReadTool,
+            self.WRITE_FILE: FileWriteTool,
+            self.HTTP_FETCH: HTTPFetchTool,
+        }
+        return classes[tool_type](**config)
+
+    def _get_or_create_web_fetch(self) -> WebFetchTool:
+        """Return the cached WebFetchTool, creating a default lazily."""
+        if self._web_fetch is None:
+            from .builtin import WebFetchTool
+
+            self._web_fetch = WebFetchTool(lg=self._lg)
+        return self._web_fetch
+
+    def _create_web_fetch(self, config: dict[str, Any]) -> Tool:
+        """Create WebFetchTool — new instance if config provided, cached otherwise."""
+        if config:
+            from .builtin import WebFetchTool
+
+            self._web_fetch = WebFetchTool(lg=self._lg, **config)
+            return self._web_fetch
+        return self._get_or_create_web_fetch()
+
+    def set_web_search_backend(self, backend: WebSearchBackend) -> None:
+        """Set the search backend for WebSearchTool creation.
+
+        Must be called before ``create("web_search", ...)``.
+
+        Args:
+            backend: Search backend implementation.
+        """
+        self._web_search_backend = backend
+
+    def _resolve_backend(self, backend_config: dict[str, Any]) -> WebSearchBackend:
+        """Resolve a search backend from a config dict.
+
+        Dynamic-imports a dotted path to a :class:`WebSearchBackendFactory`
+        subclass via the ``factory`` key. Remaining keys under ``config``
+        are passed to the factory's ``create()`` method.
+
+        Args:
+            backend_config: Dict with ``factory`` key (dotted path like
+                ``"my_package.websearch.Factory"``) and optional ``config``
+                sub-dict.
+
+        Returns:
+            Constructed backend instance.
+
+        Raises:
+            ValueError: If ``factory`` key is missing.
+            ImportError: If the factory path cannot be imported.
+        """
+        from appinfra import DotDict
+
+        if "factory" not in backend_config:
+            raise ValueError("web_search backend config must include 'factory' key")
+
+        factory_path = backend_config["factory"]
+        if not isinstance(factory_path, str):
+            raise ValueError(
+                f"web_search backend 'factory' must be a string, got {type(factory_path).__name__}"
+            )
+
+        config = DotDict(backend_config.get("config") or {})
+        factory_cls = self._import_factory(factory_path)
+        return factory_cls.create(self._lg, config)
+
+    @staticmethod
+    def _import_factory(dotted_path: str) -> type[WebSearchBackendFactory]:
+        """Dynamic-import a :class:`WebSearchBackendFactory` from a dotted path.
+
+        Args:
+            dotted_path: Fully-qualified path like
+                ``"llm_private.websearch.ddg.Factory"``.
+
+        Returns:
+            The imported factory class.
+
+        Raises:
+            ImportError: If the module cannot be imported.
+            AttributeError: If the class is not found in the module.
+        """
+        module_path, _, class_name = dotted_path.rpartition(".")
+        if not module_path:
+            raise ImportError(f"Invalid factory path {dotted_path!r}: expected 'module.ClassName'")
+        from .builtin.web.backend import validated_factory
+
+        module = importlib.import_module(module_path)
+        return validated_factory(getattr(module, class_name), dotted_path)
+
+    def _create_web_search(self, config: dict[str, Any]) -> Tool | None:
+        """Create WebSearchTool using a search backend.
+
+        The backend can be provided in three ways (checked in order):
+
+        1. ``config["backend"]`` is already a :class:`WebSearchBackend`
+           instance (programmatic injection, backward-compatible).
+        2. ``config["backend"]`` is a dict with ``factory`` key — resolved
+           via :meth:`_resolve_backend`.
+        3. A backend was previously set via :meth:`set_web_search_backend`.
+
+        Returns ``None`` when no backend has been configured, allowing the
+        agent factory to skip web_search gracefully.
+        """
+        from .builtin.web.backend import WebSearchBackend as _WSB
+        from .builtin.web.search import WebSearchTool
+
+        backend_value = config.get("backend")
+        if backend_value is None:
+            backend_value = self._web_search_backend
+
+        if backend_value is None:
+            self._lg.warning(
+                "web_search skipped: no search backend configured — call "
+                "factory.set_web_search_backend() or pass 'backend' in config"
+            )
+            return None
+
+        if isinstance(backend_value, _WSB):
+            backend = backend_value
+        elif isinstance(backend_value, dict):
+            backend = self._resolve_backend(backend_value)
+        else:
+            raise ValueError(
+                f"web_search 'backend' must be a WebSearchBackend instance "
+                f"or a config dict, got {type(backend_value).__name__}"
+            )
+
+        rest = {k: v for k, v in config.items() if k != "backend"}
+        return WebSearchTool(lg=self._lg, backend=backend, **rest)
+
+    def _create_complete_task(self) -> Tool:
+        """Create CompleteTaskTool (takes no config)."""
+        from .builtin import CompleteTaskTool
+
+        return CompleteTaskTool()
+
+    def _create_memory_tool(self, tool_type: str) -> Tool | None:
+        """Create remember or recall tool.
+
+        Returns None if LearnTrait not available (tool will be skipped).
+        """
+        from .builtin import RecallTool, RememberTool
+
+        if self._learn_trait is None:
+            return None
+
+        if tool_type == self.REMEMBER:
+            return RememberTool(self._learn_trait)
+        return RecallTool(self._learn_trait)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def set_learn_trait(self, learn_trait: LearnTrait | None) -> None:
         """Set LearnTrait for memory tools (remember/recall).
@@ -84,7 +255,7 @@ class ToolFactory:
         Example:
             factory.register("my_tool", lambda c: MyTool(**c))
         """
-        self._creators[tool_type] = creator
+        self._custom_creators[tool_type] = creator
 
     def create(self, tool_type: str, config: dict[str, Any] | None = None) -> Tool | None:
         """Create a tool from type and configuration.
@@ -101,28 +272,22 @@ class ToolFactory:
             ValueError: If tool type is unknown.
         """
         config = config or {}
-        canonical_type = self._ALIASES.get(tool_type, tool_type)
+        canonical = self._ALIASES.get(tool_type, tool_type)
 
-        # Handle memory tools specially (need LearnTrait)
-        if canonical_type in (self.REMEMBER, self.RECALL):
-            return self._create_memory_tool(canonical_type)
+        if canonical in (self.REMEMBER, self.RECALL):
+            return self._create_memory_tool(canonical)
+        if canonical in (self.SHELL, self.READ_FILE, self.WRITE_FILE, self.HTTP_FETCH):
+            return self._create_simple(canonical, config)
+        if canonical == self.WEB_FETCH:
+            return self._create_web_fetch(config)
+        if canonical == self.WEB_SEARCH:
+            return self._create_web_search(config)
+        if canonical == self.COMPLETE_TASK:
+            return self._create_complete_task()
 
-        creator = self._creators.get(canonical_type)
-        if creator is None:
-            raise ValueError(f"Unknown tool type: {tool_type}")
+        # Custom-registered tools
+        custom = self._custom_creators.get(canonical)
+        if custom is not None:
+            return custom(config)
 
-        return creator(config)
-
-    def _create_memory_tool(self, tool_type: str) -> Tool | None:
-        """Create remember or recall tool.
-
-        Returns None if LearnTrait not available (tool will be skipped).
-        """
-        from llm_gent.core.tools.builtin import RecallTool, RememberTool
-
-        if self._learn_trait is None:
-            return None  # Caller should skip this tool
-
-        if tool_type == self.REMEMBER:
-            return RememberTool(self._learn_trait)
-        return RecallTool(self._learn_trait)
+        raise ValueError(f"Unknown tool type: {tool_type}")

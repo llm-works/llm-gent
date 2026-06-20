@@ -15,8 +15,8 @@ from ..base import BaseTrait
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent
-    from llm_gent.runtime.server.http import HTTPServer
+    from ....runtime.server.http import HTTPServer
+    from ...agent import Agent
 
 
 @dataclass
@@ -82,7 +82,7 @@ class HTTPTrait(BaseTrait):
         self.config = config or HTTPConfig()
         self._handler = handler
 
-        from llm_gent.runtime.server.http import HTTPServer, HTTPServerConfig
+        from ....runtime.server.http import HTTPServer, HTTPServerConfig
 
         router_factory = self._get_router_factory(agent)
         title = self.config.title or f"{agent.name} API"
@@ -107,7 +107,7 @@ class HTTPTrait(BaseTrait):
 
     def _get_router_factory(self, agent: Agent) -> Callable[[], APIRouter]:
         """Get router factory from agent or use default."""
-        from llm_gent.runtime.server.routes import create_agent_routes
+        from ....runtime.server.routes import create_agent_routes
 
         create_routes: Callable[[], APIRouter] | None = getattr(agent, "create_routes", None)
         if create_routes is not None:
@@ -211,7 +211,7 @@ class HTTPTrait(BaseTrait):
         Returns:
             Protocol response message.
         """
-        from llm_gent.runtime.server.protocol.v1 import (
+        from ....runtime.server.protocol.v1 import (
             CompleteRequest,
             FeedbackRequest,
             ForgetRequest,
@@ -241,13 +241,13 @@ class HTTPTrait(BaseTrait):
 
     def _handle_health(self, request: Request) -> Response:
         """Handle health check request."""
-        from llm_gent.runtime.server.protocol.v1 import HealthResponse
+        from ....runtime.server.protocol.v1 import HealthResponse
 
         return HealthResponse(id=request.id, status="ok", agent_name=self.agent.name)
 
     def _handle_complete(self, request: Request) -> Response:
         """Handle completion request."""
-        from llm_gent.runtime.server.protocol.v1 import CompleteRequest, CompleteResponse
+        from ....runtime.server.protocol.v1 import CompleteRequest, CompleteResponse
 
         if self._handler is None:
             return self._complete_error(request.id, "No HTTP handler configured")
@@ -272,7 +272,7 @@ class HTTPTrait(BaseTrait):
 
     def _complete_error(self, request_id: str, error: str) -> Response:
         """Build a CompleteResponse error."""
-        from llm_gent.runtime.server.protocol.v1 import CompleteResponse
+        from ....runtime.server.protocol.v1 import CompleteResponse
 
         return CompleteResponse(
             id=request_id,
@@ -286,7 +286,7 @@ class HTTPTrait(BaseTrait):
 
     def _handle_remember(self, request: Request) -> Response:
         """Handle remember request."""
-        from llm_gent.runtime.server.protocol.v1 import RememberRequest, RememberResponse
+        from ....runtime.server.protocol.v1 import RememberRequest, RememberResponse
 
         if self._handler is None:
             return RememberResponse(
@@ -307,7 +307,7 @@ class HTTPTrait(BaseTrait):
 
     def _handle_forget(self, request: Request) -> Response:
         """Handle forget request."""
-        from llm_gent.runtime.server.protocol.v1 import ForgetRequest, ForgetResponse
+        from ....runtime.server.protocol.v1 import ForgetRequest, ForgetResponse
 
         if self._handler is None:
             return ForgetResponse(id=request.id, success=False, error="No HTTP handler configured")
@@ -324,7 +324,7 @@ class HTTPTrait(BaseTrait):
 
     def _handle_recall(self, request: Request) -> Response:
         """Handle recall request."""
-        from llm_gent.runtime.server.protocol.v1 import RecallRequest, RecallResponse
+        from ....runtime.server.protocol.v1 import RecallRequest, RecallResponse
 
         if self._handler is None:
             return RecallResponse(id=request.id, success=False, error="No HTTP handler configured")
@@ -358,7 +358,7 @@ class HTTPTrait(BaseTrait):
 
     def _handle_feedback(self, request: Request) -> Response:
         """Handle feedback request."""
-        from llm_gent.runtime.server.protocol.v1 import FeedbackRequest, FeedbackResponse
+        from ....runtime.server.protocol.v1 import FeedbackRequest, FeedbackResponse
 
         if self._handler is None:
             return FeedbackResponse(

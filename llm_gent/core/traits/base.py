@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 
 if TYPE_CHECKING:
-    from llm_gent.core.agent import Agent
+    from ..agent import Agent
 
 
 @runtime_checkable

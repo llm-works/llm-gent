@@ -18,7 +18,7 @@ from .base import ToolCall, ToolCallResult, ToolResult
 if TYPE_CHECKING:
     from appinfra.log import Logger
 
-    from llm_gent.core.tools.registry import Registry
+    from .registry import Registry
 
 
 class ToolExecutionResult(BaseModel):

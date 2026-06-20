@@ -5,6 +5,12 @@ from .file import FileReadTool, FileWriteTool
 from .http import HTTPFetchTool
 from .learn import RecallTool, RememberTool
 from .shell import ShellTool
+from .web import (
+    WebFetchTool,
+    WebSearchBackend,
+    WebSearchBackendFactory,
+    WebSearchTool,
+)
 
 
 __all__ = [
@@ -15,4 +21,8 @@ __all__ = [
     "RecallTool",
     "RememberTool",
     "ShellTool",
+    "WebFetchTool",
+    "WebSearchBackend",
+    "WebSearchBackendFactory",
+    "WebSearchTool",
 ]

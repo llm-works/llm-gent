@@ -11,6 +11,10 @@ from .builtin import (
     RecallTool,
     RememberTool,
     ShellTool,
+    WebFetchTool,
+    WebSearchBackend,
+    WebSearchBackendFactory,
+    WebSearchTool,
 )
 from .executor import SimpleToolExecutor, ToolExecutionResult
 from .factory import ToolFactory
@@ -28,6 +32,8 @@ class ToolName(StrEnum):
     READ_FILE = "read_file"
     WRITE_FILE = "write_file"
     HTTP_FETCH = "http_fetch"
+    WEB_FETCH = "web_fetch"
+    WEB_SEARCH = "web_search"
     COMPLETE_TASK = "complete_task"
     REMEMBER = "remember"
     RECALL = "recall"
@@ -39,6 +45,8 @@ ALL_TOOLS: list[ToolName] = [
     ToolName.READ_FILE,
     ToolName.WRITE_FILE,
     ToolName.HTTP_FETCH,
+    ToolName.WEB_FETCH,
+    ToolName.WEB_SEARCH,
     ToolName.COMPLETE_TASK,
     # Note: REMEMBER/RECALL require LearnTrait, added dynamically when needed
 ]
@@ -68,4 +76,8 @@ __all__ = [
     "RecallTool",
     "RememberTool",
     "ShellTool",
+    "WebFetchTool",
+    "WebSearchBackend",
+    "WebSearchBackendFactory",
+    "WebSearchTool",
 ]

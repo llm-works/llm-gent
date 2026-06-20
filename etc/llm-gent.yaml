@@ -4,7 +4,7 @@
 # Server settings
 server:
   host: 0.0.0.0
-  port: 8080
+  port: 8081
   response_timeout: 60.0
   uvicorn: !include './uvicorn.yaml'
 
@@ -30,10 +30,9 @@ learn:
         learning_rate: 0.0002
 
 # Agent definitions
-agents:
+agents: {}
   #codebase-qna: !include './agents/codebase-qna.yaml'
   #jokester: !include './agents/jokester.yaml'
-  jokester-p: !include './agents/jokester-p.yaml'
 
 # Appinfra logging (optional, uses defaults if not specified)
 logging: !include './infra.yaml#logging'

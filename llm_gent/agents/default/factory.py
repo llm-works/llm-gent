@@ -59,7 +59,7 @@ class Factory(BaseFactory):
             from llm_infer.client import SAIAAdapter
 
             llm_router = LLMClientFactory(self._lg).from_config(self._platform.llm_config())
-            self._backend = SAIAAdapter(client=llm_router)  # type: ignore[arg-type]  # ChatClient is API-compatible
+            self._backend = SAIAAdapter(client=llm_router)
         return self._backend
 
     def create(
@@ -127,8 +127,7 @@ class Factory(BaseFactory):
         if not http_config_dict:
             return
 
-        from llm_gent.core.traits.builtin.http import HTTPConfig, HTTPTrait
-
+        from ...core.traits.builtin.http import HTTPConfig, HTTPTrait
         from .http import HTTPHandler
 
         # Create HTTPHandler to handle protocol methods
@@ -143,8 +142,8 @@ class Factory(BaseFactory):
 
     def _build_system_prompt(self, agent: Agent) -> str | None:
         """Build system prompt from identity and method traits."""
-        # Absolute import to avoid circular dependency
-        from llm_gent.core.traits.builtin.directive import DirectiveTrait, MethodTrait
+        # Deferred import to avoid circular dependency
+        from ...core.traits.builtin.directive import DirectiveTrait, MethodTrait
 
         parts: list[str] = []
 
