@@ -7,17 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-19
+
 ### Added
 
 - `WebFetchTool` — fetches web pages and extracts main content as readable text using trafilatura
   (boilerplate removal, nav/footer stripping); non-HTML content passes through as-is
 - `WebSearchTool` — web search tool with pluggable `WebSearchBackend` protocol; returns structured
-  `{title, url, snippet}` results with automatic retry on retriable failures
+  `{title, url, snippet}` results with automatic retry, pagination, and configurable rate limiting
 - `WebSearchBackend` — protocol for search provider implementations
 - `WebSearchBackendFactory` ABC — factory pattern for creating search backends from YAML config;
   supports `factory:` (dynamic import) resolution for external backend implementations
 - `examples/web_search.py` — demo showing `WebSearchBackend` protocol with stub implementation
 - `trafilatura>=2.0` dependency for web content extraction
+- `llm_gent.bus` and `llm_gent.hub` packages — swarm orchestration: Hub coordinator with ZMQ
+  three-socket transport (ROUTER/DEALER + PUB/SUB), envelope-wrapped v1 protocol, heartbeat
+  health tracking, membership broadcasts, and message tier classification
+- `Handler` protocol and `AgentRunner` external-gateway class so external processes can join the
+  swarm without inheriting from `Agent`; internal runner accessible as `ManagedAgentRunner`
+- `GET /bus/config` HTTP endpoint for external-agent bus discovery
 
 ### Fixed
 
@@ -30,12 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** `BraveSearchBackend` and `SerperSearchBackend` removed from llm-gent; search
-  backends must now be provided externally via `factory:` config path (e.g.,
-  `factory: my_package.websearch.Factory`)
-- Unit test coverage from 59% to 75%; coverage threshold raised from 50% to 70%
 - **Breaking:** `ToolFactory` now requires a `Logger` argument: `ToolFactory(lg)` instead of
   `ToolFactory()`
+- **Breaking (config):** `llm.yaml` `backoff` key moved from under `rate_limit` to under `retry`
+- Unit test coverage from 59% to 75%; coverage threshold raised from 50% to 70%
 - Refactored runtime to use `appinfra.service` for IPC and state management, removing ~780 lines
   of custom transport and state code
 - Replaced local conversation layer with `llm-kelt` conversation module, delegating compaction to
@@ -80,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migrated from llm-learn to llm-kelt for training
 - Refactored training infrastructure to core modules
 
-[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/llm-works/llm-gent/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/llm-works/llm-gent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/llm-works/llm-gent/releases/tag/v0.1.0
