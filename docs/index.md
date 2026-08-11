@@ -35,9 +35,9 @@ Traits provide specific capabilities to agents:
 ```python
 agent = Agent(lg, config)
 agent.add_trait(LLMTrait(agent, llm_config))
-agent.start()      # Initialize all traits
+agent.start()  # Initialize all traits
 result = agent.run_once()  # Execute one cycle
-agent.stop()       # Cleanup all traits
+agent.stop()  # Cleanup all traits
 ```
 
 ## Related Projects

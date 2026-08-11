@@ -41,16 +41,18 @@ log_config = LogConfig.from_params(level="info", handlers={"console": {"type": "
 lg = LoggerFactory.create_root(log_config)
 
 # Configure LLM backend
-llm_config = DotDict({
-    "default": "local",
-    "backends": {
-        "local": {
-            "type": "openai_compatible",
-            "base_url": "http://localhost:8000/v1",
-            "model": "default",
-        }
-    },
-})
+llm_config = DotDict(
+    {
+        "default": "local",
+        "backends": {
+            "local": {
+                "type": "openai_compatible",
+                "base_url": "http://localhost:8000/v1",
+                "model": "default",
+            }
+        },
+    }
+)
 
 # Create agent with traits
 identity = Identity(domain=None, workspace="demo", name="my-agent")
