@@ -85,7 +85,7 @@ class Flow:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
         saia = self._saia_for(verb.role)
-        ctx = Context(saia=saia, role=verb.role, state=self._state)
+        ctx = Context(saia=saia, role=verb.role, state=self._state, flow=self)
         return await verb(ctx, *args, **kwargs)
 
     # -------------------------------------------------------------------------
