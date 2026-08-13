@@ -9,6 +9,7 @@ from llm_infer.client import ChatClient, ChatResponse, EmbeddingClient
 from llm_infer.client import Factory as LLMClientFactory
 from llm_infer.client.types import AdapterInfo
 from llm_kelt import Client as KeltClient
+from llm_kelt import SchemaMode
 from llm_kelt.core import Database
 from llm_kelt.core.types import ScoredEntity
 from llm_kelt.inference import ContextBuilder
@@ -134,7 +135,7 @@ class LearnTrait(BaseTrait):
             context=context,
             embedder=embedder,
             llm_client=llm_client,
-            ensure_schema=True,
+            schema_mode=SchemaMode.ENSURE,
             training_config=self.config.get("training"),
         )
 
