@@ -117,6 +117,37 @@ class TestPanel:
         assert result == 23
 
     @pytest.mark.asyncio
+    async def test_panel_with_custom_registered_names(self) -> None:
+        """Panel dispatches correctly when verbs are registered with custom names."""
+        flow = Flow(factory=_StubFactory())
+
+        @verb(role=ROLE_A)
+        async def impl_a(ctx: Context, x: int) -> int:
+            """Return x * 2."""
+            return x * 2
+
+        @verb(role=ROLE_A)
+        async def impl_b(ctx: Context, x: int) -> int:
+            """Return x * 3."""
+            return x * 3
+
+        # Register with custom names different from __name__
+        flow.register(impl_a, name="custom_doubler")
+        flow.register(impl_b, name="custom_tripler")
+
+        panel = Panel([impl_a, impl_b], aggregate=sum)
+
+        @verb(role=ROLE_A)
+        async def outer(ctx: Context, x: int) -> int:
+            """Run the panel."""
+            return await panel.run(ctx, x)
+
+        flow.register(outer)
+        result = await flow.dispatch("outer", 5)
+        # impl_a(5)=10, impl_b(5)=15, sum=25
+        assert result == 25
+
+    @pytest.mark.asyncio
     async def test_panel_with_majority(self) -> None:
         """A 3-judge panel returning majority verdict works end-to-end."""
         flow = Flow(factory=_StubFactory())

@@ -31,12 +31,24 @@ AggregateFn = Callable[[list[Any]], Any]
 def majority(votes: list[Any]) -> Any:
     """Return the most common vote.
 
-    Ties are broken by first-occurrence order (``collections.Counter``
-    semantics). Raises :class:`ValueError` on an empty list.
+    Ties are broken by first-occurrence order. Raises :class:`ValueError` on
+    an empty list. Falls back to equality-based counting for unhashable types.
     """
     if not votes:
         raise ValueError("majority requires at least one vote")
-    return Counter(votes).most_common(1)[0][0]
+    try:
+        return Counter(votes).most_common(1)[0][0]
+    except TypeError:
+        # Fallback for unhashable types (dicts, lists)
+        counts: list[tuple[Any, int]] = []
+        for v in votes:
+            for i, (existing, count) in enumerate(counts):
+                if v == existing:
+                    counts[i] = (existing, count + 1)
+                    break
+            else:
+                counts.append((v, 1))
+        return max(counts, key=lambda x: x[1])[0]
 
 
 def unanimous(votes: list[Any]) -> Any | None:

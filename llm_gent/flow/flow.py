@@ -56,6 +56,8 @@ class Flow:
 
         The verb must carry a ``role`` attribute of type :class:`Role`.
         """
+        if not callable(verb):
+            raise TypeError(f"verb must be callable; got {type(verb).__name__}")
         if not hasattr(verb, "role"):
             raise TypeError(
                 f"verb must carry a .role attribute; got {type(verb).__name__} without one"
