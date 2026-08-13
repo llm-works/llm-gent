@@ -106,6 +106,9 @@ class Panel:
         ``ctx.flow``. Positional and keyword args are forwarded to every verb.
         """
         results = await asyncio.gather(
-            *[ctx.flow.dispatch(v.__name__, *args, **kwargs) for v in self.verbs]
+            *[
+                ctx.flow.dispatch(getattr(v, "_registered_name", v.__name__), *args, **kwargs)
+                for v in self.verbs
+            ]
         )
         return self.aggregate(results)

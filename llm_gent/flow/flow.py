@@ -36,7 +36,7 @@ class Flow:
         self._factory = factory
         self._state = state
         self._verbs: dict[str, Any] = {}
-        self._saia_by_role: dict[str, Any] = {}
+        self._saia_by_role: dict[Role, Any] = {}
 
     # -------------------------------------------------------------------------
     # State access
@@ -65,6 +65,9 @@ class Flow:
         resolved_name = name or getattr(verb, "__name__", None)
         if not resolved_name:
             raise TypeError("verb has no __name__ and no explicit name was provided")
+        if resolved_name in self._verbs:
+            raise ValueError(f"verb {resolved_name!r} already registered")
+        verb._registered_name = resolved_name
         self._verbs[resolved_name] = verb
 
     def registered(self, name: str) -> bool:
@@ -94,9 +97,9 @@ class Flow:
 
     def _saia_for(self, role: Role) -> Any:
         """Return a cached saia for ``role``, building it on first request."""
-        cached = self._saia_by_role.get(role.name)
+        cached = self._saia_by_role.get(role)
         if cached is not None:
             return cached
         built = self._factory.build(role)
-        self._saia_by_role[role.name] = built
+        self._saia_by_role[role] = built
         return built
