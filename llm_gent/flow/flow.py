@@ -505,7 +505,10 @@ class Flow:
             return cached
         if self._factory is None:
             label = self._name or "<anonymous>"
-            raise RuntimeError(f"Flow {label!r} has no SAIAFactory to build saia for {role.name!r}")
+            raise RuntimeError(
+                f"Flow {label!r} has no SAIAFactory — factory= was not supplied at "
+                f"construction (needed to build saia for role {role.name!r})"
+            )
         built = self._factory.build(role)
         self._saia_by_role[role] = built
         return built
