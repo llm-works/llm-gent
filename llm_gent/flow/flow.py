@@ -54,10 +54,10 @@ UntilFn = Callable[[Context], Any]
 """Loop stop predicate: ``(ctx) -> bool``. May be async. State lives on ``ctx.state``."""
 
 ItemsFn = Callable[[Any, Context], Iterable[Any]]
-"""Map item source: ``(prev_result, ctx) -> iterable``. Consumed eagerly to a list."""
+"""Map item source: ``(prev_result, ctx) -> iterable``. May be async. Consumed eagerly to a list."""
 
 AggregateFn = Callable[[list[Any]], Any]
-"""Map result reducer: ``list[R] -> R'``. If omitted, .map returns the list as-is."""
+"""Map result reducer: ``list[R] -> R'``. May be async. If omitted, .map returns the list as-is."""
 
 
 _UNSET: Any = object()
@@ -685,7 +685,10 @@ async def _run_map(
     else:
         coros = [_run_map_item(mp.body, item, active_state, runtime) for item in items]
         results = list(await asyncio.gather(*coros))
-    return mp.aggregate(results) if mp.aggregate is not None else results
+    result = mp.aggregate(results) if mp.aggregate is not None else results
+    if inspect.isawaitable(result):
+        result = await result
+    return result
 
 
 async def _run_map_item(body: Flow, item: Any, state: Any, runtime: Flow) -> Any:
