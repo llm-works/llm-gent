@@ -175,7 +175,9 @@ class Flow:
         ``target`` is a verb (any async callable carrying a ``.role``) or
         another :class:`Flow`. The first appended node receives the args
         passed to :meth:`run`; each subsequent node receives the previous
-        node's result (optionally reshaped by ``project``).
+        node's result (optionally reshaped by ``project``). Note: ``project``
+        has no effect on the first node — there is no previous result to
+        transform.
 
         Hooks may be attached inline (kwargs) or via chained
         :meth:`rescue` / :meth:`after` calls — the two forms are equivalent.
@@ -183,6 +185,9 @@ class Flow:
         Returns ``self`` for chaining.
         """
         _validate_target(target)
+        if target is self:
+            label = self._name or "<anonymous>"
+            raise ValueError(f"Flow {label!r} cannot call itself as a node")
         self._nodes.append(_Node(target=target, project=project, rescue=rescue, after=after))
         return self
 
@@ -252,7 +257,9 @@ class Flow:
             *args: Positional inputs to the first node.
             state: If provided, overrides ``self.state`` for this run and is
                 exposed as ``ctx.state`` to every verb. Omitted → the flow's
-                default state is used.
+                default state is used. Note: a subflow running inside a parent
+                chain always receives the parent's active state — its own
+                constructor ``state`` is ignored.
             global_state: Reserved. Accepted so callers can start passing it;
                 actual wiring lands in PR 6 with the two-channel state model.
             _runtime: Internal — used when this flow runs as a subflow to

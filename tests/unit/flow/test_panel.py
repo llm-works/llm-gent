@@ -3,35 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from appinfra.log import quick_console_logger
 
 from llm_gent.flow import Context, Flow, Panel, Role, verb
 from llm_gent.flow.panel import majority, mean, unanimous, weighted
 
-
-ROLE_A = Role(name="a", backend="openai", model="gpt-4o-mini")
-ROLE_B = Role(name="b", backend="anthropic", model="claude-3-5")
-
-
-def _test_lg():
-    """Return a logger for tests (suppressed output)."""
-    return quick_console_logger("test", config={"level": "error"})
-
-
-class _StubSAIA:
-    """Minimal saia stand-in."""
-
-    def __init__(self, role: Role) -> None:
-        """Track the role this saia was built for."""
-        self.role = role
-
-
-class _StubFactory:
-    """SAIAFactory impl that returns a fresh stub saia per role."""
-
-    def build(self, role: Role) -> _StubSAIA:
-        """Return a stub saia for the role."""
-        return _StubSAIA(role)
+from .conftest import ROLE_A, ROLE_B, StubFactory, make_test_logger
 
 
 class TestAggregators:
@@ -95,7 +71,7 @@ class TestPanel:
     @pytest.mark.asyncio
     async def test_panel_fans_out_and_sums(self) -> None:
         """Each verb runs in parallel and its result feeds the aggregate."""
-        flow = Flow(_test_lg(), factory=_StubFactory())
+        flow = Flow(make_test_logger(), factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def add_one(ctx: Context, x: int) -> int:
@@ -125,7 +101,7 @@ class TestPanel:
     @pytest.mark.asyncio
     async def test_panel_with_custom_registered_names(self) -> None:
         """Panel dispatches correctly when verbs are registered with custom names."""
-        flow = Flow(_test_lg(), factory=_StubFactory())
+        flow = Flow(make_test_logger(), factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def impl_a(ctx: Context, x: int) -> int:
@@ -156,7 +132,7 @@ class TestPanel:
     @pytest.mark.asyncio
     async def test_panel_with_majority(self) -> None:
         """A 3-judge panel returning majority verdict works end-to-end."""
-        flow = Flow(_test_lg(), factory=_StubFactory())
+        flow = Flow(make_test_logger(), factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def yes_a(ctx: Context) -> str:
@@ -189,7 +165,7 @@ class TestPanel:
     @pytest.mark.asyncio
     async def test_panel_routes_per_verb_role(self) -> None:
         """Each inner verb receives a saia bound to its own role, not the caller's."""
-        flow = Flow(_test_lg(), factory=_StubFactory())
+        flow = Flow(make_test_logger(), factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def see_a(ctx: Context) -> Role:
