@@ -6,12 +6,18 @@ import asyncio
 from typing import Any
 
 import pytest
+from appinfra.log import quick_console_logger
 
 from llm_gent.flow import Context, Flow, Role, verb
 
 
 ROLE_A = Role(name="a", backend="openai", model="gpt-4o-mini")
 ROLE_B = Role(name="b", backend="anthropic", model="claude-3-5")
+
+
+def _test_lg():
+    """Return a logger for tests (suppressed output)."""
+    return quick_console_logger("test", config={"level": "error"})
 
 
 class _StubSAIA:
@@ -41,20 +47,20 @@ class _StubFactory:
 
 
 class TestConstruction:
-    """Flow construction accepts name-first (fluent) and factory-kwarg forms."""
+    """Flow construction accepts lg-first, name-second, factory-kwarg forms."""
 
     def test_positional_name(self) -> None:
-        """A bare positional string is treated as the flow's name."""
-        flow = Flow("scoring", factory=_StubFactory())
+        """A bare positional string after lg is treated as the flow's name."""
+        flow = Flow(_test_lg(), "scoring", factory=_StubFactory())
         assert flow.name == "scoring"
 
     def test_default_name_is_empty(self) -> None:
         """Name is optional and defaults to the empty string."""
-        assert Flow(factory=_StubFactory()).name == ""
+        assert Flow(_test_lg(), factory=_StubFactory()).name == ""
 
     def test_subflow_needs_no_factory(self) -> None:
         """A subflow (no factory) constructs cleanly — factory is optional."""
-        Flow("sub")  # no factory, no error
+        Flow(_test_lg(), "sub")  # no factory, no error
 
 
 class TestBuilderValidation:
@@ -62,7 +68,7 @@ class TestBuilderValidation:
 
     def test_call_rejects_non_verb_non_flow(self) -> None:
         """A plain callable without .role is neither a verb nor a Flow."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         async def plain(ctx: Context) -> None:
             """No .role attached."""
@@ -72,13 +78,13 @@ class TestBuilderValidation:
 
     def test_call_rejects_non_callable(self) -> None:
         """A non-callable, non-Flow value is rejected outright."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
         with pytest.raises(TypeError, match="verb .* or a Flow"):
             flow.call(42)
 
     def test_call_rejects_non_role_role_attr(self) -> None:
         """A .role attribute that isn't a Role is rejected."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         async def bogus(ctx: Context) -> None:
             """.role is a string, not a Role."""
@@ -89,13 +95,13 @@ class TestBuilderValidation:
 
     def test_rescue_before_any_call_raises(self) -> None:
         """.rescue requires a preceding node to attach to."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
         with pytest.raises(RuntimeError, match="preceding"):
             flow.rescue(lambda _exc, _ctx: None)
 
     def test_after_before_any_call_raises(self) -> None:
         """.after requires a preceding node to attach to."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
         with pytest.raises(RuntimeError, match="preceding"):
             flow.after(lambda _result, _ctx: None)
 
@@ -111,7 +117,7 @@ class TestExecutionShape:
     @pytest.mark.asyncio
     async def test_single_node_receives_run_args(self) -> None:
         """First node gets *args, **kwargs verbatim from .run()."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def echo(ctx: Context, x: int, *, tag: str) -> tuple[int, str]:
@@ -124,7 +130,7 @@ class TestExecutionShape:
     @pytest.mark.asyncio
     async def test_chained_positional_dataflow(self) -> None:
         """Later nodes receive the previous result as their single positional."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def double(ctx: Context, x: int) -> int:
@@ -142,7 +148,7 @@ class TestExecutionShape:
     @pytest.mark.asyncio
     async def test_project_transforms_between_nodes(self) -> None:
         """A project callable reshapes the previous result into the next input."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def make_dict(ctx: Context, x: int) -> dict[str, int]:
@@ -160,7 +166,7 @@ class TestExecutionShape:
     @pytest.mark.asyncio
     async def test_later_nodes_do_not_inherit_run_kwargs(self) -> None:
         """Run kwargs feed only the first node; later nodes see just prev result."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def head(ctx: Context, x: int, *, tag: str) -> str:
@@ -178,7 +184,7 @@ class TestExecutionShape:
     @pytest.mark.asyncio
     async def test_verb_ctx_has_role_and_saia(self) -> None:
         """Each verb receives a Context bound to its own role's saia."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def check_a(ctx: Context, _: Any = None) -> tuple[Any, Any]:
@@ -208,7 +214,7 @@ class TestRescue:
     @pytest.mark.asyncio
     async def test_rescue_returns_fallback_and_chain_continues(self) -> None:
         """Rescue's return value becomes the node's result; next node sees it."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def fail(ctx: Context, _: Any = None) -> int:
@@ -228,7 +234,7 @@ class TestRescue:
         """Rescue callback sees the raised exception and the node's ctx."""
         seen: dict[str, Any] = {}
 
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def fail(ctx: Context) -> None:
@@ -249,7 +255,7 @@ class TestRescue:
     @pytest.mark.asyncio
     async def test_rescue_can_be_async(self) -> None:
         """An async rescue is awaited before its return becomes the result."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def fail(ctx: Context) -> None:
@@ -267,7 +273,7 @@ class TestRescue:
     @pytest.mark.asyncio
     async def test_rescue_does_not_catch_cancelled(self) -> None:
         """asyncio.CancelledError propagates past any rescue policy."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def cancel_me(ctx: Context) -> None:
@@ -290,7 +296,7 @@ class TestRescue:
     @pytest.mark.asyncio
     async def test_no_rescue_lets_exception_propagate(self) -> None:
         """Without .rescue, the original exception bubbles out of .run()."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def fail(ctx: Context) -> None:
@@ -310,7 +316,7 @@ class TestAfter:
         """After hook sees the node's final result and its ctx."""
         seen: dict[str, Any] = {}
 
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def make(ctx: Context) -> int:
@@ -324,7 +330,7 @@ class TestAfter:
     @pytest.mark.asyncio
     async def test_after_does_not_transform_result(self) -> None:
         """Return value of .after is ignored — the node's result is unchanged."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def make(ctx: Context) -> int:
@@ -337,7 +343,7 @@ class TestAfter:
     @pytest.mark.asyncio
     async def test_after_fires_after_rescue(self) -> None:
         """When rescue fires, .after sees the rescued (fallback) value."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def fail(ctx: Context) -> None:
@@ -352,7 +358,7 @@ class TestAfter:
     @pytest.mark.asyncio
     async def test_after_can_be_async(self) -> None:
         """An async after hook is awaited before the next node runs."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def one(ctx: Context) -> int:
@@ -389,8 +395,8 @@ class TestChainedVsKwargsHooks:
             """Raise."""
             raise ValueError
 
-        chained = Flow(factory=factory).call(fail).rescue(lambda _e, _c: "R")
-        kwargs = Flow(factory=factory).call(fail, rescue=lambda _e, _c: "R")
+        chained = Flow(_test_lg(), factory=factory).call(fail).rescue(lambda _e, _c: "R")
+        kwargs = Flow(_test_lg(), factory=factory).call(fail, rescue=lambda _e, _c: "R")
 
         assert await chained.run() == await kwargs.run() == "R"
 
@@ -405,8 +411,12 @@ class TestChainedVsKwargsHooks:
             """Return 42."""
             return 42
 
-        chained = Flow(factory=factory).call(make).after(lambda r, _c: seen.append(("c", r)))
-        kwargs = Flow(factory=factory).call(make, after=lambda r, _c: seen.append(("k", r)))
+        chained = (
+            Flow(_test_lg(), factory=factory).call(make).after(lambda r, _c: seen.append(("c", r)))
+        )
+        kwargs = Flow(_test_lg(), factory=factory).call(
+            make, after=lambda r, _c: seen.append(("k", r))
+        )
 
         await chained.run()
         await kwargs.run()
@@ -441,8 +451,8 @@ class TestSubflow:
             """Format."""
             return f"n={x}"
 
-        sub = Flow("inner").call(add_one).then(times_two)  # no factory
-        main = Flow("outer", factory=factory).call(sub).then(stringify)
+        sub = Flow(_test_lg(), "inner").call(add_one).then(times_two)  # no factory
+        main = Flow(_test_lg(), "outer", factory=factory).call(sub).then(stringify)
 
         assert await main.run(5) == "n=12"  # ((5+1)*2)
 
@@ -461,8 +471,8 @@ class TestSubflow:
             """Return outer_saia identity check."""
             return ctx.saia is prev
 
-        sub = Flow("inner").call(inner_verb)
-        main = Flow(factory=factory).call(outer_verb).then(sub)
+        sub = Flow(_test_lg(), "inner").call(inner_verb)
+        main = Flow(_test_lg(), factory=factory).call(outer_verb).then(sub)
 
         assert await main.run() is True
         assert factory.built_for == [ROLE_A]
@@ -477,7 +487,7 @@ class TestSubflow:
             """Raise from inside the subflow."""
             raise ValueError("inside")
 
-        sub = Flow("inner").call(boom)
+        sub = Flow(_test_lg(), "inner").call(boom)
         seen: dict[str, Any] = {}
 
         def policy(exc: BaseException, ctx: Context) -> str:
@@ -487,7 +497,7 @@ class TestSubflow:
             seen["flow"] = ctx.flow
             return "handled"
 
-        main = Flow("outer", factory=factory).call(sub, rescue=policy)
+        main = Flow(_test_lg(), "outer", factory=factory).call(sub, rescue=policy)
         assert await main.run(None) == "handled"
         assert seen["role"] is None
         assert seen["saia"] is None
@@ -503,8 +513,8 @@ class TestSubflow:
             """Return the state."""
             return ctx.state
 
-        sub = Flow("inner").call(read_state)
-        main = Flow(factory=factory, state={"default": True}).call(sub)
+        sub = Flow(_test_lg(), "inner").call(read_state)
+        main = Flow(_test_lg(), factory=factory, state={"default": True}).call(sub)
 
         assert await main.run(None) == {"default": True}
         assert await main.run(None, state={"overridden": True}) == {"overridden": True}
@@ -521,7 +531,7 @@ class TestRuntimeErrors:
     @pytest.mark.asyncio
     async def test_empty_flow_raises(self) -> None:
         """.run() on a flow with no nodes is a programming error."""
-        flow = Flow("empty", factory=_StubFactory())
+        flow = Flow(_test_lg(), "empty", factory=_StubFactory())
         with pytest.raises(RuntimeError, match="no nodes"):
             await flow.run()
 
@@ -534,14 +544,14 @@ class TestRuntimeErrors:
             """No-op."""
             return 0
 
-        flow = Flow("naked").call(do)
+        flow = Flow(_test_lg(), "naked").call(do)
         with pytest.raises(RuntimeError, match="SAIAFactory"):
             await flow.run()
 
     @pytest.mark.asyncio
     async def test_global_state_accepted_but_not_wired(self) -> None:
         """PR 4 accepts global_state kwarg without effect; wiring lands in PR 6."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def do(ctx: Context) -> int:
@@ -579,8 +589,8 @@ class TestCancellation:
             parent_rescued = True
             return "swallowed"
 
-        sub = Flow("inner").call(inner_cancel)
-        main = Flow("outer", factory=factory).call(sub, rescue=parent_rescue)
+        sub = Flow(_test_lg(), "inner").call(inner_cancel)
+        main = Flow(_test_lg(), "outer", factory=factory).call(sub, rescue=parent_rescue)
 
         with pytest.raises(asyncio.CancelledError):
             await main.run(None)
@@ -598,7 +608,7 @@ class TestCancellation:
             started.set()
             await asyncio.sleep(3600)
 
-        flow = Flow(factory=factory).call(slow)
+        flow = Flow(_test_lg(), factory=factory).call(slow)
         task = asyncio.create_task(flow.run())
         await started.wait()
         task.cancel()

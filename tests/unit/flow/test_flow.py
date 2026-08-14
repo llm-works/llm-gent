@@ -5,12 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from appinfra.log import quick_console_logger
 
 from llm_gent.flow import Context, Flow, Role, verb
 
 
 ROLE_A = Role(name="a", backend="openai", model="gpt-4o-mini")
 ROLE_B = Role(name="b", backend="anthropic", model="claude-3-5")
+
+
+def _test_lg():
+    """Return a logger for tests (suppressed output)."""
+    return quick_console_logger("test", config={"level": "error"})
 
 
 class _StubSAIA:
@@ -39,7 +45,7 @@ class TestRegistration:
 
     def test_register_decorated_function(self) -> None:
         """A @verb-decorated function registers under its __name__."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def do_thing(ctx: Context) -> None:
@@ -50,7 +56,7 @@ class TestRegistration:
 
     def test_register_with_explicit_name(self) -> None:
         """An explicit name overrides the function's __name__."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_A)
         async def do_thing(ctx: Context) -> None:
@@ -62,7 +68,7 @@ class TestRegistration:
 
     def test_register_rejects_missing_role_attr(self) -> None:
         """Registration rejects callables without a .role attribute."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         async def not_a_verb(ctx: Context) -> None:
             """No role attribute attached."""
@@ -72,7 +78,7 @@ class TestRegistration:
 
     def test_register_rejects_non_role_role_attr(self) -> None:
         """Registration rejects a .role attribute that isn't a Role."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         async def bogus(ctx: Context) -> None:
             """Has a role attr but it's the wrong type."""
@@ -84,7 +90,7 @@ class TestRegistration:
 
     def test_register_class_instance(self) -> None:
         """A class instance with .role and async __call__ registers cleanly."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         class MyVerb:
             """Test class-based verb."""
@@ -107,7 +113,7 @@ class TestDispatch:
     async def test_dispatch_invokes_verb_with_context(self) -> None:
         """The verb receives a Context whose saia is bound to its role."""
         factory = _StubFactory()
-        flow = Flow(factory=factory)
+        flow = Flow(_test_lg(), factory=factory)
 
         @verb(role=ROLE_A)
         async def check(ctx: Context, value: int) -> tuple[Any, int]:
@@ -125,7 +131,7 @@ class TestDispatch:
     async def test_dispatch_passes_state_through(self) -> None:
         """ctx.state exposes whatever the flow was constructed with."""
         user_state = {"counter": 0}
-        flow = Flow(factory=_StubFactory(), state=user_state)
+        flow = Flow(_test_lg(), factory=_StubFactory(), state=user_state)
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context) -> int:
@@ -141,7 +147,7 @@ class TestDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_reports_ctx_role(self) -> None:
         """ctx.role reflects the role attached to the dispatched verb."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
 
         @verb(role=ROLE_B)
         async def report(ctx: Context) -> Role:
@@ -154,7 +160,7 @@ class TestDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_unknown_name_raises(self) -> None:
         """Dispatching an unregistered name raises KeyError with the name."""
-        flow = Flow(factory=_StubFactory())
+        flow = Flow(_test_lg(), factory=_StubFactory())
         with pytest.raises(KeyError, match="no verb"):
             await flow.dispatch("missing")
 
@@ -166,7 +172,7 @@ class TestSAIACaching:
     async def test_saia_built_once_per_role(self) -> None:
         """Repeated dispatch of the same role reuses the cached saia."""
         factory = _StubFactory()
-        flow = Flow(factory=factory)
+        flow = Flow(_test_lg(), factory=factory)
 
         @verb(role=ROLE_A)
         async def a1(ctx: Context) -> Any:
@@ -192,7 +198,7 @@ class TestSAIACaching:
     async def test_saia_built_per_distinct_role(self) -> None:
         """Distinct roles get distinct saia instances."""
         factory = _StubFactory()
-        flow = Flow(factory=factory)
+        flow = Flow(_test_lg(), factory=factory)
 
         @verb(role=ROLE_A)
         async def alpha(ctx: Context) -> Any:

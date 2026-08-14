@@ -28,6 +28,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from appinfra.log import Logger
+
 from .context import Context
 from .factory import SAIAFactory
 from .role import Role
@@ -68,6 +70,7 @@ class Flow:
 
     def __init__(
         self,
+        lg: Logger,
         name: str = "",
         *,
         factory: SAIAFactory | None = None,
@@ -76,6 +79,7 @@ class Flow:
         """Initialize a flow.
 
         Args:
+            lg: Logger instance for tracing execution.
             name: Optional identifier — used in error messages and traces.
                 Also lets a flow serve as a named node inside a parent chain.
             factory: Builds role-bound saia instances. Required for a
@@ -85,6 +89,7 @@ class Flow:
                 mutate it in place. Opaque to the flow; may be overridden per
                 :meth:`run` invocation.
         """
+        self._lg = lg
         self._name = name
         self._factory = factory
         self._state = state
@@ -148,6 +153,7 @@ class Flow:
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
+        self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
         saia = self._saia_for(verb.role)
         ctx = Context(saia=saia, role=verb.role, state=self._state, flow=self)
         return await verb(ctx, *args, **kwargs)
@@ -268,12 +274,22 @@ class Flow:
                 "when constructing the top-level Flow"
             )
         active_state = self._state if state is _UNSET else state
+        lg = runtime._lg
+        label = self._name or "<anonymous>"
+        is_subflow = _runtime is not None
 
+        lg.debug(
+            "starting flow run",
+            extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
+        )
         result: Any = _UNSET
         for index, node in enumerate(self._nodes):
             node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             ctx = _build_ctx(node.target, runtime, active_state)
-            result = await _execute_node(node, ctx, runtime, active_state, node_args, node_kwargs)
+            result = await _execute_node(
+                node, ctx, runtime, active_state, node_args, node_kwargs, lg
+            )
+        lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
     # -------------------------------------------------------------------------
@@ -335,6 +351,7 @@ async def _execute_node(
     active_state: Any,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
+    lg: Logger,
 ) -> Any:
     """Invoke a node's target with cancellation-safe rescue + optional after hook.
 
@@ -342,6 +359,8 @@ async def _execute_node(
     Other exceptions surface unless a rescue is attached; the rescue's
     return value (awaited if awaitable) becomes the node's result.
     """
+    target_name = _target_label(node.target)
+    lg.debug("executing node", extra={"target": target_name})
     try:
         if isinstance(node.target, Flow):
             result = await node.target.run(
@@ -354,15 +373,24 @@ async def _execute_node(
     except Exception as exc:
         if node.rescue is None:
             raise
+        lg.warning("rescue policy invoked", extra={"target": target_name, "exception": exc})
         fallback = node.rescue(exc, ctx)
         if inspect.isawaitable(fallback):
             fallback = await fallback
         result = fallback
     if node.after is not None:
+        lg.debug("running after hook", extra={"target": target_name})
         hook_result = node.after(result, ctx)
         if inspect.isawaitable(hook_result):
             await hook_result
     return result
+
+
+def _target_label(target: Any) -> str:
+    """Return a human-readable label for a node target."""
+    if isinstance(target, Flow):
+        return f"Flow({target.name!r})" if target.name else "Flow(<anonymous>)"
+    return getattr(target, "__name__", type(target).__name__)
 
 
 def _step_inputs(
