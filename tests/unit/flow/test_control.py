@@ -404,6 +404,37 @@ class TestMapExecution:
         assert await flow.run([1, 2, 3, 4]) == 20  # sum of doubles
 
     @pytest.mark.asyncio
+    async def test_async_aggregate_is_awaited(self) -> None:
+        """An async aggregate callback is awaited before the map returns."""
+
+        async def total(results: list[int]) -> int:
+            await asyncio.sleep(0)
+            return sum(results)
+
+        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow.call(_identity).map(lambda f: f.call(_double), aggregate=total)
+        assert await flow.run([1, 2, 3]) == 12
+
+    @pytest.mark.asyncio
+    async def test_async_items_is_awaited(self) -> None:
+        """An async items callback is awaited before fan-out."""
+
+        async def items(prev: int, _ctx: Context) -> list[int]:
+            await asyncio.sleep(0)
+            return list(range(prev))
+
+        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow.call(_identity).map(lambda f: f.call(_double), items=items)
+        assert await flow.run(3) == [0, 2, 4]
+
+    @pytest.mark.asyncio
+    async def test_empty_items_returns_empty_list(self) -> None:
+        """An empty item source produces an empty result list."""
+        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow.call(_identity).map(lambda f: f.call(_double))
+        assert await flow.run([]) == []
+
+    @pytest.mark.asyncio
     async def test_strict_true_propagates_first_exception(self) -> None:
         """A failing item raises out of .run when strict=True."""
 

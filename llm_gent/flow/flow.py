@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,7 +53,7 @@ WhenFn = Callable[[Any, Context], Any]
 UntilFn = Callable[[Context], Any]
 """Loop stop predicate: ``(ctx) -> bool``. May be async. State lives on ``ctx.state``."""
 
-ItemsFn = Callable[[Any, Context], Iterable[Any]]
+ItemsFn = Callable[[Any, Context], Any]
 """Map item source: ``(prev_result, ctx) -> iterable``. May be async. Consumed eagerly to a list."""
 
 AggregateFn = Callable[[list[Any]], Any]
@@ -407,7 +407,7 @@ class Flow:
                 replaced by a :class:`Failure` sentinel in the results list so
                 the aggregator can partition successes from failures.
             rescue: Attached to the map node — fires if the map itself raises
-                (only possible with ``strict=True``).
+                (item resolution, body exceptions in strict mode, or aggregate).
             after: Attached to the map node — fires with the final (possibly
                 aggregated) result.
 
@@ -681,7 +681,12 @@ async def _run_map(
     items = await _resolve_items(mp.items, prev_result, ctx)
     if mp.strict:
         coros = [mp.body.run(item, state=active_state, _runtime=runtime) for item in items]
-        results = list(await asyncio.gather(*coros))
+        results = list(await asyncio.gather(*coros, return_exceptions=True))
+        for r in results:
+            if isinstance(r, asyncio.CancelledError):
+                raise r
+            if isinstance(r, BaseException):
+                raise r
     else:
         coros = [_run_map_item(mp.body, item, active_state, runtime) for item in items]
         results = list(await asyncio.gather(*coros))
