@@ -29,10 +29,21 @@ class Context:
     """
 
     saia: Any
-    """The role-bound saia instance for this dispatch."""
+    """The role-bound saia instance for this dispatch.
 
-    role: Role
-    """The role the current verb declared."""
+    Optional in one narrow case: when a fluent-builder node is itself a
+    subflow, the ``rescue`` / ``after`` hooks attached to that node run with
+    ``saia=None`` because the outer node has no single role. Verb-level
+    contexts always carry a real saia.
+    """
+
+    role: Role | None
+    """The role the current verb declared, or ``None`` for a subflow-node ctx.
+
+    ``None`` only appears on the ambient ctx passed to ``rescue`` / ``after``
+    hooks attached to a subflow node — those hooks fire at the composition
+    layer, above any single role. Verb-level contexts always carry a role.
+    """
 
     state: Any
     """The flow's shared state object (user-owned; the flow does not inspect it)."""
