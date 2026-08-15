@@ -20,6 +20,16 @@ Both roles are optional. A top-level flow that only serves as a verb
 registry never needs to call the fluent methods; a subflow that only exists
 to structure composition never needs a factory of its own — it borrows from
 the runtime it is executed under.
+
+Two state channels are exposed on every :class:`Context`:
+
+- ``ctx.state`` is scoped to the enclosing subflow and shared with the
+  parent by reference. The ``state=`` / ``merge=`` kwargs on
+  :meth:`Flow.call`, :meth:`Flow.loop`, and :meth:`Flow.map` project an
+  isolated child state for the block they contain and (optionally) merge it
+  back when the block completes successfully.
+- ``ctx.global_state`` is run-wide, provided at the outermost :meth:`run`
+  invocation (default: fresh empty ``dict``) and inherited by every subflow.
 """
 
 from __future__ import annotations
@@ -59,9 +69,23 @@ ItemsFn = Callable[[Any, Context], Any]
 AggregateFn = Callable[[list[Any]], Any]
 """Map result reducer: ``list[R] -> R'``. May be async. If omitted, .map returns the list as-is."""
 
+StateProject = Callable[[Any], Any]
+"""Scoped-state projection: ``(parent_state) -> child_state``. May be async.
+
+Runs once around a :meth:`Flow.call` subflow, once around a :meth:`Flow.loop`
+(before the first iteration), and once per item for :meth:`Flow.map`.
+"""
+
+StateMerge = Callable[[Any, Any], Any]
+"""Scoped-state merge: ``(parent_state, child_state) -> None``. May be async.
+
+Runs only when the isolated block completes successfully. Return value is
+ignored — mutate ``parent_state`` in place.
+"""
+
 
 _UNSET: Any = object()
-"""Sentinel used to distinguish "state kwarg omitted" from "state kwarg = None"."""
+"""Sentinel used to distinguish "kwarg omitted" from "kwarg = None"."""
 
 
 @dataclass(frozen=True)
@@ -78,6 +102,23 @@ class Failure:
 
     item: Any
     """The input item whose subflow run failed."""
+
+
+@dataclass(frozen=True)
+class _RunEnv:
+    """Per-run environment threaded through the execution helpers.
+
+    Bundles the runtime flow (factory + saia cache + logger source), the
+    currently active scoped state, and the run-wide global state so helpers
+    do not each need to carry the three as separate positional arguments.
+    ``lg`` is cached off ``runtime`` at the top of :meth:`Flow.run` for
+    brevity in the debug/warning call sites.
+    """
+
+    runtime: Flow
+    state: Any
+    global_state: Any
+    lg: Logger
 
 
 @dataclass
@@ -97,6 +138,8 @@ class _Loop:
     until: UntilFn | None
     max_iters: int | None
     deadline: float | None
+    state_fn: StateProject | None = None
+    merge_fn: StateMerge | None = None
 
 
 @dataclass
@@ -107,6 +150,8 @@ class _Map:
     items: ItemsFn | None
     aggregate: AggregateFn | None
     strict: bool
+    state_fn: StateProject | None = None
+    merge_fn: StateMerge | None = None
 
 
 @dataclass
@@ -117,6 +162,8 @@ class _Node:
     project: ProjectFn | None = None
     rescue: RescuePolicy | None = None
     after: AfterHook | None = None
+    state_fn: StateProject | None = None
+    merge_fn: StateMerge | None = None
 
 
 class Flow:
@@ -172,7 +219,7 @@ class Flow:
         return self._state
 
     # -------------------------------------------------------------------------
-    # Registration (unchanged from PR 1-3)
+    # Registration
     # -------------------------------------------------------------------------
 
     def register(self, verb: Any, name: str | None = None) -> None:
@@ -201,21 +248,32 @@ class Flow:
         return name in self._verbs
 
     # -------------------------------------------------------------------------
-    # Dispatch (unchanged from PR 1-3)
+    # Dispatch
     # -------------------------------------------------------------------------
 
     async def dispatch(self, name: str, *args: Any, **kwargs: Any) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
 
         The verb receives a fresh :class:`Context` as its first argument,
-        followed by ``*args`` / ``**kwargs`` from the caller.
+        followed by ``*args`` / ``**kwargs`` from the caller. ``dispatch`` is
+        the low-level entrypoint used by :class:`Panel` and by verbs that
+        invoke sibling verbs directly; the ctx here is not built by a
+        composition run, so ``ctx.global_state`` is a fresh empty ``dict``.
+        Verbs that need a live run-wide container must be reached via
+        :meth:`run` rather than dispatched ad hoc.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
         self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
         saia = self._saia_for(verb.role)
-        ctx = Context(saia=saia, role=verb.role, state=self._state, flow=self)
+        ctx = Context(
+            saia=saia,
+            role=verb.role,
+            state=self._state,
+            global_state={},
+            flow=self,
+        )
         return await verb(ctx, *args, **kwargs)
 
     # -------------------------------------------------------------------------
@@ -229,6 +287,8 @@ class Flow:
         project: ProjectFn | None = None,
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
+        state: StateProject | None = None,
+        merge: StateMerge | None = None,
     ) -> Flow:
         """Append a node to the composition chain.
 
@@ -242,13 +302,36 @@ class Flow:
         Hooks may be attached inline (kwargs) or via chained
         :meth:`rescue` / :meth:`after` calls — the two forms are equivalent.
 
+        When ``target`` is a :class:`Flow`, ``state`` / ``merge`` open a
+        scoped state channel for the subflow: ``state(parent_state)``
+        produces the child's ``ctx.state``, and ``merge(parent_state,
+        child_state)`` runs once after the subflow returns successfully.
+        Both are rejected when ``target`` is a verb (verbs have no scoped
+        state to isolate); ``merge`` also requires ``state`` — nothing to
+        merge without an isolated child.
+
         Returns ``self`` for chaining.
         """
         _validate_target(target)
         if target is self:
             label = self._name or "<anonymous>"
             raise ValueError(f"Flow {label!r} cannot call itself as a node")
-        self._nodes.append(_Node(target=target, project=project, rescue=rescue, after=after))
+        if (state is not None or merge is not None) and not isinstance(target, Flow):
+            raise TypeError(
+                ".call(state=/merge=) is only valid when target is a Flow; "
+                f"got {type(target).__name__}"
+            )
+        _require_state_for_merge(state, merge, ".call")
+        self._nodes.append(
+            _Node(
+                target=target,
+                project=project,
+                rescue=rescue,
+                after=after,
+                state_fn=state,
+                merge_fn=merge,
+            )
+        )
         return self
 
     def then(
@@ -258,6 +341,8 @@ class Flow:
         project: ProjectFn | None = None,
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
+        state: StateProject | None = None,
+        merge: StateMerge | None = None,
     ) -> Flow:
         """Append a chained node — semantic alias for :meth:`call`.
 
@@ -265,7 +350,14 @@ class Flow:
         pipeline. Positionally identical to :meth:`call` — data flow is
         determined by position in the chain, not by which method was used.
         """
-        return self.call(target, project=project, rescue=rescue, after=after)
+        return self.call(
+            target,
+            project=project,
+            rescue=rescue,
+            after=after,
+            state=state,
+            merge=merge,
+        )
 
     def rescue(self, policy: RescuePolicy) -> Flow:
         """Attach a failure policy to the most recently appended node.
@@ -316,7 +408,9 @@ class Flow:
                 subflow's result (or the pass-through input).
 
         The branch node's result is the chosen subflow's output; it becomes
-        the next chain step's input like any other node's result.
+        the next chain step's input like any other node's result. Both bodies
+        share the parent's ``ctx.state``; wrap a body in :meth:`call` if a
+        branch arm needs its own scoped state.
 
         Returns ``self`` for chaining.
         """
@@ -339,6 +433,8 @@ class Flow:
         deadline: float | None = None,
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
+        state: StateProject | None = None,
+        merge: StateMerge | None = None,
     ) -> Flow:
         """Append a bounded loop: iterate ``body`` until a stop condition holds.
 
@@ -360,6 +456,14 @@ class Flow:
                 elapsed time may exceed ``deadline`` by one iteration.
             rescue: Attached to the loop node — fires if any iteration raises.
             after: Attached to the loop node — fires with the loop's final result.
+            state: Scoped-state projection. ``state(parent_state)`` runs once
+                before the first iteration; every iteration sees the same
+                projected child state on ``ctx.state``. Omitted → iterations
+                see the parent's ``state`` by reference.
+            merge: Scoped-state merge. ``merge(parent_state, child_state)``
+                runs once after the loop exits successfully (via ``until``,
+                ``max_iters``, or ``deadline``). Skipped if an iteration
+                raises past any ``rescue``. Requires ``state``.
 
         At least one of ``until`` or ``max_iters`` must be provided so the
         loop is guaranteed to terminate.
@@ -372,9 +476,17 @@ class Flow:
             raise ValueError(f".loop(max_iters=) must be >= 1; got {max_iters}")
         if deadline is not None and deadline <= 0:
             raise ValueError(f".loop(deadline=) must be > 0; got {deadline}")
+        _require_state_for_merge(state, merge, ".loop")
         body_flow = _materialize(body, self._lg, "loop.body")
         node = _Node(
-            target=_Loop(body=body_flow, until=until, max_iters=max_iters, deadline=deadline),
+            target=_Loop(
+                body=body_flow,
+                until=until,
+                max_iters=max_iters,
+                deadline=deadline,
+                state_fn=state,
+                merge_fn=merge,
+            ),
             rescue=rescue,
             after=after,
         )
@@ -390,6 +502,8 @@ class Flow:
         strict: bool = True,
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
+        state: StateProject | None = None,
+        merge: StateMerge | None = None,
     ) -> Flow:
         """Append a parallel fan-out: run ``body`` per item concurrently.
 
@@ -410,6 +524,17 @@ class Flow:
                 (item resolution, body exceptions in strict mode, or aggregate).
             after: Attached to the map node — fires with the final (possibly
                 aggregated) result.
+            state: Scoped-state projection. Runs once **per item**, so each
+                item's body sees its own isolated ``ctx.state`` — the safe
+                shape for concurrent per-item scratch space. Omitted → every
+                item shares the parent's ``state`` by reference (writes
+                interleave; caller's responsibility).
+            merge: Scoped-state merge. Runs once per item, after that item's
+                body returns successfully. Because items run concurrently,
+                merges interleave against the shared parent state; callers
+                wanting a single sequential fold should use ``aggregate``
+                (which runs once after every item completes) instead.
+                Requires ``state``.
 
         Cancellation propagates unconditionally regardless of ``strict``.
         Sibling items keep running when one fails; the wasted work is the
@@ -417,9 +542,17 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
+        _require_state_for_merge(state, merge, ".map")
         body_flow = _materialize(body, self._lg, "map.body")
         node = _Node(
-            target=_Map(body=body_flow, items=items, aggregate=aggregate, strict=strict),
+            target=_Map(
+                body=body_flow,
+                items=items,
+                aggregate=aggregate,
+                strict=strict,
+                state_fn=state,
+                merge_fn=merge,
+            ),
             rescue=rescue,
             after=after,
         )
@@ -434,8 +567,9 @@ class Flow:
         self,
         *args: Any,
         state: Any = _UNSET,
-        global_state: Any = None,  # noqa: ARG002 — accepted; wired in PR 6
+        global_state: Any = _UNSET,
         _runtime: Flow | None = None,
+        _global_state: Any = _UNSET,
         **kwargs: Any,
     ) -> Any:
         """Execute the composition graph.
@@ -452,14 +586,25 @@ class Flow:
             *args: Positional inputs to the first node.
             state: If provided, overrides ``self.state`` for this run and is
                 exposed as ``ctx.state`` to every verb. Omitted → the flow's
-                default state is used. Note: a subflow running inside a parent
-                chain always receives the parent's active state — its own
-                constructor ``state`` is ignored.
-            global_state: Reserved. Accepted so callers can start passing it;
-                actual wiring lands in PR 6 with the two-channel state model.
+                default state is used. A subflow running inside a parent
+                chain always receives whatever state the containing node's
+                ``state=`` projection produced (or, when no projection is
+                set, the parent's active state by reference).
+            global_state: Run-wide state exposed as ``ctx.global_state`` on
+                every node in the tree. Defaults to a fresh empty ``dict`` at
+                the top level so verbs guard on the KEY they need
+                (``ctx.global_state.get("budget")``) rather than on the
+                container. Explicitly passing another value (dict, dataclass,
+                Pydantic model, arbitrary object) overrides the default.
+                Subflows inherit the top-level container automatically — the
+                kwarg on a subflow's :meth:`run` only takes effect when it is
+                invoked as its own top-level run.
             _runtime: Internal — used when this flow runs as a subflow to
                 share the outer flow's factory and saia cache. Not part of
                 the public surface.
+            _global_state: Internal — used to propagate the outermost
+                ``global_state`` container down into subflows without each
+                nested :meth:`run` re-defaulting to a fresh dict.
             **kwargs: Keyword inputs to the first node.
 
         Raises:
@@ -468,6 +613,34 @@ class Flow:
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
+        env = self._build_run_env(state, global_state, _runtime, _global_state)
+        label = self._name or "<anonymous>"
+        is_subflow = _runtime is not None
+        env.lg.debug(
+            "starting flow run",
+            extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
+        )
+        result: Any = _UNSET
+        for index, node in enumerate(self._nodes):
+            node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
+            ctx = _build_ctx(node.target, env)
+            result = await _execute_node(node, ctx, env, node_args, node_kwargs)
+        env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
+        return result
+
+    def _build_run_env(
+        self,
+        state: Any,
+        global_state: Any,
+        _runtime: Flow | None,
+        _global_state: Any,
+    ) -> _RunEnv:
+        """Resolve the effective runtime, scoped state, and global state for a run.
+
+        Encapsulates the subflow-vs-top-level defaults so :meth:`run` stays a
+        thin driver over the node loop. Raises when the resolved runtime has
+        no factory — a top-level flow must supply one at construction.
+        """
         runtime = _runtime if _runtime is not None else self
         if runtime._factory is None:
             label = runtime._name or "<anonymous>"
@@ -476,23 +649,14 @@ class Flow:
                 "when constructing the top-level Flow"
             )
         active_state = self._state if state is _UNSET else state
-        lg = runtime._lg
-        label = self._name or "<anonymous>"
         is_subflow = _runtime is not None
-
-        lg.debug(
-            "starting flow run",
-            extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
+        if is_subflow and global_state is _UNSET:
+            active_global = {} if _global_state is _UNSET else _global_state
+        else:
+            active_global = {} if global_state is _UNSET else global_state
+        return _RunEnv(
+            runtime=runtime, state=active_state, global_state=active_global, lg=runtime._lg
         )
-        result: Any = _UNSET
-        for index, node in enumerate(self._nodes):
-            node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
-            ctx = _build_ctx(node.target, runtime, active_state)
-            result = await _execute_node(
-                node, ctx, runtime, active_state, node_args, node_kwargs, lg
-            )
-        lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
-        return result
 
     # -------------------------------------------------------------------------
     # Internals
@@ -535,7 +699,18 @@ def _validate_target(target: Any) -> None:
         )
 
 
-def _build_ctx(target: Any, runtime: Flow, state: Any) -> Context:
+def _require_state_for_merge(
+    state: StateProject | None, merge: StateMerge | None, method: str
+) -> None:
+    """Enforce that ``merge=`` is only legal with ``state=`` (nothing to merge otherwise)."""
+    if merge is not None and state is None:
+        raise ValueError(
+            f"{method}(merge=...) requires state= "
+            "(nothing to merge back without an isolated child state)"
+        )
+
+
+def _build_ctx(target: Any, env: _RunEnv) -> Context:
     """Build the Context passed to the node's verb (and to its hooks).
 
     Verb nodes get a role-bound ctx (role + saia populated). Subflow nodes
@@ -544,19 +719,29 @@ def _build_ctx(target: Any, runtime: Flow, state: Any) -> Context:
     verb builds its own role-bound ctx as it runs.
     """
     if isinstance(target, Flow | _Branch | _Loop | _Map):
-        return Context(saia=None, role=None, state=state, flow=runtime)
-    saia = runtime._saia_for(target.role)
-    return Context(saia=saia, role=target.role, state=state, flow=runtime)
+        return Context(
+            saia=None,
+            role=None,
+            state=env.state,
+            global_state=env.global_state,
+            flow=env.runtime,
+        )
+    saia = env.runtime._saia_for(target.role)
+    return Context(
+        saia=saia,
+        role=target.role,
+        state=env.state,
+        global_state=env.global_state,
+        flow=env.runtime,
+    )
 
 
 async def _execute_node(
     node: _Node,
     ctx: Context,
-    runtime: Flow,
-    active_state: Any,
+    env: _RunEnv,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
-    lg: Logger,
 ) -> Any:
     """Invoke a node's target with cancellation-safe rescue + optional after hook.
 
@@ -565,23 +750,21 @@ async def _execute_node(
     return value (awaited if awaitable) becomes the node's result.
     """
     target_name = _target_label(node.target)
-    lg.debug("executing node", extra={"target": target_name})
+    env.lg.debug("executing node", extra={"target": target_name})
     try:
-        result = await _invoke_target(
-            node.target, ctx, runtime, active_state, node_args, node_kwargs
-        )
+        result = await _invoke_target(node, ctx, env, node_args, node_kwargs)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         if node.rescue is None:
             raise
-        lg.warning("rescue policy invoked", extra={"target": target_name, "exception": exc})
+        env.lg.warning("rescue policy invoked", extra={"target": target_name, "exception": exc})
         fallback = node.rescue(exc, ctx)
         if inspect.isawaitable(fallback):
             fallback = await fallback
         result = fallback
     if node.after is not None:
-        lg.debug("running after hook", extra={"target": target_name})
+        env.lg.debug("running after hook", extra={"target": target_name})
         hook_result = node.after(result, ctx)
         if inspect.isawaitable(hook_result):
             await hook_result
@@ -589,30 +772,69 @@ async def _execute_node(
 
 
 async def _invoke_target(
-    target: Any,
+    node: _Node,
     ctx: Context,
-    runtime: Flow,
-    active_state: Any,
+    env: _RunEnv,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
 ) -> Any:
     """Dispatch a node's target: verb, subflow, or control-flow primitive."""
+    target = node.target
     if isinstance(target, Flow):
-        return await target.run(*node_args, state=active_state, _runtime=runtime, **node_kwargs)
+        return await _run_subflow(target, env, node.state_fn, node.merge_fn, node_args, node_kwargs)
     if isinstance(target, _Branch):
-        return await _run_branch(target, ctx, runtime, active_state, node_args)
+        return await _run_branch(target, ctx, env, node_args)
     if isinstance(target, _Loop):
-        return await _run_loop(target, ctx, runtime, active_state, node_args)
+        return await _run_loop(target, ctx, env, node_args)
     if isinstance(target, _Map):
-        return await _run_map(target, ctx, runtime, active_state, node_args)
+        return await _run_map(target, ctx, env, node_args)
     return await target(ctx, *node_args, **node_kwargs)
+
+
+async def _run_subflow(
+    body: Flow,
+    env: _RunEnv,
+    state_fn: StateProject | None,
+    merge_fn: StateMerge | None,
+    node_args: tuple[Any, ...],
+    node_kwargs: dict[str, Any],
+) -> Any:
+    """Run a subflow node, honoring optional scoped-state projection/merge."""
+    child_state = await _project_state(state_fn, env.state)
+    result = await body.run(
+        *node_args,
+        state=child_state,
+        _runtime=env.runtime,
+        _global_state=env.global_state,
+        **node_kwargs,
+    )
+    await _merge_state(merge_fn, env.state, child_state)
+    return result
+
+
+async def _project_state(state_fn: StateProject | None, parent_state: Any) -> Any:
+    """Build the child state for a scoped block; pass-through when unset."""
+    if state_fn is None:
+        return parent_state
+    child = state_fn(parent_state)
+    if inspect.isawaitable(child):
+        child = await child
+    return child
+
+
+async def _merge_state(merge_fn: StateMerge | None, parent_state: Any, child_state: Any) -> None:
+    """Fold the child state back into the parent; no-op when unset."""
+    if merge_fn is None:
+        return
+    result = merge_fn(parent_state, child_state)
+    if inspect.isawaitable(result):
+        await result
 
 
 async def _run_branch(
     br: _Branch,
     ctx: Context,
-    runtime: Flow,
-    active_state: Any,
+    env: _RunEnv,
     node_args: tuple[Any, ...],
 ) -> Any:
     """Evaluate the predicate and dispatch the chosen subflow.
@@ -620,7 +842,7 @@ async def _run_branch(
     Passes the branch input (``node_args[0]``, or ``None`` when the branch
     is the chain's head with no positional) as the sole positional to the
     chosen subflow. Falsy predicate with no ``else_`` returns the input
-    unchanged.
+    unchanged. Both bodies share the parent's active state.
     """
     prev_result = node_args[0] if node_args else None
     verdict = br.when(prev_result, ctx)
@@ -629,45 +851,58 @@ async def _run_branch(
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
         return prev_result
-    return await chosen.run(prev_result, state=active_state, _runtime=runtime)
+    return await chosen.run(
+        prev_result,
+        state=env.state,
+        _runtime=env.runtime,
+        _global_state=env.global_state,
+    )
 
 
 async def _run_loop(
     lp: _Loop,
     ctx: Context,
-    runtime: Flow,
-    active_state: Any,
+    env: _RunEnv,
     node_args: tuple[Any, ...],
 ) -> Any:
     """Iterate the loop body under bounds, threading each result to the next.
 
     Post-check semantics: the body runs at least once, then ``until`` (if
     set) is evaluated. ``max_iters`` and ``deadline`` bound the total
-    iteration count and elapsed wall clock respectively.
+    iteration count and elapsed wall clock respectively. Scoped state is
+    projected once before the first iteration; every iteration sees the same
+    child state, and the merge fires once after the loop exits successfully.
     """
+    child_state = await _project_state(lp.state_fn, env.state)
     result: Any = node_args[0] if node_args else None
     started = time.monotonic()
     iteration = 0
     while True:
         if lp.max_iters is not None and iteration >= lp.max_iters:
-            return result
+            break
         if lp.deadline is not None and time.monotonic() - started >= lp.deadline:
-            return result
-        result = await lp.body.run(result, state=active_state, _runtime=runtime)
+            break
+        result = await lp.body.run(
+            result,
+            state=child_state,
+            _runtime=env.runtime,
+            _global_state=env.global_state,
+        )
         iteration += 1
         if lp.until is not None:
             verdict = lp.until(ctx)
             if inspect.isawaitable(verdict):
                 verdict = await verdict
             if verdict:
-                return result
+                break
+    await _merge_state(lp.merge_fn, env.state, child_state)
+    return result
 
 
 async def _run_map(
     mp: _Map,
     ctx: Context,
-    runtime: Flow,
-    active_state: Any,
+    env: _RunEnv,
     node_args: tuple[Any, ...],
 ) -> Any:
     """Fan out the body over items concurrently, then (optionally) aggregate.
@@ -676,11 +911,15 @@ async def _run_map(
     tasks continue but their results are discarded. ``strict=False`` swaps
     each failing item for a :class:`Failure` sentinel so the caller sees
     every position. Cancellation propagates unconditionally in both modes.
+    Scoped state is projected per item; per-item merges run only for items
+    that completed successfully.
     """
     prev_result = node_args[0] if node_args else None
     items = await _resolve_items(mp.items, prev_result, ctx)
     if mp.strict:
-        coros = [mp.body.run(item, state=active_state, _runtime=runtime) for item in items]
+        coros = [
+            _run_map_item_strict(mp.body, item, env, mp.state_fn, mp.merge_fn) for item in items
+        ]
         results = list(await asyncio.gather(*coros, return_exceptions=True))
         for r in results:
             if isinstance(r, asyncio.CancelledError):
@@ -688,7 +927,7 @@ async def _run_map(
             if isinstance(r, BaseException):
                 raise r
     else:
-        coros = [_run_map_item(mp.body, item, active_state, runtime) for item in items]
+        coros = [_run_map_item(mp.body, item, env, mp.state_fn, mp.merge_fn) for item in items]
         results = list(await asyncio.gather(*coros))
     result = mp.aggregate(results) if mp.aggregate is not None else results
     if inspect.isawaitable(result):
@@ -696,14 +935,51 @@ async def _run_map(
     return result
 
 
-async def _run_map_item(body: Flow, item: Any, state: Any, runtime: Flow) -> Any:
-    """Run one map item; wrap non-cancellation exceptions as :class:`Failure`."""
+async def _run_map_item_strict(
+    body: Flow,
+    item: Any,
+    env: _RunEnv,
+    state_fn: StateProject | None,
+    merge_fn: StateMerge | None,
+) -> Any:
+    """Run one strict-mode map item; merge fires only when the body succeeds."""
+    child_state = await _project_state(state_fn, env.state)
+    result = await body.run(
+        item,
+        state=child_state,
+        _runtime=env.runtime,
+        _global_state=env.global_state,
+    )
+    await _merge_state(merge_fn, env.state, child_state)
+    return result
+
+
+async def _run_map_item(
+    body: Flow,
+    item: Any,
+    env: _RunEnv,
+    state_fn: StateProject | None,
+    merge_fn: StateMerge | None,
+) -> Any:
+    """Run one non-strict map item; wrap non-cancellation exceptions as :class:`Failure`.
+
+    Merge fires only for items that complete successfully — a failed item's
+    partially-mutated child state is discarded.
+    """
+    child_state = await _project_state(state_fn, env.state)
     try:
-        return await body.run(item, state=state, _runtime=runtime)
+        result = await body.run(
+            item,
+            state=child_state,
+            _runtime=env.runtime,
+            _global_state=env.global_state,
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         return Failure(exception=exc, item=item)
+    await _merge_state(merge_fn, env.state, child_state)
+    return result
 
 
 async def _resolve_items(items_fn: ItemsFn | None, prev_result: Any, ctx: Context) -> list[Any]:
