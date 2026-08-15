@@ -390,10 +390,12 @@ class TestScopedStateProjection:
 
     async def test_loop_until_sees_projected_child_state(self) -> None:
         """``until`` predicate sees the projected child state, not the parent."""
+        counts: list[int] = []
 
         @verb(role=ROLE_A)
         async def bump(ctx, prev) -> int:
             ctx.state["count"] = ctx.state.get("count", 0) + 1
+            counts.append(ctx.state["count"])
             return prev
 
         lg = make_test_logger()
@@ -406,6 +408,7 @@ class TestScopedStateProjection:
 
         await top.run("seed")
 
+        assert counts == [1, 2, 3]
         assert parent_state == {"count": 999}
 
     async def test_map_state_projected_per_item(self) -> None:

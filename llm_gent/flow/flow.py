@@ -531,7 +531,9 @@ class Flow:
                 interleave; caller's responsibility).
             merge: Scoped-state merge. Runs once per item, after that item's
                 body returns successfully. Because items run concurrently,
-                merges interleave against the shared parent state; callers
+                merges interleave against the shared parent state; an async
+                merge that awaits between reading and writing ``parent_state``
+                can lose updates — sync callbacks are preemption-safe. Callers
                 wanting a single sequential fold should use ``aggregate``
                 (which runs once after every item completes) instead.
                 Requires ``state``.
@@ -605,7 +607,9 @@ class Flow:
             _global_state: Internal — used to propagate the outermost
                 ``global_state`` container down into subflows without each
                 nested :meth:`run` re-defaulting to a fresh dict.
-            **kwargs: Keyword inputs to the first node.
+            **kwargs: Keyword inputs to the first node. Note: ``state``,
+                ``global_state``, ``_runtime``, and ``_global_state`` are
+                reserved — passing them in ``**kwargs`` raises ``TypeError``.
 
         Raises:
             RuntimeError: The flow has no nodes, or is running as a
@@ -931,8 +935,6 @@ async def _run_map(
         ]
         results = list(await asyncio.gather(*coros, return_exceptions=True))
         for r in results:
-            if isinstance(r, asyncio.CancelledError):
-                raise r
             if isinstance(r, BaseException):
                 raise r
     else:
