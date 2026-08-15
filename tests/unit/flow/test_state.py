@@ -388,6 +388,26 @@ class TestScopedStateProjection:
 
         assert merged == []
 
+    async def test_loop_until_sees_projected_child_state(self) -> None:
+        """``until`` predicate sees the projected child state, not the parent."""
+
+        @verb(role=ROLE_A)
+        async def bump(ctx, prev) -> int:
+            ctx.state["count"] = ctx.state.get("count", 0) + 1
+            return prev
+
+        lg = make_test_logger()
+        parent_state: dict = {"count": 999}
+        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).loop(
+            lambda f: f.call(bump),
+            until=lambda ctx: ctx.state.get("count", 0) >= 3,
+            state=lambda _parent: {},
+        )
+
+        await top.run("seed")
+
+        assert parent_state == {"count": 999}
+
     async def test_map_state_projected_per_item(self) -> None:
         """``.map(state=)`` builds an isolated state per item — no cross-contamination."""
         seen: list[tuple[int, dict]] = []

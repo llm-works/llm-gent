@@ -831,6 +831,19 @@ async def _merge_state(merge_fn: StateMerge | None, parent_state: Any, child_sta
         await result
 
 
+async def _check_until(until_fn: UntilFn | None, child_state: Any, env: _RunEnv) -> bool:
+    """Evaluate the loop's until predicate with a ctx bound to the loop's scoped state."""
+    if until_fn is None:
+        return False
+    ctx = Context(
+        saia=None, role=None, state=child_state, global_state=env.global_state, flow=env.runtime
+    )
+    verdict = until_fn(ctx)
+    if inspect.isawaitable(verdict):
+        verdict = await verdict
+    return bool(verdict)
+
+
 async def _run_branch(
     br: _Branch,
     ctx: Context,
@@ -889,12 +902,8 @@ async def _run_loop(
             _global_state=env.global_state,
         )
         iteration += 1
-        if lp.until is not None:
-            verdict = lp.until(ctx)
-            if inspect.isawaitable(verdict):
-                verdict = await verdict
-            if verdict:
-                break
+        if await _check_until(lp.until, child_state, env):
+            break
     await _merge_state(lp.merge_fn, env.state, child_state)
     return result
 

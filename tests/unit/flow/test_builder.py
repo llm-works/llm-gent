@@ -522,8 +522,8 @@ class TestRuntimeErrors:
             await flow.run()
 
     @pytest.mark.asyncio
-    async def test_global_state_accepted_but_not_wired(self) -> None:
-        """PR 4 accepts global_state kwarg without effect; wiring lands in PR 6."""
+    async def test_global_state_kwarg_accepted(self) -> None:
+        """Flow.run accepts global_state; behavior tested in test_state.py."""
         flow = Flow(make_test_logger(), factory=StubFactory())
 
         @verb(role=ROLE_A)
@@ -532,7 +532,6 @@ class TestRuntimeErrors:
             return 1
 
         flow.call(do)
-        # Should not raise; global_state is currently ignored.
         assert await flow.run(global_state={"budget": 1000}) == 1
 
 
