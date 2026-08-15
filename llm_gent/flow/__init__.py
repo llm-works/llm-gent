@@ -26,7 +26,8 @@ mount them via the existing trait system.
 from .archetypes import extractor, grader, planner, synthesizer
 from .context import Context
 from .factory import SAIAFactory
-from .flow import Failure, Flow
+from .flow import Flow
+from .nodes import Failure
 from .panel import Panel
 from .role import Role
 from .state import State
