@@ -3,14 +3,14 @@
 Internal to :mod:`llm_gent.flow`: the coroutines that :meth:`Flow.run` calls
 into to execute each node in order (verbs, subflows, and the branch/loop/map
 control-flow primitives), together with the scoped-state projection/merge
-plumbing and the eager Buildable materializer used at build time.
+plumbing.
 
-Depends on :mod:`.flow` for the :class:`Flow` class itself, which appears
-both in ``isinstance`` checks (to distinguish subflow nodes from verb nodes
-and control-flow primitives) and in the Buildable materializer (which
-instantiates fresh Flows). Those sites use localized late imports
-(``from .flow import Flow`` inside the function body) to break the circular
-dependency between the executor and the class it operates on.
+Depends on :mod:`.flow` for the :class:`Flow` class itself, which appears in
+three ``isinstance`` checks used to distinguish subflow nodes from verb
+nodes and control-flow primitives (:func:`_build_ctx`,
+:func:`_invoke_target`, :func:`_target_label`). Each uses a localized late
+import (``from .flow import Flow`` inside the function body) to break the
+circular dependency between the executor and the class it operates on.
 """
 
 from __future__ import annotations
@@ -19,8 +19,6 @@ import asyncio
 import inspect
 import time
 from typing import TYPE_CHECKING, Any
-
-from appinfra.log import Logger
 
 from .context import Context
 from .nodes import (
@@ -311,28 +309,6 @@ async def _resolve_items(items_fn: ItemsFn | None, prev_result: Any, ctx: Contex
         return list(source)
     except TypeError as exc:
         raise TypeError(f".map items must be iterable; got {type(source).__name__}") from exc
-
-
-def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
-    """Turn a :data:`Buildable` (Flow or ``lambda f: ...`` callback) into a Flow.
-
-    A ``Flow`` is returned as-is; a callable is invoked against a fresh Flow
-    it may mutate (the return value, if any, is ignored). Anything else is a
-    :class:`TypeError` — bad Buildables fail eagerly at build time, not at
-    :meth:`Flow.run` time.
-    """
-    from .flow import Flow
-
-    if isinstance(buildable, Flow):
-        return buildable
-    if not callable(buildable):
-        raise TypeError(
-            f"expected a Flow or a lambda f: f.call(...) callback for {name!r}; "
-            f"got {type(buildable).__name__}"
-        )
-    fresh = Flow(lg, name)
-    buildable(fresh)
-    return fresh
 
 
 def _target_label(target: Any) -> str:

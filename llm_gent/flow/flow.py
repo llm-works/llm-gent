@@ -34,11 +34,12 @@ wrapper:
   ``dict``). Every node in the tree reaches it via the same call regardless
   of nesting depth or per-scope projection.
 
-Execution helpers (node dispatch, scoped-state projection/merge, Buildable
-materialization) live in :mod:`._executor`; the private dataclasses and the
-:class:`Failure` sentinel live in :mod:`.nodes`. This module owns the
-:class:`Flow` class itself plus the two builder-side validators used by its
-fluent methods.
+Execution helpers (node dispatch, scoped-state projection/merge) live in
+:mod:`._executor`; the private dataclasses and the :class:`Failure`
+sentinel live in :mod:`.nodes`. This module owns the :class:`Flow` class
+itself plus the builder-side helpers used by its fluent methods —
+:func:`_validate_target`, :func:`_require_state_for_merge`, and the eager
+Buildable materializer :func:`_materialize`.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from typing import Any
 
 from appinfra.log import Logger
 
-from ._executor import _build_ctx, _execute_node, _materialize, _step_inputs
+from ._executor import _build_ctx, _execute_node, _step_inputs
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -603,3 +604,23 @@ def _require_state_for_merge(
             f"{method}(merge=...) requires state= "
             "(nothing to merge back without an isolated child state)"
         )
+
+
+def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
+    """Turn a :data:`Buildable` (Flow or ``lambda f: ...`` callback) into a Flow.
+
+    A ``Flow`` is returned as-is; a callable is invoked against a fresh Flow
+    it may mutate (the return value, if any, is ignored). Anything else is a
+    :class:`TypeError` — bad Buildables fail eagerly at build time, not at
+    :meth:`Flow.run` time.
+    """
+    if isinstance(buildable, Flow):
+        return buildable
+    if not callable(buildable):
+        raise TypeError(
+            f"expected a Flow or a lambda f: f.call(...) callback for {name!r}; "
+            f"got {type(buildable).__name__}"
+        )
+    fresh = Flow(lg, name)
+    buildable(fresh)
+    return fresh
