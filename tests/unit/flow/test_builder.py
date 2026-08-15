@@ -483,8 +483,8 @@ class TestSubflow:
 
         @verb(role=ROLE_A)
         async def read_state(ctx: Context, _: Any = None) -> Any:
-            """Return the state."""
-            return ctx.state
+            """Return the payload wrapped in ctx.state."""
+            return ctx.state.data
 
         sub = Flow(make_test_logger(), "inner").call(read_state)
         main = Flow(make_test_logger(), factory=factory, state={"default": True}).call(sub)
@@ -520,19 +520,6 @@ class TestRuntimeErrors:
         flow = Flow(make_test_logger(), "naked").call(do)
         with pytest.raises(RuntimeError, match="SAIAFactory"):
             await flow.run()
-
-    @pytest.mark.asyncio
-    async def test_global_state_kwarg_accepted(self) -> None:
-        """Flow.run accepts global_state; behavior tested in test_state.py."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
-
-        @verb(role=ROLE_A)
-        async def do(ctx: Context) -> int:
-            """Return 1."""
-            return 1
-
-        flow.call(do)
-        assert await flow.run(global_state={"budget": 1000}) == 1
 
 
 # -----------------------------------------------------------------------------

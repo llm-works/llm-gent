@@ -6,6 +6,9 @@ Public surface:
 - :class:`SAIAFactory` — protocol that turns a Role into a saia instance
 - :func:`verb` — decorator marking an async function as a role-bound verb
 - :class:`Context` — runtime environment injected into every verb
+- :class:`State` — scope-aware wrapper around the user-owned payload on
+  ``ctx.state`` (``.data`` reaches the payload; ``.root()`` walks to the
+  outermost scope)
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
 - :class:`Panel` — fan-out N verbs in parallel + aggregate their results
@@ -26,6 +29,7 @@ from .factory import SAIAFactory
 from .flow import Failure, Flow
 from .panel import Panel
 from .role import Role
+from .state import State
 from .verb import verb
 
 
@@ -36,6 +40,7 @@ __all__ = [
     "Panel",
     "Role",
     "SAIAFactory",
+    "State",
     "extractor",
     "grader",
     "planner",

@@ -107,8 +107,8 @@ class TestDispatch:
         @verb(role=ROLE_A)
         async def bump(ctx: Context) -> int:
             """Increment the shared counter."""
-            ctx.state["counter"] += 1
-            return ctx.state["counter"]
+            ctx.state.data["counter"] += 1
+            return ctx.state.data["counter"]
 
         flow.register(bump)
         assert await flow.dispatch("bump") == 1
