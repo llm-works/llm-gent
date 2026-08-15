@@ -607,9 +607,9 @@ class Flow:
             _global_state: Internal — used to propagate the outermost
                 ``global_state`` container down into subflows without each
                 nested :meth:`run` re-defaulting to a fresh dict.
-            **kwargs: Keyword inputs to the first node. Note: ``state``,
+            **kwargs: Keyword inputs to the first node. The names ``state``,
                 ``global_state``, ``_runtime``, and ``_global_state`` are
-                reserved — passing them in ``**kwargs`` raises ``TypeError``.
+                bound parameters — they are not forwarded to the first node.
 
         Raises:
             RuntimeError: The flow has no nodes, or is running as a
