@@ -1,4 +1,4 @@
-"""Two-channel state — scoped ``ctx.state`` + run-wide ``ctx.global_state``."""
+"""Unified ``ctx.state`` — :class:`State` wrapper, scoped projection, root navigation."""
 
 from __future__ import annotations
 
@@ -6,41 +6,44 @@ import asyncio
 
 import pytest
 
-from llm_gent.flow import Failure, Flow, verb
+from llm_gent.flow import Failure, Flow, State, verb
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, make_test_logger
 
 
 # -----------------------------------------------------------------------------
-# ctx.global_state — defaults, propagation, subflow inheritance
+# ctx.state wrapper — top-level payload defaults and overrides
 # -----------------------------------------------------------------------------
 
 
-class TestGlobalStateDefault:
-    """``ctx.global_state`` defaults to an empty dict at the top-level."""
+class TestStateWrapper:
+    """``ctx.state`` is always a :class:`State`; the payload is on ``.data``."""
 
-    async def test_default_is_empty_dict(self) -> None:
-        """Top-level Flow.run with no global_state kwarg → verbs see {}."""
+    async def test_default_payload_is_empty_dict(self) -> None:
+        """Top-level Flow.run with no state kwarg → ctx.state.data == {}."""
         seen: list[object] = []
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
-            seen.append(ctx.global_state)
+            seen.append(ctx.state)
 
         lg = make_test_logger()
         flow = Flow(lg, "top", factory=StubFactory()).call(check)
         await flow.run()
 
-        assert seen == [{}]
+        assert len(seen) == 1
+        assert isinstance(seen[0], State)
+        assert seen[0].data == {}
+        assert seen[0].is_root is True
 
     async def test_default_isolated_between_runs(self) -> None:
-        """Successive top-level runs receive independent default containers."""
+        """Successive top-level runs receive independent default payloads."""
         captured: list[dict] = []
 
         @verb(role=ROLE_A)
         async def touch(ctx) -> None:
-            ctx.global_state["mark"] = id(ctx.global_state)
-            captured.append(ctx.global_state)
+            ctx.state.data["mark"] = id(ctx.state.data)
+            captured.append(ctx.state.data)
 
         lg = make_test_logger()
         flow = Flow(lg, "top", factory=StubFactory()).call(touch)
@@ -52,22 +55,22 @@ class TestGlobalStateDefault:
         assert captured[0] is not captured[1]
 
     async def test_explicit_dict_overrides_default(self) -> None:
-        """Callers may pass any dict — the framework wires it verbatim."""
+        """Callers may pass any dict — the framework wraps it verbatim."""
         supplied = {"budget": 100}
         seen: list[object] = []
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
-            seen.append(ctx.global_state)
+            seen.append(ctx.state.data)
 
         lg = make_test_logger()
         flow = Flow(lg, "top", factory=StubFactory()).call(check)
-        await flow.run(global_state=supplied)
+        await flow.run(state=supplied)
 
         assert seen[0] is supplied
 
     async def test_explicit_non_dict_overrides_default(self) -> None:
-        """The default is dict-shaped, but callers can pass any object."""
+        """The default is dict-shaped, but callers can pass any object as payload."""
 
         class Bag:
             budget = 42
@@ -77,77 +80,126 @@ class TestGlobalStateDefault:
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
-            seen.append(ctx.global_state)
+            seen.append(ctx.state.data)
 
         lg = make_test_logger()
         flow = Flow(lg, "top", factory=StubFactory()).call(check)
-        await flow.run(global_state=bag)
+        await flow.run(state=bag)
 
         assert seen[0] is bag
 
     async def test_explicit_none_honored(self) -> None:
-        """Passing ``None`` explicitly is honored (caller opts out of the default)."""
+        """Passing ``state=None`` explicitly is honored — payload is None."""
         seen: list[object] = []
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
-            seen.append(ctx.global_state)
+            seen.append(ctx.state.data)
 
         lg = make_test_logger()
         flow = Flow(lg, "top", factory=StubFactory()).call(check)
-        await flow.run(global_state=None)
+        await flow.run(state=None)
 
         assert seen == [None]
 
-    async def test_dispatch_provides_empty_dict(self) -> None:
-        """Panel/dispatch entrypoints build a fresh empty-dict global_state."""
+    async def test_prewrapped_state_passed_through(self) -> None:
+        """A caller-constructed :class:`State` is used verbatim (not re-wrapped)."""
+        outer = State(data={"pre": "wrapped"})
         seen: list[object] = []
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
-            seen.append(ctx.global_state)
+            seen.append(ctx.state)
 
         lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory())
+        flow = Flow(lg, "top", factory=StubFactory()).call(check)
+        await flow.run(state=outer)
+
+        assert seen[0] is outer
+
+    async def test_dispatch_wraps_construction_state(self) -> None:
+        """``Flow.dispatch`` also wraps its state as a top-level :class:`State`."""
+        user_state = {"counter": 0}
+        seen: list[object] = []
+
+        @verb(role=ROLE_A)
+        async def check(ctx) -> None:
+            seen.append(ctx.state)
+
+        lg = make_test_logger()
+        flow = Flow(lg, "top", factory=StubFactory(), state=user_state)
         flow.register(check)
         await flow.dispatch("check")
 
-        assert seen == [{}]
+        assert isinstance(seen[0], State)
+        assert seen[0].data is user_state
+        assert seen[0].is_root is True
 
 
-class TestGlobalStateInheritance:
-    """Subflows inherit the outermost ``global_state`` container by identity."""
+# -----------------------------------------------------------------------------
+# ctx.state.root() — verbs reach run-wide payload from any depth
+# -----------------------------------------------------------------------------
 
-    async def test_subflow_inherits_container(self) -> None:
-        """The same object surfaces on ``ctx.global_state`` inside a subflow."""
-        captured: list[object] = []
+
+class TestStateNavigation:
+    """Subflows can reach the outermost :class:`State` via :meth:`State.root`."""
+
+    async def test_subflow_reaches_root_from_projection(self) -> None:
+        """A projected subflow's ``ctx.state.root().data`` is the outermost payload."""
+        captured: list[tuple[str, dict]] = []
 
         @verb(role=ROLE_A)
         async def top_verb(ctx) -> None:
-            captured.append(("top", ctx.global_state))
+            captured.append(("top", ctx.state.root().data))
 
         @verb(role=ROLE_B)
         async def inner_verb(ctx, _prev) -> None:
-            captured.append(("inner", ctx.global_state))
+            captured.append(("inner", ctx.state.root().data))
+
+        lg = make_test_logger()
+        inner = Flow(lg, "inner").call(inner_verb)
+        top = (
+            Flow(lg, "top", factory=StubFactory())
+            .call(top_verb)
+            .call(inner, state=lambda _p: {"scoped": True})
+        )
+
+        outer = {"budget": 500}
+        await top.run(state=outer)
+
+        assert captured[0] == ("top", outer)
+        assert captured[1] == ("inner", outer)
+        assert captured[0][1] is captured[1][1] is outer
+
+    async def test_subflow_without_projection_shares_root(self) -> None:
+        """Without a state= projection, the subflow's ``ctx.state`` IS the parent's."""
+        captured: list[State] = []
+
+        @verb(role=ROLE_A)
+        async def top_verb(ctx) -> None:
+            captured.append(ctx.state)
+
+        @verb(role=ROLE_B)
+        async def inner_verb(ctx, _prev) -> None:
+            captured.append(ctx.state)
 
         lg = make_test_logger()
         inner = Flow(lg, "inner").call(inner_verb)
         top = Flow(lg, "top", factory=StubFactory()).call(top_verb).call(inner)
 
         outer = {"budget": 500}
-        await top.run(global_state=outer)
+        await top.run(state=outer)
 
-        assert captured[0] == ("top", outer)
-        assert captured[1] == ("inner", outer)
-        assert captured[0][1] is captured[1][1] is outer
+        assert captured[0] is captured[1]
+        assert captured[0].is_root is True
 
-    async def test_branch_body_inherits(self) -> None:
-        """Branch bodies see the outermost ``global_state``."""
-        seen: list[object] = []
+    async def test_branch_body_reaches_root(self) -> None:
+        """Branch bodies see the outermost payload via ``.root().data``."""
+        seen: list[dict] = []
 
         @verb(role=ROLE_A)
         async def hit(ctx, _prev) -> str:
-            seen.append(ctx.global_state)
+            seen.append(ctx.state.root().data)
             return "ok"
 
         lg = make_test_logger()
@@ -156,61 +208,79 @@ class TestGlobalStateInheritance:
         )
 
         outer = {"key": "value"}
-        await top.run("input", global_state=outer)
+        await top.run("input", state=outer)
 
         assert seen == [outer]
 
-    async def test_loop_body_inherits(self) -> None:
-        """Loop iterations see the outermost ``global_state``."""
-        seen: list[object] = []
+    async def test_loop_iterations_reach_root(self) -> None:
+        """Loop iterations under state= projection still see the outermost via .root()."""
+        seen: list[dict] = []
 
         @verb(role=ROLE_A)
         async def hit(ctx, _prev) -> str:
-            seen.append(ctx.global_state)
+            seen.append(ctx.state.root().data)
             return "ok"
 
         lg = make_test_logger()
-        top = Flow(lg, "top", factory=StubFactory()).loop(lambda f: f.call(hit), max_iters=3)
+        top = Flow(lg, "top", factory=StubFactory()).loop(
+            lambda f: f.call(hit), max_iters=3, state=lambda _p: {}
+        )
 
         outer = {"key": "value"}
-        await top.run("input", global_state=outer)
+        await top.run("input", state=outer)
 
         assert len(seen) == 3
         assert all(s is outer for s in seen)
 
-    async def test_map_body_inherits(self) -> None:
-        """Every map item sees the outermost ``global_state``."""
-        seen: list[object] = []
+    async def test_map_items_reach_root(self) -> None:
+        """Every map item sees the outermost payload via .root()."""
+        seen: list[dict] = []
 
         @verb(role=ROLE_A)
-        async def hit(ctx, item) -> str:
-            seen.append(ctx.global_state)
+        async def hit(ctx, item) -> int:
+            seen.append(ctx.state.root().data)
             return item
 
         lg = make_test_logger()
-        top = Flow(lg, "top", factory=StubFactory()).map(lambda f: f.call(hit))
+        top = Flow(lg, "top", factory=StubFactory()).map(lambda f: f.call(hit), state=lambda _p: {})
 
         outer = {"key": "value"}
-        await top.run([1, 2, 3], global_state=outer)
+        await top.run([1, 2, 3], state=outer)
 
         assert len(seen) == 3
         assert all(s is outer for s in seen)
 
+    async def test_root_of_root_is_self(self) -> None:
+        """At the outermost scope, ``root()`` returns the same object."""
+        captured: list[State] = []
+
+        @verb(role=ROLE_A)
+        async def check(ctx) -> None:
+            captured.append(ctx.state)
+
+        lg = make_test_logger()
+        flow = Flow(lg, "top", factory=StubFactory()).call(check)
+        await flow.run()
+
+        s = captured[0]
+        assert s.root() is s
+        assert s.is_root is True
+
 
 # -----------------------------------------------------------------------------
-# ctx.state — shared-by-default, opt-in projection
+# Scoped state — shared-by-default, opt-in projection
 # -----------------------------------------------------------------------------
 
 
 class TestScopedStateSharing:
-    """``ctx.state`` shares the parent reference into a subflow by default."""
+    """Without ``state=``, the subflow shares the parent's :class:`State` by reference."""
 
     async def test_subflow_mutations_visible_in_parent(self) -> None:
-        """No projection → parent and subflow reference the same object."""
+        """No projection → parent and subflow reference the same payload."""
 
         @verb(role=ROLE_A)
         async def inner_verb(ctx) -> str:
-            ctx.state["from_inner"] = True
+            ctx.state.data["from_inner"] = True
             return "ok"
 
         lg = make_test_logger()
@@ -223,11 +293,11 @@ class TestScopedStateSharing:
         assert parent_state["from_inner"] is True
 
     async def test_loop_default_shares_state(self) -> None:
-        """Loop body without ``state=`` mutates the parent's state directly."""
+        """Loop body without ``state=`` mutates the parent's payload directly."""
 
         @verb(role=ROLE_A)
         async def bump(ctx, prev) -> int:
-            ctx.state["count"] = ctx.state.get("count", 0) + 1
+            ctx.state.data["count"] = ctx.state.data.get("count", 0) + 1
             return prev
 
         lg = make_test_logger()
@@ -245,11 +315,11 @@ class TestScopedStateProjection:
     """``state=`` on ``.call``/``.loop``/``.map`` isolates the child from the parent."""
 
     async def test_call_state_isolates_subflow(self) -> None:
-        """A projected child state does not leak into the parent."""
+        """A projected child payload does not leak into the parent."""
 
         @verb(role=ROLE_A)
         async def inner_verb(ctx) -> str:
-            ctx.state["only_child"] = True
+            ctx.state.data["only_child"] = True
             return "ok"
 
         lg = make_test_logger()
@@ -268,7 +338,7 @@ class TestScopedStateProjection:
 
         @verb(role=ROLE_A)
         async def inner_verb(ctx) -> str:
-            ctx.state["scratch"] = 7
+            ctx.state.data["scratch"] = 7
             return "ok"
 
         def merge(parent: dict, child: dict) -> None:
@@ -290,7 +360,7 @@ class TestScopedStateProjection:
 
         @verb(role=ROLE_A)
         async def inner_verb(ctx) -> str:
-            ctx.state["scratch"] = 7
+            ctx.state.data["scratch"] = 7
             raise RuntimeError("boom")
 
         merged: list[bool] = []
@@ -312,8 +382,8 @@ class TestScopedStateProjection:
         assert merged == []
         assert parent_state == {}
 
-    async def test_call_projection_receives_parent_state(self) -> None:
-        """``state(parent)`` sees the parent's active state at build time."""
+    async def test_call_projection_receives_parent_payload(self) -> None:
+        """``state(parent_payload)`` sees the parent's active payload (unwrapped)."""
         received: list[object] = []
 
         @verb(role=ROLE_A)
@@ -334,13 +404,13 @@ class TestScopedStateProjection:
         assert received == [parent_state]
 
     async def test_loop_state_projected_once_persists_across_iters(self) -> None:
-        """``.loop(state=)`` projects once — iterations share the child state."""
+        """``.loop(state=)`` projects once — iterations share the child payload."""
         snapshots: list[dict] = []
 
         @verb(role=ROLE_A)
         async def bump(ctx, prev) -> int:
-            ctx.state["count"] = ctx.state.get("count", 0) + 1
-            snapshots.append(dict(ctx.state))
+            ctx.state.data["count"] = ctx.state.data.get("count", 0) + 1
+            snapshots.append(dict(ctx.state.data))
             return prev
 
         def merge(parent: dict, child: dict) -> None:
@@ -366,8 +436,8 @@ class TestScopedStateProjection:
 
         @verb(role=ROLE_A)
         async def bump(ctx, prev) -> int:
-            ctx.state["count"] = ctx.state.get("count", 0) + 1
-            if ctx.state["count"] == 2:
+            ctx.state.data["count"] = ctx.state.data.get("count", 0) + 1
+            if ctx.state.data["count"] == 2:
                 raise RuntimeError("boom")
             return prev
 
@@ -389,20 +459,20 @@ class TestScopedStateProjection:
         assert merged == []
 
     async def test_loop_until_sees_projected_child_state(self) -> None:
-        """``until`` predicate sees the projected child state, not the parent."""
+        """``until`` predicate sees the projected child payload, not the parent."""
         counts: list[int] = []
 
         @verb(role=ROLE_A)
         async def bump(ctx, prev) -> int:
-            ctx.state["count"] = ctx.state.get("count", 0) + 1
-            counts.append(ctx.state["count"])
+            ctx.state.data["count"] = ctx.state.data.get("count", 0) + 1
+            counts.append(ctx.state.data["count"])
             return prev
 
         lg = make_test_logger()
         parent_state: dict = {"count": 999}
         top = Flow(lg, "top", factory=StubFactory(), state=parent_state).loop(
             lambda f: f.call(bump),
-            until=lambda ctx: ctx.state.get("count", 0) >= 3,
+            until=lambda ctx: ctx.state.data.get("count", 0) >= 3,
             state=lambda _parent: {},
         )
 
@@ -412,14 +482,14 @@ class TestScopedStateProjection:
         assert parent_state == {"count": 999}
 
     async def test_map_state_projected_per_item(self) -> None:
-        """``.map(state=)`` builds an isolated state per item — no cross-contamination."""
+        """``.map(state=)`` builds an isolated payload per item — no cross-contamination."""
         seen: list[tuple[int, dict]] = []
 
         @verb(role=ROLE_A)
         async def record(ctx, item) -> int:
-            ctx.state["item"] = item
+            ctx.state.data["item"] = item
             await asyncio.sleep(0)
-            seen.append((item, dict(ctx.state)))
+            seen.append((item, dict(ctx.state.data)))
             return item
 
         lg = make_test_logger()
@@ -440,7 +510,7 @@ class TestScopedStateProjection:
 
         @verb(role=ROLE_A)
         async def maybe_fail(ctx, item) -> int:
-            ctx.state["item"] = item
+            ctx.state.data["item"] = item
             if item == 2:
                 raise RuntimeError(f"bad {item}")
             return item
@@ -469,11 +539,11 @@ class TestStateProjectionAsync:
     """Async state/merge callables are awaited transparently."""
 
     async def test_async_state_and_merge(self) -> None:
-        """Both projection and merge accept coroutines."""
+        """Both projection and merge accept coroutines returning payloads."""
 
         @verb(role=ROLE_A)
         async def inner_verb(ctx) -> str:
-            ctx.state["hit"] = True
+            ctx.state.data["hit"] = True
             return "ok"
 
         async def async_state(_parent: dict) -> dict:

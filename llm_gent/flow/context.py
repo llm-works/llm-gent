@@ -5,12 +5,12 @@ as the first argument to every verb. It exposes:
 
 - ``saia`` — the role-bound saia instance for this dispatch
 - ``role`` — the :class:`Role` under which this verb is running
-- ``state`` — the enclosing subflow's scoped state (user-owned; opaque to the flow)
-- ``global_state`` — the run-wide state provided at the outermost :meth:`Flow.run`
+- ``state`` — the enclosing scope's :class:`State` wrapper (user-owned payload
+  reached via ``ctx.state.data``; run-wide payload via ``ctx.state.root().data``)
 - ``flow`` — back-reference to the dispatching flow (enables inner verb calls
   from composition helpers like :class:`Panel`)
 
-Verbs read from this and (typically) mutate ``state`` in place.
+Verbs read from this and (typically) mutate ``state.data`` in place.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .role import Role
+from .state import State
 
 
 @dataclass(frozen=True)
@@ -46,22 +47,14 @@ class Context:
     layer, above any single role. Verb-level contexts always carry a role.
     """
 
-    state: Any
-    """The enclosing subflow's scoped state (user-owned; the flow does not inspect it).
+    state: State
+    """The enclosing scope's :class:`State` wrapper.
 
-    Shared with the parent flow by reference by default; the ``state=`` /
-    ``merge=`` kwargs on :meth:`Flow.call`, :meth:`Flow.loop`, and
-    :meth:`Flow.map` opt into an isolated child state for the subflow they
-    contain.
-    """
-
-    global_state: Any
-    """The run-wide state supplied at the outermost :meth:`Flow.run` invocation.
-
-    Every node in the composition tree — including subflows, loop iterations,
-    and map items — sees the same container. Defaults to an empty ``dict``
-    when the caller does not supply one, so verbs guard on the KEY they need
-    (``ctx.global_state.get("budget")``) rather than on the container.
+    ``ctx.state.data`` is the scope's payload (user-owned; the flow does not
+    inspect it). Shared with the parent by reference by default; the
+    ``state=`` / ``merge=`` kwargs on :meth:`Flow.call`, :meth:`Flow.loop`,
+    and :meth:`Flow.map` project an isolated child payload for the subflow
+    they contain. Verbs reach run-wide state via ``ctx.state.root().data``.
     """
 
     flow: Any

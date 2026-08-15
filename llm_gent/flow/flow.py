@@ -21,15 +21,18 @@ registry never needs to call the fluent methods; a subflow that only exists
 to structure composition never needs a factory of its own — it borrows from
 the runtime it is executed under.
 
-Two state channels are exposed on every :class:`Context`:
+State is exposed on every :class:`Context` as a single :class:`State`
+wrapper:
 
-- ``ctx.state`` is scoped to the enclosing subflow and shared with the
-  parent by reference. The ``state=`` / ``merge=`` kwargs on
+- ``ctx.state.data`` is the enclosing scope's payload — shared with the
+  parent by reference by default. The ``state=`` / ``merge=`` kwargs on
   :meth:`Flow.call`, :meth:`Flow.loop`, and :meth:`Flow.map` project an
-  isolated child state for the block they contain and (optionally) merge it
+  isolated child payload for the block they contain and (optionally) merge it
   back when the block completes successfully.
-- ``ctx.global_state`` is run-wide, provided at the outermost :meth:`run`
-  invocation (default: fresh empty ``dict``) and inherited by every subflow.
+- ``ctx.state.root().data`` is the run-wide payload — the outermost
+  :meth:`run` invocation's ``state=`` argument (default: fresh empty
+  ``dict``). Every node in the tree reaches it via the same call regardless
+  of nesting depth or per-scope projection.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from appinfra.log import Logger
 from .context import Context
 from .factory import SAIAFactory
 from .role import Role
+from .state import State
 
 
 RescuePolicy = Callable[[BaseException, Context], Any]
@@ -108,16 +112,14 @@ class Failure:
 class _RunEnv:
     """Per-run environment threaded through the execution helpers.
 
-    Bundles the runtime flow (factory + saia cache + logger source), the
-    currently active scoped state, and the run-wide global state so helpers
-    do not each need to carry the three as separate positional arguments.
-    ``lg`` is cached off ``runtime`` at the top of :meth:`Flow.run` for
-    brevity in the debug/warning call sites.
+    Bundles the runtime flow (factory + saia cache + logger source) and the
+    currently active :class:`State` so helpers do not each need to carry
+    them as separate positional arguments. ``lg`` is cached off ``runtime``
+    at the top of :meth:`Flow.run` for brevity in the debug/warning call sites.
     """
 
     runtime: Flow
-    state: Any
-    global_state: Any
+    state: State
     lg: Logger
 
 
@@ -258,20 +260,21 @@ class Flow:
         followed by ``*args`` / ``**kwargs`` from the caller. ``dispatch`` is
         the low-level entrypoint used by :class:`Panel` and by verbs that
         invoke sibling verbs directly; the ctx here is not built by a
-        composition run, so ``ctx.global_state`` is a fresh empty ``dict``.
-        Verbs that need a live run-wide container must be reached via
-        :meth:`run` rather than dispatched ad hoc.
+        composition run, so ``ctx.state`` wraps this flow's construction
+        state (defaulting to a fresh empty ``dict`` when none was supplied).
+        Verbs that need a live run-wide payload from a :meth:`run` invocation
+        must be reached via :meth:`run` rather than dispatched ad hoc.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
         self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
         saia = self._saia_for(verb.role)
+        payload = self._state if self._state is not None else {}
         ctx = Context(
             saia=saia,
             role=verb.role,
-            state=self._state,
-            global_state={},
+            state=payload if isinstance(payload, State) else State(data=payload),
             flow=self,
         )
         return await verb(ctx, *args, **kwargs)
@@ -569,9 +572,7 @@ class Flow:
         self,
         *args: Any,
         state: Any = _UNSET,
-        global_state: Any = _UNSET,
         _runtime: Flow | None = None,
-        _global_state: Any = _UNSET,
         **kwargs: Any,
     ) -> Any:
         """Execute the composition graph.
@@ -586,30 +587,23 @@ class Flow:
 
         Args:
             *args: Positional inputs to the first node.
-            state: If provided, overrides ``self.state`` for this run and is
-                exposed as ``ctx.state`` to every verb. Omitted → the flow's
-                default state is used. A subflow running inside a parent
-                chain always receives whatever state the containing node's
-                ``state=`` projection produced (or, when no projection is
-                set, the parent's active state by reference).
-            global_state: Run-wide state exposed as ``ctx.global_state`` on
-                every node in the tree. Defaults to a fresh empty ``dict`` at
-                the top level so verbs guard on the KEY they need
-                (``ctx.global_state.get("budget")``) rather than on the
-                container. Explicitly passing another value (dict, dataclass,
-                Pydantic model, arbitrary object) overrides the default.
-                Subflows inherit the top-level container automatically — the
-                kwarg on a subflow's :meth:`run` only takes effect when it is
-                invoked as its own top-level run.
+            state: The payload to expose on ``ctx.state`` for this run. At
+                the top level, framework wraps it as :class:`State`
+                (``ctx.state.data`` reaches the payload; ``ctx.state.root()``
+                reaches the outermost scope from any subflow). Omitted → the
+                flow's construction ``state`` is used, else a fresh empty
+                ``dict``. Explicitly passing ``None`` is honored (the payload
+                becomes ``None`` and verbs must guard). A subflow running
+                inside a parent chain always receives whatever :class:`State`
+                the containing node produced (either the parent's :class:`State`
+                by reference, or a new child :class:`State` projected via
+                ``state=`` on the enclosing ``.call`` / ``.loop`` / ``.map``).
             _runtime: Internal — used when this flow runs as a subflow to
                 share the outer flow's factory and saia cache. Not part of
                 the public surface.
-            _global_state: Internal — used to propagate the outermost
-                ``global_state`` container down into subflows without each
-                nested :meth:`run` re-defaulting to a fresh dict.
-            **kwargs: Keyword inputs to the first node. The names ``state``,
-                ``global_state``, ``_runtime``, and ``_global_state`` are
-                bound parameters — they are not forwarded to the first node.
+            **kwargs: Keyword inputs to the first node. The names ``state``
+                and ``_runtime`` are bound parameters — they are not
+                forwarded to the first node.
 
         Raises:
             RuntimeError: The flow has no nodes, or is running as a
@@ -617,7 +611,7 @@ class Flow:
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        env = self._build_run_env(state, global_state, _runtime, _global_state)
+        env = self._build_run_env(state, _runtime)
         label = self._name or "<anonymous>"
         is_subflow = _runtime is not None
         env.lg.debug(
@@ -632,18 +626,14 @@ class Flow:
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
-    def _build_run_env(
-        self,
-        state: Any,
-        global_state: Any,
-        _runtime: Flow | None,
-        _global_state: Any,
-    ) -> _RunEnv:
-        """Resolve the effective runtime, scoped state, and global state for a run.
+    def _build_run_env(self, state: Any, _runtime: Flow | None) -> _RunEnv:
+        """Resolve the effective runtime and active :class:`State` for a run.
 
-        Encapsulates the subflow-vs-top-level defaults so :meth:`run` stays a
-        thin driver over the node loop. Raises when the resolved runtime has
-        no factory — a top-level flow must supply one at construction.
+        Top-level runs wrap the resolved payload as :class:`State`; subflow
+        runs receive an already-wrapped :class:`State` from the parent's
+        ``_run_*`` helper and thread it through unchanged. Raises when the
+        resolved runtime has no factory — a top-level flow must supply one
+        at construction.
         """
         runtime = _runtime if _runtime is not None else self
         if runtime._factory is None:
@@ -652,15 +642,13 @@ class Flow:
                 f"Flow {label!r} has no SAIAFactory — provide factory=... "
                 "when constructing the top-level Flow"
             )
-        active_state = self._state if state is _UNSET else state
         is_subflow = _runtime is not None
-        if is_subflow and global_state is _UNSET:
-            active_global = {} if _global_state is _UNSET else _global_state
+        if is_subflow:
+            active_state = state
         else:
-            active_global = {} if global_state is _UNSET else global_state
-        return _RunEnv(
-            runtime=runtime, state=active_state, global_state=active_global, lg=runtime._lg
-        )
+            payload = (self._state if self._state is not None else {}) if state is _UNSET else state
+            active_state = payload if isinstance(payload, State) else State(data=payload)
+        return _RunEnv(runtime=runtime, state=active_state, lg=runtime._lg)
 
     # -------------------------------------------------------------------------
     # Internals
@@ -723,21 +711,9 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context:
     verb builds its own role-bound ctx as it runs.
     """
     if isinstance(target, Flow | _Branch | _Loop | _Map):
-        return Context(
-            saia=None,
-            role=None,
-            state=env.state,
-            global_state=env.global_state,
-            flow=env.runtime,
-        )
+        return Context(saia=None, role=None, state=env.state, flow=env.runtime)
     saia = env.runtime._saia_for(target.role)
-    return Context(
-        saia=saia,
-        role=target.role,
-        state=env.state,
-        global_state=env.global_state,
-        flow=env.runtime,
-    )
+    return Context(saia=saia, role=target.role, state=env.state, flow=env.runtime)
 
 
 async def _execute_node(
@@ -809,39 +785,48 @@ async def _run_subflow(
         *node_args,
         state=child_state,
         _runtime=env.runtime,
-        _global_state=env.global_state,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
     return result
 
 
-async def _project_state(state_fn: StateProject | None, parent_state: Any) -> Any:
-    """Build the child state for a scoped block; pass-through when unset."""
+async def _project_state(state_fn: StateProject | None, parent: State) -> State:
+    """Build the child :class:`State` for a scoped block; pass-through when unset.
+
+    With no projection, the subflow sees the parent's :class:`State` object
+    directly — same reference, shared payload, ``is_root`` echoes the parent.
+    With a projection, ``state_fn(parent.data)`` produces the child payload,
+    which the framework wraps as ``State(data=child_payload, _parent=parent)``
+    so the child's :meth:`State.root` still walks back to the outermost scope.
+    """
     if state_fn is None:
-        return parent_state
-    child = state_fn(parent_state)
-    if inspect.isawaitable(child):
-        child = await child
-    return child
+        return parent
+    child_payload = state_fn(parent.data)
+    if inspect.isawaitable(child_payload):
+        child_payload = await child_payload
+    return State(data=child_payload, _parent=parent)
 
 
-async def _merge_state(merge_fn: StateMerge | None, parent_state: Any, child_state: Any) -> None:
-    """Fold the child state back into the parent; no-op when unset."""
+async def _merge_state(merge_fn: StateMerge | None, parent: State, child: State) -> None:
+    """Fold the child payload back into the parent's; no-op when unset.
+
+    The merge callback receives the two payloads (``parent.data``,
+    ``child.data``); the :class:`State` wrappers are unwrapped for the user
+    so signatures match the pre-unification shape.
+    """
     if merge_fn is None:
         return
-    result = merge_fn(parent_state, child_state)
+    result = merge_fn(parent.data, child.data)
     if inspect.isawaitable(result):
         await result
 
 
-async def _check_until(until_fn: UntilFn | None, child_state: Any, env: _RunEnv) -> bool:
+async def _check_until(until_fn: UntilFn | None, loop_state: State, env: _RunEnv) -> bool:
     """Evaluate the loop's until predicate with a ctx bound to the loop's scoped state."""
     if until_fn is None:
         return False
-    ctx = Context(
-        saia=None, role=None, state=child_state, global_state=env.global_state, flow=env.runtime
-    )
+    ctx = Context(saia=None, role=None, state=loop_state, flow=env.runtime)
     verdict = until_fn(ctx)
     if inspect.isawaitable(verdict):
         verdict = await verdict
@@ -868,12 +853,7 @@ async def _run_branch(
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
         return prev_result
-    return await chosen.run(
-        prev_result,
-        state=env.state,
-        _runtime=env.runtime,
-        _global_state=env.global_state,
-    )
+    return await chosen.run(prev_result, state=env.state, _runtime=env.runtime)
 
 
 async def _run_loop(
@@ -899,12 +879,7 @@ async def _run_loop(
             break
         if lp.deadline is not None and time.monotonic() - started >= lp.deadline:
             break
-        result = await lp.body.run(
-            result,
-            state=child_state,
-            _runtime=env.runtime,
-            _global_state=env.global_state,
-        )
+        result = await lp.body.run(result, state=child_state, _runtime=env.runtime)
         iteration += 1
         if await _check_until(lp.until, child_state, env):
             break
@@ -955,12 +930,7 @@ async def _run_map_item_strict(
 ) -> Any:
     """Run one strict-mode map item; merge fires only when the body succeeds."""
     child_state = await _project_state(state_fn, env.state)
-    result = await body.run(
-        item,
-        state=child_state,
-        _runtime=env.runtime,
-        _global_state=env.global_state,
-    )
+    result = await body.run(item, state=child_state, _runtime=env.runtime)
     await _merge_state(merge_fn, env.state, child_state)
     return result
 
@@ -979,12 +949,7 @@ async def _run_map_item(
     """
     child_state = await _project_state(state_fn, env.state)
     try:
-        result = await body.run(
-            item,
-            state=child_state,
-            _runtime=env.runtime,
-            _global_state=env.global_state,
-        )
+        result = await body.run(item, state=child_state, _runtime=env.runtime)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

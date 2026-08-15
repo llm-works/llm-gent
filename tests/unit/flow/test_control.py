@@ -103,7 +103,7 @@ class TestBranchExecution:
         def when(prev: Any, ctx: Context) -> bool:
             """Record inputs and choose the true arm."""
             seen["prev"] = prev
-            seen["state"] = ctx.state
+            seen["state"] = ctx.state.data
             seen["role"] = ctx.role
             return True
 
@@ -260,12 +260,12 @@ class TestLoopExecution:
         @verb(role=ROLE_A)
         async def push(ctx: Context, item: int) -> int:
             """Append to the state list, return the input."""
-            ctx.state["items"].append(item)
+            ctx.state.data["items"].append(item)
             return item + 1
 
         def until(ctx: Context) -> bool:
             """Stop after 3 items."""
-            return len(ctx.state["items"]) >= 3
+            return len(ctx.state.data["items"]) >= 3
 
         flow = Flow(make_test_logger(), factory=StubFactory(), state={"items": []})
         flow.call(_identity).loop(lambda f: f.call(push), until=until, max_iters=10)
@@ -374,7 +374,7 @@ class TestMapExecution:
         def items(prev: Any, ctx: Context) -> list[int]:
             """Record inputs and produce the item list."""
             seen["prev"] = prev
-            seen["state"] = ctx.state
+            seen["state"] = ctx.state.data
             return list(range(prev))
 
         flow = Flow(make_test_logger(), factory=StubFactory(), state={"tag": "s"})
