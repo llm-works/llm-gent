@@ -246,16 +246,21 @@ async def _run_map(
     """
     prev_result = node_args[0] if node_args else None
     items = await _resolve_items(mp.items, prev_result, ctx)
+    merge_lock = asyncio.Lock()
     if mp.strict:
         coros = [
-            _run_map_item_strict(mp.body, item, env, mp.state_fn, mp.merge_fn) for item in items
+            _run_map_item_strict(mp.body, item, env, mp.state_fn, mp.merge_fn, merge_lock)
+            for item in items
         ]
         results = list(await asyncio.gather(*coros, return_exceptions=True))
         for r in results:
             if isinstance(r, BaseException):
                 raise r
     else:
-        coros = [_run_map_item(mp.body, item, env, mp.state_fn, mp.merge_fn) for item in items]
+        coros = [
+            _run_map_item(mp.body, item, env, mp.state_fn, mp.merge_fn, merge_lock)
+            for item in items
+        ]
         results = list(await asyncio.gather(*coros))
     result = mp.aggregate(results) if mp.aggregate is not None else results
     if inspect.isawaitable(result):
@@ -269,11 +274,13 @@ async def _run_map_item_strict(
     env: _RunEnv,
     state_fn: StateProject | None,
     merge_fn: StateMerge | None,
+    merge_lock: asyncio.Lock,
 ) -> Any:
     """Run one strict-mode map item; merge fires only when the body succeeds."""
     child_state = await _project_state(state_fn, env.state)
     result = await body.run(item, state=child_state, _runtime=env.runtime)
-    await _merge_state(merge_fn, env.state, child_state)
+    async with merge_lock:
+        await _merge_state(merge_fn, env.state, child_state)
     return result
 
 
@@ -283,6 +290,7 @@ async def _run_map_item(
     env: _RunEnv,
     state_fn: StateProject | None,
     merge_fn: StateMerge | None,
+    merge_lock: asyncio.Lock,
 ) -> Any:
     """Run one non-strict map item; wrap non-cancellation exceptions as :class:`Failure`.
 
@@ -296,7 +304,8 @@ async def _run_map_item(
         raise
     except Exception as exc:
         return Failure(exception=exc, item=item)
-    await _merge_state(merge_fn, env.state, child_state)
+    async with merge_lock:
+        await _merge_state(merge_fn, env.state, child_state)
     return result
 
 
