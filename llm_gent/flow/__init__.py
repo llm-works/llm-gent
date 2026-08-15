@@ -6,7 +6,8 @@ Public surface:
 - :class:`SAIAFactory` — protocol that turns a Role into a saia instance
 - :func:`verb` — decorator marking an async function as a role-bound verb
 - :class:`Context` — runtime environment injected into every verb
-- :class:`Flow` — verb registry + role-routed dispatch
+- :class:`Flow` — verb registry + role-routed dispatch + fluent composition
+- :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
 - :class:`Panel` — fan-out N verbs in parallel + aggregate their results
 - Archetype decorators: :func:`planner`, :func:`extractor`, :func:`grader`,
   :func:`synthesizer` — semantic tags for the standard agent shape
@@ -22,7 +23,7 @@ mount them via the existing trait system.
 from .archetypes import extractor, grader, planner, synthesizer
 from .context import Context
 from .factory import SAIAFactory
-from .flow import Flow
+from .flow import Failure, Flow
 from .panel import Panel
 from .role import Role
 from .verb import verb
@@ -30,6 +31,7 @@ from .verb import verb
 
 __all__ = [
     "Context",
+    "Failure",
     "Flow",
     "Panel",
     "Role",
