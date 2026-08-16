@@ -288,7 +288,7 @@ class Flow:
 
         The policy runs when the node raises anything other than
         :class:`asyncio.CancelledError` (cancellation is never rescued).
-        Signature: ``(exception, ctx) -> fallback`` — may be async.
+        Signature: ``(exception, pending_input, ctx) -> fallback`` — may be async.
         """
         if not self._nodes:
             raise RuntimeError(".rescue() requires a preceding .call()/.then() step")

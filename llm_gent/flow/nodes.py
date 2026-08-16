@@ -66,7 +66,7 @@ Surfaces in two places on the public API:
 """
 
 
-RescuePolicy = Callable[[BaseException, "Any | Unset", Context], Any]
+RescuePolicy = Callable[[BaseException, Any, Context], Any]
 """Failure hook: ``(exception, pending_input, ctx) -> fallback``. May be async.
 
 ``pending_input`` is the value that would have been passed into the failing
