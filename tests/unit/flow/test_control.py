@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Failure, Flow, verb
+from llm_gent.flow import Context, Failure, verb
 
-from .conftest import ROLE_A, StubFactory, make_test_logger
+from .conftest import ROLE_A, StubFactory, make_ff
 
 
 # -----------------------------------------------------------------------------
@@ -45,13 +45,13 @@ class TestBranchBuild:
 
     def test_rejects_non_flow_non_callable_then(self) -> None:
         """A ``then`` that is neither Flow nor callable is a build-time TypeError."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         with pytest.raises(TypeError, match="branch.then"):
             flow.branch(when=lambda _p, _c: True, then=42)
 
     def test_rejects_non_flow_non_callable_else(self) -> None:
         """A non-Flow non-callable ``else_`` fails at build time too."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         with pytest.raises(TypeError, match="branch.else"):
             flow.branch(
                 when=lambda _p, _c: True,
@@ -66,7 +66,7 @@ class TestBranchExecution:
     @pytest.mark.asyncio
     async def test_true_runs_then_arm(self) -> None:
         """Truthy predicate → the ``then`` subflow runs."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).branch(
             when=lambda prev, _ctx: prev > 0,
             then=lambda f: f.call(_double),
@@ -77,7 +77,7 @@ class TestBranchExecution:
     @pytest.mark.asyncio
     async def test_false_runs_else_arm(self) -> None:
         """Falsy predicate → the ``else_`` subflow runs."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).branch(
             when=lambda prev, _ctx: prev > 0,
             then=lambda f: f.call(_double),
@@ -88,7 +88,7 @@ class TestBranchExecution:
     @pytest.mark.asyncio
     async def test_false_without_else_passes_prev_through(self) -> None:
         """No ``else_`` and falsy predicate → prev result flows unchanged."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).branch(
             when=lambda _p, _c: False,
             then=lambda f: f.call(_double),
@@ -107,7 +107,7 @@ class TestBranchExecution:
             seen["role"] = ctx.role
             return True
 
-        flow = Flow(make_test_logger(), factory=StubFactory(), state={"k": "v"})
+        flow = make_ff().create(state={"k": "v"})
         flow.call(_identity).branch(when=when, then=lambda f: f.call(_double))
         await flow.run(4)
         assert seen == {"prev": 4, "state": {"k": "v"}, "role": None}
@@ -121,15 +121,15 @@ class TestBranchExecution:
             await asyncio.sleep(0)
             return prev > 0
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).branch(when=when, then=lambda f: f.call(_double))
         assert await flow.run(3) == 6
 
     @pytest.mark.asyncio
     async def test_named_flow_as_then(self) -> None:
         """A pre-built Flow works as ``then`` interchangeably with a callback."""
-        then_flow = Flow(make_test_logger(), "double").call(_double)
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        then_flow = make_ff().create("double").call(_double)
+        flow = make_ff().create()
         flow.call(_identity).branch(when=lambda _p, _c: True, then=then_flow)
         assert await flow.run(6) == 12
 
@@ -142,11 +142,11 @@ class TestBranchExecution:
             """Always raise."""
             raise ValueError("arm-failed")
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).branch(
             when=lambda _p, _c: True,
             then=lambda f: f.call(boom),
-            rescue=lambda exc, _c: f"rescued:{exc}",
+            rescue=lambda exc, _prev, _c: f"rescued:{exc}",
         )
         assert await flow.run(0) == "rescued:arm-failed"
 
@@ -161,13 +161,13 @@ class TestBranchExecution:
 
         rescued = False
 
-        def rescue(exc: BaseException, _ctx: Context) -> str:
+        def rescue(exc: BaseException, _prev: Any, _ctx: Context) -> str:
             """Should never fire."""
             nonlocal rescued
             rescued = True
             return "should-not-see"
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).branch(
             when=lambda _p, _c: True,
             then=lambda f: f.call(cancel_me),
@@ -188,19 +188,19 @@ class TestLoopBuild:
 
     def test_requires_until_or_max_iters(self) -> None:
         """Without ``until`` and without ``max_iters`` termination is not guaranteed."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         with pytest.raises(ValueError, match="until= or max_iters"):
             flow.loop(lambda f: f.call(_double))
 
     def test_max_iters_must_be_positive(self) -> None:
         """``max_iters`` of 0 or negative is a build error."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         with pytest.raises(ValueError, match="max_iters"):
             flow.loop(lambda f: f.call(_double), max_iters=0)
 
     def test_deadline_must_be_positive(self) -> None:
         """``deadline`` of 0 or negative is a build error."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         with pytest.raises(ValueError, match="deadline"):
             flow.loop(lambda f: f.call(_double), max_iters=3, deadline=0)
 
@@ -211,14 +211,14 @@ class TestLoopExecution:
     @pytest.mark.asyncio
     async def test_max_iters_bounds_iteration(self) -> None:
         """With only ``max_iters``, the loop runs exactly N iterations."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).loop(lambda f: f.call(_double), max_iters=3)
         assert await flow.run(1) == 8  # 1→2→4→8
 
     @pytest.mark.asyncio
     async def test_result_is_last_iteration(self) -> None:
         """The loop's output is the last iteration's return value."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).loop(lambda f: f.call(_plus_one), max_iters=5)
         assert await flow.run(0) == 5
 
@@ -237,7 +237,7 @@ class TestLoopExecution:
             """Stop when counter has reached 3."""
             return counter["n"] >= 3
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).loop(lambda f: f.call(tick), until=until, max_iters=10)
         assert await flow.run(None) == 3
         assert counter["n"] == 3
@@ -245,7 +245,7 @@ class TestLoopExecution:
     @pytest.mark.asyncio
     async def test_until_never_true_hits_max_iters(self) -> None:
         """``max_iters`` is a hard cap even if ``until`` never fires."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).loop(
             lambda f: f.call(_plus_one),
             until=lambda _c: False,
@@ -267,7 +267,7 @@ class TestLoopExecution:
             """Stop after 3 items."""
             return len(ctx.state.data["items"]) >= 3
 
-        flow = Flow(make_test_logger(), factory=StubFactory(), state={"items": []})
+        flow = make_ff().create(state={"items": []})
         flow.call(_identity).loop(lambda f: f.call(push), until=until, max_iters=10)
         state: dict[str, Any] = {"items": []}
         await flow.run(0, state=state)
@@ -289,15 +289,15 @@ class TestLoopExecution:
             await asyncio.sleep(0)
             return counter["n"] >= 2
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).loop(lambda f: f.call(tick), until=until, max_iters=10)
         assert await flow.run(None) == 2
 
     @pytest.mark.asyncio
     async def test_named_flow_as_body(self) -> None:
         """A pre-built Flow works as the loop body."""
-        body = Flow(make_test_logger(), "step").call(_plus_one)
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        body = make_ff().create("step").call(_plus_one)
+        flow = make_ff().create()
         flow.call(_identity).loop(body, max_iters=3)
         assert await flow.run(10) == 13
 
@@ -311,7 +311,7 @@ class TestLoopExecution:
             await asyncio.sleep(0.05)
             return x + 1
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).loop(lambda f: f.call(slow), max_iters=100, deadline=0.06)
         result = await flow.run(0)
         # ~1-2 iterations should fit in 60ms; must not run all 100.
@@ -328,13 +328,13 @@ class TestLoopExecution:
 
         rescued = False
 
-        def rescue(exc: BaseException, _c: Context) -> str:
+        def rescue(exc: BaseException, _prev: Any, _c: Context) -> str:
             """Should never fire."""
             nonlocal rescued
             rescued = True
             return "swallowed"
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).loop(
             lambda f: f.call(cancel_me),
             max_iters=3,
@@ -362,7 +362,7 @@ class TestMapExecution:
             """Produce a list of ints."""
             return [1, 2, 3]
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(make_list).map(lambda f: f.call(_double))
         assert await flow.run() == [2, 4, 6]
 
@@ -377,7 +377,7 @@ class TestMapExecution:
             seen["state"] = ctx.state.data
             return list(range(prev))
 
-        flow = Flow(make_test_logger(), factory=StubFactory(), state={"tag": "s"})
+        flow = make_ff().create(state={"tag": "s"})
         flow.call(_identity).map(lambda f: f.call(_double), items=items)
         assert await flow.run(3) == [0, 2, 4]
         assert seen == {"prev": 3, "state": {"tag": "s"}}
@@ -392,14 +392,14 @@ class TestMapExecution:
             await asyncio.sleep(0.02 - x * 0.005)
             return x
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(delayed))
         assert await flow.run([0, 1, 2, 3]) == [0, 1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_aggregate_reduces_results(self) -> None:
         """``aggregate=sum`` returns the reduced value instead of the list."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double), aggregate=sum)
         assert await flow.run([1, 2, 3, 4]) == 20  # sum of doubles
 
@@ -411,7 +411,7 @@ class TestMapExecution:
             await asyncio.sleep(0)
             return sum(results)
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double), aggregate=total)
         assert await flow.run([1, 2, 3]) == 12
 
@@ -423,14 +423,14 @@ class TestMapExecution:
             await asyncio.sleep(0)
             return list(range(prev))
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double), items=items)
         assert await flow.run(3) == [0, 2, 4]
 
     @pytest.mark.asyncio
     async def test_empty_items_returns_empty_list(self) -> None:
         """An empty item source produces an empty result list."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double))
         assert await flow.run([]) == []
 
@@ -445,7 +445,7 @@ class TestMapExecution:
                 raise ValueError(f"bad:{x}")
             return x
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(maybe_fail))
         with pytest.raises(ValueError, match="bad:2"):
             await flow.run([1, 2, 3])
@@ -461,7 +461,7 @@ class TestMapExecution:
                 raise ValueError(f"bad:{x}")
             return x * 10
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(maybe_fail), strict=False)
         results = await flow.run([1, 2, 3])
         assert results[0] == 10
@@ -481,7 +481,7 @@ class TestMapExecution:
                 raise asyncio.CancelledError
             return x
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(cancel_at_two), strict=False)
         with pytest.raises(asyncio.CancelledError):
             await flow.run([1, 2, 3])
@@ -489,7 +489,7 @@ class TestMapExecution:
     @pytest.mark.asyncio
     async def test_non_iterable_items_raises(self) -> None:
         """A non-iterable resolved-items value is a clear TypeError."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double))
         with pytest.raises(TypeError, match="iterable"):
             await flow.run(42)
@@ -497,8 +497,8 @@ class TestMapExecution:
     @pytest.mark.asyncio
     async def test_named_flow_as_body(self) -> None:
         """A pre-built Flow works as the map body."""
-        body = Flow(make_test_logger(), "double").call(_double)
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        body = make_ff().create("double").call(_double)
+        flow = make_ff().create()
         flow.call(_identity).map(body)
         assert await flow.run([2, 5]) == [4, 10]
 
@@ -511,7 +511,7 @@ class TestMapExecution:
             """Return a small dict per item."""
             return {"x": x}
 
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(wrap))
         assert await flow.run([7, 8]) == [{"x": 7}, {"x": 8}]
 
@@ -527,13 +527,13 @@ class TestBuildable:
     @pytest.mark.asyncio
     async def test_callback_and_flow_produce_same_result(self) -> None:
         """A branch built two ways runs identically."""
-        factory = StubFactory()
+        saia = StubFactory()
 
-        named = Flow(make_test_logger(), "then").call(_double)
-        flow_named = Flow(make_test_logger(), factory=factory)
+        named = make_ff().create("then").call(_double)
+        flow_named = make_ff(saia_f=saia).create()
         flow_named.call(_identity).branch(when=lambda _p, _c: True, then=named)
 
-        flow_cb = Flow(make_test_logger(), factory=factory)
+        flow_cb = make_ff(saia_f=saia).create()
         flow_cb.call(_identity).branch(when=lambda _p, _c: True, then=lambda f: f.call(_double))
 
         assert await flow_named.run(4) == await flow_cb.run(4) == 8

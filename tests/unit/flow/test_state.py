@@ -6,9 +6,9 @@ import asyncio
 
 import pytest
 
-from llm_gent.flow import Failure, Flow, State, verb
+from llm_gent.flow import Failure, State, verb
 
-from .conftest import ROLE_A, ROLE_B, StubFactory, make_test_logger
+from .conftest import ROLE_A, ROLE_B, make_ff
 
 
 # -----------------------------------------------------------------------------
@@ -27,8 +27,8 @@ class TestStateWrapper:
         async def check(ctx) -> None:
             seen.append(ctx.state)
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory()).call(check)
+        ff = make_ff()
+        flow = ff.create("top").call(check)
         await flow.run()
 
         assert len(seen) == 1
@@ -45,8 +45,8 @@ class TestStateWrapper:
             ctx.state.data["mark"] = id(ctx.state.data)
             captured.append(ctx.state.data)
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory()).call(touch)
+        ff = make_ff()
+        flow = ff.create("top").call(touch)
 
         await flow.run()
         await flow.run()
@@ -63,8 +63,8 @@ class TestStateWrapper:
         async def check(ctx) -> None:
             seen.append(ctx.state.data)
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory()).call(check)
+        ff = make_ff()
+        flow = ff.create("top").call(check)
         await flow.run(state=supplied)
 
         assert seen[0] is supplied
@@ -82,8 +82,8 @@ class TestStateWrapper:
         async def check(ctx) -> None:
             seen.append(ctx.state.data)
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory()).call(check)
+        ff = make_ff()
+        flow = ff.create("top").call(check)
         await flow.run(state=bag)
 
         assert seen[0] is bag
@@ -96,9 +96,41 @@ class TestStateWrapper:
         async def check(ctx) -> None:
             seen.append(ctx.state.data)
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory()).call(check)
+        ff = make_ff()
+        flow = ff.create("top").call(check)
         await flow.run(state=None)
+
+        assert seen == [None]
+
+    async def test_construction_state_none_factory(self) -> None:
+        """FlowFactory(state=None) is preserved at run time — not replaced with {}."""
+        seen: list[object] = []
+
+        @verb(role=ROLE_A)
+        async def check(ctx) -> None:
+            seen.append(ctx.state.data)
+
+        from llm_gent.flow import FlowFactory
+
+        from .conftest import StubFactory, make_test_logger
+
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), state=None)
+        flow = ff.create().call(check)
+        await flow.run()
+
+        assert seen == [None]
+
+    async def test_construction_state_none_create(self) -> None:
+        """ff.create(state=None) is preserved at run time — not replaced with {}."""
+        seen: list[object] = []
+
+        @verb(role=ROLE_A)
+        async def check(ctx) -> None:
+            seen.append(ctx.state.data)
+
+        ff = make_ff()
+        flow = ff.create(state=None).call(check)
+        await flow.run()
 
         assert seen == [None]
 
@@ -111,8 +143,8 @@ class TestStateWrapper:
         async def check(ctx) -> None:
             seen.append(ctx.state)
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory()).call(check)
+        ff = make_ff()
+        flow = ff.create("top").call(check)
         await flow.run(state=outer)
 
         assert seen[0] is outer
@@ -126,8 +158,8 @@ class TestStateWrapper:
         async def check(ctx) -> None:
             seen.append(ctx.state)
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory(), state=user_state)
+        ff = make_ff()
+        flow = ff.create("top", state=user_state)
         flow.register(check)
         await flow.dispatch("check")
 
@@ -156,13 +188,9 @@ class TestStateNavigation:
         async def inner_verb(ctx, _prev) -> None:
             captured.append(("inner", ctx.state.root().data))
 
-        lg = make_test_logger()
-        inner = Flow(lg, "inner").call(inner_verb)
-        top = (
-            Flow(lg, "top", factory=StubFactory())
-            .call(top_verb)
-            .call(inner, state=lambda _p: {"scoped": True})
-        )
+        ff = make_ff()
+        inner = ff.create("inner").call(inner_verb)
+        top = ff.create("top").call(top_verb).call(inner, state=lambda _p: {"scoped": True})
 
         outer = {"budget": 500}
         await top.run(state=outer)
@@ -183,9 +211,9 @@ class TestStateNavigation:
         async def inner_verb(ctx, _prev) -> None:
             captured.append(ctx.state)
 
-        lg = make_test_logger()
-        inner = Flow(lg, "inner").call(inner_verb)
-        top = Flow(lg, "top", factory=StubFactory()).call(top_verb).call(inner)
+        ff = make_ff()
+        inner = ff.create("inner").call(inner_verb)
+        top = ff.create("top").call(top_verb).call(inner)
 
         outer = {"budget": 500}
         await top.run(state=outer)
@@ -202,10 +230,8 @@ class TestStateNavigation:
             seen.append(ctx.state.root().data)
             return "ok"
 
-        lg = make_test_logger()
-        top = Flow(lg, "top", factory=StubFactory()).branch(
-            when=lambda _prev, _ctx: True, then=lambda f: f.call(hit)
-        )
+        ff = make_ff()
+        top = ff.create("top").branch(when=lambda _prev, _ctx: True, then=lambda f: f.call(hit))
 
         outer = {"key": "value"}
         await top.run("input", state=outer)
@@ -221,10 +247,8 @@ class TestStateNavigation:
             seen.append(ctx.state.root().data)
             return "ok"
 
-        lg = make_test_logger()
-        top = Flow(lg, "top", factory=StubFactory()).loop(
-            lambda f: f.call(hit), max_iters=3, state=lambda _p: {}
-        )
+        ff = make_ff()
+        top = ff.create("top").loop(lambda f: f.call(hit), max_iters=3, state=lambda _p: {})
 
         outer = {"key": "value"}
         await top.run("input", state=outer)
@@ -241,8 +265,8 @@ class TestStateNavigation:
             seen.append(ctx.state.root().data)
             return item
 
-        lg = make_test_logger()
-        top = Flow(lg, "top", factory=StubFactory()).map(lambda f: f.call(hit), state=lambda _p: {})
+        ff = make_ff()
+        top = ff.create("top").map(lambda f: f.call(hit), state=lambda _p: {})
 
         outer = {"key": "value"}
         await top.run([1, 2, 3], state=outer)
@@ -258,8 +282,8 @@ class TestStateNavigation:
         async def check(ctx) -> None:
             captured.append(ctx.state)
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory()).call(check)
+        ff = make_ff()
+        flow = ff.create("top").call(check)
         await flow.run()
 
         s = captured[0]
@@ -283,10 +307,10 @@ class TestScopedStateSharing:
             ctx.state.data["from_inner"] = True
             return "ok"
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state = {"from_inner": False, "root": "yes"}
-        inner = Flow(lg, "inner").call(inner_verb)
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).call(inner)
+        inner = ff.create("inner").call(inner_verb)
+        top = ff.create("top", state=parent_state).call(inner)
 
         await top.run()
 
@@ -300,11 +324,9 @@ class TestScopedStateSharing:
             ctx.state.data["count"] = ctx.state.data.get("count", 0) + 1
             return prev
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state: dict = {}
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).loop(
-            lambda f: f.call(bump), max_iters=4
-        )
+        top = ff.create("top", state=parent_state).loop(lambda f: f.call(bump), max_iters=4)
 
         await top.run("seed")
 
@@ -322,12 +344,10 @@ class TestScopedStateProjection:
             ctx.state.data["only_child"] = True
             return "ok"
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state = {"parent_key": "kept"}
-        inner = Flow(lg, "inner").call(inner_verb)
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).call(
-            inner, state=lambda _parent: {}
-        )
+        inner = ff.create("inner").call(inner_verb)
+        top = ff.create("top", state=parent_state).call(inner, state=lambda _parent: {})
 
         await top.run()
 
@@ -344,10 +364,10 @@ class TestScopedStateProjection:
         def merge(parent: dict, child: dict) -> None:
             parent["fold"] = child["scratch"]
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state: dict = {}
-        inner = Flow(lg, "inner").call(inner_verb)
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).call(
+        inner = ff.create("inner").call(inner_verb)
+        top = ff.create("top", state=parent_state).call(
             inner, state=lambda _parent: {}, merge=merge
         )
 
@@ -369,10 +389,10 @@ class TestScopedStateProjection:
             merged.append(True)
             parent["fold"] = child["scratch"]
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state: dict = {}
-        inner = Flow(lg, "inner").call(inner_verb)
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).call(
+        inner = ff.create("inner").call(inner_verb)
+        top = ff.create("top", state=parent_state).call(
             inner, state=lambda _parent: {}, merge=merge
         )
 
@@ -394,10 +414,10 @@ class TestScopedStateProjection:
             received.append(parent)
             return {"copied_from": parent.get("root")}
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state = {"root": "R"}
-        inner = Flow(lg, "inner").call(inner_verb)
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).call(inner, state=project)
+        inner = ff.create("inner").call(inner_verb)
+        top = ff.create("top", state=parent_state).call(inner, state=project)
 
         await top.run()
 
@@ -416,9 +436,9 @@ class TestScopedStateProjection:
         def merge(parent: dict, child: dict) -> None:
             parent["final_count"] = child["count"]
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state: dict = {"unrelated": True}
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).loop(
+        top = ff.create("top", state=parent_state).loop(
             lambda f: f.call(bump),
             max_iters=3,
             state=lambda _parent: {},
@@ -444,9 +464,9 @@ class TestScopedStateProjection:
         def merge(_parent: dict, _child: dict) -> None:
             merged.append(True)
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state: dict = {}
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).loop(
+        top = ff.create("top", state=parent_state).loop(
             lambda f: f.call(bump),
             max_iters=5,
             state=lambda _parent: {},
@@ -468,9 +488,9 @@ class TestScopedStateProjection:
             counts.append(ctx.state.data["count"])
             return prev
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state: dict = {"count": 999}
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).loop(
+        top = ff.create("top", state=parent_state).loop(
             lambda f: f.call(bump),
             until=lambda ctx: ctx.state.data.get("count", 0) >= 3,
             state=lambda _parent: {},
@@ -492,9 +512,9 @@ class TestScopedStateProjection:
             seen.append((item, dict(ctx.state.data)))
             return item
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state = {"parent_key": "kept"}
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).map(
+        top = ff.create("top", state=parent_state).map(
             lambda f: f.call(record),
             state=lambda _parent: {},
         )
@@ -518,9 +538,9 @@ class TestScopedStateProjection:
         def merge(parent: dict, child: dict) -> None:
             parent.setdefault("merged", []).append(child["item"])
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state: dict = {}
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).map(
+        top = ff.create("top", state=parent_state).map(
             lambda f: f.call(maybe_fail),
             state=lambda _parent: {},
             merge=merge,
@@ -554,12 +574,10 @@ class TestStateProjectionAsync:
             await asyncio.sleep(0)
             parent["carried"] = child["hit"]
 
-        lg = make_test_logger()
+        ff = make_ff()
         parent_state: dict = {}
-        inner = Flow(lg, "inner").call(inner_verb)
-        top = Flow(lg, "top", factory=StubFactory(), state=parent_state).call(
-            inner, state=async_state, merge=async_merge
-        )
+        inner = ff.create("inner").call(inner_verb)
+        top = ff.create("top", state=parent_state).call(inner, state=async_state, merge=async_merge)
 
         await top.run()
 
@@ -580,9 +598,9 @@ class TestStateKwargValidation:
         @verb(role=ROLE_A)
         async def _v(ctx) -> None: ...
 
-        lg = make_test_logger()
-        inner = Flow(lg, "inner").call(_v)
-        flow = Flow(lg, "top", factory=StubFactory())
+        ff = make_ff()
+        inner = ff.create("inner").call(_v)
+        flow = ff.create("top")
 
         with pytest.raises(ValueError, match="requires state="):
             flow.call(inner, merge=lambda p, c: None)  # noqa: ARG005
@@ -593,8 +611,8 @@ class TestStateKwargValidation:
         @verb(role=ROLE_A)
         async def _v(ctx, _prev) -> None: ...
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory())
+        ff = make_ff()
+        flow = ff.create("top")
 
         with pytest.raises(ValueError, match="requires state="):
             flow.loop(
@@ -609,8 +627,8 @@ class TestStateKwargValidation:
         @verb(role=ROLE_A)
         async def _v(ctx, _item) -> None: ...
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory())
+        ff = make_ff()
+        flow = ff.create("top")
 
         with pytest.raises(ValueError, match="requires state="):
             flow.map(
@@ -624,8 +642,8 @@ class TestStateKwargValidation:
         @verb(role=ROLE_A)
         async def leaf(ctx) -> None: ...
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory())
+        ff = make_ff()
+        flow = ff.create("top")
 
         with pytest.raises(TypeError, match="only valid when target is a Flow"):
             flow.call(leaf, state=lambda _p: {})
@@ -636,8 +654,8 @@ class TestStateKwargValidation:
         @verb(role=ROLE_A)
         async def leaf(ctx) -> None: ...
 
-        lg = make_test_logger()
-        flow = Flow(lg, "top", factory=StubFactory())
+        ff = make_ff()
+        flow = ff.create("top")
 
         with pytest.raises(TypeError, match="only valid when target is a Flow"):
             flow.call(leaf, merge=lambda p, c: None)  # noqa: ARG005

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from appinfra.log import Logger, quick_console_logger
 
-from llm_gent.flow import Role
+from llm_gent.flow import FlowFactory, Role, SAIAFactory
 
 
 ROLE_A = Role(name="a", backend="openai", model="gpt-4o-mini")
@@ -35,3 +35,13 @@ class StubFactory:
         """Record and return a fresh stub saia for the role."""
         self.built_for.append(role)
         return StubSAIA(role)
+
+
+def make_ff(saia_f: SAIAFactory | None = None) -> FlowFactory:
+    """Return a fresh :class:`FlowFactory` with a test logger + SAIAFactory.
+
+    Defaults to a fresh :class:`StubFactory` per call so tests that
+    introspect the factory get an isolated instance. Pass ``saia_f=`` when
+    the test needs to keep a reference to inspect after the run.
+    """
+    return FlowFactory(make_test_logger(), saia_f=saia_f or StubFactory())

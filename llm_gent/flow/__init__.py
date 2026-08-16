@@ -10,7 +10,13 @@ Public surface:
   ``ctx.state`` (``.data`` reaches the payload; ``.root()`` walks to the
   outermost scope)
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
+- :class:`FlowFactory` — app-scoped :class:`Flow` builder (captures ``lg``
+  and one :class:`SAIAFactory`); preferred entry point at the application
+  boundary
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
+- :data:`UNSET` — "no value here" sentinel (distinct from ``None``), used by
+  :meth:`Flow.run`'s ``state=`` default and by rescue callbacks'
+  ``pending_input`` positional
 - :class:`Panel` — fan-out N verbs in parallel + aggregate their results
 - Archetype decorators: :func:`planner`, :func:`extractor`, :func:`grader`,
   :func:`synthesizer` — semantic tags for the standard agent shape
@@ -25,9 +31,9 @@ mount them via the existing trait system.
 
 from .archetypes import extractor, grader, planner, synthesizer
 from .context import Context
-from .factory import SAIAFactory
+from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
-from .nodes import Failure
+from .nodes import UNSET, Failure, Unset
 from .panel import Panel
 from .role import Role
 from .state import State
@@ -35,13 +41,16 @@ from .verb import verb
 
 
 __all__ = [
+    "UNSET",
     "Context",
     "Failure",
     "Flow",
+    "FlowFactory",
     "Panel",
     "Role",
     "SAIAFactory",
     "State",
+    "Unset",
     "extractor",
     "grader",
     "planner",

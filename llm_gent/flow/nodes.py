@@ -1,11 +1,13 @@
 """Composition-graph node types and per-run environment.
 
 Internal to :mod:`llm_gent.flow`: the private dataclasses (:class:`_Node`,
-:class:`_Branch`, :class:`_Loop`, :class:`_Map`, :class:`_RunEnv`), the
-sentinel :data:`_UNSET`, the type aliases used by the fluent builder's
-callback slots, and the one public export routed through this module —
-:class:`Failure`, the sentinel returned in place of a failed item by
-:meth:`Flow.map` when ``strict=False``.
+:class:`_Branch`, :class:`_Loop`, :class:`_Map`, :class:`_RunEnv`), and the
+type aliases used by the fluent builder's callback slots. Two public
+symbols are routed through this module as well: :class:`Failure`, the
+sentinel returned in place of a failed item by :meth:`Flow.map` when
+``strict=False``; and :data:`UNSET` (with its :class:`Unset` type), the
+"no value here" sentinel used by :meth:`Flow.run`'s ``state=`` default and
+by rescue policies' ``pending_input`` positional.
 
 Depends only on :mod:`.context` and :mod:`.state`; :class:`Flow` is
 referenced solely inside string-form annotations (via
@@ -17,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from appinfra.log import Logger
 
@@ -29,8 +31,50 @@ if TYPE_CHECKING:
     from .flow import Flow
 
 
-RescuePolicy = Callable[[BaseException, Context], Any]
-"""Failure hook: ``(exception, ctx) -> fallback``. May be async."""
+class Unset:
+    """Singleton sentinel type used by :data:`UNSET`.
+
+    Distinct from ``None`` — appears where ``None`` is a legitimate value
+    that must be distinguished from "no value was supplied here". The
+    canonical comparison is identity (``x is UNSET``); ``isinstance(x, Unset)``
+    works too and is what tooling checks against the ``Any | Unset`` union
+    in :type:`RescuePolicy`.
+    """
+
+    _instance: Unset | None = None
+
+    def __new__(cls) -> Unset:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET: Final[Unset] = Unset()
+"""Sentinel meaning "no value here" — distinct from ``None``.
+
+Surfaces in two places on the public API:
+
+- :meth:`Flow.run` — ``state=UNSET`` is the sentinel default that resolves
+  to the flow's construction ``state`` (or a fresh empty ``dict``); passing
+  ``state=None`` explicitly is honored as "payload is ``None``".
+- :type:`RescuePolicy` — the ``pending_input`` positional is :data:`UNSET`
+  when the failing node is the chain's first node and :meth:`Flow.run` was
+  called with no positional argument.
+"""
+
+
+RescuePolicy = Callable[[BaseException, Any, Context], Any]
+"""Failure hook: ``(exception, pending_input, ctx) -> fallback``. May be async.
+
+``pending_input`` is the value that would have been passed into the failing
+node (post ``project=`` if one was set) — carried through so a rescue can
+fall back to a prior result without a preceding ``.after``-hook stash. When
+the failing node is the chain's first node and :meth:`Flow.run` had no
+positional argument, ``pending_input`` is :data:`UNSET`.
+"""
 
 AfterHook = Callable[[Any, Context], Any]
 """Success hook: ``(result, ctx) -> None`` (return value ignored). May be async."""
@@ -63,10 +107,6 @@ StateMerge = Callable[[Any, Any], Any]
 Runs only when the isolated block completes successfully. Return value is
 ignored — mutate ``parent_state`` in place.
 """
-
-
-_UNSET: Any = object()
-"""Sentinel used to distinguish "kwarg omitted" from "kwarg = None"."""
 
 
 @dataclass(frozen=True)

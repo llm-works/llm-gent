@@ -21,6 +21,13 @@ registry never needs to call the fluent methods; a subflow that only exists
 to structure composition never needs a factory of its own — it borrows from
 the runtime it is executed under.
 
+At application boundaries, prefer :class:`FlowFactory` from
+:mod:`.factory` — it captures the ambient ``lg`` and the app-wide
+:class:`SAIAFactory` once so per-subsystem construction reads as
+``f.create("grade").call(...)`` rather than repeating both at every site.
+Direct :class:`Flow` construction is still supported and is what the
+executor uses internally to materialize lambda-form subflows.
+
 State is exposed on every :class:`Context` as a single :class:`State`
 wrapper:
 
@@ -52,7 +59,7 @@ from ._executor import _build_ctx, _execute_node, _step_inputs
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
-    _UNSET,
+    UNSET,
     AfterHook,
     AggregateFn,
     ItemsFn,
@@ -86,25 +93,35 @@ class Flow:
         lg: Logger,
         name: str = "",
         *,
-        factory: SAIAFactory | None = None,
-        state: Any = None,
+        saia_f: SAIAFactory | None = None,
+        state: Any = UNSET,
     ) -> None:
         """Initialize a flow.
+
+        Prefer :class:`FlowFactory` at application boundaries — it captures
+        the ambient ``lg`` and the app-wide :class:`SAIAFactory` once so
+        Flow-per-subsystem construction doesn't repeat them. Constructing
+        :class:`Flow` directly is still supported; the executor uses it
+        internally to materialize subflows built with the fluent lambda
+        form, and it remains valid for lower-level tests.
 
         Args:
             lg: Logger instance for tracing execution.
             name: Optional identifier — used in error messages and traces.
                 Also lets a flow serve as a named node inside a parent chain.
-            factory: Builds role-bound saia instances. Required for a
-                top-level runtime. Optional for a subflow — the runtime it
-                runs under supplies one.
+            saia_f: A :class:`SAIAFactory` that builds role-bound saia
+                instances. The ``_f`` suffix carries the framework-wide
+                policy: any ``saia_f=`` kwarg takes a factory, never a
+                saia instance. Required for a top-level runtime; optional
+                for a subflow, which borrows the factory from the runtime
+                it executes under.
             state: User-owned shared state object. Verbs read and (typically)
                 mutate it in place. Opaque to the flow; may be overridden per
                 :meth:`run` invocation.
         """
         self._lg = lg
         self._name = name
-        self._factory = factory
+        self._saia_f = saia_f
         self._state = state
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
@@ -271,7 +288,7 @@ class Flow:
 
         The policy runs when the node raises anything other than
         :class:`asyncio.CancelledError` (cancellation is never rescued).
-        Signature: ``(exception, ctx) -> fallback`` — may be async.
+        Signature: ``(exception, pending_input, ctx) -> fallback`` — may be async.
         """
         if not self._nodes:
             raise RuntimeError(".rescue() requires a preceding .call()/.then() step")
@@ -475,7 +492,7 @@ class Flow:
     async def run(
         self,
         *args: Any,
-        state: Any = _UNSET,
+        state: Any = UNSET,
         _runtime: Flow | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -522,7 +539,7 @@ class Flow:
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
-        result: Any = _UNSET
+        result: Any = UNSET
         for index, node in enumerate(self._nodes):
             node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             ctx = _build_ctx(node.target, env)
@@ -540,17 +557,17 @@ class Flow:
         at construction.
         """
         runtime = _runtime if _runtime is not None else self
-        if runtime._factory is None:
+        if runtime._saia_f is None:
             label = runtime._name or "<anonymous>"
             raise RuntimeError(
-                f"Flow {label!r} has no SAIAFactory — provide factory=... "
+                f"Flow {label!r} has no SAIAFactory — provide saia_f=... "
                 "when constructing the top-level Flow"
             )
         is_subflow = _runtime is not None
         if is_subflow:
             active_state = state
         else:
-            payload = (self._state if self._state is not None else {}) if state is _UNSET else state
+            payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
             active_state = payload if isinstance(payload, State) else State(data=payload)
         return _RunEnv(runtime=runtime, state=active_state, lg=runtime._lg)
 
@@ -563,13 +580,13 @@ class Flow:
         cached = self._saia_by_role.get(role)
         if cached is not None:
             return cached
-        if self._factory is None:
+        if self._saia_f is None:
             label = self._name or "<anonymous>"
             raise RuntimeError(
-                f"Flow {label!r} has no SAIAFactory — factory= was not supplied at "
+                f"Flow {label!r} has no SAIAFactory — saia_f= was not supplied at "
                 f"construction (needed to build saia for role {role.name!r})"
             )
-        built = self._factory.build(role)
+        built = self._saia_f.build(role)
         self._saia_by_role[role] = built
         return built
 
@@ -621,6 +638,6 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
             f"expected a Flow or a lambda f: f.call(...) callback for {name!r}; "
             f"got {type(buildable).__name__}"
         )
-    fresh = Flow(lg, name)
+    fresh = Flow(lg=lg, name=name)
     buildable(fresh)
     return fresh

@@ -1,21 +1,33 @@
-"""SAIAFactory — plug point that constructs a role-bound saia instance.
+"""Factory surfaces for the flow substrate.
 
-A :class:`Role` is pure config. Turning a role into a runnable saia client
-requires wiring together an llm-infer backend, saia's builder, tools, and a
-system prompt. Any of those pieces can vary between deployments, so the
-framework leaves construction to a user-supplied factory and provides only
-the protocol.
+Two factories live here, at different scopes:
 
-A flow holds a single factory and typically caches saia instances per role
-so verbs share bindings within one run.
+- :class:`SAIAFactory` — protocol that turns a :class:`Role` into a saia
+  instance. Typically one per application; the wiring (backend, tools,
+  system prompt) is deployment-specific so the framework only names the
+  contract.
+- :class:`FlowFactory` — app-scoped bundle of the ambient ``lg`` and (by
+  convention) a single ``SAIAFactory``. Provides :meth:`create` for
+  building Flows without repeating those two arguments at every
+  construction site, and :meth:`with_saia_f` for deriving a factory that
+  swaps the SAIAFactory (e.g. a plugin subsystem).
+
+Naming policy: any ``saia_f=`` kwarg on the framework's public API takes a
+:class:`SAIAFactory` (never a saia instance). The kwarg is named after
+the concept; the type carries the mechanism.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .nodes import UNSET
+
 
 if TYPE_CHECKING:
+    from appinfra.log import Logger
+
+    from .flow import Flow
     from .role import Role
 
 
@@ -49,3 +61,65 @@ class SAIAFactory(Protocol):
     def build(self, role: Role) -> Any:
         """Return a saia instance configured for ``role``."""
         ...
+
+
+class FlowFactory:
+    """App-scoped factory for :class:`Flow` — captures ``lg`` and ``saia`` once.
+
+    An application typically has one logger and one :class:`SAIAFactory`
+    covering every :class:`Flow` it constructs. Repeating both at every
+    Flow-construction site is noise; :class:`FlowFactory` bundles them
+    once so subsystem builders read as ``f.create("grade").call(...)``.
+
+    :meth:`create` builds a Flow with the captured defaults;
+    :meth:`with_saia_f` returns a new :class:`FlowFactory` whose SAIAFactory
+    is swapped (for subsystems that need a different saia builder).
+    """
+
+    def __init__(
+        self,
+        lg: Logger,
+        *,
+        saia_f: SAIAFactory | None = None,
+        state: Any = UNSET,
+    ) -> None:
+        """Capture the ambient environment for subsequent :meth:`create` calls.
+
+        Args:
+            lg: Logger threaded into every :class:`Flow` this factory builds.
+            saia_f: A :class:`SAIAFactory`. The ``_f`` suffix carries the
+                framework-wide policy: any ``saia_f=`` kwarg takes a factory,
+                never a saia instance.
+            state: Default construction ``state`` for built flows. Per-Flow
+                overrides go through :meth:`create`; per-run overrides go
+                through :meth:`Flow.run`.
+        """
+        self._lg = lg
+        self._saia_f = saia_f
+        self._state = state
+
+    def create(self, name: str = "", *, state: Any = UNSET) -> Flow:
+        """Return a :class:`Flow` using this factory's ``lg``, ``saia``, and ``state``.
+
+        Args:
+            name: Optional identifier — used in error messages and traces.
+                Also lets the flow serve as a named node inside a parent
+                chain.
+            state: Per-Flow construction ``state`` override. Passing
+                :data:`UNSET` (default) inherits the factory's ``state``;
+                passing ``None`` explicitly is honored as "payload is
+                ``None``"; any other value replaces the factory default.
+        """
+        from .flow import Flow
+
+        resolved_state = self._state if state is UNSET else state
+        return Flow(self._lg, name, saia_f=self._saia_f, state=resolved_state)
+
+    def with_saia_f(self, saia_f: SAIAFactory) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
+
+        ``lg`` and ``state`` are preserved. Useful for subsystems that
+        share the app's logger but need a different saia builder (e.g. a
+        plugin with its own model wiring).
+        """
+        return FlowFactory(self._lg, saia_f=saia_f, state=self._state)
