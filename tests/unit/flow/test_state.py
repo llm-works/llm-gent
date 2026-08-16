@@ -102,6 +102,38 @@ class TestStateWrapper:
 
         assert seen == [None]
 
+    async def test_construction_state_none_factory(self) -> None:
+        """FlowFactory(state=None) is preserved at run time — not replaced with {}."""
+        seen: list[object] = []
+
+        @verb(role=ROLE_A)
+        async def check(ctx) -> None:
+            seen.append(ctx.state.data)
+
+        from llm_gent.flow import FlowFactory
+
+        from .conftest import StubFactory, make_test_logger
+
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), state=None)
+        flow = ff.create().call(check)
+        await flow.run()
+
+        assert seen == [None]
+
+    async def test_construction_state_none_create(self) -> None:
+        """ff.create(state=None) is preserved at run time — not replaced with {}."""
+        seen: list[object] = []
+
+        @verb(role=ROLE_A)
+        async def check(ctx) -> None:
+            seen.append(ctx.state.data)
+
+        ff = make_ff()
+        flow = ff.create(state=None).call(check)
+        await flow.run()
+
+        assert seen == [None]
+
     async def test_prewrapped_state_passed_through(self) -> None:
         """A caller-constructed :class:`State` is used verbatim (not re-wrapped)."""
         outer = State(data={"pre": "wrapped"})

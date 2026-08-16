@@ -94,7 +94,7 @@ class Flow:
         name: str = "",
         *,
         saia_f: SAIAFactory | None = None,
-        state: Any = None,
+        state: Any = UNSET,
     ) -> None:
         """Initialize a flow.
 
@@ -567,7 +567,7 @@ class Flow:
         if is_subflow:
             active_state = state
         else:
-            payload = (self._state if self._state is not None else {}) if state is UNSET else state
+            payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
             active_state = payload if isinstance(payload, State) else State(data=payload)
         return _RunEnv(runtime=runtime, state=active_state, lg=runtime._lg)
 

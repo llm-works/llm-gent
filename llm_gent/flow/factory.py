@@ -81,7 +81,7 @@ class FlowFactory:
         lg: Logger,
         *,
         saia_f: SAIAFactory | None = None,
-        state: Any = None,
+        state: Any = UNSET,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
