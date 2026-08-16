@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from .context import Context
 from .nodes import (
+    UNSET,
     Failure,
     ItemsFn,
     StateMerge,
@@ -79,7 +80,8 @@ async def _execute_node(
         if node.rescue is None:
             raise
         env.lg.warning("rescue policy invoked", extra={"target": target_name, "exception": exc})
-        fallback = node.rescue(exc, ctx)
+        pending_input = node_args[0] if node_args else UNSET
+        fallback = node.rescue(exc, pending_input, ctx)
         if inspect.isawaitable(fallback):
             fallback = await fallback
         result = fallback

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from llm_gent.flow import Context, Flow, Panel, Role, verb
+from llm_gent.flow import Context, Panel, Role, verb
 from llm_gent.flow.panel import majority, mean, unanimous, weighted
 
-from .conftest import ROLE_A, ROLE_B, StubFactory, make_test_logger
+from .conftest import ROLE_A, ROLE_B, make_ff
 
 
 class TestAggregators:
@@ -71,7 +71,7 @@ class TestPanel:
     @pytest.mark.asyncio
     async def test_panel_fans_out_and_sums(self) -> None:
         """Each verb runs in parallel and its result feeds the aggregate."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
 
         @verb(role=ROLE_A)
         async def add_one(ctx: Context, x: int) -> int:
@@ -101,7 +101,7 @@ class TestPanel:
     @pytest.mark.asyncio
     async def test_panel_with_custom_registered_names(self) -> None:
         """Panel dispatches correctly when verbs are registered with custom names."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
 
         @verb(role=ROLE_A)
         async def impl_a(ctx: Context, x: int) -> int:
@@ -132,7 +132,7 @@ class TestPanel:
     @pytest.mark.asyncio
     async def test_panel_with_majority(self) -> None:
         """A 3-judge panel returning majority verdict works end-to-end."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
 
         @verb(role=ROLE_A)
         async def yes_a(ctx: Context) -> str:
@@ -165,7 +165,7 @@ class TestPanel:
     @pytest.mark.asyncio
     async def test_panel_routes_per_verb_role(self) -> None:
         """Each inner verb receives a saia bound to its own role, not the caller's."""
-        flow = Flow(make_test_logger(), factory=StubFactory())
+        flow = make_ff().create()
 
         @verb(role=ROLE_A)
         async def see_a(ctx: Context) -> Role:
