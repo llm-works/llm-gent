@@ -137,7 +137,7 @@ class FlowFactory:
         """
         return FlowFactory(self._lg, saia_f=saia_f, state=self._state, traits=self._traits)
 
-    def with_traits(self, traits: TraitsRegistry) -> FlowFactory:
+    def with_traits(self, traits: TraitsRegistry | None) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose trait registry is swapped.
 
         ``lg``, ``saia_f``, and ``state`` are preserved. Mirrors

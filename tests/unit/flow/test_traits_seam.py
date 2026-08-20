@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from llm_gent.core.errors import TraitNotFoundError
 from llm_gent.core.traits import Registry
 from llm_gent.core.traits.base import BaseTrait
 from llm_gent.flow import Flow, FlowFactory, verb
@@ -185,6 +186,12 @@ class TestFactoryDerivers:
         assert built._saia_f is sf
         assert built.state is state
 
+    def test_with_traits_none_clears_registry(self) -> None:
+        """with_traits(None) derives a factory whose flows have no registry."""
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), traits=_fresh_registry())
+        derived = ff.with_traits(None)
+        assert derived.create().traits is None
+
 
 class TestSubflowInheritance:
     """Subflows borrow the outer runtime's traits (matches saia_f behavior)."""
@@ -256,5 +263,5 @@ class TestBackwardCompatibility:
             ctx.traits.require(_MemoryStub)
 
         flow = Flow(make_test_logger(), saia_f=StubFactory(), traits=registry).call(demand)
-        with pytest.raises(Exception, match="_MemoryStub"):
+        with pytest.raises(TraitNotFoundError, match="_MemoryStub"):
             asyncio.run(flow.run())
