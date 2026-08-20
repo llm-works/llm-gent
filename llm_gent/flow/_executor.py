@@ -51,10 +51,11 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context:
     """
     from .flow import Flow
 
+    traits = env.runtime._traits
     if isinstance(target, Flow | _Branch | _Loop | _Map):
-        return Context(saia=None, role=None, state=env.state, flow=env.runtime)
+        return Context(saia=None, role=None, state=env.state, flow=env.runtime, traits=traits)
     saia = env.runtime._saia_for(target.role)
-    return Context(saia=saia, role=target.role, state=env.state, flow=env.runtime)
+    return Context(saia=saia, role=target.role, state=env.state, flow=env.runtime, traits=traits)
 
 
 async def _execute_node(
@@ -170,7 +171,13 @@ async def _check_until(until_fn: UntilFn | None, loop_state: State, env: _RunEnv
     """Evaluate the loop's until predicate with a ctx bound to the loop's scoped state."""
     if until_fn is None:
         return False
-    ctx = Context(saia=None, role=None, state=loop_state, flow=env.runtime)
+    ctx = Context(
+        saia=None,
+        role=None,
+        state=loop_state,
+        flow=env.runtime,
+        traits=env.runtime._traits,
+    )
     verdict = until_fn(ctx)
     if inspect.isawaitable(verdict):
         verdict = await verdict
