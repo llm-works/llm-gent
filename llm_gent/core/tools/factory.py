@@ -10,7 +10,7 @@ from appinfra.log import Logger
 
 
 if TYPE_CHECKING:
-    from ..traits.builtin.learn import LearnTrait
+    from ..traits.builtin.memory import MemoryTrait
     from .base import BaseTool, Tool
     from .builtin.web.backend import WebSearchBackend, WebSearchBackendFactory
     from .builtin.web.fetch import WebFetchTool
@@ -59,7 +59,7 @@ class ToolFactory:
         """
         self._lg = lg
         self._custom_creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
-        self._learn_trait: LearnTrait | None = None
+        self._memory_trait: MemoryTrait | None = None
         self._web_fetch: WebFetchTool | None = None
         self._web_search_backend: WebSearchBackend | None = None
 
@@ -222,28 +222,28 @@ class ToolFactory:
     def _create_memory_tool(self, tool_type: str) -> Tool | None:
         """Create remember or recall tool.
 
-        Returns None if LearnTrait not available (tool will be skipped).
+        Returns None if MemoryTrait not available (tool will be skipped).
         """
         from .builtin import RecallTool, RememberTool
 
-        if self._learn_trait is None:
+        if self._memory_trait is None:
             return None
 
         if tool_type == self.REMEMBER:
-            return RememberTool(self._learn_trait)
-        return RecallTool(self._learn_trait)
+            return RememberTool(self._memory_trait)
+        return RecallTool(self._memory_trait)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def set_learn_trait(self, learn_trait: LearnTrait | None) -> None:
-        """Set LearnTrait for memory tools (remember/recall).
+    def set_memory_trait(self, memory_trait: MemoryTrait | None) -> None:
+        """Set MemoryTrait for memory tools (remember/recall).
 
         Args:
-            learn_trait: LearnTrait instance or None.
+            memory_trait: MemoryTrait instance or None.
         """
-        self._learn_trait = learn_trait
+        self._memory_trait = memory_trait
 
     def register(self, tool_type: str, creator: Callable[[dict[str, Any]], Tool]) -> None:
         """Register a custom tool type.
@@ -266,7 +266,7 @@ class ToolFactory:
 
         Returns:
             Configured Tool instance, or None if tool cannot be created
-            (e.g., memory tools without LearnTrait).
+            (e.g., memory tools without MemoryTrait).
 
         Raises:
             ValueError: If tool type is unknown.

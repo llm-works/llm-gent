@@ -224,12 +224,12 @@ class TestHTTPTraitHandleRequest:
         return trait
 
     @pytest.fixture
-    def mock_learn_trait(self):
-        """Create mock LearnTrait."""
-        from llm_gent.core.traits.builtin.learn import LearnTrait
+    def mock_memory_trait(self):
+        """Create mock MemoryTrait."""
+        from llm_gent.core.traits.builtin.memory import MemoryTrait
 
         trait = create_mock_trait(
-            LearnTrait,
+            MemoryTrait,
             remember={"return_value": 42},
             recall={
                 "return_value": [
@@ -249,7 +249,7 @@ class TestHTTPTraitHandleRequest:
         return trait
 
     @pytest.fixture
-    def agent(self, mock_logger, mock_llm_trait, mock_learn_trait):
+    def agent(self, mock_logger, mock_llm_trait, mock_memory_trait):
         """Create a test agent with mocked traits."""
         from llm_gent.agents.default import Agent as DefaultAgent
 
@@ -258,7 +258,7 @@ class TestHTTPTraitHandleRequest:
         )
         # Use registry's register method to add mock traits
         agent._traits.register(mock_llm_trait)
-        agent._traits.register(mock_learn_trait)
+        agent._traits.register(mock_memory_trait)
         return agent
 
     @pytest.fixture
@@ -291,8 +291,8 @@ class TestHTTPTraitHandleRequest:
         assert resp.response_id == "resp-123"
         assert resp.content == "Hello!"
 
-    def test_handle_remember_request(self, http_trait, mock_learn_trait):
-        mock_learn_trait.remember.return_value = 42
+    def test_handle_remember_request(self, http_trait, mock_memory_trait):
+        mock_memory_trait.remember.return_value = 42
         req = RememberRequest(id="req-1", fact="User likes Python", category="preferences")
 
         resp = http_trait.handle_request(req)
@@ -300,20 +300,20 @@ class TestHTTPTraitHandleRequest:
         assert isinstance(resp, RememberResponse)
         assert resp.success is True
         assert resp.fact_id == 42
-        mock_learn_trait.remember.assert_called_once_with(
+        mock_memory_trait.remember.assert_called_once_with(
             fact="User likes Python", category="preferences"
         )
 
-    def test_handle_forget_request(self, http_trait, mock_learn_trait):
+    def test_handle_forget_request(self, http_trait, mock_memory_trait):
         req = ForgetRequest(id="req-1", fact_id=42)
 
         resp = http_trait.handle_request(req)
 
         assert isinstance(resp, ForgetResponse)
         assert resp.success is True
-        mock_learn_trait.forget.assert_called_once_with(fact_id=42)
+        mock_memory_trait.forget.assert_called_once_with(fact_id=42)
 
-    def test_handle_feedback_request(self, http_trait, mock_learn_trait):
+    def test_handle_feedback_request(self, http_trait, mock_memory_trait):
         # First complete a request to track the response
         complete_req = CompleteRequest(id="req-1", query="Hello")
         http_trait.handle_request(complete_req)
@@ -324,7 +324,7 @@ class TestHTTPTraitHandleRequest:
 
         assert isinstance(resp, FeedbackResponse)
         assert resp.success is True
-        mock_learn_trait.record_feedback.assert_called_once()
+        mock_memory_trait.record_feedback.assert_called_once()
 
     def test_handle_unknown_message_type(self, http_trait):
         # Create a request with unknown message type
@@ -350,8 +350,8 @@ class TestHTTPTraitHandleRequest:
         assert resp.success is False
         assert "LLM error" in resp.error
 
-    def test_handle_remember_request_error(self, http_trait, mock_learn_trait):
-        mock_learn_trait.remember.side_effect = ValueError("Storage error")
+    def test_handle_remember_request_error(self, http_trait, mock_memory_trait):
+        mock_memory_trait.remember.side_effect = ValueError("Storage error")
         req = RememberRequest(id="req-1", fact="test fact")
 
         resp = http_trait.handle_request(req)
@@ -361,8 +361,8 @@ class TestHTTPTraitHandleRequest:
         assert "Storage error" in resp.error
         assert resp.fact_id == -1
 
-    def test_handle_forget_request_error(self, http_trait, mock_learn_trait):
-        mock_learn_trait.forget.side_effect = ValueError("Fact not found")
+    def test_handle_forget_request_error(self, http_trait, mock_memory_trait):
+        mock_memory_trait.forget.side_effect = ValueError("Fact not found")
         req = ForgetRequest(id="req-1", fact_id=999)
 
         resp = http_trait.handle_request(req)
@@ -371,9 +371,9 @@ class TestHTTPTraitHandleRequest:
         assert resp.success is False
         assert "Fact not found" in resp.error
 
-    def test_handle_recall_request_error(self, http_trait, mock_learn_trait):
+    def test_handle_recall_request_error(self, http_trait, mock_memory_trait):
         # recall() raises when embedder not configured
-        mock_learn_trait.recall.side_effect = ValueError("recall() requires embedder")
+        mock_memory_trait.recall.side_effect = ValueError("recall() requires embedder")
         req = RecallRequest(id="req-1", query="test query")
 
         resp = http_trait.handle_request(req)
@@ -387,8 +387,8 @@ class TestHTTPTraitHandleRequest:
     def test_handle_recall_request_success(self, mock_logger):
         """Verify successful recall returns facts serialized correctly."""
         from llm_gent.agents.default import Agent as DefaultAgent
-        from llm_gent.core.traits.builtin.learn import LearnTrait
         from llm_gent.core.traits.builtin.llm import LLMTrait
+        from llm_gent.core.traits.builtin.memory import MemoryTrait
         from llm_gent.runtime.server.protocol.v1 import RecallResponse
 
         # Setup mock scored facts
@@ -402,8 +402,8 @@ class TestHTTPTraitHandleRequest:
 
         # Create mock traits with correct type for registry lookup
         mock_llm_trait = create_mock_trait(LLMTrait)
-        mock_learn_trait = create_mock_trait(
-            LearnTrait, recall={"return_value": [mock_scored_entity]}, has_embedder=True
+        mock_memory_trait = create_mock_trait(
+            MemoryTrait, recall={"return_value": [mock_scored_entity]}, has_embedder=True
         )
 
         # Create agent with traits
@@ -411,7 +411,7 @@ class TestHTTPTraitHandleRequest:
             lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
         )
         agent._traits.register(mock_llm_trait)
-        agent._traits.register(mock_learn_trait)
+        agent._traits.register(mock_memory_trait)
 
         # Create HTTPTrait with handler
         from llm_gent.agents.default.http import HTTPHandler

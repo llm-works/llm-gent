@@ -8,8 +8,9 @@ from appinfra import DotDict
 from llm_gent.core.errors import ConfigError
 from llm_gent.core.traits import TraitName
 from llm_gent.core.traits.builtin.directive import Directive, DirectiveTrait, MethodTrait
-from llm_gent.core.traits.builtin.learn import LearnTrait
 from llm_gent.core.traits.builtin.llm import LLMTrait
+from llm_gent.core.traits.builtin.memory import MemoryTrait
+from llm_gent.core.traits.builtin.training import TrainingTrait
 from llm_gent.core.traits.factory import Factory
 
 
@@ -114,17 +115,17 @@ class TestCreateLLMTrait:
         assert isinstance(trait, LLMTrait)
 
 
-class TestCreateLearnTrait:
-    """Tests for Factory.create_learn_trait()."""
+class TestCreateMemoryTrait:
+    """Tests for Factory.create_memory_trait()."""
 
     def test_none_config_raises(self, factory, mock_agent):
-        with pytest.raises(ConfigError, match="Learning configuration required"):
-            factory.create_learn_trait(mock_agent, mock_agent.identity, None)
+        with pytest.raises(ConfigError, match="Memory configuration required"):
+            factory.create_memory_trait(mock_agent, mock_agent.identity, None)
 
     def test_missing_db_raises(self, factory, mock_agent):
         config = DotDict({"embedder_url": "http://localhost:9000"})
         with pytest.raises(ConfigError, match="missing required 'db' field"):
-            factory.create_learn_trait(mock_agent, mock_agent.identity, config)
+            factory.create_memory_trait(mock_agent, mock_agent.identity, config)
 
     def test_valid_config(self, factory, mock_agent):
         config = DotDict(
@@ -133,14 +134,33 @@ class TestCreateLearnTrait:
                 "embedder_url": "http://localhost:9000",
             }
         )
-        trait = factory.create_learn_trait(mock_agent, mock_agent.identity, config)
-        assert isinstance(trait, LearnTrait)
+        trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+        assert isinstance(trait, MemoryTrait)
 
     def test_defaults_applied(self, factory, mock_agent):
         config = DotDict({"db": {"url": "postgresql://localhost/test"}})
-        trait = factory.create_learn_trait(mock_agent, mock_agent.identity, config)
+        trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
         assert trait.config.embedder_model == "default"
         assert trait.config.embedder_timeout == 30.0
+
+
+class TestCreateTrainingTrait:
+    """Tests for Factory.create_training_trait()."""
+
+    def test_empty_source_yields_empty_config(self, factory, mock_agent):
+        trait = factory.create_training_trait(mock_agent, None)
+        assert isinstance(trait, TrainingTrait)
+        assert trait.default_schema == "public"
+
+    def test_reads_schema_and_adapters(self, factory, mock_agent):
+        source = {
+            "schema": {"name": "custom", "enforce": True},
+            "adapters": {"lora": {"base_path": "/tmp/adapters"}},
+        }
+        trait = factory.create_training_trait(mock_agent, source)
+        assert trait.default_schema == "custom"
+        assert trait.config.get("schema", {}).get("enforce") is True
+        assert trait.config.get("adapters", {}).get("lora", {}).get("base_path") == "/tmp/adapters"
 
 
 class TestCreateMethodTrait:
@@ -312,13 +332,13 @@ class TestCreateStorage:
         assert isinstance(trait, StorageTrait)
 
 
-class TestCreateLearnRouting:
-    """Tests for _create_learn with platform config merging."""
+class TestCreateMemoryRouting:
+    """Tests for _create_memory with platform config merging."""
 
     def test_no_learn_config_raises(self, factory, mock_agent):
         mock_agent.config = DotDict({})
-        with pytest.raises(ConfigError, match="Learning configuration required"):
-            factory._create_learn(mock_agent)
+        with pytest.raises(ConfigError, match="Memory configuration required"):
+            factory._create_memory(mock_agent)
 
     def test_merges_agent_kelt_schema(self, mock_platform):
         mock_platform.learn_config.return_value = {
@@ -331,9 +351,51 @@ class TestCreateLearnRouting:
         mock_agent.config = DotDict({"kelt": {"schema": {"name": "custom", "enforce": True}}})
         mock_agent.identity = MagicMock()
 
-        with patch.object(factory_inst, "create_learn_trait") as mock_create:
+        with patch.object(factory_inst, "create_memory_trait") as mock_create:
             mock_create.return_value = MagicMock()
-            factory_inst._create_learn(mock_agent)
+            factory_inst._create_memory(mock_agent)
 
             config_passed = mock_create.call_args[0][2]
             assert config_passed["schema"] == {"name": "custom", "enforce": True}
+
+
+class TestCreateTrainingRouting:
+    """Tests for _create_training with platform config merging."""
+
+    def test_empty_platform_config_creates_default_trait(self, mock_platform):
+        mock_platform.learn_config.return_value = None
+        factory_inst = Factory(mock_platform)
+
+        mock_agent = MagicMock()
+        mock_agent.config = DotDict({})
+
+        trait = factory_inst._create_training(mock_agent)
+        assert isinstance(trait, TrainingTrait)
+        assert trait.default_schema == "public"
+
+    def test_reads_platform_adapters(self, mock_platform):
+        mock_platform.learn_config.return_value = {
+            "schema": {"name": "platform"},
+            "adapters": {"lora": {"base_path": "/data/adapters"}},
+        }
+        factory_inst = Factory(mock_platform)
+
+        mock_agent = MagicMock()
+        mock_agent.config = DotDict({})
+
+        trait = factory_inst._create_training(mock_agent)
+        assert trait.default_schema == "platform"
+        assert trait.config.get("adapters", {}).get("lora", {}).get("base_path") == "/data/adapters"
+
+    def test_agent_kelt_schema_overrides_platform(self, mock_platform):
+        mock_platform.learn_config.return_value = {
+            "schema": {"name": "platform"},
+            "adapters": {"lora": {"base_path": "/data/adapters"}},
+        }
+        factory_inst = Factory(mock_platform)
+
+        mock_agent = MagicMock()
+        mock_agent.config = DotDict({"kelt": {"schema": {"name": "agent"}}})
+
+        trait = factory_inst._create_training(mock_agent)
+        assert trait.default_schema == "agent"

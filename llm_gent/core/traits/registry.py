@@ -1,6 +1,6 @@
 """Trait registry for managing available platform traits.
 
-The registry is a container for all configured platform traits (LLM, Learn, HTTP, etc.)
+The registry is a container for all configured platform traits (LLM, Memory, HTTP, etc.)
 that can be attached to agents. It provides type-safe access and discovery.
 """
 
@@ -33,7 +33,7 @@ class Registry:
 
         # Traits are registered via agent.add_trait()
         agent.add_trait(LLMTrait(agent, llm_config))
-        agent.add_trait(LearnTrait(agent, learn_config))
+        agent.add_trait(MemoryTrait(agent, memory_config))
 
         # Access traits by type through agent
         llm_trait = agent.get_trait(LLMTrait)
@@ -42,7 +42,7 @@ class Registry:
             pass
 
         # Or require it (raises if missing)
-        learn_trait = agent.require_trait(LearnTrait)
+        memory_trait = agent.require_trait(MemoryTrait)
     """
 
     def __init__(self, lg: Logger) -> None:

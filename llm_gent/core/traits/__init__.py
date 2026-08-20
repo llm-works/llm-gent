@@ -8,10 +8,11 @@ from .builtin import (
     DirectiveTrait,
     HTTPConfig,
     HTTPTrait,
-    LearnConfig,
-    LearnTrait,
     LLMConfig,
     LLMTrait,
+    ManifestNotFoundError,
+    MemoryConfig,
+    MemoryTrait,
     MethodTrait,
     RatingConfig,
     RatingTrait,
@@ -19,6 +20,8 @@ from .builtin import (
     SAIATrait,
     StorageTrait,
     ToolsTrait,
+    TrainingConfig,
+    TrainingTrait,
 )
 from .factory import Factory
 from .registry import Registry
@@ -33,26 +36,28 @@ class TraitName(StrEnum):
 
     DIRECTIVE = "directive"
     LLM = "llm"
-    LEARN = "learn"
+    MEMORY = "memory"
     HTTP = "http"
     RATING = "rating"
     SAIA = "saia"
     STORAGE = "storage"
     TOOLS = "tools"
     METHOD = "method"
+    TRAINING = "training"
 
 
 # All trait types available in the platform
 ALL_TRAITS: list[TraitName] = [
     TraitName.DIRECTIVE,
     TraitName.LLM,
-    TraitName.LEARN,
+    TraitName.MEMORY,
     TraitName.HTTP,
     TraitName.RATING,
     TraitName.SAIA,
     TraitName.STORAGE,
     TraitName.TOOLS,
     TraitName.METHOD,
+    TraitName.TRAINING,
 ]
 
 
@@ -73,12 +78,12 @@ __all__ = [
     # HTTP
     "HTTPConfig",
     "HTTPTrait",
-    # Learn
-    "LearnConfig",
-    "LearnTrait",
     # LLM
     "LLMConfig",
     "LLMTrait",
+    # Memory
+    "MemoryConfig",
+    "MemoryTrait",
     # Rating
     "RatingConfig",
     "RatingTrait",
@@ -89,4 +94,8 @@ __all__ = [
     "StorageTrait",
     # Tools
     "ToolsTrait",
+    # Training (adapter manifest / schema resolution)
+    "ManifestNotFoundError",
+    "TrainingConfig",
+    "TrainingTrait",
 ]

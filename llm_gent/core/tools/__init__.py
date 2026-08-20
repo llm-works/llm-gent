@@ -48,7 +48,7 @@ ALL_TOOLS: list[ToolName] = [
     ToolName.WEB_FETCH,
     ToolName.WEB_SEARCH,
     ToolName.COMPLETE_TASK,
-    # Note: REMEMBER/RECALL require LearnTrait, added dynamically when needed
+    # Note: REMEMBER/RECALL require MemoryTrait, added dynamically when needed
 ]
 
 

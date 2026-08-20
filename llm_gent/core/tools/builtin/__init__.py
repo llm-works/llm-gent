@@ -3,7 +3,7 @@
 from .complete import CompleteTaskTool
 from .file import FileReadTool, FileWriteTool
 from .http import HTTPFetchTool
-from .learn import RecallTool, RememberTool
+from .memory import RecallTool, RememberTool
 from .shell import ShellTool
 from .web import (
     WebFetchTool,
