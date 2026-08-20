@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..core.traits import Registry as TraitsRegistry
 from .role import Role
 from .state import State
 
@@ -63,4 +64,17 @@ class Context:
     Composition helpers (:class:`Panel`, etc.) use this to dispatch sibling
     verbs with their own role-bound saia. Typed as ``Any`` to avoid a circular
     import — ``.dispatch(name, *args, **kwargs)`` is the only method used.
+    """
+
+    traits: TraitsRegistry | None = None
+    """Trait registry the dispatching flow was constructed with, or ``None``.
+
+    Verbs reach mounted platform capabilities (memory, storage, tools,
+    custom traits) via ``ctx.traits.get(SomeTrait)`` or
+    ``ctx.traits.require(SomeTrait)``. ``None`` when the flow was
+    constructed without a registry — verbs that need a trait must handle
+    absence, or the flow must be constructed with one. Imported as
+    ``TraitsRegistry`` to disambiguate from other registry types in
+    consumer codebases; the same class is exported as ``Registry`` from
+    :mod:`llm_gent.core.traits`.
     """

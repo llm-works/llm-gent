@@ -55,6 +55,7 @@ from typing import Any
 
 from appinfra.log import Logger
 
+from ..core.traits import Registry as TraitsRegistry
 from ._executor import _build_ctx, _execute_node, _step_inputs
 from .context import Context
 from .factory import SAIAFactory
@@ -95,6 +96,7 @@ class Flow:
         *,
         saia_f: SAIAFactory | None = None,
         state: Any = UNSET,
+        traits: TraitsRegistry | None = None,
     ) -> None:
         """Initialize a flow.
 
@@ -118,11 +120,18 @@ class Flow:
             state: User-owned shared state object. Verbs read and (typically)
                 mutate it in place. Opaque to the flow; may be overridden per
                 :meth:`run` invocation.
+            traits: Optional trait registry surfaced on every dispatched
+                :class:`Context` as ``ctx.traits``. When ``None``, verbs see
+                ``ctx.traits is None``. A subflow inherits the outer
+                runtime's registry (like the saia cache) via the same
+                internal handoff, so mounting on the top-level flow is
+                enough to reach every nested dispatch.
         """
         self._lg = lg
         self._name = name
         self._saia_f = saia_f
         self._state = state
+        self._traits = traits
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
@@ -140,6 +149,11 @@ class Flow:
     def state(self) -> Any:
         """The flow's default shared state object (user-owned)."""
         return self._state
+
+    @property
+    def traits(self) -> TraitsRegistry | None:
+        """The trait registry this flow was constructed with, or ``None``."""
+        return self._traits
 
     # -------------------------------------------------------------------------
     # Registration
@@ -197,6 +211,7 @@ class Flow:
             role=verb.role,
             state=payload if isinstance(payload, State) else State(data=payload),
             flow=self,
+            traits=self._traits,
         )
         return await verb(ctx, *args, **kwargs)
 

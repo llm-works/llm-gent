@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ..core.traits import Registry as TraitsRegistry
 from .nodes import UNSET
 
 
@@ -82,6 +83,7 @@ class FlowFactory:
         *,
         saia_f: SAIAFactory | None = None,
         state: Any = UNSET,
+        traits: TraitsRegistry | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -93,13 +95,18 @@ class FlowFactory:
             state: Default construction ``state`` for built flows. Per-Flow
                 overrides go through :meth:`create`; per-run overrides go
                 through :meth:`Flow.run`.
+            traits: Optional trait registry propagated to every :class:`Flow`
+                built by this factory. Verbs reach mounted capabilities via
+                ``ctx.traits``. ``None`` yields flows with ``ctx.traits is
+                None``.
         """
         self._lg = lg
         self._saia_f = saia_f
         self._state = state
+        self._traits = traits
 
     def create(self, name: str = "", *, state: Any = UNSET) -> Flow:
-        """Return a :class:`Flow` using this factory's ``lg``, ``saia``, and ``state``.
+        """Return a :class:`Flow` using this factory's captured environment.
 
         Args:
             name: Optional identifier — used in error messages and traces.
@@ -113,13 +120,27 @@ class FlowFactory:
         from .flow import Flow
 
         resolved_state = self._state if state is UNSET else state
-        return Flow(self._lg, name, saia_f=self._saia_f, state=resolved_state)
+        return Flow(
+            self._lg,
+            name,
+            saia_f=self._saia_f,
+            state=resolved_state,
+            traits=self._traits,
+        )
 
     def with_saia_f(self, saia_f: SAIAFactory) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
 
-        ``lg`` and ``state`` are preserved. Useful for subsystems that
-        share the app's logger but need a different saia builder (e.g. a
-        plugin with its own model wiring).
+        ``lg``, ``state``, and ``traits`` are preserved. Useful for
+        subsystems that share the app's logger but need a different saia
+        builder (e.g. a plugin with its own model wiring).
         """
-        return FlowFactory(self._lg, saia_f=saia_f, state=self._state)
+        return FlowFactory(self._lg, saia_f=saia_f, state=self._state, traits=self._traits)
+
+    def with_traits(self, traits: TraitsRegistry) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose trait registry is swapped.
+
+        ``lg``, ``saia_f``, and ``state`` are preserved. Mirrors
+        :meth:`with_saia_f` for the trait dimension.
+        """
+        return FlowFactory(self._lg, saia_f=self._saia_f, state=self._state, traits=traits)
