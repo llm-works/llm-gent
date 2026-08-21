@@ -17,7 +17,7 @@ from appinfra.time import time
 from ...core.agent import Agent as BaseAgent
 from ...core.dispatcher import Dispatcher
 from ...core.runnable import ExecutionResult
-from ...core.traits.builtin.learn import LearnTrait
+from ...core.traits.builtin.memory import MemoryTrait
 from ...core.traits.builtin.saia import SAIATrait
 
 
@@ -119,13 +119,13 @@ class Agent(BaseAgent):
             ExecutionResult with outcome.
         """
         saia_trait = self.get_trait(SAIATrait)
-        learn_trait = self.get_trait(LearnTrait)
+        memory_trait = self.get_trait(MemoryTrait)
 
         if saia_trait is None:
             return ExecutionResult(success=False, content="SAIATrait not attached")
 
         # Get context (conversation if available, otherwise recall from learning)
-        context = self._get_context(learn_trait, task, recall_strategy, recall_limit)
+        context = self._get_context(memory_trait, task, recall_strategy, recall_limit)
 
         # Execute task
         prompt = saia_trait.saia.compose(context, task)
@@ -136,14 +136,14 @@ class Agent(BaseAgent):
         self._record_conversation_turn(task, result)
 
         # Persist successful outcomes
-        if result.success and learn_trait is not None:
-            await self._persist_outcome(learn_trait, saia_trait, task, result)
+        if result.success and memory_trait is not None:
+            await self._persist_outcome(memory_trait, saia_trait, task, result)
 
         return result
 
     def _recall_context(
         self,
-        learn_trait: LearnTrait | None,
+        memory_trait: MemoryTrait | None,
         task: str,
         recall_strategy: str,
         recall_limit: int,
@@ -155,21 +155,21 @@ class Agent(BaseAgent):
             recall_semantic,
         )
 
-        if learn_trait is None:
+        if memory_trait is None:
             return ""
 
         if recall_strategy == "semantic":
             past = recall_semantic(
-                learn_trait, query=task, limit=recall_limit, agent_name=self.name
+                memory_trait, query=task, limit=recall_limit, agent_name=self.name
             )
         else:  # chronological
-            past = recall_chronological(learn_trait, self.name, limit=recall_limit)
+            past = recall_chronological(memory_trait, self.name, limit=recall_limit)
 
         return format_solutions_context(past)
 
     def _get_context(
         self,
-        learn_trait: LearnTrait | None,
+        memory_trait: MemoryTrait | None,
         task: str,
         recall_strategy: str,
         recall_limit: int,
@@ -177,7 +177,7 @@ class Agent(BaseAgent):
         """Get context for task execution.
 
         Uses conversation history if ConversationTrait is present,
-        otherwise falls back to solution recall from LearnTrait.
+        otherwise falls back to solution recall from MemoryTrait.
         """
         from ...core.traits.builtin.conversation import ConversationTrait
 
@@ -190,7 +190,7 @@ class Agent(BaseAgent):
                 return conv_context
 
         # Fall back to recall if no conversation context
-        return self._recall_context(learn_trait, task, recall_strategy, recall_limit)
+        return self._recall_context(memory_trait, task, recall_strategy, recall_limit)
 
     def _format_conversation_context(self, conv_trait: ConversationTrait) -> str:
         """Format conversation history as context string."""
@@ -219,7 +219,7 @@ class Agent(BaseAgent):
 
     async def _persist_outcome(
         self,
-        learn_trait: LearnTrait,
+        memory_trait: MemoryTrait,
         saia_trait: SAIATrait,
         task: str,
         result: ExecutionResult,
@@ -231,7 +231,7 @@ class Agent(BaseAgent):
         try:
             summary = await self._summarize_outcome(saia_trait, result.content)
             if summary:
-                self._record_solution(learn_trait, task, result, summary)
+                self._record_solution(memory_trait, task, result, summary)
         except Exception as e:
             self._lg.warning(
                 "failed to persist solution", extra={"agent": self.name, "exception": e}
@@ -252,13 +252,13 @@ class Agent(BaseAgent):
 
     def _record_solution(
         self,
-        learn_trait: LearnTrait,
+        memory_trait: MemoryTrait,
         task: str,
         result: ExecutionResult,
         summary: str,
     ) -> None:
         """Record solution to learning database."""
-        learn_trait.record_solution(self.name, task, result, summary)
+        memory_trait.record_solution(self.name, task, result, summary)
         self._lg.debug(
             "solution persisted",
             extra={"agent": self.name, "tokens": result.tokens_used},

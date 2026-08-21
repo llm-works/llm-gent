@@ -1283,18 +1283,18 @@ class TestRememberTool:
 
     def test_remember_success(self):
         """Store a fact successfully."""
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.remember.return_value = 42
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.remember.return_value = 42
 
-        tool = RememberTool(mock_learn_trait)
+        tool = RememberTool(mock_memory_trait)
         result = tool.execute(fact="User prefers Python")
 
         assert result.success is True
         assert "42" in result.output
         assert "User prefers Python" in result.output
-        mock_learn_trait.remember.assert_called_once_with(
+        mock_memory_trait.remember.assert_called_once_with(
             fact="User prefers Python",
             category="general",
             source="inferred",
@@ -1302,16 +1302,16 @@ class TestRememberTool:
 
     def test_remember_with_category(self):
         """Store a fact with category."""
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.remember.return_value = 123
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.remember.return_value = 123
 
-        tool = RememberTool(mock_learn_trait)
+        tool = RememberTool(mock_memory_trait)
         result = tool.execute(fact="Uses vim", category="preferences")
 
         assert result.success is True
-        mock_learn_trait.remember.assert_called_once_with(
+        mock_memory_trait.remember.assert_called_once_with(
             fact="Uses vim",
             category="preferences",
             source="inferred",
@@ -1319,12 +1319,12 @@ class TestRememberTool:
 
     def test_remember_failure(self):
         """Handle store failure gracefully."""
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.remember.side_effect = RuntimeError("Database error")
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.remember.side_effect = RuntimeError("Database error")
 
-        tool = RememberTool(mock_learn_trait)
+        tool = RememberTool(mock_memory_trait)
         result = tool.execute(fact="Some fact")
 
         assert result.success is False
@@ -1332,10 +1332,10 @@ class TestRememberTool:
 
     def test_tool_properties(self):
         """Tool has correct properties."""
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        mock_learn_trait = MagicMock()
-        tool = RememberTool(mock_learn_trait)
+        mock_memory_trait = MagicMock()
+        tool = RememberTool(mock_memory_trait)
 
         assert tool.name == "remember"
         assert "fact" in tool.parameters["properties"]
@@ -1348,7 +1348,7 @@ class TestRecallTool:
 
     def test_recall_with_embedder(self):
         """Search facts using semantic search."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
         mock_fact = MagicMock()
         mock_fact.content = "User prefers Python"
@@ -1358,21 +1358,21 @@ class TestRecallTool:
         mock_scored_entity.entity = mock_fact
         mock_scored_entity.score = 0.85
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = True
-        mock_learn_trait.recall.return_value = [mock_scored_entity]
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = True
+        mock_memory_trait.recall.return_value = [mock_scored_entity]
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         result = tool.execute(query="programming language")
 
         assert result.success is True
         assert "User prefers Python" in result.output
         assert "0.85" in result.output
-        mock_learn_trait.recall.assert_called_once()
+        mock_memory_trait.recall.assert_called_once()
 
     def test_recall_without_embedder(self):
         """Fall back to listing facts without semantic search."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
         mock_fact = MagicMock()
         mock_fact.content = "Uses vim"
@@ -1386,11 +1386,11 @@ class TestRecallTool:
         mock_learn = MagicMock()
         mock_learn.atomic = mock_atomic
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = False
-        mock_learn_trait.kelt = mock_learn
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = False
+        mock_memory_trait.kelt = mock_learn
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         result = tool.execute(query="editor")
 
         assert result.success is True
@@ -1398,13 +1398,13 @@ class TestRecallTool:
 
     def test_recall_no_results(self):
         """Handle no matching facts."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = True
-        mock_learn_trait.recall.return_value = []
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = True
+        mock_memory_trait.recall.return_value = []
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         result = tool.execute(query="nonexistent topic")
 
         assert result.success is True
@@ -1412,16 +1412,16 @@ class TestRecallTool:
 
     def test_recall_with_category_filter(self):
         """Filter recall by category."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = True
-        mock_learn_trait.recall.return_value = []
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = True
+        mock_memory_trait.recall.return_value = []
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         tool.execute(query="test", category="preferences")
 
-        mock_learn_trait.recall.assert_called_once_with(
+        mock_memory_trait.recall.assert_called_once_with(
             query="test",
             top_k=5,
             min_similarity=0.3,
@@ -1430,13 +1430,13 @@ class TestRecallTool:
 
     def test_recall_failure(self):
         """Handle recall failure gracefully."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = True
-        mock_learn_trait.recall.side_effect = RuntimeError("Embedder error")
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = True
+        mock_memory_trait.recall.side_effect = RuntimeError("Embedder error")
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         result = tool.execute(query="test")
 
         assert result.success is False
@@ -1444,10 +1444,10 @@ class TestRecallTool:
 
     def test_tool_properties(self):
         """Tool has correct properties."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        mock_learn_trait = MagicMock()
-        tool = RecallTool(mock_learn_trait)
+        mock_memory_trait = MagicMock()
+        tool = RecallTool(mock_memory_trait)
 
         assert tool.name == "recall"
         assert "query" in tool.parameters["properties"]

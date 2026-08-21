@@ -28,12 +28,12 @@ class Factory:
     Trait Requirements (3 ways, priority order):
         1. YAML config (highest priority):
             traits:
-              required: [llm, learn]
+              required: [llm, memory]
 
         2. Factory class variable:
             class CustomFactory(Factory):
                 agent_class = MyAgent
-                required_traits = [TraitName.LLM, TraitName.LEARN]
+                required_traits = [TraitName.LLM, TraitName.MEMORY]
 
         3. No requirements (agent handles validation in code)
 
@@ -191,23 +191,25 @@ class Factory:
         """Build mapping from trait names to trait classes for validation."""
         from ..traits.builtin.directive import DirectiveTrait, MethodTrait
         from ..traits.builtin.http import HTTPTrait
-        from ..traits.builtin.learn import LearnTrait
         from ..traits.builtin.llm import LLMTrait
+        from ..traits.builtin.memory import MemoryTrait
         from ..traits.builtin.rating import RatingTrait
         from ..traits.builtin.saia import SAIATrait
         from ..traits.builtin.storage import StorageTrait
         from ..traits.builtin.tools import ToolsTrait
+        from ..traits.builtin.training import TrainingTrait
 
         return {
             TraitName.DIRECTIVE: DirectiveTrait,
             TraitName.LLM: LLMTrait,
-            TraitName.LEARN: LearnTrait,
+            TraitName.MEMORY: MemoryTrait,
             TraitName.RATING: RatingTrait,
             TraitName.STORAGE: StorageTrait,
             TraitName.METHOD: MethodTrait,
             TraitName.HTTP: HTTPTrait,
             TraitName.SAIA: SAIATrait,
             TraitName.TOOLS: ToolsTrait,
+            TraitName.TRAINING: TrainingTrait,
         }
 
     def _validate_trait_requirements(
@@ -238,7 +240,7 @@ class Factory:
         if missing:
             raise TraitNotFoundError(
                 f"{agent.name} requires traits {missing} but they were not created. "
-                f"Check platform configuration (e.g., 'learn' section for LearnTrait)."
+                f"Check platform configuration (e.g., 'learn' section for MemoryTrait)."
             )
 
     def _configure_tools(self, agent: Agent, config: DotDict) -> None:
@@ -253,7 +255,7 @@ class Factory:
             agent: Agent instance.
             config: Full config dict from manifest.
         """
-        from ..traits.builtin.learn import LearnTrait
+        from ..traits.builtin.memory import MemoryTrait
         from ..traits.builtin.tools import ToolsTrait
 
         # Determine which tools to configure
@@ -261,10 +263,10 @@ class Factory:
         if not tools_config:
             return
 
-        # Bind LearnTrait to platform.tool_factory if available
-        learn_trait = agent.get_trait(LearnTrait)
-        if learn_trait:
-            self._platform.tool_factory.set_learn_trait(learn_trait)
+        # Bind MemoryTrait to platform.tool_factory if available
+        memory_trait = agent.get_trait(MemoryTrait)
+        if memory_trait:
+            self._platform.tool_factory.set_memory_trait(memory_trait)
 
         try:
             # Get or create ToolsTrait and populate with configured tools
@@ -280,9 +282,9 @@ class Factory:
             if is_new and tools_trait.has_tools():
                 agent.add_trait(tools_trait)
         finally:
-            # Clear learn_trait to avoid leaking state between agents
-            if learn_trait:
-                self._platform.tool_factory.set_learn_trait(None)
+            # Clear memory_trait to avoid leaking state between agents
+            if memory_trait:
+                self._platform.tool_factory.set_memory_trait(None)
 
     def _create_and_register_tools(
         self, agent: Agent, tools_config: dict[str, dict[str, Any]], tools_trait: Any

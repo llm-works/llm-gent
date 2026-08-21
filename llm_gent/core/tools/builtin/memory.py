@@ -1,6 +1,6 @@
-"""Learning tools for agent memory operations.
+"""Memory tools for agent kelt-backed fact operations.
 
-These tools enable agents to store and retrieve facts via LearnTrait.
+These tools enable agents to store and retrieve facts via MemoryTrait.
 """
 
 from __future__ import annotations
@@ -11,21 +11,21 @@ from ..base import BaseTool, ToolResult
 
 
 if TYPE_CHECKING:
-    from ...traits.builtin.learn import LearnTrait
+    from ...traits.builtin.memory import MemoryTrait
 
 
 class RememberTool(BaseTool):
     """Store a fact in long-term memory.
 
-    Uses LearnTrait to persist facts for future reference.
+    Uses MemoryTrait to persist facts for future reference.
     Facts are stored with optional category for organization.
 
     Example:
-        from llm_gent.core.traits.builtin.learn import LearnTrait, LearnConfig
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.traits.builtin.memory import MemoryTrait, MemoryConfig
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        learn_trait = LearnTrait(agent, LearnConfig(...))
-        tool = RememberTool(learn_trait)
+        memory_trait = MemoryTrait(agent, MemoryConfig(...))
+        tool = RememberTool(memory_trait)
         result = tool.execute(fact="User prefers Python", category="preferences")
     """
 
@@ -48,13 +48,13 @@ class RememberTool(BaseTool):
         "required": ["fact"],
     }
 
-    def __init__(self, learn_trait: LearnTrait) -> None:
-        """Initialize with LearnTrait for persistence.
+    def __init__(self, memory_trait: MemoryTrait) -> None:
+        """Initialize with MemoryTrait for persistence.
 
         Args:
-            learn_trait: The LearnTrait instance for storing facts.
+            memory_trait: The MemoryTrait instance for storing facts.
         """
-        self._learn_trait = learn_trait
+        self._memory_trait = memory_trait
 
     def execute(self, **kwargs: Any) -> ToolResult:
         """Store a fact in memory.
@@ -69,7 +69,7 @@ class RememberTool(BaseTool):
         category: str = kwargs.get("category", "general")
 
         try:
-            fact_id = self._learn_trait.remember(fact=fact, category=category, source="inferred")
+            fact_id = self._memory_trait.remember(fact=fact, category=category, source="inferred")
             return ToolResult(success=True, output=f"Stored fact (id={fact_id}): {fact}")
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Failed to store fact: {e}")
@@ -78,15 +78,15 @@ class RememberTool(BaseTool):
 class RecallTool(BaseTool):
     """Search memory for relevant facts.
 
-    Uses LearnTrait to search stored facts. Supports semantic search
+    Uses MemoryTrait to search stored facts. Supports semantic search
     when embedder is configured, otherwise returns recent facts.
 
     Example:
-        from llm_gent.core.traits.builtin.learn import LearnTrait, LearnConfig
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.traits.builtin.memory import MemoryTrait, MemoryConfig
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        learn_trait = LearnTrait(agent, LearnConfig(...))
-        tool = RecallTool(learn_trait)
+        memory_trait = MemoryTrait(agent, MemoryConfig(...))
+        tool = RecallTool(memory_trait)
         result = tool.execute(query="user preferences", limit=5)
     """
 
@@ -111,13 +111,13 @@ class RecallTool(BaseTool):
         "required": ["query"],
     }
 
-    def __init__(self, learn_trait: LearnTrait) -> None:
-        """Initialize with LearnTrait for retrieval.
+    def __init__(self, memory_trait: MemoryTrait) -> None:
+        """Initialize with MemoryTrait for retrieval.
 
         Args:
-            learn_trait: The LearnTrait instance for retrieving facts.
+            memory_trait: The MemoryTrait instance for retrieving facts.
         """
-        self._learn_trait = learn_trait
+        self._memory_trait = memory_trait
 
     def execute(self, **kwargs: Any) -> ToolResult:
         """Search for facts matching the query.
@@ -134,7 +134,7 @@ class RecallTool(BaseTool):
 
         try:
             categories = [category] if category else None
-            if self._learn_trait.has_embedder:
+            if self._memory_trait.has_embedder:
                 return self._recall_semantic(query, limit, categories)
             return self._recall_list(limit, categories)
         except Exception as e:
@@ -142,7 +142,7 @@ class RecallTool(BaseTool):
 
     def _recall_semantic(self, query: str, limit: int, categories: list[str] | None) -> ToolResult:
         """Recall facts using semantic search."""
-        scored_facts = self._learn_trait.recall(
+        scored_facts = self._memory_trait.recall(
             query=query, top_k=limit, min_similarity=0.3, categories=categories
         )
         if not scored_facts:
@@ -158,7 +158,7 @@ class RecallTool(BaseTool):
 
     def _recall_list(self, limit: int, categories: list[str] | None) -> ToolResult:
         """Recall facts by listing recent entries (no embedder)."""
-        facts = self._learn_trait.kelt.atomic.assertions.list(limit=limit)
+        facts = self._memory_trait.kelt.atomic.assertions.list(limit=limit)
         # Filter by category in memory if specified (list() doesn't support category filter)
         if categories:
             facts = [f for f in facts if f.category in categories]

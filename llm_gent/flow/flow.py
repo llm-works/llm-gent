@@ -55,7 +55,7 @@ from typing import Any
 
 from appinfra.log import Logger
 
-from ..core.traits import Registry as TraitsRegistry
+from ..core.traits import Registry as TraitRegistry
 from ._executor import _build_ctx, _execute_node, _step_inputs
 from .context import Context
 from .factory import SAIAFactory
@@ -96,7 +96,7 @@ class Flow:
         *,
         saia_f: SAIAFactory | None = None,
         state: Any = UNSET,
-        traits: TraitsRegistry | None = None,
+        traits: TraitRegistry | None = None,
     ) -> None:
         """Initialize a flow.
 
@@ -151,7 +151,7 @@ class Flow:
         return self._state
 
     @property
-    def traits(self) -> TraitsRegistry | None:
+    def traits(self) -> TraitRegistry | None:
         """The trait registry this flow was constructed with, or ``None``."""
         return self._traits
 

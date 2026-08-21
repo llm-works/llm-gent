@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ..core.traits import Registry as TraitsRegistry
+from ..core.traits import Registry as TraitRegistry
 from .nodes import UNSET
 
 
@@ -83,7 +83,7 @@ class FlowFactory:
         *,
         saia_f: SAIAFactory | None = None,
         state: Any = UNSET,
-        traits: TraitsRegistry | None = None,
+        traits: TraitRegistry | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -137,7 +137,7 @@ class FlowFactory:
         """
         return FlowFactory(self._lg, saia_f=saia_f, state=self._state, traits=self._traits)
 
-    def with_traits(self, traits: TraitsRegistry | None) -> FlowFactory:
+    def with_traits(self, traits: TraitRegistry | None) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose trait registry is swapped.
 
         ``lg``, ``saia_f``, and ``state`` are preserved. Mirrors

@@ -23,7 +23,7 @@ class FooTrait(BaseTrait):
 
 
 class BarTrait(BaseTrait):
-    trait_name = TraitName.LEARN  # reuse existing enum value for "learn"
+    trait_name = TraitName.MEMORY  # reuse existing enum value for "memory"
 
 
 class NoNameTrait(BaseTrait):
@@ -230,5 +230,5 @@ class TestClear:
 
         assert registry.count() == 0
         assert registry.get_by_name(TraitName.LLM) is None
-        assert registry.get_by_name(TraitName.LEARN) is None
+        assert registry.get_by_name(TraitName.MEMORY) is None
         assert registry.all() == []

@@ -13,8 +13,9 @@ if TYPE_CHECKING:
     from ..platform import PlatformContext
     from . import TraitName
     from .builtin.directive import Directive, DirectiveTrait, MethodTrait
-    from .builtin.learn import LearnConfig, LearnTrait
     from .builtin.llm import LLMConfig, LLMTrait
+    from .builtin.memory import MemoryConfig, MemoryTrait
+    from .builtin.training import TrainingTrait
 
 from .base import Trait
 
@@ -49,10 +50,11 @@ class Factory:
         self._creators: dict[TraitName, Callable[..., Trait]] = {
             TraitName.DIRECTIVE: self._create_directive,
             TraitName.LLM: self._create_llm,
-            TraitName.LEARN: self._create_learn,
+            TraitName.MEMORY: self._create_memory,
             TraitName.RATING: self._create_rating,
             TraitName.STORAGE: self._create_storage,
             TraitName.METHOD: self._create_method,
+            TraitName.TRAINING: self._create_training,
         }
 
     def create(
@@ -137,10 +139,11 @@ class Factory:
 
         return DotDict(result)
 
-    def _create_learn(self, agent: Agent) -> LearnTrait:
-        """Route to create_learn_trait.
+    def _create_memory(self, agent: Agent) -> MemoryTrait:
+        """Route to create_memory_trait.
 
         Merges platform learn config with agent-level kelt config (schema, identity overrides).
+        Platform config key is still ``learn`` (see PlatformContext.learn_config).
         """
         learn_config_raw = self._platform.learn_config()
         learn_config: DotDict | None = DotDict(learn_config_raw) if learn_config_raw else None
@@ -150,7 +153,22 @@ class Factory:
         if agent_kelt and learn_config and agent_kelt.get("schema"):
             learn_config["schema"] = agent_kelt["schema"]
 
-        return self.create_learn_trait(agent, agent.identity, learn_config)
+        return self.create_memory_trait(agent, agent.identity, learn_config)
+
+    def _create_training(self, agent: Agent) -> TrainingTrait:
+        """Route to create_training_trait.
+
+        Reads schema + adapters from platform learn config (kelt-side settings share
+        that block on disk). Agent-level kelt.schema overrides platform schema.
+        """
+        learn_config_raw = self._platform.learn_config()
+        source: dict[str, Any] = dict(learn_config_raw) if learn_config_raw else {}
+
+        agent_kelt = agent.config.get("kelt", {})
+        if agent_kelt and agent_kelt.get("schema"):
+            source["schema"] = agent_kelt["schema"]
+
+        return self.create_training_trait(agent, source)
 
     def _create_rating(self, agent: Agent) -> Trait:
         """Route to create_rating_trait."""
@@ -225,43 +243,65 @@ class Factory:
 
         return DirectiveTrait(agent, directive)
 
-    def create_learn_trait(
-        self, agent: Agent, identity: Identity | None, learn_config: LearnConfig | None
-    ) -> LearnTrait:
-        """Create LearnTrait with agent-specific identity.
+    def create_memory_trait(
+        self, agent: Agent, identity: Identity | None, memory_config: MemoryConfig | None
+    ) -> MemoryTrait:
+        """Create MemoryTrait with agent-specific identity.
 
         Args:
             agent: Agent instance that will own this trait.
             identity: Agent's identity for memory addressing.
-            learn_config: Learning configuration dict (db, embedder_url, etc.).
+            memory_config: Memory configuration dict (db, embedder_url, etc.).
 
         Returns:
-            Configured LearnTrait instance.
+            Configured MemoryTrait instance.
 
         Raises:
-            ConfigError: If learn_config is None or missing required fields.
+            ConfigError: If memory_config is None or missing required fields.
         """
         from ..errors import ConfigError
-        from .builtin.learn import LearnConfig, LearnTrait
+        from .builtin.memory import MemoryConfig, MemoryTrait
 
-        if not learn_config:
-            raise ConfigError("Learning configuration required but not provided")
+        if not memory_config:
+            raise ConfigError("Memory configuration required but not provided")
 
-        if "db" not in learn_config:
-            raise ConfigError("Learning configuration missing required 'db' field")
+        if "db" not in memory_config:
+            raise ConfigError("Memory configuration missing required 'db' field")
 
-        config = LearnConfig(
+        config = MemoryConfig(
             identity=identity,
-            schema=learn_config.get("schema"),
-            llm=learn_config.get("llm", {}),
-            db=learn_config["db"],
-            embedder_url=learn_config.get("embedder_url"),
-            embedder_model=learn_config.get("embedder_model", "default"),
-            embedder_timeout=learn_config.get("embedder_timeout", 30.0),
-            training=learn_config.get("training"),
-            adapters=learn_config.get("adapters"),
+            schema=memory_config.get("schema"),
+            llm=memory_config.get("llm", {}),
+            db=memory_config["db"],
+            embedder_url=memory_config.get("embedder_url"),
+            embedder_model=memory_config.get("embedder_model", "default"),
+            embedder_timeout=memory_config.get("embedder_timeout", 30.0),
+            training=memory_config.get("training"),
         )
-        return LearnTrait(agent, config)
+        return MemoryTrait(agent, config)
+
+    def create_training_trait(
+        self, agent: Agent, source_config: dict[str, Any] | None
+    ) -> TrainingTrait:
+        """Create TrainingTrait from a config with schema + adapters keys.
+
+        Args:
+            agent: Agent instance that will own this trait.
+            source_config: Config dict; ``schema`` (name/enforce) and ``adapters``
+                (lora.base_path) are read. Missing keys yield an empty TrainingTrait
+                that falls back to the default schema for every lookup.
+
+        Returns:
+            Configured TrainingTrait instance.
+        """
+        from .builtin.training import TrainingConfig, TrainingTrait
+
+        source: dict[str, Any] = dict(source_config) if source_config else {}
+        config = TrainingConfig(
+            schema=source.get("schema"),
+            adapters=source.get("adapters"),
+        )
+        return TrainingTrait(agent, config)
 
     def create_method_trait(self, agent: Agent, method: str | None) -> MethodTrait:
         """Create MethodTrait from method string.

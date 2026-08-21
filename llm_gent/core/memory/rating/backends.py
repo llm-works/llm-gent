@@ -126,7 +126,7 @@ class AtomicFactsBackend:
         """Yield unrated facts one at a time.
 
         Args:
-            context_key: Context key to filter facts (e.g., from LearnTrait).
+            context_key: Context key to filter facts (e.g., from MemoryTrait).
             fact_type: Filter by fact type (e.g., "solution").
             category: Filter by category (e.g., "joke").
             limit: Maximum number of facts to yield.
@@ -157,7 +157,7 @@ class AtomicFactsBackend:
         """Count unrated facts.
 
         Args:
-            context_key: Context key to filter facts (e.g., from LearnTrait).
+            context_key: Context key to filter facts (e.g., from MemoryTrait).
             fact_type: Filter by fact type (e.g., "solution").
             category: Filter by category (e.g., "joke").
 

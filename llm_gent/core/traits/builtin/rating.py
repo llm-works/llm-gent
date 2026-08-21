@@ -64,7 +64,7 @@ class RatingTrait(BaseTrait):
     agent-generated content. Stores ratings in atomic_feedback_details with
     source tracking for multi-rater scenarios.
 
-    **IMPORTANT:** RatingTrait depends on LearnTrait. LearnTrait must be attached
+    **IMPORTANT:** RatingTrait depends on MemoryTrait. MemoryTrait must be attached
     to the agent BEFORE RatingTrait.
 
     Capabilities:
@@ -75,7 +75,7 @@ class RatingTrait(BaseTrait):
         - Multi-provider support: Use multiple LLMs for rating comparison
 
     Example:
-        from llm_gent.core.traits import RatingTrait, LearnTrait
+        from llm_gent.core.traits import RatingTrait, MemoryTrait
 
         rating_config = RatingConfig(
             providers=[{
@@ -99,7 +99,7 @@ class RatingTrait(BaseTrait):
         )
 
         # Attach traits
-        agent.add_trait(LearnTrait(agent, learn_config))
+        agent.add_trait(MemoryTrait(agent, memory_config))
         agent.add_trait(RatingTrait(agent, rating_config))
         agent.start()
 
@@ -136,24 +136,24 @@ class RatingTrait(BaseTrait):
         """Initialize rating service and backend.
 
         Raises:
-            TraitNotFoundError: If LearnTrait or LLMTrait are not attached.
+            TraitNotFoundError: If MemoryTrait or LLMTrait are not attached.
         """
         from ...llm import LLMCaller
-        from .learn import LearnTrait
         from .llm import LLMTrait
+        from .memory import MemoryTrait
 
         # Require dependencies
-        learn_trait = self.agent.require_trait(LearnTrait)
+        memory_trait = self.agent.require_trait(MemoryTrait)
         llm_trait = self.agent.require_trait(LLMTrait)
 
         # Initialize rating service and backend with LLMCaller wrapper
         caller = LLMCaller(self.agent.lg, llm_trait.router)
         self._service = RatingService(self.agent.lg, caller)
 
-        # Get schema from LearnTrait config for backend operations
-        schema_config = learn_trait.config.get("schema", {})
+        # Get schema from MemoryTrait config for backend operations
+        schema_config = memory_trait.config.get("schema", {})
         schema = str(schema_config.get("name")) if schema_config.get("name") else None
-        self._backend = AtomicFactsBackend(self.agent.lg, learn_trait.kelt.database, schema)
+        self._backend = AtomicFactsBackend(self.agent.lg, memory_trait.kelt.database, schema)
 
         self._parse_config()
         self._log_started()
@@ -204,13 +204,13 @@ class RatingTrait(BaseTrait):
         Returns:
             Number of unrated facts matching filters.
         """
-        from .learn import LearnTrait
+        from .memory import MemoryTrait
 
         if not self._backend:
             raise RuntimeError("Rating backend not initialized - call on_start() first")
 
-        learn_trait = self.agent.require_trait(LearnTrait)
-        context_key = str(learn_trait.kelt.context.context_key)
+        memory_trait = self.agent.require_trait(MemoryTrait)
+        context_key = str(memory_trait.kelt.context.context_key)
 
         return self._backend.get_unrated_count(context_key, fact_type, category)
 
@@ -232,14 +232,14 @@ class RatingTrait(BaseTrait):
         Returns:
             List of rating results.
         """
-        from .learn import LearnTrait
+        from .memory import MemoryTrait
 
         if not self._backend:
             raise RuntimeError("Rating backend not initialized - call on_start() first")
 
         provider = self._select_provider(provider_index)
-        learn_trait = self.agent.require_trait(LearnTrait)
-        context_key = str(learn_trait.kelt.context.context_key)
+        memory_trait = self.agent.require_trait(MemoryTrait)
+        context_key = str(memory_trait.kelt.context.context_key)
 
         results = []
         for fact in self._backend.unrated_facts(context_key, fact_type, category, limit):
@@ -283,13 +283,13 @@ class RatingTrait(BaseTrait):
 
     def _prepare_batch_context(self, fact_type: str | None, provider_index: int) -> _BatchContext:
         """Prepare context for batch rating."""
-        from .learn import LearnTrait
+        from .memory import MemoryTrait
 
         if not self._backend or not self._service:
             raise RuntimeError("Rating not initialized - call on_start() first")
 
         provider = self._select_provider(provider_index)
-        learn_trait = self.agent.require_trait(LearnTrait)
+        memory_trait = self.agent.require_trait(MemoryTrait)
         resolved_type = fact_type or "solution"
         type_criteria = self._criteria.get(resolved_type)
         if not type_criteria:
@@ -297,7 +297,7 @@ class RatingTrait(BaseTrait):
 
         backend_type = provider.backend.get("type", "unknown")
         return _BatchContext(
-            context_key=str(learn_trait.kelt.context.context_key),
+            context_key=str(memory_trait.kelt.context.context_key),
             prompt=type_criteria.prompt,
             criteria=type_criteria.criteria,
             model=provider.model,

@@ -28,7 +28,7 @@ class Agent(Runnable):
     implement the concrete agent behavior.
 
     For LLM operations, attach SAIATrait and call agent.get_trait(SAIATrait).saia
-    directly. For learning, attach LearnTrait and access via get_trait().
+    directly. For memory, attach MemoryTrait and access via get_trait().
 
     Example:
         class MyAgent(Agent):

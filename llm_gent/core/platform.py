@@ -19,8 +19,8 @@ from .traits.factory import Factory as TraitFactory
 
 
 if TYPE_CHECKING:
-    from .traits.builtin.learn import LearnConfig
     from .traits.builtin.llm import LLMConfig
+    from .traits.builtin.memory import MemoryConfig
 
 
 class PlatformContext:
@@ -73,7 +73,7 @@ class PlatformContext:
         cls,
         lg: Logger,
         llm_config: LLMConfig,
-        learn_config: LearnConfig | None = None,
+        learn_config: MemoryConfig | None = None,
     ) -> PlatformContext:
         """Create platform context from configuration.
 

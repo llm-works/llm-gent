@@ -71,7 +71,7 @@ class HTTPHandler:
         return result
 
     def remember(self, fact: str, category: str | None = None) -> int:
-        """Store a fact using LearnTrait.
+        """Store a fact using MemoryTrait.
 
         Args:
             fact: The fact to remember.
@@ -81,31 +81,31 @@ class HTTPHandler:
             The fact ID.
 
         Raises:
-            RuntimeError: If LearnTrait is not attached.
+            RuntimeError: If MemoryTrait is not attached.
         """
-        from ...core.traits.builtin.learn import LearnTrait
+        from ...core.traits.builtin.memory import MemoryTrait
 
-        learn_trait = self.agent.get_trait(LearnTrait)
-        if learn_trait is None:
-            raise RuntimeError("LearnTrait not attached")
+        memory_trait = self.agent.get_trait(MemoryTrait)
+        if memory_trait is None:
+            raise RuntimeError("MemoryTrait not attached")
         # HTTP protocol allows None category, trait requires str
-        return learn_trait.remember(fact=fact, category=category or "general")
+        return memory_trait.remember(fact=fact, category=category or "general")
 
     def forget(self, fact_id: int) -> None:
-        """Remove a fact using LearnTrait.
+        """Remove a fact using MemoryTrait.
 
         Args:
             fact_id: The ID of the fact to forget.
 
         Raises:
-            RuntimeError: If LearnTrait is not attached.
+            RuntimeError: If MemoryTrait is not attached.
         """
-        from ...core.traits.builtin.learn import LearnTrait
+        from ...core.traits.builtin.memory import MemoryTrait
 
-        learn_trait = self.agent.get_trait(LearnTrait)
-        if learn_trait is None:
-            raise RuntimeError("LearnTrait not attached")
-        learn_trait.forget(fact_id=fact_id)
+        memory_trait = self.agent.get_trait(MemoryTrait)
+        if memory_trait is None:
+            raise RuntimeError("MemoryTrait not attached")
+        memory_trait.forget(fact_id=fact_id)
 
     def recall(
         self,
@@ -114,7 +114,7 @@ class HTTPHandler:
         min_similarity: float = 0.5,
         categories: list[str] | None = None,
     ) -> list[Any]:
-        """Recall facts similar to query using LearnTrait.
+        """Recall facts similar to query using MemoryTrait.
 
         Args:
             query: The query to search for.
@@ -126,19 +126,19 @@ class HTTPHandler:
             List of scored facts.
 
         Raises:
-            RuntimeError: If LearnTrait is not attached.
+            RuntimeError: If MemoryTrait is not attached.
         """
-        from ...core.traits.builtin.learn import LearnTrait
+        from ...core.traits.builtin.memory import MemoryTrait
 
-        learn_trait = self.agent.get_trait(LearnTrait)
-        if learn_trait is None:
-            raise RuntimeError("LearnTrait not attached")
-        return learn_trait.recall(
+        memory_trait = self.agent.get_trait(MemoryTrait)
+        if memory_trait is None:
+            raise RuntimeError("MemoryTrait not attached")
+        return memory_trait.recall(
             query=query, top_k=top_k, min_similarity=min_similarity, categories=categories
         )
 
     def feedback(self, response_id: str, signal: str, correction: str | None = None) -> None:
-        """Record feedback using LearnTrait.
+        """Record feedback using MemoryTrait.
 
         Args:
             response_id: ID of the response being rated.
@@ -147,7 +147,7 @@ class HTTPHandler:
 
         Raises:
             ValueError: If response_id is not recognized or signal is invalid.
-            RuntimeError: If LearnTrait is not attached.
+            RuntimeError: If MemoryTrait is not attached.
         """
         if response_id not in self._response_ids:
             raise ValueError(f"Unknown response_id: {response_id}")
@@ -155,18 +155,18 @@ class HTTPHandler:
         if signal not in ("positive", "negative"):
             raise ValueError(f"Invalid signal: {signal}. Must be 'positive' or 'negative'")
 
-        from ...core.traits.builtin.learn import LearnTrait
+        from ...core.traits.builtin.memory import MemoryTrait
 
-        learn_trait = self.agent.get_trait(LearnTrait)
-        if learn_trait is None:
-            raise RuntimeError("LearnTrait not attached")
+        memory_trait = self.agent.get_trait(MemoryTrait)
+        if memory_trait is None:
+            raise RuntimeError("MemoryTrait not attached")
 
-        # Convert HTTP API format to LearnTrait.record_feedback format
+        # Convert HTTP API format to MemoryTrait.record_feedback format
         context: dict[str, Any] = {"response_id": response_id}
         if correction:
             context["correction"] = correction
 
-        learn_trait.record_feedback(
+        memory_trait.record_feedback(
             content=correction or "",
             signal=cast(Literal["positive", "negative"], signal),
             context=context,

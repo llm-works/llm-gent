@@ -10,13 +10,13 @@ from __future__ import annotations
 from typing import Any
 
 
-def recall_chronological(learn_trait: Any, agent_name: str, limit: int = 5) -> list[Any]:
+def recall_chronological(memory_trait: Any, agent_name: str, limit: int = 5) -> list[Any]:
     """Recall last N solutions chronologically.
 
     Use for repetitive tasks where recency matters (e.g., scheduled execution).
 
     Args:
-        learn_trait: LearnTrait instance providing access to solutions client.
+        memory_trait: MemoryTrait instance providing access to solutions client.
         agent_name: Agent name to filter solutions by.
         limit: Maximum number of recent solutions to recall.
 
@@ -24,7 +24,7 @@ def recall_chronological(learn_trait: Any, agent_name: str, limit: int = 5) -> l
         List of solution facts, ordered by most recent first.
     """
     try:
-        solutions = learn_trait.kelt.atomic.solutions.list_by_agent(
+        solutions = memory_trait.kelt.atomic.solutions.list_by_agent(
             agent_name=agent_name,
             limit=limit,
             active_only=True,
@@ -32,15 +32,15 @@ def recall_chronological(learn_trait: Any, agent_name: str, limit: int = 5) -> l
         return solutions  # type: ignore[no-any-return]
     except Exception as e:
         # Log failure for debugging, but don't fail (graceful degradation)
-        if hasattr(learn_trait, "_lg"):
-            learn_trait._lg.debug(
+        if hasattr(memory_trait, "_lg"):
+            memory_trait._lg.debug(
                 "recall_chronological failed", extra={"agent_name": agent_name, "exception": e}
             )
         return []
 
 
 def recall_semantic(
-    learn_trait: Any, query: str, limit: int = 5, agent_name: str | None = None
+    memory_trait: Any, query: str, limit: int = 5, agent_name: str | None = None
 ) -> list[Any]:
     """Recall semantically similar solutions using search.
 
@@ -48,7 +48,7 @@ def recall_semantic(
     Falls back to chronological recall if search fails.
 
     Args:
-        learn_trait: LearnTrait instance providing access to solutions client.
+        memory_trait: MemoryTrait instance providing access to solutions client.
         query: Query string to search for similar solutions.
         limit: Maximum number of solutions to recall.
         agent_name: Optional agent name to filter by (if search supports it).
@@ -58,7 +58,7 @@ def recall_semantic(
     """
     try:
         # Search uses substring matching on problem text
-        solutions = learn_trait.kelt.atomic.solutions.search(
+        solutions = memory_trait.kelt.atomic.solutions.search(
             query=query,
             limit=limit,
             active_only=True,
@@ -75,13 +75,13 @@ def recall_semantic(
         return solutions  # type: ignore[no-any-return]
     except Exception as e:
         # Log failure for debugging, then fall back to chronological
-        if hasattr(learn_trait, "_lg"):
-            learn_trait._lg.debug(
+        if hasattr(memory_trait, "_lg"):
+            memory_trait._lg.debug(
                 "recall_semantic failed", extra={"query": query[:100], "exception": e}
             )
         # Fall back to chronological on any error
         if agent_name:
-            return recall_chronological(learn_trait, agent_name, limit)
+            return recall_chronological(memory_trait, agent_name, limit)
         return []
 
 
