@@ -67,6 +67,7 @@ class MemoryTrait(BaseTrait):
         memory_trait = MemoryTrait(agent, MemoryConfig(
             identity=Identity.from_name("my-agent"),
             llm=LLMConfig(base_url="http://localhost:8000/v1"),
+            db={"url": "postgresql://localhost/kelt"},
             embedder_url="http://localhost:8001/v1",
         ))
         agent.add_trait(memory_trait)
@@ -200,7 +201,7 @@ class MemoryTrait(BaseTrait):
     @property
     def default_schema(self) -> str:
         """Default schema name from config (schema.name), falling back to 'public'."""
-        schema_config = self.config.get("schema", {})
+        schema_config = self.config.get("schema") or {}
         return str(schema_config.get("name") or "public")
 
     @property

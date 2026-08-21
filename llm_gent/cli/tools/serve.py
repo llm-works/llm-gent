@@ -100,6 +100,7 @@ class ServeTool(Tool):
             embedder_model=config.learn.embedder_model,
             embedder_timeout=config.learn.embedder_timeout,
             training=config.learn.training,
+            schema=config.learn.schema,
             adapters=config.learn.adapters,
             # Note: identity is set per-agent in factory
         )
