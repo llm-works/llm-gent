@@ -61,8 +61,9 @@ class MemoryTrait(BaseTrait):
 
     Example:
         from llm_gent.core.traits import MemoryTrait, MemoryConfig, LLMConfig
-        from llm_gent.core.agent import Identity
+        from llm_gent.core.agent import Agent, Identity
 
+        # Assumes: lg (Logger), config (agent config dict)
         agent = Agent(lg, config)
         memory_trait = MemoryTrait(agent, MemoryConfig(
             identity=Identity.from_name("my-agent"),
@@ -111,15 +112,15 @@ class MemoryTrait(BaseTrait):
             llm_client: LLM client instance (None if not configured).
 
         Returns:
-            Schema-agnostic KeltClient. Use client.with_schema("X") for
-            per-operation schema selection.
+            KeltClient scoped to default_schema. Use client.with_schema("X")
+            to override for specific operations.
         """
         identity = self._resolve_identity()
         if identity is None:
             raise ValueError("MemoryConfig must have identity set")
 
-        # Schema-agnostic context - no schema_name
-        context = ClientContext(context_key=identity.context_key)
+        # Use default_schema for default operations; callers can override with with_schema()
+        context = ClientContext(context_key=identity.context_key, schema_name=self.default_schema)
 
         return KeltClient(
             lg=self.agent.lg,
