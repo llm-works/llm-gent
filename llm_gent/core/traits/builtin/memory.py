@@ -33,7 +33,7 @@ MemoryConfig = DotDict
 
 Expected fields:
     identity: Resolved Identity (required).
-    schema: Schema config dict with 'name' and 'enforce' (default: {"name": "public"}).
+    schema: Schema config dict with 'name' (default: {"name": "public"}).
     llm: LLM configuration for learned completions.
     db: Database configuration dict (with url, extensions, etc.).
     embedder_url: URL for embedding service (None = no RAG).
