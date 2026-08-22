@@ -232,3 +232,49 @@ class TestClear:
         assert registry.get_by_name(TraitName.LLM) is None
         assert registry.get_by_name(TraitName.MEMORY) is None
         assert registry.all() == []
+
+
+# ---------------------------------------------------------------------------
+# Protocol-only traits (Registry-mode adoption path)
+# ---------------------------------------------------------------------------
+
+
+class TestProtocolOnlyTrait:
+    """Registry-mode adoption: a trait implementing the ``Trait`` protocol
+    directly, without inheriting :class:`BaseTrait`, registers and is retrieved
+    without a ``# type: ignore``. Guards against re-tightening the
+    ``Registry.get`` TypeVar bound back to ``BaseTrait``.
+    """
+
+    def test_register_get_require(self, registry):
+        class ProtoTrait:
+            """Bare ``Trait`` protocol implementer — no BaseTrait, no Agent."""
+
+            def on_start(self) -> None:
+                pass
+
+            def on_stop(self) -> None:
+                pass
+
+        trait = ProtoTrait()
+        registry.register(trait)
+
+        assert registry.get(ProtoTrait) is trait
+        assert registry.require(ProtoTrait) is trait
+        assert registry.has(ProtoTrait)
+        assert ProtoTrait in registry.types()
+
+    def test_unregister(self, registry):
+        class ProtoTrait:
+            def on_start(self) -> None:
+                pass
+
+            def on_stop(self) -> None:
+                pass
+
+        trait = ProtoTrait()
+        registry.register(trait)
+        registry.unregister(ProtoTrait)
+
+        assert registry.get(ProtoTrait) is None
+        assert not registry.has(ProtoTrait)
