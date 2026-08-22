@@ -34,13 +34,10 @@ class Context:
     saia: Any
     """The role-bound saia instance for this dispatch.
 
-    ``None`` in two cases: (1) when a fluent-builder node is itself a
-    subflow, the ``rescue`` / ``after`` hooks attached to that node run
-    with ``saia=None`` because the outer node has no single role; (2) when
-    the dispatching flow was constructed without a ``saia_f``, every verb
-    ctx also carries ``saia=None`` — verbs that don't touch ``ctx.saia``
-    work as-is; verbs that reach for it raise :class:`AttributeError` at
-    their own call site.
+    Optional in one narrow case: when a fluent-builder node is itself a
+    subflow, the ``rescue`` / ``after`` hooks attached to that node run with
+    ``saia=None`` because the outer node has no single role. Verb-level
+    contexts always carry a real saia.
     """
 
     role: Role | None

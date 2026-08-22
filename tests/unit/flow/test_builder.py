@@ -632,28 +632,24 @@ class TestRuntimeErrors:
             await flow.run()
 
     @pytest.mark.asyncio
-    async def test_top_level_without_saia_runs_saia_free_verbs(self) -> None:
-        """No SAIAFactory is legal; verbs that never touch ``ctx.saia`` run fine."""
+    async def test_top_level_without_saia_raises(self) -> None:
+        """A top-level flow with no SAIAFactory can't build a saia to run verbs.
+
+        Under the ``nodes are verbs, always`` principle, every verb needs a
+        role-bound saia; a Flow that dispatches verbs must therefore carry a
+        factory. Enforced at run time so the collision surfaces immediately
+        rather than silently binding ``ctx.saia=None`` and either
+        AttributeError-ing deep in the verb body or (worse) succeeding when
+        the verb happens not to reach for saia that run.
+        """
 
         @verb(role=ROLE_A)
-        async def peek(ctx: Context) -> Any:
-            """Never touches ``ctx.saia``."""
-            return ctx.saia
+        async def do(ctx: Context) -> int:
+            """No-op."""
+            return 0
 
-        flow = Flow(make_test_logger(), "naked").call(peek)
-        assert await flow.run() is None
-
-    @pytest.mark.asyncio
-    async def test_top_level_without_saia_surfaces_at_use_site(self) -> None:
-        """A verb that reaches for ``ctx.saia`` raises at its own call site."""
-
-        @verb(role=ROLE_A)
-        async def needs_saia(ctx: Context) -> Any:
-            """Attempts to use the missing saia."""
-            return ctx.saia.build_something()
-
-        flow = Flow(make_test_logger(), "hungry").call(needs_saia)
-        with pytest.raises(AttributeError):
+        flow = Flow(make_test_logger(), "naked").call(do)
+        with pytest.raises(RuntimeError, match="SAIAFactory"):
             await flow.run()
 
 

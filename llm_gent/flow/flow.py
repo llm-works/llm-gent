@@ -115,11 +115,10 @@ class Flow:
             saia_f: A :class:`SAIAFactory` that builds role-bound saia
                 instances. The ``_f`` suffix carries the framework-wide
                 policy: any ``saia_f=`` kwarg takes a factory, never a
-                saia instance. Optional: when omitted, verbs dispatched by
-                this flow receive ``ctx.saia = None``. A subflow with no
-                factory borrows the outer runtime's; a top-level flow with
-                no factory only supports verbs that don't touch
-                ``ctx.saia``.
+                saia instance. Required for a top-level runtime — verbs
+                by definition need saia, so a Flow that dispatches them
+                needs a factory. Optional for a subflow, which borrows
+                the factory from the runtime it executes under.
             state: User-owned shared state object. Verbs read and (typically)
                 mutate it in place. Opaque to the flow; may be overridden per
                 :meth:`run` invocation.
@@ -532,7 +531,8 @@ class Flow:
             **kwargs: Keyword inputs to the first node.
 
         Raises:
-            RuntimeError: The flow has no nodes.
+            RuntimeError: The flow has no nodes, or is running as a
+                top-level runtime without a factory.
         """
         active_state = self._wrap_top_state(state)
         return await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
@@ -548,6 +548,12 @@ class Flow:
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
+        if runtime._saia_f is None:
+            label = runtime._name or "<anonymous>"
+            raise RuntimeError(
+                f"Flow {label!r} has no SAIAFactory — provide saia_f=... "
+                "when constructing the top-level Flow"
+            )
         env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg)
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
@@ -580,19 +586,16 @@ class Flow:
     # -------------------------------------------------------------------------
 
     def _saia_for(self, role: Role) -> Any:
-        """Return a cached saia for ``role``, or ``None`` when no factory is mounted.
-
-        Verb dispatch surfaces the result as ``ctx.saia``. When the flow was
-        constructed without ``saia_f=``, verbs receive ``ctx.saia = None`` —
-        verbs that only need ``ctx.state`` or ``ctx.traits`` work as-is;
-        verbs that touch ``ctx.saia`` raise :class:`AttributeError` at their
-        own call site, where the missing dependency is legible.
-        """
+        """Return a cached saia for ``role``, building it on first request."""
         cached = self._saia_by_role.get(role)
         if cached is not None:
             return cached
         if self._saia_f is None:
-            return None
+            label = self._name or "<anonymous>"
+            raise RuntimeError(
+                f"Flow {label!r} has no SAIAFactory — saia_f= was not supplied at "
+                f"construction (needed to build saia for role {role.name!r})"
+            )
         built = self._saia_f.build(role)
         self._saia_by_role[role] = built
         return built
