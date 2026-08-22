@@ -2,6 +2,13 @@
 
 The registry is a container for all configured platform traits (LLM, Memory, HTTP, etc.)
 that can be attached to agents. It provides type-safe access and discovery.
+
+The type parameter bound is the :class:`Trait` Protocol rather than
+:class:`BaseTrait`, so Registry-mode adopters that implement the Protocol
+directly (without inheriting :class:`BaseTrait`) type-check cleanly. Every
+:class:`BaseTrait` subclass structurally satisfies :class:`Trait`, so the
+existing agent-attached path (which does inherit :class:`BaseTrait` for
+lifecycle) is unaffected.
 """
 
 from __future__ import annotations
@@ -11,14 +18,14 @@ from typing import TYPE_CHECKING, TypeVar
 from appinfra.log import Logger
 
 from ..errors import DuplicateTraitError, TraitNotFoundError
-from .base import BaseTrait
+from .base import Trait
 
 
 if TYPE_CHECKING:
     from . import TraitName
 
 
-T = TypeVar("T", bound=BaseTrait)
+T = TypeVar("T", bound=Trait)
 
 
 class Registry:
@@ -52,10 +59,10 @@ class Registry:
             lg: Logger instance for registry operations.
         """
         self._lg = lg
-        self._traits: dict[type[BaseTrait], BaseTrait] = {}
-        self._by_name: dict[TraitName, BaseTrait] = {}
+        self._traits: dict[type[Trait], Trait] = {}
+        self._by_name: dict[TraitName, Trait] = {}
 
-    def register(self, trait: BaseTrait) -> None:
+    def register(self, trait: Trait) -> None:
         """Register a trait in the registry.
 
         Automatically registers by name if trait has trait_name attribute.
@@ -93,7 +100,7 @@ class Registry:
             extra={"trait": trait_type.__name__, "total": len(self._traits)},
         )
 
-    def replace(self, trait: BaseTrait) -> None:
+    def replace(self, trait: Trait) -> None:
         """Replace an existing trait or register if not present.
 
         Args:
@@ -127,7 +134,7 @@ class Registry:
         """
         return self._traits.get(trait_type)  # type: ignore[return-value]
 
-    def get_by_name(self, name: TraitName) -> BaseTrait | None:
+    def get_by_name(self, name: TraitName) -> Trait | None:
         """Get a trait by name.
 
         Args:
@@ -158,7 +165,7 @@ class Registry:
             )
         return trait
 
-    def require_by_name(self, name: TraitName) -> BaseTrait:
+    def require_by_name(self, name: TraitName) -> Trait:
         """Get a required trait by name.
 
         Args:
@@ -178,7 +185,7 @@ class Registry:
             )
         return trait
 
-    def has(self, trait_type: type[BaseTrait]) -> bool:
+    def has(self, trait_type: type[Trait]) -> bool:
         """Check if a trait type is registered.
 
         Args:
@@ -189,7 +196,7 @@ class Registry:
         """
         return trait_type in self._traits
 
-    def all(self) -> list[BaseTrait]:
+    def all(self) -> list[Trait]:
         """Get all registered traits.
 
         Returns:
@@ -197,7 +204,7 @@ class Registry:
         """
         return list(self._traits.values())
 
-    def types(self) -> list[type[BaseTrait]]:
+    def types(self) -> list[type[Trait]]:
         """Get all registered trait types.
 
         Returns:
@@ -213,7 +220,7 @@ class Registry:
         """
         return len(self._traits)
 
-    def unregister(self, trait_type: type[BaseTrait]) -> None:
+    def unregister(self, trait_type: type[Trait]) -> None:
         """Unregister a trait by type.
 
         Args:
