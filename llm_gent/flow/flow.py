@@ -621,6 +621,7 @@ def _validate_target(target: Any) -> None:
             f"verb target .role must be a Role instance; got {type(target.role).__name__}"
         )
     _reject_reserved_kwarg(target, "state")
+    _reject_reserved_kwarg(target, "runtime")
 
 
 def _reject_reserved_kwarg(verb: Any, name: str) -> None:
@@ -655,8 +656,7 @@ def _reject_reserved_kwarg(verb: Any, name: str) -> None:
             raise TypeError(
                 f"verb {verb_name!r} declares reserved parameter {name!r} — "
                 f"Flow.run({name}=...) binds this name and it would never "
-                f"reach the verb; rename the parameter or read the payload "
-                f"via ctx.state.data"
+                f"reach the verb; rename the parameter"
             )
         return
 
