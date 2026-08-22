@@ -51,6 +51,7 @@ Buildable materializer :func:`_materialize`.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from appinfra.log import Logger
@@ -114,9 +115,10 @@ class Flow:
             saia_f: A :class:`SAIAFactory` that builds role-bound saia
                 instances. The ``_f`` suffix carries the framework-wide
                 policy: any ``saia_f=`` kwarg takes a factory, never a
-                saia instance. Required for a top-level runtime; optional
-                for a subflow, which borrows the factory from the runtime
-                it executes under.
+                saia instance. Required for a top-level runtime — verbs
+                by definition need saia, so a Flow that dispatches them
+                needs a factory. Optional for a subflow, which borrows
+                the factory from the runtime it executes under.
             state: User-owned shared state object. Verbs read and (typically)
                 mutate it in place. Opaque to the flow; may be overridden per
                 :meth:`run` invocation.
@@ -504,14 +506,8 @@ class Flow:
     # Execution
     # -------------------------------------------------------------------------
 
-    async def run(
-        self,
-        *args: Any,
-        state: Any = UNSET,
-        _runtime: Flow | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute the composition graph.
+    async def run(self, *args: Any, state: Any = UNSET, **kwargs: Any) -> Any:
+        """Execute the composition graph as the top-level runtime.
 
         The first node receives ``*args`` / ``**kwargs``. Each subsequent
         node receives one positional — the previous node's result, optionally
@@ -523,33 +519,44 @@ class Flow:
 
         Args:
             *args: Positional inputs to the first node.
-            state: The payload to expose on ``ctx.state`` for this run. At
-                the top level, framework wraps it as :class:`State`
-                (``ctx.state.data`` reaches the payload; ``ctx.state.root()``
-                reaches the outermost scope from any subflow). Omitted → the
-                flow's construction ``state`` is used, else a fresh empty
-                ``dict``. Explicitly passing ``None`` is honored (the payload
-                becomes ``None`` and verbs must guard). A subflow running
-                inside a parent chain always receives whatever :class:`State`
-                the containing node produced (either the parent's :class:`State`
-                by reference, or a new child :class:`State` projected via
-                ``state=`` on the enclosing ``.call`` / ``.loop`` / ``.map``).
-            _runtime: Internal — used when this flow runs as a subflow to
-                share the outer flow's factory and saia cache. Not part of
-                the public surface.
-            **kwargs: Keyword inputs to the first node. The names ``state``
-                and ``_runtime`` are bound parameters — they are not
-                forwarded to the first node.
+            state: The payload to expose on ``ctx.state`` for this run.
+                Framework wraps it as :class:`State` (``ctx.state.data``
+                reaches the payload; ``ctx.state.root()`` reaches the
+                outermost scope from any subflow). Omitted → the flow's
+                construction ``state`` is used, else a fresh empty ``dict``.
+                Explicitly passing ``None`` is honored (the payload becomes
+                ``None`` and verbs must guard). ``state`` is a bound
+                parameter — it is not forwarded to the first node; verbs
+                needing it as a kwarg are rejected at :meth:`call` time.
+            **kwargs: Keyword inputs to the first node.
 
         Raises:
             RuntimeError: The flow has no nodes, or is running as a
                 top-level runtime without a factory.
         """
+        active_state = self._wrap_top_state(state)
+        return await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
+
+    async def _run_as_subflow(self, *args: Any, state: State, runtime: Flow, **kwargs: Any) -> Any:
+        """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
+
+        The executor's subflow helpers (``.call`` targeting a Flow, and the
+        ``.branch`` / ``.loop`` / ``.map`` bodies) invoke this directly so
+        the outer runtime's factory and saia cache are shared with the
+        subflow. State arrives pre-wrapped — top-level wrapping happens once
+        in :meth:`run`.
+        """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        env = self._build_run_env(state, _runtime)
+        if runtime._saia_f is None:
+            label = runtime._name or "<anonymous>"
+            raise RuntimeError(
+                f"Flow {label!r} has no SAIAFactory — provide saia_f=... "
+                "when constructing the top-level Flow"
+            )
+        env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg)
         label = self._name or "<anonymous>"
-        is_subflow = _runtime is not None
+        is_subflow = runtime is not self
         env.lg.debug(
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
@@ -562,29 +569,17 @@ class Flow:
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
-    def _build_run_env(self, state: Any, _runtime: Flow | None) -> _RunEnv:
-        """Resolve the effective runtime and active :class:`State` for a run.
+    def _wrap_top_state(self, state: Any) -> State:
+        """Wrap a top-level ``run(state=...)`` payload as :class:`State`.
 
-        Top-level runs wrap the resolved payload as :class:`State`; subflow
-        runs receive an already-wrapped :class:`State` from the parent's
-        ``_run_*`` helper and thread it through unchanged. Raises when the
-        resolved runtime has no factory — a top-level flow must supply one
-        at construction.
+        Resolves the ``state=UNSET`` sentinel to the flow's construction
+        default (or a fresh empty ``dict`` when none was supplied). Explicit
+        ``state=None`` is honored — the payload becomes ``None``. Already-
+        wrapped :class:`State` inputs are returned unchanged so a caller can
+        thread a run-wide state instance across multiple :meth:`run` calls.
         """
-        runtime = _runtime if _runtime is not None else self
-        if runtime._saia_f is None:
-            label = runtime._name or "<anonymous>"
-            raise RuntimeError(
-                f"Flow {label!r} has no SAIAFactory — provide saia_f=... "
-                "when constructing the top-level Flow"
-            )
-        is_subflow = _runtime is not None
-        if is_subflow:
-            active_state = state
-        else:
-            payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
-            active_state = payload if isinstance(payload, State) else State(data=payload)
-        return _RunEnv(runtime=runtime, state=active_state, lg=runtime._lg)
+        payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
+        return payload if isinstance(payload, State) else State(data=payload)
 
     # -------------------------------------------------------------------------
     # Internals
@@ -625,6 +620,45 @@ def _validate_target(target: Any) -> None:
         raise TypeError(
             f"verb target .role must be a Role instance; got {type(target.role).__name__}"
         )
+    _reject_reserved_kwarg(target, "state")
+    _reject_reserved_kwarg(target, "runtime")
+
+
+def _reject_reserved_kwarg(verb: Any, name: str) -> None:
+    """Reject a verb whose signature declares a :meth:`Flow.run`-bound kwarg.
+
+    ``Flow.run(state=...)`` binds ``state`` to seed the top-level payload
+    and strips it before forwarding kwargs to the first node. A verb whose
+    signature declares ``state`` as a keyword-visible parameter would never
+    see a value passed via ``.run()`` — silent misbehavior. Rejected at
+    build time so the collision surfaces where the graph is authored.
+
+    The first positional is conventionally ``ctx`` and is skipped: the
+    framework always binds it, so its name doesn't collide with any run
+    kwarg. Ignores verbs whose signature cannot be introspected (C
+    callables, some partials) — those cannot statically collide with a
+    bound kwarg either. ``**kwargs``-only verbs are allowed: :meth:`run`
+    already strips the reserved name before forwarding, so the verb's
+    ``**kwargs`` never sees it.
+    """
+    try:
+        sig = inspect.signature(verb)
+    except (TypeError, ValueError):
+        return
+    for param in list(sig.parameters.values())[1:]:
+        if param.name != name:
+            continue
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            verb_name = getattr(verb, "__name__", type(verb).__name__)
+            raise TypeError(
+                f"verb {verb_name!r} declares reserved parameter {name!r} — "
+                f"Flow.run({name}=...) binds this name and it would never "
+                f"reach the verb; rename the parameter"
+            )
+        return
 
 
 def _require_state_for_merge(
