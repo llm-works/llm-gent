@@ -126,10 +126,10 @@ async def _run_subflow(
 ) -> Any:
     """Run a subflow node, honoring optional scoped-state projection/merge."""
     child_state = await _project_state(state_fn, env.state)
-    result = await body.run(
+    result = await body._run_as_subflow(
         *node_args,
         state=child_state,
-        _runtime=env.runtime,
+        runtime=env.runtime,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -204,7 +204,7 @@ async def _run_branch(
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
         return prev_result
-    return await chosen.run(prev_result, state=env.state, _runtime=env.runtime)
+    return await chosen._run_as_subflow(prev_result, state=env.state, runtime=env.runtime)
 
 
 async def _run_loop(
@@ -230,7 +230,7 @@ async def _run_loop(
             break
         if lp.deadline is not None and time.monotonic() - started >= lp.deadline:
             break
-        result = await lp.body.run(result, state=child_state, _runtime=env.runtime)
+        result = await lp.body._run_as_subflow(result, state=child_state, runtime=env.runtime)
         iteration += 1
         if await _check_until(lp.until, child_state, env):
             break
@@ -287,7 +287,7 @@ async def _run_map_item_strict(
 ) -> Any:
     """Run one strict-mode map item; merge fires only when the body succeeds."""
     child_state = await _project_state(state_fn, env.state)
-    result = await body.run(item, state=child_state, _runtime=env.runtime)
+    result = await body._run_as_subflow(item, state=child_state, runtime=env.runtime)
     async with merge_lock:
         await _merge_state(merge_fn, env.state, child_state)
     return result
@@ -308,7 +308,7 @@ async def _run_map_item(
     """
     child_state = await _project_state(state_fn, env.state)
     try:
-        result = await body.run(item, state=child_state, _runtime=env.runtime)
+        result = await body._run_as_subflow(item, state=child_state, runtime=env.runtime)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

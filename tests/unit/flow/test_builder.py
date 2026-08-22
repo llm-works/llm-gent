@@ -64,6 +64,38 @@ class TestBuilderValidation:
         with pytest.raises(TypeError, match="Role instance"):
             flow.call(bogus)
 
+    def test_call_rejects_verb_declaring_state_kwarg(self) -> None:
+        """A verb with a ``state=`` parameter collides with ``Flow.run(state=...)``."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def bad(ctx: Context, *, state: dict[str, Any]) -> None:
+            """Verb tries to bind ``state`` — would never receive it via .run()."""
+
+        with pytest.raises(TypeError, match="reserved parameter 'state'"):
+            flow.call(bad)
+
+    def test_call_rejects_verb_state_positional(self) -> None:
+        """Positional-or-keyword ``state`` collides too, not just keyword-only."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def bad(ctx: Context, state: dict[str, Any]) -> None:
+            """``state`` bindable by name is also rejected."""
+
+        with pytest.raises(TypeError, match="reserved parameter 'state'"):
+            flow.call(bad)
+
+    def test_call_accepts_verb_with_kwargs_absorbing_state(self) -> None:
+        """``**kwargs``-only verbs are fine — .run(state=...) is stripped first."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def ok(ctx: Context, **kwargs: Any) -> None:
+            """``**kwargs`` cannot collide — the reserved name never reaches it."""
+
+        flow.call(ok)  # no error
+
     def test_rescue_before_any_call_raises(self) -> None:
         """.rescue requires a preceding node to attach to."""
         flow = make_ff().create()
@@ -600,16 +632,28 @@ class TestRuntimeErrors:
             await flow.run()
 
     @pytest.mark.asyncio
-    async def test_top_level_without_saia_raises(self) -> None:
-        """A top-level flow with no SAIAFactory can't build a saia to run verbs."""
+    async def test_top_level_without_saia_runs_saia_free_verbs(self) -> None:
+        """No SAIAFactory is legal; verbs that never touch ``ctx.saia`` run fine."""
 
         @verb(role=ROLE_A)
-        async def do(ctx: Context) -> int:
-            """No-op."""
-            return 0
+        async def peek(ctx: Context) -> Any:
+            """Never touches ``ctx.saia``."""
+            return ctx.saia
 
-        flow = Flow(make_test_logger(), "naked").call(do)
-        with pytest.raises(RuntimeError, match="SAIAFactory"):
+        flow = Flow(make_test_logger(), "naked").call(peek)
+        assert await flow.run() is None
+
+    @pytest.mark.asyncio
+    async def test_top_level_without_saia_surfaces_at_use_site(self) -> None:
+        """A verb that reaches for ``ctx.saia`` raises at its own call site."""
+
+        @verb(role=ROLE_A)
+        async def needs_saia(ctx: Context) -> Any:
+            """Attempts to use the missing saia."""
+            return ctx.saia.build_something()
+
+        flow = Flow(make_test_logger(), "hungry").call(needs_saia)
+        with pytest.raises(AttributeError):
             await flow.run()
 
 
