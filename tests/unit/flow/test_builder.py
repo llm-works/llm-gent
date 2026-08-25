@@ -643,25 +643,45 @@ class TestRuntimeErrors:
             await flow.run()
 
     @pytest.mark.asyncio
-    async def test_top_level_without_saia_raises(self) -> None:
-        """A top-level flow with no SAIAFactory can't build a saia to run verbs.
+    async def test_verb_reading_saia_without_factory_raises_at_access(self) -> None:
+        """A factoryless flow raises when a verb actually reads ``ctx.saia``.
 
-        Under the ``nodes are verbs, always`` principle, every verb needs a
-        role-bound saia; a Flow that dispatches verbs must therefore carry a
-        factory. Enforced at run time so the collision surfaces immediately
-        rather than silently binding ``ctx.saia=None`` and either
-        AttributeError-ing deep in the verb body or (worse) succeeding when
-        the verb happens not to reach for saia that run.
+        The error surfaces at the access site, not at run start — this lets
+        verbs that never touch ``ctx.saia`` (e.g. those routing LLM calls
+        through their own configuration) run under a factoryless flow. The
+        error message still points at construction so the caller knows
+        which knob to set.
         """
 
         @verb(role=ROLE_A)
-        async def do(ctx: Context) -> int:
-            """No-op."""
+        async def reads_saia(ctx: Context) -> int:
+            """Touches ctx.saia — requires a factory."""
+            _ = ctx.saia
             return 0
 
-        flow = Flow(make_test_logger(), "naked").call(do)
+        flow = Flow(make_test_logger(), "naked").call(reads_saia)
         with pytest.raises(RuntimeError, match="SAIAFactory"):
             await flow.run()
+
+    @pytest.mark.asyncio
+    async def test_verb_not_reading_saia_runs_without_factory(self) -> None:
+        """A verb that never reads ``ctx.saia`` runs under a factoryless flow.
+
+        Consumers whose verbs route LLM calls through their own path
+        (``self._config``, an alternate client) do not need a SAIAFactory
+        at construction time. Prior versions eagerly built a saia per node
+        and required a factory (often satisfied by a null factory in
+        consumer code) even when no verb touched ``ctx.saia``. Lazy
+        resolution removes that ceremony.
+        """
+
+        @verb(role=ROLE_A)
+        async def no_saia(ctx: Context) -> int:
+            """Never touches ctx.saia — factoryless flow is fine."""
+            return 42
+
+        flow = Flow(make_test_logger(), "naked").call(no_saia)
+        assert await flow.run() == 42
 
 
 # -----------------------------------------------------------------------------

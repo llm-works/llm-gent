@@ -44,18 +44,18 @@ if TYPE_CHECKING:
 def _build_ctx(target: Any, env: _RunEnv) -> Context:
     """Build the Context passed to the node's verb (and to its hooks).
 
-    Verb nodes get a role-bound ctx (role + saia populated). Subflow nodes
-    and control-flow nodes (branch/loop/map) get an ambient ctx — role and
-    saia are ``None`` because those nodes have no single role; each inner
-    verb builds its own role-bound ctx as it runs.
+    Verb nodes get a role-bound ctx; ``ctx.saia`` resolves lazily on first
+    read via the flow's SAIAFactory. Subflow nodes and control-flow nodes
+    (branch/loop/map) get an ambient ctx with ``role=None`` — those nodes
+    have no single role, so ``ctx.saia`` returns ``None`` (each inner verb
+    builds its own role-bound ctx as it runs).
     """
     from .flow import Flow
 
     traits = env.runtime._traits
     if isinstance(target, Flow | _Branch | _Loop | _Map):
-        return Context(saia=None, role=None, state=env.state, flow=env.runtime, traits=traits)
-    saia = env.runtime._saia_for(target.role)
-    return Context(saia=saia, role=target.role, state=env.state, flow=env.runtime, traits=traits)
+        return Context(role=None, state=env.state, flow=env.runtime, traits=traits)
+    return Context(role=target.role, state=env.state, flow=env.runtime, traits=traits)
 
 
 async def _execute_node(
@@ -172,7 +172,6 @@ async def _check_until(until_fn: UntilFn | None, loop_state: State, env: _RunEnv
     if until_fn is None:
         return False
     ctx = Context(
-        saia=None,
         role=None,
         state=loop_state,
         flow=env.runtime,
