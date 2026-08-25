@@ -669,10 +669,13 @@ def _require_state_for_merge(
 
 
 def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
-    """Turn a :data:`Buildable` (Flow or ``lambda f: ...`` callback) into a Flow.
+    """Turn a :data:`Buildable` (Flow, verb, or ``lambda f: ...`` callback) into a Flow.
 
-    A ``Flow`` is returned as-is; a callable is invoked against a fresh Flow
-    it may mutate (the return value, if any, is ignored). Anything else is a
+    A ``Flow`` is returned as-is. A callable carrying a :class:`Role` on
+    ``.role`` (a verb — whether a module-level ``@verb`` function or a
+    bound instance method) is wrapped as a single-node flow calling that
+    verb. Any other callable is invoked against a fresh Flow it may mutate
+    (the return value, if any, is ignored). Anything else is a
     :class:`TypeError` — bad Buildables fail eagerly at build time, not at
     :meth:`Flow.run` time.
     """
@@ -683,6 +686,10 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
             f"expected a Flow or a lambda f: f.call(...) callback for {name!r}; "
             f"got {type(buildable).__name__}"
         )
+    if isinstance(getattr(buildable, "role", None), Role):
+        fresh = Flow(lg=lg, name=name)
+        fresh.call(buildable)
+        return fresh
     fresh = Flow(lg=lg, name=name)
     buildable(fresh)
     return fresh

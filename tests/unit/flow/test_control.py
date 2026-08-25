@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Failure, verb
+from llm_gent.flow import Context, Failure, Flow, verb
 
 from .conftest import ROLE_A, StubFactory, make_ff
 
@@ -514,6 +514,49 @@ class TestMapExecution:
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(wrap))
         assert await flow.run([7, 8]) == [{"x": 7}, {"x": 8}]
+
+    @pytest.mark.asyncio
+    async def test_module_verb_as_body(self) -> None:
+        """A bare module-level ``@verb`` is auto-wrapped as the map body."""
+        flow = make_ff().create()
+        flow.call(_identity).map(_double)
+        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+
+    @pytest.mark.asyncio
+    async def test_bound_instance_method_verb_as_body(self) -> None:
+        """A bound ``@verb`` instance method is auto-wrapped; ``self`` stays bound."""
+
+        class Doubler:
+            def __init__(self, offset: int) -> None:
+                """Capture a per-instance offset added to each item."""
+                self.offset = offset
+
+            @verb(role=ROLE_A)
+            async def scale(self, ctx: Context, x: int) -> int:
+                """Return ``x * 2 + self.offset``, proving ``self`` is bound."""
+                assert ctx.role is ROLE_A
+                return x * 2 + self.offset
+
+        instance = Doubler(offset=100)
+        flow = make_ff().create()
+        flow.call(_identity).map(instance.scale)
+        assert await flow.run([1, 2, 3]) == [102, 104, 106]
+
+    @pytest.mark.asyncio
+    async def test_non_verb_callable_still_treated_as_builder(self) -> None:
+        """A callable without ``.role`` (e.g. a plain classmethod) hits the
+        builder-callback path — the verb-shape check must not steal it."""
+        witnessed: list[Flow] = []
+
+        def build_body(f: Flow) -> None:
+            """Standard builder callback that mutates the fresh flow in place."""
+            witnessed.append(f)
+            f.call(_double)
+
+        flow = make_ff().create()
+        flow.call(_identity).map(build_body)
+        assert await flow.run([1, 2]) == [2, 4]
+        assert len(witnessed) == 1  # invoked once at materialize time
 
 
 # -----------------------------------------------------------------------------
