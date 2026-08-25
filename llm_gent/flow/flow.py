@@ -115,10 +115,11 @@ class Flow:
             saia_f: A :class:`SAIAFactory` that builds role-bound saia
                 instances. The ``_f`` suffix carries the framework-wide
                 policy: any ``saia_f=`` kwarg takes a factory, never a
-                saia instance. Required for a top-level runtime — verbs
-                by definition need saia, so a Flow that dispatches them
-                needs a factory. Optional for a subflow, which borrows
-                the factory from the runtime it executes under.
+                saia instance. Required only when role-bound code
+                accesses ``ctx.saia`` — verbs that route LLM calls
+                through their own configuration can run without one.
+                A subflow borrows the factory from the runtime it
+                executes under.
             state: User-owned shared state object. Verbs read and (typically)
                 mutate it in place. Opaque to the flow; may be overridden per
                 :meth:`run` invocation.
