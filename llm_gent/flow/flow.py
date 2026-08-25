@@ -206,10 +206,8 @@ class Flow:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
         self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
-        saia = self._saia_for(verb.role)
         payload = self._state if self._state is not None else {}
         ctx = Context(
-            saia=saia,
             role=verb.role,
             state=payload if isinstance(payload, State) else State(data=payload),
             flow=self,
@@ -531,8 +529,11 @@ class Flow:
             **kwargs: Keyword inputs to the first node.
 
         Raises:
-            RuntimeError: The flow has no nodes, or is running as a
-                top-level runtime without a factory.
+            RuntimeError: The flow has no nodes to run. Missing
+                :class:`SAIAFactory` no longer raises at run start — the
+                error surfaces at the first ``ctx.saia`` access instead,
+                so verbs that don't consume ``ctx.saia`` can run under a
+                factoryless flow.
         """
         active_state = self._wrap_top_state(state)
         return await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
@@ -548,12 +549,6 @@ class Flow:
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        if runtime._saia_f is None:
-            label = runtime._name or "<anonymous>"
-            raise RuntimeError(
-                f"Flow {label!r} has no SAIAFactory — provide saia_f=... "
-                "when constructing the top-level Flow"
-            )
         env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg)
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self

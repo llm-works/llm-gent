@@ -3,7 +3,8 @@
 A :class:`Context` is built by the :class:`Flow` at dispatch time and passed
 as the first argument to every verb. It exposes:
 
-- ``saia`` — the role-bound saia instance for this dispatch
+- ``saia`` — the role-bound saia instance for this dispatch, resolved lazily
+  on first access
 - ``role`` — the :class:`Role` under which this verb is running
 - ``state`` — the enclosing scope's :class:`State` wrapper (user-owned payload
   reached via ``ctx.state.data``; run-wide payload via ``ctx.state.root().data``)
@@ -31,15 +32,6 @@ class Context:
     positional argument.
     """
 
-    saia: Any
-    """The role-bound saia instance for this dispatch.
-
-    Optional in one narrow case: when a fluent-builder node is itself a
-    subflow, the ``rescue`` / ``after`` hooks attached to that node run with
-    ``saia=None`` because the outer node has no single role. Verb-level
-    contexts always carry a real saia.
-    """
-
     role: Role | None
     """The role the current verb declared, or ``None`` for a subflow-node ctx.
 
@@ -64,6 +56,7 @@ class Context:
     Composition helpers (:class:`Panel`, etc.) use this to dispatch sibling
     verbs with their own role-bound saia. Typed as ``Any`` to avoid a circular
     import — ``.dispatch(name, *args, **kwargs)`` is the only method used.
+    Also the resolver for :attr:`saia`.
     """
 
     traits: TraitRegistry | None = None
@@ -78,3 +71,24 @@ class Context:
     consumer codebases; the same class is exported as ``Registry`` from
     :mod:`llm_gent.core.traits`.
     """
+
+    @property
+    def saia(self) -> Any:
+        """The role-bound saia instance for this dispatch.
+
+        Resolved lazily on first access via the dispatching flow's
+        SAIAFactory. The flow caches per role, so repeated reads on the
+        same or sibling contexts hit the same instance.
+
+        Returns ``None`` when :attr:`role` is ``None`` — subflow-node ctx
+        and hook ctx have no single role, so no saia to bind.
+
+        Raises :class:`RuntimeError` if the flow was constructed with no
+        SAIAFactory and this ctx has a role. The error surfaces at access,
+        not at construction, so verbs that never touch ``ctx.saia`` (e.g.
+        those routing LLM calls through their own configuration) can run
+        under a factoryless flow.
+        """
+        if self.role is None:
+            return None
+        return self.flow._saia_for(self.role)
