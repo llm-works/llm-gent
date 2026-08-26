@@ -797,6 +797,251 @@ class TestMapChainedApi:
         with pytest.raises(TypeError, match="already set"):
             flow.guard(lambda _i, _c: True)
 
+    def test_halt_without_preceding_map_raises(self) -> None:
+        """Chain with no nodes rejects .halt() with a clear TypeError."""
+        flow = make_ff().create()
+        with pytest.raises(TypeError, match=r"\.halt\(\) requires a preceding .map"):
+            flow.halt(asyncio.Event())
+
+    def test_halt_on_non_map_node_raises(self) -> None:
+        """.halt() after a plain .call node rejects with a clear TypeError."""
+        flow = make_ff().create()
+        flow.call(_identity)
+        with pytest.raises(TypeError, match=r"\.halt\(\) applies to map nodes"):
+            flow.halt(asyncio.Event())
+
+    def test_double_halt_rejected(self) -> None:
+        """Calling .halt() twice on the same map node is a TypeError."""
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).halt(asyncio.Event())
+        with pytest.raises(TypeError, match="already set"):
+            flow.halt(asyncio.Event())
+
+
+# -----------------------------------------------------------------------------
+# .map — max_concurrency= throttle
+# -----------------------------------------------------------------------------
+
+
+class TestMapMaxConcurrency:
+    """.map(max_concurrency=N) caps in-flight per-item runners."""
+
+    def test_zero_rejected_at_build_time(self) -> None:
+        """max_concurrency=0 is a ValueError at build time."""
+        flow = make_ff().create()
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
+            flow.call(_identity).map(_double, max_concurrency=0)
+
+    def test_negative_rejected_at_build_time(self) -> None:
+        """max_concurrency=-1 is a ValueError at build time."""
+        flow = make_ff().create()
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
+            flow.call(_identity).map(_double, max_concurrency=-1)
+
+    def test_float_rejected_at_build_time(self) -> None:
+        """max_concurrency=1.5 is a ValueError — must be int, not float."""
+        flow = make_ff().create()
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
+            flow.call(_identity).map(_double, max_concurrency=1.5)
+
+    def test_bool_rejected_at_build_time(self) -> None:
+        """max_concurrency=True is a ValueError — bool is a subclass of int but not allowed."""
+        flow = make_ff().create()
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
+            flow.call(_identity).map(_double, max_concurrency=True)
+
+    @pytest.mark.asyncio
+    async def test_none_default_leaves_unthrottled(self) -> None:
+        """Without max_concurrency= the default behavior is unbounded gather."""
+        flow = make_ff().create()
+        flow.call(_identity).map(_double)
+        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+
+    @pytest.mark.asyncio
+    async def test_caps_concurrent_in_flight_items(self) -> None:
+        """At most max_concurrency runners execute their body at once."""
+        in_flight = 0
+        peak = 0
+        lock = asyncio.Lock()
+
+        @verb(role=ROLE_A)
+        async def slow(_ctx: Context, x: int) -> int:
+            """Track concurrency by bumping a shared counter across a sleep."""
+            nonlocal in_flight, peak
+            async with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            async with lock:
+                in_flight -= 1
+            return x
+
+        flow = make_ff().create()
+        flow.call(_identity).map(slow, max_concurrency=2)
+        results = await flow.run([1, 2, 3, 4, 5])
+        assert results == [1, 2, 3, 4, 5]
+        assert peak <= 2
+        assert peak >= 1  # at least one item ran
+
+    @pytest.mark.asyncio
+    async def test_max_concurrency_of_one_is_serial(self) -> None:
+        """max_concurrency=1 forces sequential execution."""
+        order: list[int] = []
+
+        @verb(role=ROLE_A)
+        async def track(_ctx: Context, x: int) -> int:
+            """Record the enter/exit interleaving as a start/stop pair."""
+            order.append(x)
+            await asyncio.sleep(0)
+            order.append(-x)
+            return x
+
+        flow = make_ff().create()
+        flow.call(_identity).map(track, max_concurrency=1)
+        await flow.run([1, 2, 3])
+        # Serial: every start is followed by its matching stop before the next start.
+        assert order == [1, -1, 2, -2, 3, -3]
+
+
+# -----------------------------------------------------------------------------
+# .map — .halt() chained method
+# -----------------------------------------------------------------------------
+
+
+class TestMapHalt:
+    """.halt(event) short-circuits queued items to Skipped once the event fires."""
+
+    @pytest.mark.asyncio
+    async def test_pre_set_halt_skips_every_item(self) -> None:
+        """A halt event that fires before .run() skips every item without running the body."""
+        halt = asyncio.Event()
+        halt.set()
+        ran: list[int] = []
+
+        @verb(role=ROLE_A)
+        async def track(_ctx: Context, x: int) -> int:
+            """Record any item that reaches the body (should never happen here)."""
+            ran.append(x)
+            return x
+
+        flow = make_ff().create()
+        flow.call(_identity).map(track).halt(halt)
+        results = await flow.run([1, 2, 3])
+        assert ran == []
+        assert all(isinstance(r, Skipped) for r in results)
+        assert [r.item for r in results] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_halt_mid_wave_skips_remaining_queue(self) -> None:
+        """A halt set by an in-flight item drains the remaining queue as Skipped."""
+        halt = asyncio.Event()
+        ran: list[int] = []
+
+        @verb(role=ROLE_A)
+        async def track(_ctx: Context, x: int) -> int:
+            """Set halt after processing item 1 to prove queued items short-circuit."""
+            ran.append(x)
+            if x == 1:
+                halt.set()
+            return x * 10
+
+        flow = make_ff().create()
+        flow.call(_identity).map(track, max_concurrency=1).halt(halt)
+        results = await flow.run([1, 2, 3, 4])
+        assert ran == [1]
+        assert results[0] == 10
+        assert all(isinstance(r, Skipped) for r in results[1:])
+        assert [r.item for r in results[1:]] == [2, 3, 4]
+
+    @pytest.mark.asyncio
+    async def test_halt_does_not_fire_merge(self) -> None:
+        """A halted item's projected child state must not merge back."""
+        merged: list[int] = []
+        halt = asyncio.Event()
+        halt.set()
+
+        def project(_parent: Any) -> dict[str, int]:
+            """Give every item a fresh child state — should never merge because halt is set."""
+            return {"payload": 1}
+
+        def merge(_parent: Any, child: dict[str, int]) -> None:
+            """Record any child payload that leaks past the halt."""
+            merged.append(child["payload"])
+
+        flow = make_ff().create(state={})
+        flow.call(_identity).map(_double, state=project, merge=merge).halt(halt)
+        await flow.run([1, 2, 3])
+        assert merged == []
+
+    @pytest.mark.asyncio
+    async def test_halt_unset_leaves_all_items_processed(self) -> None:
+        """A halt event that never fires is a no-op — every item runs to completion."""
+        halt = asyncio.Event()  # never set
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).halt(halt)
+        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+
+
+# -----------------------------------------------------------------------------
+# .map — state-projection failure handling (CodeRabbit follow-up)
+# -----------------------------------------------------------------------------
+
+
+class TestMapProjectionErrors:
+    """State-projection exceptions are handled symmetrically with guard/body errors."""
+
+    @pytest.mark.asyncio
+    async def test_projection_exception_wraps_as_failure_in_non_strict(self) -> None:
+        """A state= projection that raises becomes a Failure(item) under strict=False."""
+
+        def blow(_parent: Any) -> dict[str, int]:
+            """Always raise from the projection callback."""
+            raise RuntimeError("proj-boom")
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double, state=blow, strict=False)
+        results = await flow.run([1, 2, 3])
+        assert len(results) == 3
+        for i, item in enumerate([1, 2, 3]):
+            assert isinstance(results[i], Failure)
+            assert isinstance(results[i].exception, RuntimeError)
+            assert results[i].item == item
+
+    @pytest.mark.asyncio
+    async def test_projection_exception_fires_on_error_in_non_strict(self) -> None:
+        """on_error narrates projection failures under strict=False."""
+        observed: list[tuple[type, int]] = []
+        observed_states: list[Any] = []
+
+        def blow(_parent: Any) -> dict[str, int]:
+            """Raise from projection to trigger the on_error narration path."""
+            raise RuntimeError("proj-boom")
+
+        def on_err(exc: BaseException, item: int, ctx: Context) -> None:
+            """Record (exception type, item) so the test can assert coverage."""
+            observed.append((type(exc), item))
+            observed_states.append(ctx.state.data)
+
+        flow = make_ff().create(state={"parent": True})
+        flow.call(_identity).map(_double, state=blow, strict=False).on_error(on_err)
+        await flow.run([1, 2])
+        assert sorted(observed) == [(RuntimeError, 1), (RuntimeError, 2)]
+        # Projection failed → on_error sees parent state, not (non-existent) child
+        assert all(s == {"parent": True} for s in observed_states)
+
+    @pytest.mark.asyncio
+    async def test_projection_exception_propagates_in_strict(self) -> None:
+        """A state= projection that raises still propagates when strict=True."""
+
+        def blow(_parent: Any) -> dict[str, int]:
+            """Raise from projection to check the strict-mode propagation path."""
+            raise RuntimeError("proj-boom")
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double, state=blow)
+        with pytest.raises(RuntimeError, match="proj-boom"):
+            await flow.run([1])
+
 
 # -----------------------------------------------------------------------------
 # Buildable materialization

@@ -255,6 +255,14 @@ async def _run_map(
     sentinel. An :meth:`Flow.on_error` hook (if attached) fires for each
     per-item exception under both strict modes without altering control
     flow. Cancellation propagates unconditionally regardless.
+
+    ``max_concurrency=N`` caps in-flight per-item runners via an
+    ``asyncio.Semaphore``; items above the cap wait for a slot.
+    :meth:`Flow.halt` mounts an ``asyncio.Event`` — items that have not
+    passed the per-item halt check short-circuit to :class:`Skipped`, so
+    once the event fires the remaining queue drains without running any
+    more bodies. Already-in-flight items complete.
+
     Scoped state is projected per item; per-item merges run only for items
     that completed successfully (skipped and errored items do not merge).
     """
@@ -262,7 +270,15 @@ async def _run_map(
     items = await _resolve_items(mp.items, prev_result, ctx)
     merge_lock = asyncio.Lock()
     runner = _run_map_item_strict if mp.strict else _run_map_item
-    coros = [runner(mp, item, env, merge_lock) for item in items]
+    sem = asyncio.Semaphore(mp.max_concurrency) if mp.max_concurrency is not None else None
+
+    async def _gated(item: Any) -> Any:
+        if sem is None:
+            return await runner(mp, item, env, merge_lock)
+        async with sem:
+            return await runner(mp, item, env, merge_lock)
+
+    coros = [_gated(item) for item in items]
     if mp.strict:
         results = list(await asyncio.gather(*coros, return_exceptions=True))
         for r in results:
@@ -284,14 +300,18 @@ async def _run_map_item_strict(
 ) -> Any:
     """Run one strict-mode map item; merge fires only when the body succeeds.
 
-    Guard runs after state projection; a falsy verdict short-circuits to
-    :class:`Skipped`. ``on_error`` fires before the exception propagates.
+    Halt is checked first (before projection). Projection, guard, and body
+    exceptions all propagate; ``on_error`` fires before the exception
+    escapes.
     """
-    child_state = await _project_state(mp.state_fn, env.state)
-    item_ctx = _map_item_ctx(env, child_state)
-    if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
+    if mp.halt_event is not None and mp.halt_event.is_set():
         return Skipped(item=item)
+    item_ctx = _map_item_ctx(env, env.state)
     try:
+        child_state = await _project_state(mp.state_fn, env.state)
+        item_ctx = _map_item_ctx(env, child_state)
+        if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
+            return Skipped(item=item)
         result = await mp.body._run_as_subflow(item, state=child_state, runtime=env.runtime)
     except asyncio.CancelledError:
         raise
@@ -312,15 +332,17 @@ async def _run_map_item(
 ) -> Any:
     """Run one non-strict map item; wrap non-cancellation exceptions as :class:`Failure`.
 
-    Guard runs after state projection; a falsy verdict short-circuits to
-    :class:`Skipped`. Guard exceptions are treated like body exceptions —
-    wrapped as :class:`Failure` and passed to ``on_error``. Merge fires
-    only for items that complete successfully — a failed or skipped item's
-    partially-mutated child state is discarded.
+    Halt is checked first (before projection). Projection, guard, and body
+    exceptions are all wrapped as :class:`Failure` and passed to
+    ``on_error``. Merge fires only for items that complete successfully —
+    a failed or skipped item's partially-mutated child state is discarded.
     """
-    child_state = await _project_state(mp.state_fn, env.state)
-    item_ctx = _map_item_ctx(env, child_state)
+    if mp.halt_event is not None and mp.halt_event.is_set():
+        return Skipped(item=item)
+    item_ctx = _map_item_ctx(env, env.state)
     try:
+        child_state = await _project_state(mp.state_fn, env.state)
+        item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
         result = await mp.body._run_as_subflow(item, state=child_state, runtime=env.runtime)
