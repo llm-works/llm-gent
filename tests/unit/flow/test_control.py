@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Failure, verb
+from llm_gent.flow import Context, Failure, Flow, Skipped, verb
 
 from .conftest import ROLE_A, StubFactory, make_ff
 
@@ -132,6 +132,24 @@ class TestBranchExecution:
         flow = make_ff().create()
         flow.call(_identity).branch(when=lambda _p, _c: True, then=then_flow)
         assert await flow.run(6) == 12
+
+    @pytest.mark.asyncio
+    async def test_bare_verb_as_then_and_else(self) -> None:
+        """A bare ``@verb`` is auto-wrapped in either arm — same path as .map."""
+        flow = make_ff().create()
+        flow.call(_identity).branch(
+            when=lambda prev, _c: prev > 0,
+            then=_double,
+            else_=_plus_one,
+        )
+        assert await flow.run(3) == 6
+        flow2 = make_ff().create()
+        flow2.call(_identity).branch(
+            when=lambda prev, _c: prev > 0,
+            then=_double,
+            else_=_plus_one,
+        )
+        assert await flow2.run(-1) == 0
 
     @pytest.mark.asyncio
     async def test_rescue_catches_arm_exception(self) -> None:
@@ -292,6 +310,13 @@ class TestLoopExecution:
         flow = make_ff().create()
         flow.call(_identity).loop(lambda f: f.call(tick), until=until, max_iters=10)
         assert await flow.run(None) == 2
+
+    @pytest.mark.asyncio
+    async def test_bare_verb_as_body(self) -> None:
+        """A bare ``@verb`` is auto-wrapped as the loop body."""
+        flow = make_ff().create()
+        flow.call(_identity).loop(_plus_one, max_iters=4)
+        assert await flow.run(0) == 4
 
     @pytest.mark.asyncio
     async def test_named_flow_as_body(self) -> None:
@@ -514,6 +539,263 @@ class TestMapExecution:
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(wrap))
         assert await flow.run([7, 8]) == [{"x": 7}, {"x": 8}]
+
+    @pytest.mark.asyncio
+    async def test_module_verb_as_body(self) -> None:
+        """A bare module-level ``@verb`` is auto-wrapped as the map body."""
+        flow = make_ff().create()
+        flow.call(_identity).map(_double)
+        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+
+    @pytest.mark.asyncio
+    async def test_bound_instance_method_verb_as_body(self) -> None:
+        """A bound ``@verb`` instance method is auto-wrapped; ``self`` stays bound."""
+
+        class Doubler:
+            def __init__(self, offset: int) -> None:
+                """Capture a per-instance offset added to each item."""
+                self.offset = offset
+
+            @verb(role=ROLE_A)
+            async def scale(self, ctx: Context, x: int) -> int:
+                """Return ``x * 2 + self.offset``, proving ``self`` is bound."""
+                assert ctx.role is ROLE_A
+                return x * 2 + self.offset
+
+        instance = Doubler(offset=100)
+        flow = make_ff().create()
+        flow.call(_identity).map(instance.scale)
+        assert await flow.run([1, 2, 3]) == [102, 104, 106]
+
+    @pytest.mark.asyncio
+    async def test_non_verb_callable_still_treated_as_builder(self) -> None:
+        """A callable without ``.role`` (e.g. a plain classmethod) hits the
+        builder-callback path — the verb-shape check must not steal it."""
+        witnessed: list[Flow] = []
+
+        def build_body(f: Flow) -> None:
+            """Standard builder callback that mutates the fresh flow in place."""
+            witnessed.append(f)
+            f.call(_double)
+
+        flow = make_ff().create()
+        flow.call(_identity).map(build_body)
+        assert await flow.run([1, 2]) == [2, 4]
+        assert len(witnessed) == 1  # invoked once at materialize time
+
+
+# -----------------------------------------------------------------------------
+# .map — .guard() chained method
+# -----------------------------------------------------------------------------
+
+
+class TestMapGuard:
+    """.guard() attaches a per-item skip predicate to the preceding map node."""
+
+    @pytest.mark.asyncio
+    async def test_falsy_verdict_yields_skipped_in_position(self) -> None:
+        """A False verdict skips the body and lands ``Skipped(item)`` in that slot."""
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).guard(lambda item, _ctx: item != 2)
+        results = await flow.run([1, 2, 3])
+        assert results[0] == 2
+        assert isinstance(results[1], Skipped)
+        assert results[1].item == 2
+        assert results[2] == 6
+
+    @pytest.mark.asyncio
+    async def test_truthy_verdict_runs_body(self) -> None:
+        """A truthy verdict runs the body unchanged."""
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).guard(lambda _item, _ctx: True)
+        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+
+    @pytest.mark.asyncio
+    async def test_guard_reads_projected_state(self) -> None:
+        """Guard runs after per-item state projection so it can read ``ctx.state``."""
+        seen: list[dict[str, int]] = []
+
+        def project(_parent: Any) -> dict[str, int]:
+            """Give each item its own child state tagged with a stub budget."""
+            return {"budget": 100}
+
+        def guard(item: int, ctx: Context) -> bool:
+            """Read the projected budget and drop items over it."""
+            seen.append(dict(ctx.state.data))
+            return item <= ctx.state.data["budget"]
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double, state=project).guard(guard)
+        results = await flow.run([50, 150, 25])
+        assert results[0] == 100
+        assert isinstance(results[1], Skipped)
+        assert results[2] == 50
+        assert all(s == {"budget": 100} for s in seen)
+
+    @pytest.mark.asyncio
+    async def test_async_guard_awaited(self) -> None:
+        """An async guard is awaited before verdict is applied."""
+
+        async def guard(item: int, _ctx: Context) -> bool:
+            """Skip evens asynchronously."""
+            await asyncio.sleep(0)
+            return item % 2 == 1
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).guard(guard)
+        results = await flow.run([1, 2, 3])
+        assert results[0] == 2
+        assert isinstance(results[1], Skipped)
+        assert results[2] == 6
+
+    @pytest.mark.asyncio
+    async def test_skip_does_not_fire_merge(self) -> None:
+        """A skipped item's projected child state must not merge back."""
+        merged: list[int] = []
+        items = [1, 2, 3]
+        item_iter = iter(items)
+
+        def project(_parent: Any) -> dict[str, int]:
+            """Tag each child state with its item identity (relies on projection order)."""
+            return {"item": next(item_iter)}
+
+        def merge(parent: dict[str, list[int]], child: dict[str, int]) -> None:
+            """Record which child payloads made it back."""
+            merged.append(child["item"])
+            parent["seen"].append(child["item"])
+
+        flow = make_ff().create(state={"seen": []})
+        flow.call(_identity).map(
+            _double,
+            state=project,
+            merge=merge,
+        ).guard(lambda item, _ctx: item != 2)
+        parent: dict[str, list[int]] = {"seen": []}
+        await flow.run(items, state=parent)
+        assert sorted(merged) == [1, 3]  # only survivors merged, skipped item excluded
+        assert sorted(parent["seen"]) == [1, 3]
+
+    @pytest.mark.asyncio
+    async def test_guard_exception_becomes_failure_in_non_strict(self) -> None:
+        """A guard that raises is wrapped as Failure in non-strict mode."""
+
+        def exploding_guard(item: int, _ctx: Context) -> bool:
+            """Raise for item 2, pass others."""
+            if item == 2:
+                raise ValueError("guard-boom")
+            return True
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double, strict=False).guard(exploding_guard)
+        results = await flow.run([1, 2, 3])
+        assert results[0] == 2
+        assert isinstance(results[1], Failure)
+        assert isinstance(results[1].exception, ValueError)
+        assert results[2] == 6
+
+
+# -----------------------------------------------------------------------------
+# .map — .on_error() chained method
+# -----------------------------------------------------------------------------
+
+
+class TestMapOnError:
+    """.on_error() fires side-effect narration under both strict modes."""
+
+    @pytest.mark.asyncio
+    async def test_strict_true_fires_before_propagate(self) -> None:
+        """In strict mode, on_error runs before the exception escapes."""
+        observed: list[tuple[type, int]] = []
+
+        @verb(role=ROLE_A)
+        async def blow(_ctx: Context, x: int) -> int:
+            """Raise for x == 2."""
+            if x == 2:
+                raise ValueError(f"bad:{x}")
+            return x
+
+        def on_err(exc: BaseException, item: int, _ctx: Context) -> None:
+            """Record the exception and item."""
+            observed.append((type(exc), item))
+
+        flow = make_ff().create()
+        flow.call(_identity).map(blow).on_error(on_err)
+        with pytest.raises(ValueError, match="bad:2"):
+            await flow.run([1, 2, 3])
+        assert (ValueError, 2) in observed
+
+    @pytest.mark.asyncio
+    async def test_strict_false_fires_and_produces_failure(self) -> None:
+        """In non-strict mode, on_error runs and the item still becomes a Failure."""
+        observed: list[int] = []
+
+        @verb(role=ROLE_A)
+        async def blow(_ctx: Context, x: int) -> int:
+            """Raise for even items."""
+            if x % 2 == 0:
+                raise ValueError(f"bad:{x}")
+            return x
+
+        async def on_err(_exc: BaseException, item: int, _ctx: Context) -> None:
+            """Record the failing item asynchronously."""
+            await asyncio.sleep(0)
+            observed.append(item)
+
+        flow = make_ff().create()
+        flow.call(_identity).map(blow, strict=False).on_error(on_err)
+        results = await flow.run([1, 2, 3, 4])
+        assert results[0] == 1
+        assert isinstance(results[1], Failure)
+        assert results[2] == 3
+        assert isinstance(results[3], Failure)
+        assert sorted(observed) == [2, 4]
+
+    @pytest.mark.asyncio
+    async def test_on_error_exception_is_swallowed(self) -> None:
+        """A hook that raises must not mask the original per-item exception."""
+
+        @verb(role=ROLE_A)
+        async def blow(_ctx: Context, _x: int) -> int:
+            """Always raise."""
+            raise ValueError("original")
+
+        def on_err(_exc: BaseException, _item: int, _ctx: Context) -> None:
+            """Raise a different exception from inside the hook."""
+            raise RuntimeError("hook-blew-up")
+
+        flow = make_ff().create()
+        flow.call(_identity).map(blow).on_error(on_err)
+        with pytest.raises(ValueError, match="original"):
+            await flow.run([1])
+
+
+# -----------------------------------------------------------------------------
+# .map — chained-method attachment rules
+# -----------------------------------------------------------------------------
+
+
+class TestMapChainedApi:
+    """.guard() and .on_error() are guarded against wrong-node attachment."""
+
+    def test_guard_without_preceding_map_raises(self) -> None:
+        """Chain with no nodes rejects .guard() with a clear TypeError."""
+        flow = make_ff().create()
+        with pytest.raises(TypeError, match=r"\.guard\(\) requires a preceding .map"):
+            flow.guard(lambda _i, _c: True)
+
+    def test_on_error_on_non_map_node_raises(self) -> None:
+        """.on_error() after a plain .call node rejects with a clear TypeError."""
+        flow = make_ff().create()
+        flow.call(_identity)
+        with pytest.raises(TypeError, match=r"\.on_error\(\) applies to map nodes"):
+            flow.on_error(lambda _e, _i, _c: None)
+
+    def test_double_guard_rejected(self) -> None:
+        """Calling .guard() twice on the same map node is a TypeError."""
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).guard(lambda _i, _c: True)
+        with pytest.raises(TypeError, match="already set"):
+            flow.guard(lambda _i, _c: True)
 
 
 # -----------------------------------------------------------------------------

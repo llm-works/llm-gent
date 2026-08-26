@@ -25,6 +25,8 @@ from .nodes import (
     UNSET,
     Failure,
     ItemsFn,
+    OnErrorFn,
+    Skipped,
     StateMerge,
     StateProject,
     UntilFn,
@@ -248,27 +250,25 @@ async def _run_map(
     ``strict=True`` re-raises the first non-cancellation exception; sibling
     tasks continue but their results are discarded. ``strict=False`` swaps
     each failing item for a :class:`Failure` sentinel so the caller sees
-    every position. Cancellation propagates unconditionally in both modes.
+    every position. A :meth:`Flow.guard` predicate (if attached) skips
+    items before the body runs and replaces them with a :class:`Skipped`
+    sentinel. An :meth:`Flow.on_error` hook (if attached) fires for each
+    per-item exception under both strict modes without altering control
+    flow. Cancellation propagates unconditionally regardless.
     Scoped state is projected per item; per-item merges run only for items
-    that completed successfully.
+    that completed successfully (skipped and errored items do not merge).
     """
     prev_result = node_args[0] if node_args else None
     items = await _resolve_items(mp.items, prev_result, ctx)
     merge_lock = asyncio.Lock()
+    runner = _run_map_item_strict if mp.strict else _run_map_item
+    coros = [runner(mp, item, env, merge_lock) for item in items]
     if mp.strict:
-        coros = [
-            _run_map_item_strict(mp.body, item, env, mp.state_fn, mp.merge_fn, merge_lock)
-            for item in items
-        ]
         results = list(await asyncio.gather(*coros, return_exceptions=True))
         for r in results:
             if isinstance(r, BaseException):
                 raise r
     else:
-        coros = [
-            _run_map_item(mp.body, item, env, mp.state_fn, mp.merge_fn, merge_lock)
-            for item in items
-        ]
         results = list(await asyncio.gather(*coros))
     result = mp.aggregate(results) if mp.aggregate is not None else results
     if inspect.isawaitable(result):
@@ -277,44 +277,97 @@ async def _run_map(
 
 
 async def _run_map_item_strict(
-    body: Flow,
+    mp: _Map,
     item: Any,
     env: _RunEnv,
-    state_fn: StateProject | None,
-    merge_fn: StateMerge | None,
     merge_lock: asyncio.Lock,
 ) -> Any:
-    """Run one strict-mode map item; merge fires only when the body succeeds."""
-    child_state = await _project_state(state_fn, env.state)
-    result = await body._run_as_subflow(item, state=child_state, runtime=env.runtime)
+    """Run one strict-mode map item; merge fires only when the body succeeds.
+
+    Guard runs after state projection; a falsy verdict short-circuits to
+    :class:`Skipped`. ``on_error`` fires before the exception propagates.
+    """
+    child_state = await _project_state(mp.state_fn, env.state)
+    item_ctx = _map_item_ctx(env, child_state)
+    if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
+        return Skipped(item=item)
+    try:
+        result = await mp.body._run_as_subflow(item, state=child_state, runtime=env.runtime)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if mp.on_error is not None:
+            await _run_on_error(mp.on_error, exc, item, item_ctx, env)
+        raise
     async with merge_lock:
-        await _merge_state(merge_fn, env.state, child_state)
+        await _merge_state(mp.merge_fn, env.state, child_state)
     return result
 
 
 async def _run_map_item(
-    body: Flow,
+    mp: _Map,
     item: Any,
     env: _RunEnv,
-    state_fn: StateProject | None,
-    merge_fn: StateMerge | None,
     merge_lock: asyncio.Lock,
 ) -> Any:
     """Run one non-strict map item; wrap non-cancellation exceptions as :class:`Failure`.
 
-    Merge fires only for items that complete successfully — a failed item's
+    Guard runs after state projection; a falsy verdict short-circuits to
+    :class:`Skipped`. Guard exceptions are treated like body exceptions —
+    wrapped as :class:`Failure` and passed to ``on_error``. Merge fires
+    only for items that complete successfully — a failed or skipped item's
     partially-mutated child state is discarded.
     """
-    child_state = await _project_state(state_fn, env.state)
+    child_state = await _project_state(mp.state_fn, env.state)
+    item_ctx = _map_item_ctx(env, child_state)
     try:
-        result = await body._run_as_subflow(item, state=child_state, runtime=env.runtime)
+        if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
+            return Skipped(item=item)
+        result = await mp.body._run_as_subflow(item, state=child_state, runtime=env.runtime)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        if mp.on_error is not None:
+            await _run_on_error(mp.on_error, exc, item, item_ctx, env)
         return Failure(exception=exc, item=item)
     async with merge_lock:
-        await _merge_state(merge_fn, env.state, child_state)
+        await _merge_state(mp.merge_fn, env.state, child_state)
     return result
+
+
+def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context:
+    """Build the per-item :class:`Context` fed to guard and on_error hooks.
+
+    These hooks run without a :class:`Role`, so ``ctx.saia`` is ``None``.
+    """
+    return Context(role=None, state=child_state, flow=env.runtime, traits=env.runtime._traits)
+
+
+async def _run_guard(guard_fn: Any, item: Any, ctx: Context) -> bool:
+    """Evaluate the guard predicate, awaiting when async, coercing to bool."""
+    verdict = guard_fn(item, ctx)
+    if inspect.isawaitable(verdict):
+        verdict = await verdict
+    return bool(verdict)
+
+
+async def _run_on_error(
+    on_error_fn: OnErrorFn,
+    exc: BaseException,
+    item: Any,
+    ctx: Context,
+    env: _RunEnv,
+) -> None:
+    """Invoke on_error and swallow any exception it raises (never mask the original)."""
+    try:
+        result = on_error_fn(exc, item, ctx)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as hook_exc:
+        env.lg.warning(
+            "map on_error hook raised — original exception preserved",
+            extra={"exception": hook_exc, "original": exc},
+        )
 
 
 async def _resolve_items(items_fn: ItemsFn | None, prev_result: Any, ctx: Context) -> list[Any]:

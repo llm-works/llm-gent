@@ -2,12 +2,14 @@
 
 Internal to :mod:`llm_gent.flow`: the private dataclasses (:class:`_Node`,
 :class:`_Branch`, :class:`_Loop`, :class:`_Map`, :class:`_RunEnv`), and the
-type aliases used by the fluent builder's callback slots. Two public
+type aliases used by the fluent builder's callback slots. Three public
 symbols are routed through this module as well: :class:`Failure`, the
 sentinel returned in place of a failed item by :meth:`Flow.map` when
-``strict=False``; and :data:`UNSET` (with its :class:`Unset` type), the
-"no value here" sentinel used by :meth:`Flow.run`'s ``state=`` default and
-by rescue policies' ``pending_input`` positional.
+``strict=False``; :class:`Skipped`, the sentinel returned in place of an
+item whose :meth:`Flow.guard` predicate returned falsy; and :data:`UNSET`
+(with its :class:`Unset` type), the "no value here" sentinel used by
+:meth:`Flow.run`'s ``state=`` default and by rescue policies'
+``pending_input`` positional.
 
 Depends only on :mod:`.context` and :mod:`.state`; :class:`Flow` is
 referenced solely inside string-form annotations (via
@@ -94,6 +96,23 @@ ItemsFn = Callable[[Any, Context], Any]
 AggregateFn = Callable[[list[Any]], Any]
 """Map result reducer: ``list[R] -> R'``. May be async. If omitted, .map returns the list as-is."""
 
+GuardFn = Callable[[Any, Context], Any]
+"""Map per-item skip predicate: ``(item, ctx) -> bool``. May be async.
+
+Falsy return skips the item; a :class:`Skipped` sentinel lands in that
+position of the result list. The predicate runs after per-item state
+projection so it can read ``ctx.state``.
+"""
+
+OnErrorFn = Callable[[BaseException, Any, Context], Any]
+"""Map per-item error hook: ``(exception, item, ctx) -> None``. Return value ignored.
+
+Fires in both ``strict`` modes for side-effect narration (logging,
+tracing). Does not alter control flow — in ``strict=True`` the exception
+still propagates after ``on_error`` returns; in ``strict=False`` the item
+is still replaced by a :class:`Failure` sentinel.
+"""
+
 StateProject = Callable[[Any], Any]
 """Scoped-state projection: ``(parent_state) -> child_state``. May be async.
 
@@ -123,6 +142,19 @@ class Failure:
 
     item: Any
     """The input item whose subflow run failed."""
+
+
+@dataclass(frozen=True)
+class Skipped:
+    """Placeholder for an item whose :meth:`Flow.guard` predicate returned falsy.
+
+    Occupies the same positional slot in :meth:`Flow.map`'s result list
+    that a successful or failed item would, so aggregators can partition
+    ``list[R | Failure | Skipped]`` by isinstance without losing position.
+    """
+
+    item: Any
+    """The input item that was gated out before the map body ran."""
 
 
 @dataclass(frozen=True)
@@ -171,6 +203,8 @@ class _Map:
     strict: bool
     state_fn: StateProject | None = None
     merge_fn: StateMerge | None = None
+    guard: GuardFn | None = None
+    on_error: OnErrorFn | None = None
 
 
 @dataclass
