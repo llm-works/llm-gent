@@ -829,14 +829,20 @@ class TestMapMaxConcurrency:
     def test_zero_rejected_at_build_time(self) -> None:
         """max_concurrency=0 is a ValueError at build time."""
         flow = make_ff().create()
-        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be >= 1"):
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
             flow.call(_identity).map(_double, max_concurrency=0)
 
     def test_negative_rejected_at_build_time(self) -> None:
         """max_concurrency=-1 is a ValueError at build time."""
         flow = make_ff().create()
-        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be >= 1"):
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
             flow.call(_identity).map(_double, max_concurrency=-1)
+
+    def test_float_rejected_at_build_time(self) -> None:
+        """max_concurrency=1.5 is a ValueError — must be int, not float."""
+        flow = make_ff().create()
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
+            flow.call(_identity).map(_double, max_concurrency=1.5)
 
     @pytest.mark.asyncio
     async def test_none_default_leaves_unthrottled(self) -> None:
