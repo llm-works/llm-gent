@@ -156,9 +156,6 @@ class Skipped:
     item: Any
     """The input item that was gated out before the map body ran."""
 
-    reason: Any = None
-    """Optional guard-supplied reason for the skip; ``None`` by default."""
-
 
 @dataclass(frozen=True)
 class _RunEnv:

@@ -336,7 +336,10 @@ async def _run_map_item(
 
 
 def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context:
-    """Build the per-item :class:`Context` fed to guard and on_error hooks."""
+    """Build the per-item :class:`Context` fed to guard and on_error hooks.
+
+    These hooks run without a :class:`Role`, so ``ctx.saia`` is ``None``.
+    """
     return Context(role=None, state=child_state, flow=env.runtime, traits=env.runtime._traits)
 
 
