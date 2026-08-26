@@ -19,6 +19,7 @@ without pulling in :mod:`.flow`.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
@@ -205,6 +206,8 @@ class _Map:
     merge_fn: StateMerge | None = None
     guard: GuardFn | None = None
     on_error: OnErrorFn | None = None
+    max_concurrency: int | None = None
+    halt_event: asyncio.Event | None = None
 
 
 @dataclass

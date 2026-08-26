@@ -51,6 +51,7 @@ Buildable materializer :func:`_materialize`.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from typing import Any
 
@@ -442,6 +443,7 @@ class Flow:
         items: ItemsFn | None = None,
         aggregate: AggregateFn | None = None,
         strict: bool = True,
+        max_concurrency: int | None = None,
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
         state: StateProject | None = None,
@@ -461,7 +463,14 @@ class Flow:
             strict: ``True`` (default) → the first non-cancellation exception
                 propagates out of :meth:`run`. ``False`` → each failing item is
                 replaced by a :class:`Failure` sentinel in the results list so
-                the aggregator can partition successes from failures.
+                the aggregator can partition successes from failures. Under
+                ``strict=False`` a state-projection failure is also wrapped
+                as :class:`Failure` (symmetric with guard/body failures).
+            max_concurrency: Cap on in-flight per-item runners. Must be
+                ``>= 1`` when set. Omitted → unbounded (all items dispatch
+                immediately as one ``asyncio.gather``). Load-bearing for
+                callers that need to respect an external rate limit (LLM
+                requests, downstream service quota).
             rescue: Attached to the map node — fires if the map itself raises
                 (item resolution, body exceptions in strict mode, or aggregate).
             after: Attached to the map node — fires with the final (possibly
@@ -487,6 +496,8 @@ class Flow:
         Returns ``self`` for chaining.
         """
         _require_state_for_merge(state, merge, ".map")
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError(f".map(max_concurrency=) must be >= 1; got {max_concurrency}")
         body_flow = _materialize(body, self._lg, "map.body")
         node = _Node(
             target=_Map(
@@ -496,6 +507,7 @@ class Flow:
                 strict=strict,
                 state_fn=state,
                 merge_fn=merge,
+                max_concurrency=max_concurrency,
             ),
             rescue=rescue,
             after=after,
@@ -548,6 +560,31 @@ class Flow:
         if target.on_error is not None:
             raise TypeError(".on_error() already set on the preceding map node")
         target.on_error = fn
+        return self
+
+    def halt(self, event: asyncio.Event) -> Flow:
+        """Attach a halt signal to the preceding :meth:`map` node.
+
+        Once ``event`` is set, subsequent per-item runners short-circuit to
+        :class:`Skipped` without projecting state, running the guard, or
+        invoking the body — the halted item's per-item merge does not fire
+        either. Items already past the halt check run to completion; halting
+        an in-flight body mid-request is a body-level
+        :class:`asyncio.CancelledError` concern, not the map primitive's
+        job. Combined with ``max_concurrency=N``, at most ``N`` items complete
+        after the event fires.
+
+        Only valid on a map node. Chainable form only — there is no
+        ``halt=`` kwarg on :meth:`map`.
+
+        Raises:
+            TypeError: The preceding node is missing, isn't a map, or already
+                has a halt attached.
+        """
+        target = self._require_map_tail(".halt()")
+        if target.halt_event is not None:
+            raise TypeError(".halt() already set on the preceding map node")
+        target.halt_event = event
         return self
 
     def _require_map_tail(self, method: str) -> _Map:
