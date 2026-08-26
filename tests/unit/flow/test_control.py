@@ -999,19 +999,23 @@ class TestMapProjectionErrors:
     async def test_projection_exception_fires_on_error_in_non_strict(self) -> None:
         """on_error narrates projection failures under strict=False."""
         observed: list[tuple[type, int]] = []
+        observed_states: list[Any] = []
 
         def blow(_parent: Any) -> dict[str, int]:
             """Raise from projection to trigger the on_error narration path."""
             raise RuntimeError("proj-boom")
 
-        def on_err(exc: BaseException, item: int, _ctx: Context) -> None:
+        def on_err(exc: BaseException, item: int, ctx: Context) -> None:
             """Record (exception type, item) so the test can assert coverage."""
             observed.append((type(exc), item))
+            observed_states.append(ctx.state.data)
 
-        flow = make_ff().create()
+        flow = make_ff().create(state={"parent": True})
         flow.call(_identity).map(_double, state=blow, strict=False).on_error(on_err)
         await flow.run([1, 2])
         assert sorted(observed) == [(RuntimeError, 1), (RuntimeError, 2)]
+        # Projection failed → on_error sees parent state, not (non-existent) child
+        assert all(s == {"parent": True} for s in observed_states)
 
     @pytest.mark.asyncio
     async def test_projection_exception_propagates_in_strict(self) -> None:
