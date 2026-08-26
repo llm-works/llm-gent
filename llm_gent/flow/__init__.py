@@ -14,6 +14,8 @@ Public surface:
   and one :class:`SAIAFactory`); preferred entry point at the application
   boundary
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
+- :class:`Skipped` — sentinel returned for an item gated out by
+  ``Flow.guard`` on a ``Flow.map`` node
 - :data:`UNSET` — "no value here" sentinel (distinct from ``None``), used by
   :meth:`Flow.run`'s ``state=`` default and by rescue callbacks'
   ``pending_input`` positional
@@ -33,7 +35,7 @@ from .archetypes import extractor, grader, planner, synthesizer
 from .context import Context
 from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
-from .nodes import UNSET, Failure, Unset
+from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
 from .role import Role
 from .state import State
@@ -49,6 +51,7 @@ __all__ = [
     "Panel",
     "Role",
     "SAIAFactory",
+    "Skipped",
     "State",
     "Unset",
     "extractor",

@@ -64,7 +64,9 @@ from .nodes import (
     UNSET,
     AfterHook,
     AggregateFn,
+    GuardFn,
     ItemsFn,
+    OnErrorFn,
     ProjectFn,
     RescuePolicy,
     StateMerge,
@@ -500,6 +502,65 @@ class Flow:
         )
         self._nodes.append(node)
         return self
+
+    def guard(self, fn: GuardFn) -> Flow:
+        """Attach a per-item skip predicate to the preceding :meth:`map` node.
+
+        ``fn(item, ctx) -> bool`` (sync or async) runs after per-item state
+        projection and before the map body. A falsy verdict short-circuits
+        the item: the body never runs, no per-item merge fires, and the
+        result slot is filled with a :class:`Skipped` sentinel so the
+        result list stays 1:1 with the input items.
+
+        Only valid on a map node. Chainable form only — there is no
+        ``guard=`` kwarg on :meth:`map` (keeps the signature narrow;
+        the semantics only make sense for map).
+
+        Raises:
+            TypeError: The preceding node is missing, isn't a map, or
+                already has a guard attached.
+        """
+        target = self._require_map_tail(".guard()")
+        if target.guard is not None:
+            raise TypeError(".guard() already set on the preceding map node")
+        target.guard = fn
+        return self
+
+    def on_error(self, fn: OnErrorFn) -> Flow:
+        """Attach a per-item error hook to the preceding :meth:`map` node.
+
+        ``fn(exception, item, ctx) -> None`` (sync or async) fires whenever
+        an item's body raises a non-cancellation exception. The hook runs
+        under both ``strict`` modes: in ``strict=True`` before the
+        exception propagates, in ``strict=False`` before the item is
+        replaced by :class:`Failure`. Return value is ignored; the hook is
+        for side-effect narration (logging, tracing), not control flow.
+
+        A hook exception is logged and swallowed so the original per-item
+        exception is never masked. Only valid on a map node. Chainable
+        form only — there is no ``on_error=`` kwarg on :meth:`map`.
+
+        Raises:
+            TypeError: The preceding node is missing, isn't a map, or
+                already has an on_error attached.
+        """
+        target = self._require_map_tail(".on_error()")
+        if target.on_error is not None:
+            raise TypeError(".on_error() already set on the preceding map node")
+        target.on_error = fn
+        return self
+
+    def _require_map_tail(self, method: str) -> _Map:
+        """Return the last node's target if it is a :class:`_Map`, else raise."""
+        if not self._nodes:
+            raise TypeError(f"{method} requires a preceding .map() node; none in chain")
+        target = self._nodes[-1].target
+        if not isinstance(target, _Map):
+            raise TypeError(
+                f"{method} applies to map nodes only; the preceding node is a "
+                f"{type(target).__name__}"
+            )
+        return target
 
     # -------------------------------------------------------------------------
     # Execution
