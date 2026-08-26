@@ -313,16 +313,16 @@ async def _run_map_item(
     """Run one non-strict map item; wrap non-cancellation exceptions as :class:`Failure`.
 
     Guard runs after state projection; a falsy verdict short-circuits to
-    :class:`Skipped`. ``on_error`` fires before the item is replaced by
-    a :class:`Failure`. Merge fires only for items that complete
-    successfully — a failed or skipped item's partially-mutated child
-    state is discarded.
+    :class:`Skipped`. Guard exceptions are treated like body exceptions —
+    wrapped as :class:`Failure` and passed to ``on_error``. Merge fires
+    only for items that complete successfully — a failed or skipped item's
+    partially-mutated child state is discarded.
     """
     child_state = await _project_state(mp.state_fn, env.state)
     item_ctx = _map_item_ctx(env, child_state)
-    if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
-        return Skipped(item=item)
     try:
+        if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
+            return Skipped(item=item)
         result = await mp.body._run_as_subflow(item, state=child_state, runtime=env.runtime)
     except asyncio.CancelledError:
         raise

@@ -652,6 +652,12 @@ class TestMapGuard:
     async def test_skip_does_not_fire_merge(self) -> None:
         """A skipped item's projected child state must not merge back."""
         merged: list[int] = []
+        items = [1, 2, 3]
+        item_iter = iter(items)
+
+        def project(_parent: Any) -> dict[str, int]:
+            """Tag each child state with its item identity (relies on projection order)."""
+            return {"item": next(item_iter)}
 
         def merge(parent: dict[str, list[int]], child: dict[str, int]) -> None:
             """Record which child payloads made it back."""
@@ -661,13 +667,31 @@ class TestMapGuard:
         flow = make_ff().create(state={"seen": []})
         flow.call(_identity).map(
             _double,
-            state=lambda _p: {"item": -1},
+            state=project,
             merge=merge,
         ).guard(lambda item, _ctx: item != 2)
         parent: dict[str, list[int]] = {"seen": []}
-        await flow.run([1, 2, 3], state=parent)
-        assert 2 not in merged  # skipped item never merged
-        assert len(merged) == 2  # only the two survivors merged
+        await flow.run(items, state=parent)
+        assert sorted(merged) == [1, 3]  # only survivors merged, skipped item excluded
+        assert sorted(parent["seen"]) == [1, 3]
+
+    @pytest.mark.asyncio
+    async def test_guard_exception_becomes_failure_in_non_strict(self) -> None:
+        """A guard that raises is wrapped as Failure in non-strict mode."""
+
+        def exploding_guard(item: int, _ctx: Context) -> bool:
+            """Raise for item 2, pass others."""
+            if item == 2:
+                raise ValueError("guard-boom")
+            return True
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double, strict=False).guard(exploding_guard)
+        results = await flow.run([1, 2, 3])
+        assert results[0] == 2
+        assert isinstance(results[1], Failure)
+        assert isinstance(results[1].exception, ValueError)
+        assert results[2] == 6
 
 
 # -----------------------------------------------------------------------------
