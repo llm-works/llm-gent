@@ -844,6 +844,12 @@ class TestMapMaxConcurrency:
         with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
             flow.call(_identity).map(_double, max_concurrency=1.5)
 
+    def test_bool_rejected_at_build_time(self) -> None:
+        """max_concurrency=True is a ValueError — bool is a subclass of int but not allowed."""
+        flow = make_ff().create()
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
+            flow.call(_identity).map(_double, max_concurrency=True)
+
     @pytest.mark.asyncio
     async def test_none_default_leaves_unthrottled(self) -> None:
         """Without max_concurrency= the default behavior is unbounded gather."""

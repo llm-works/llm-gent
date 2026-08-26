@@ -497,7 +497,7 @@ class Flow:
         """
         _require_state_for_merge(state, merge, ".map")
         if max_concurrency is not None and (
-            not isinstance(max_concurrency, int) or max_concurrency < 1
+            type(max_concurrency) is not int or max_concurrency < 1
         ):
             raise ValueError(f".map(max_concurrency=) must be an int >= 1; got {max_concurrency}")
         body_flow = _materialize(body, self._lg, "map.body")
