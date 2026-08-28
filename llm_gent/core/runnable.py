@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Runnable interface for executable agents.
 
 Defines the interface that the runtime runner expects from anything it can run.

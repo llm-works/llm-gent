@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Agent registry - manages collection of agent configurations.
 
 The registry is a pure data structure that tracks registered agents.

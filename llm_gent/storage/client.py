@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Agent storage client for custom relational schemas.
 
 Provides AgentStorage for registering and querying agent-defined tables.

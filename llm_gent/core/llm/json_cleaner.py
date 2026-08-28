@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """JSON cleanup utilities for LLM outputs.
 
 LLMs (especially smaller models) frequently return malformed or weirdly structured JSON.

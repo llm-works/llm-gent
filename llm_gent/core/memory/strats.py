@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Memory strategies for agent context retrieval.
 
 Provides functions for recalling past solutions using different strategies:

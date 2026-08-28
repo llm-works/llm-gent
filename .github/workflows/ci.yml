@@ -51,6 +51,9 @@ jobs:
       - name: Type check
         run: python -m mypy llm_gent/ --ignore-missing-imports
 
+      - name: Check SPDX headers
+        run: appinfra cq spdx
+
   test:
     name: Test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest

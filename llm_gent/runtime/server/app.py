@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """FastAPI application factory.
 
 Creates the FastAPI app with routes configured for the runtime Core.

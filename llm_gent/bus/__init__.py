@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Agent communication bus for swarm orchestration.
 
 Provides ZMQ-based message bus with envelope protocol for agent-to-agent
