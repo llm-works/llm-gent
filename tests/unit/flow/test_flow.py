@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Tests for the Flow class — register + dispatch + saia caching."""
 
 from __future__ import annotations

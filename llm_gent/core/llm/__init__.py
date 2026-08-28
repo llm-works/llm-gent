@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """LLM backend abstraction."""
 
 from .backend import HTTPBackend, LLMBackend, LLMError, StructuredOutputError

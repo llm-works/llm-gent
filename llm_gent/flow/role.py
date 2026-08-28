@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Role — first-class config for a persona bound to an LLM backend + model.
 
 A ``Role`` wraps the configuration a :class:`SAIAFactory` needs to build a

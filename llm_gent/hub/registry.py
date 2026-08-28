@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Unified agent registry for the swarm hub.
 
 Single source of truth for agent membership, configuration, health,

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Framework-level LLM wrapper with logging and dry-run support.
 
 Sits between llm-infer client and the rest of the framework:

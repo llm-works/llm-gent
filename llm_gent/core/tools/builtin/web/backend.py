@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """WebSearchBackend protocol and factory ABC.
 
 Defines the contract for search backend implementations and the factory

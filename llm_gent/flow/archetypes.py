@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Archetype decorators — semantic tags for verbs in the standard agent shape.
 
 These decorators behave identically to :func:`verb` but also tag the wrapped

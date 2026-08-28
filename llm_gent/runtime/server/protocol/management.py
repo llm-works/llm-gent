@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Protocol messages for agent management API.
 
 These messages enable IPC between the FastAPI subprocess and main process

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Agent service wrapper for appinfra.service integration.
 
 Wraps agent creation and execution as an appinfra Service so it can

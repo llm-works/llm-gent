@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Memory tools for agent kelt-backed fact operations.
 
 These tools enable agents to store and retrieve facts via MemoryTrait.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Runtime core - orchestrates agent lifecycle via appinfra.service.
 
 Core manages agent services using appinfra's ThreadRunner/ProcessRunner.

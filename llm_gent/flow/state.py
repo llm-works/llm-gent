@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """State — scope-aware wrapper around a user-owned payload.
 
 Every :meth:`Flow.run` wraps its incoming state as a :class:`State`; sub-flows
