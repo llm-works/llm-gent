@@ -122,7 +122,12 @@ class Panel:
         """
         results = await asyncio.gather(
             *[
-                ctx.flow.dispatch(getattr(v, "_registered_name", v.__name__), *args, **kwargs)
+                ctx.flow.dispatch(
+                    getattr(v, "_registered_name", v.__name__),
+                    *args,
+                    halt=ctx.halt,
+                    **kwargs,
+                )
                 for v in self.verbs
             ]
         )

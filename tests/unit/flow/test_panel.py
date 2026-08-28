@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from llm_gent.flow import Context, Panel, Role, verb
@@ -193,3 +195,49 @@ class TestPanel:
         flow.register(outer)
         roles = await flow.dispatch("outer")
         assert set(roles) == {ROLE_A, ROLE_B}
+
+    @pytest.mark.asyncio
+    async def test_panel_propagates_local_halt_in_subflow(self) -> None:
+        """Panel.run passes ctx.halt to dispatched verbs, not the outer flow's halt.
+
+        Scenario: outer.with_halt(root) → middle.with_halt(local) → Panel.run
+        The Panel's verbs should observe ``local``, not ``root``.
+        """
+        root_halt = asyncio.Event()
+        local_halt = asyncio.Event()
+        observed: list[asyncio.Event | None] = []
+
+        @verb(role=ROLE_A)
+        async def capture_a(ctx: Context) -> str:
+            """Record the halt event we received."""
+            observed.append(ctx.halt)
+            return "a"
+
+        @verb(role=ROLE_A)
+        async def capture_b(ctx: Context) -> str:
+            """Record the halt event we received."""
+            observed.append(ctx.halt)
+            return "b"
+
+        panel = Panel([capture_a, capture_b], aggregate=list)
+
+        @verb(role=ROLE_A)
+        async def run_panel(ctx: Context, _: object) -> list[str]:
+            """Run Panel from within a subflow with a local halt."""
+            return await panel.run(ctx)
+
+        # Build a middle subflow that has its own local halt event.
+        middle = make_ff().create().with_halt(local_halt)
+        middle.call(run_panel)
+
+        # Build the outer/root flow with a different (root) halt event.
+        # Register verbs on outer since ctx.flow points to the runtime.
+        outer = make_ff().create().with_halt(root_halt)
+        outer.register(capture_a)
+        outer.register(capture_b)
+        outer.call(middle)
+
+        results = await outer.run(())
+        assert set(results) == {"a", "b"}
+        # Panel verbs received the middle flow's local_halt, not root_halt.
+        assert observed == [local_halt, local_halt]
