@@ -214,12 +214,13 @@ class Flow:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
         self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
-        payload = self._state if self._state is not None else {}
+        payload = self._state if self._state is not UNSET else {}
         ctx = Context(
             role=verb.role,
             state=payload if isinstance(payload, State) else State(data=payload),
             flow=self,
             traits=self._traits,
+            halt=self._halt_event,
         )
         return await verb(ctx, *args, **kwargs)
 
@@ -644,7 +645,7 @@ class Flow:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
 
         The executor's subflow helpers (``.call`` targeting a Flow, and the
-        ``.branch`` / ``.loop`` / ``.map`` bodies) invoke this directly so
+        ``.branch`` / ``.iterate`` / ``.map`` bodies) invoke this directly so
         the outer runtime's factory and saia cache are shared with the
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
