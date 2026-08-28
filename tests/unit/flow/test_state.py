@@ -241,7 +241,7 @@ class TestStateNavigation:
 
         assert seen == [outer]
 
-    async def test_loop_iterations_reach_root(self) -> None:
+    async def test_iterate_iterations_reach_root(self) -> None:
         """Loop iterations under state= projection still see the outermost via .root()."""
         seen: list[dict] = []
 
@@ -251,7 +251,7 @@ class TestStateNavigation:
             return "ok"
 
         ff = make_ff()
-        top = ff.create("top").loop(lambda f: f.call(hit), max_iters=3, state=lambda _p: {})
+        top = ff.create("top").iterate(lambda f: f.call(hit), max_iters=3, state=lambda _p: {})
 
         outer = {"key": "value"}
         await top.run("input", state=outer)
@@ -319,7 +319,7 @@ class TestScopedStateSharing:
 
         assert parent_state["from_inner"] is True
 
-    async def test_loop_default_shares_state(self) -> None:
+    async def test_iterate_default_shares_state(self) -> None:
         """Loop body without ``state=`` mutates the parent's payload directly."""
 
         @verb(role=ROLE_A)
@@ -329,7 +329,7 @@ class TestScopedStateSharing:
 
         ff = make_ff()
         parent_state: dict = {}
-        top = ff.create("top", state=parent_state).loop(lambda f: f.call(bump), max_iters=4)
+        top = ff.create("top", state=parent_state).iterate(lambda f: f.call(bump), max_iters=4)
 
         await top.run("seed")
 
@@ -337,7 +337,7 @@ class TestScopedStateSharing:
 
 
 class TestScopedStateProjection:
-    """``state=`` on ``.call``/``.loop``/``.map`` isolates the child from the parent."""
+    """``state=`` on ``.call``/``.iterate``/``.map`` isolates the child from the parent."""
 
     async def test_call_state_isolates_subflow(self) -> None:
         """A projected child payload does not leak into the parent."""
@@ -426,8 +426,8 @@ class TestScopedStateProjection:
 
         assert received == [parent_state]
 
-    async def test_loop_state_projected_once_persists_across_iters(self) -> None:
-        """``.loop(state=)`` projects once — iterations share the child payload."""
+    async def test_iterate_state_projected_once_persists_across_iters(self) -> None:
+        """``.iterate(state=)`` projects once — iterations share the child payload."""
         snapshots: list[dict] = []
 
         @verb(role=ROLE_A)
@@ -441,7 +441,7 @@ class TestScopedStateProjection:
 
         ff = make_ff()
         parent_state: dict = {"unrelated": True}
-        top = ff.create("top", state=parent_state).loop(
+        top = ff.create("top", state=parent_state).iterate(
             lambda f: f.call(bump),
             max_iters=3,
             state=lambda _parent: {},
@@ -453,7 +453,7 @@ class TestScopedStateProjection:
         assert snapshots == [{"count": 1}, {"count": 2}, {"count": 3}]
         assert parent_state == {"unrelated": True, "final_count": 3}
 
-    async def test_loop_merge_skipped_when_body_raises(self) -> None:
+    async def test_iterate_merge_skipped_when_body_raises(self) -> None:
         """A loop body that raises past ``rescue`` → merge does not fire."""
         merged: list[bool] = []
 
@@ -469,7 +469,7 @@ class TestScopedStateProjection:
 
         ff = make_ff()
         parent_state: dict = {}
-        top = ff.create("top", state=parent_state).loop(
+        top = ff.create("top", state=parent_state).iterate(
             lambda f: f.call(bump),
             max_iters=5,
             state=lambda _parent: {},
@@ -481,7 +481,7 @@ class TestScopedStateProjection:
 
         assert merged == []
 
-    async def test_loop_until_sees_projected_child_state(self) -> None:
+    async def test_iterate_until_sees_projected_child_state(self) -> None:
         """``until`` predicate sees the projected child payload, not the parent."""
         counts: list[int] = []
 
@@ -493,7 +493,7 @@ class TestScopedStateProjection:
 
         ff = make_ff()
         parent_state: dict = {"count": 999}
-        top = ff.create("top", state=parent_state).loop(
+        top = ff.create("top", state=parent_state).iterate(
             lambda f: f.call(bump),
             until=lambda ctx: ctx.state.data.get("count", 0) >= 3,
             state=lambda _parent: {},
@@ -608,8 +608,8 @@ class TestStateKwargValidation:
         with pytest.raises(ValueError, match="requires state="):
             flow.call(inner, merge=lambda p, c: None)  # noqa: ARG005
 
-    def test_loop_merge_without_state_rejected(self) -> None:
-        """``.loop(merge=...)`` without ``state=`` fails eagerly."""
+    def test_iterate_merge_without_state_rejected(self) -> None:
+        """``.iterate(merge=...)`` without ``state=`` fails eagerly."""
 
         @verb(role=ROLE_A)
         async def _v(ctx, _prev) -> None: ...
@@ -618,7 +618,7 @@ class TestStateKwargValidation:
         flow = ff.create("top")
 
         with pytest.raises(ValueError, match="requires state="):
-            flow.loop(
+            flow.iterate(
                 lambda f: f.call(_v),
                 max_iters=1,
                 merge=lambda p, c: None,  # noqa: ARG005

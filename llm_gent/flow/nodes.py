@@ -4,8 +4,8 @@
 """Composition-graph node types and per-run environment.
 
 Internal to :mod:`llm_gent.flow`: the private dataclasses (:class:`_Node`,
-:class:`_Branch`, :class:`_Loop`, :class:`_Map`, :class:`_RunEnv`), and the
-type aliases used by the fluent builder's callback slots. Three public
+:class:`_Branch`, :class:`_Iterate`, :class:`_Map`, :class:`_RunEnv`), and
+the type aliases used by the fluent builder's callback slots. Three public
 symbols are routed through this module as well: :class:`Failure`, the
 sentinel returned in place of a failed item by :meth:`Flow.map` when
 ``strict=False``; :class:`Skipped`, the sentinel returned in place of an
@@ -92,7 +92,7 @@ WhenFn = Callable[[Any, Context], Any]
 """Branch predicate: ``(prev_result, ctx) -> bool``. May be async."""
 
 UntilFn = Callable[[Context], Any]
-"""Loop stop predicate: ``(ctx) -> bool``. May be async. State lives on ``ctx.state``."""
+"""Iterate stop predicate: ``(ctx) -> bool``. May be async. State lives on ``ctx.state``."""
 
 ItemsFn = Callable[[Any, Context], Any]
 """Map item source: ``(prev_result, ctx) -> iterable``. May be async. Consumed eagerly to a list."""
@@ -120,7 +120,7 @@ is still replaced by a :class:`Failure` sentinel.
 StateProject = Callable[[Any], Any]
 """Scoped-state projection: ``(parent_state) -> child_state``. May be async.
 
-Runs once around a :meth:`Flow.call` subflow, once around a :meth:`Flow.loop`
+Runs once around a :meth:`Flow.call` subflow, once around a :meth:`Flow.iterate`
 (before the first iteration), and once per item for :meth:`Flow.map`.
 """
 
@@ -165,15 +165,19 @@ class Skipped:
 class _RunEnv:
     """Per-run environment threaded through the execution helpers.
 
-    Bundles the runtime flow (factory + saia cache + logger source) and the
-    currently active :class:`State` so helpers do not each need to carry
-    them as separate positional arguments. ``lg`` is cached off ``runtime``
-    at the top of :meth:`Flow.run` for brevity in the debug/warning call sites.
+    Bundles the runtime flow (factory + saia cache + logger source), the
+    currently active :class:`State`, and any ambient halt event so helpers
+    do not each need to carry them as separate positional arguments. ``lg``
+    is cached off ``runtime`` at the top of :meth:`Flow.run` for brevity in
+    the debug/warning call sites. ``halt`` is the ambient
+    :class:`asyncio.Event` attached via :meth:`Flow.with_halt` (or inherited
+    from the outer runtime); ``None`` when no halt is in scope.
     """
 
     runtime: Flow
     state: State
     lg: Logger
+    halt: asyncio.Event | None = None
 
 
 @dataclass
@@ -186,7 +190,7 @@ class _Branch:
 
 
 @dataclass
-class _Loop:
+class _Iterate:
     """Composition-graph node: iterate a subflow until a bound or predicate fires."""
 
     body: Flow
@@ -210,7 +214,6 @@ class _Map:
     guard: GuardFn | None = None
     on_error: OnErrorFn | None = None
     max_concurrency: int | None = None
-    halt_event: asyncio.Event | None = None
 
 
 @dataclass

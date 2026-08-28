@@ -4,9 +4,9 @@
 """Flow execution helpers — walk the composition graph, dispatch each node.
 
 Internal to :mod:`llm_gent.flow`: the coroutines that :meth:`Flow.run` calls
-into to execute each node in order (verbs, subflows, and the branch/loop/map
-control-flow primitives), together with the scoped-state projection/merge
-plumbing.
+into to execute each node in order (verbs, subflows, and the
+branch/iterate/map control-flow primitives), together with the scoped-state
+projection/merge plumbing.
 
 Depends on :mod:`.flow` for the :class:`Flow` class itself, which appears in
 three ``isinstance`` checks used to distinguish subflow nodes from verb
@@ -34,7 +34,7 @@ from .nodes import (
     StateProject,
     UntilFn,
     _Branch,
-    _Loop,
+    _Iterate,
     _Map,
     _Node,
     _RunEnv,
@@ -51,16 +51,18 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context:
 
     Verb nodes get a role-bound ctx; ``ctx.saia`` resolves lazily on first
     read via the flow's SAIAFactory. Subflow nodes and control-flow nodes
-    (branch/loop/map) get an ambient ctx with ``role=None`` — those nodes
+    (branch/iterate/map) get an ambient ctx with ``role=None`` — those nodes
     have no single role, so ``ctx.saia`` returns ``None`` (each inner verb
     builds its own role-bound ctx as it runs).
     """
     from .flow import Flow
 
     traits = env.runtime._traits
-    if isinstance(target, Flow | _Branch | _Loop | _Map):
-        return Context(role=None, state=env.state, flow=env.runtime, traits=traits)
-    return Context(role=target.role, state=env.state, flow=env.runtime, traits=traits)
+    if isinstance(target, Flow | _Branch | _Iterate | _Map):
+        return Context(role=None, state=env.state, flow=env.runtime, traits=traits, halt=env.halt)
+    return Context(
+        role=target.role, state=env.state, flow=env.runtime, traits=traits, halt=env.halt
+    )
 
 
 async def _execute_node(
@@ -114,8 +116,8 @@ async def _invoke_target(
         return await _run_subflow(target, env, node.state_fn, node.merge_fn, node_args, node_kwargs)
     if isinstance(target, _Branch):
         return await _run_branch(target, ctx, env, node_args)
-    if isinstance(target, _Loop):
-        return await _run_loop(target, ctx, env, node_args)
+    if isinstance(target, _Iterate):
+        return await _run_iterate(target, ctx, env, node_args)
     if isinstance(target, _Map):
         return await _run_map(target, ctx, env, node_args)
     return await target(ctx, *node_args, **node_kwargs)
@@ -172,15 +174,16 @@ async def _merge_state(merge_fn: StateMerge | None, parent: State, child: State)
         await result
 
 
-async def _check_until(until_fn: UntilFn | None, loop_state: State, env: _RunEnv) -> bool:
-    """Evaluate the loop's until predicate with a ctx bound to the loop's scoped state."""
+async def _check_until(until_fn: UntilFn | None, iterate_state: State, env: _RunEnv) -> bool:
+    """Evaluate the iterate node's until predicate with a ctx bound to its scoped state."""
     if until_fn is None:
         return False
     ctx = Context(
         role=None,
-        state=loop_state,
+        state=iterate_state,
         flow=env.runtime,
         traits=env.runtime._traits,
+        halt=env.halt,
     )
     verdict = until_fn(ctx)
     if inspect.isawaitable(verdict):
@@ -211,34 +214,38 @@ async def _run_branch(
     return await chosen._run_as_subflow(prev_result, state=env.state, runtime=env.runtime)
 
 
-async def _run_loop(
-    lp: _Loop,
+async def _run_iterate(
+    it: _Iterate,
     ctx: Context,
     env: _RunEnv,
     node_args: tuple[Any, ...],
 ) -> Any:
-    """Iterate the loop body under bounds, threading each result to the next.
+    """Iterate the body under bounds, threading each result to the next.
 
     Post-check semantics: the body runs at least once, then ``until`` (if
     set) is evaluated. ``max_iters`` and ``deadline`` bound the total
-    iteration count and elapsed wall clock respectively. Scoped state is
-    projected once before the first iteration; every iteration sees the same
-    child state, and the merge fires once after the loop exits successfully.
+    iteration count and elapsed wall clock respectively; an ambient halt
+    event (via :meth:`Flow.with_halt`) is checked between iterations, so a
+    running body is not interrupted mid-request. Scoped state is projected
+    once before the first iteration; every iteration sees the same child
+    state, and the merge fires once after the block exits successfully.
     """
-    child_state = await _project_state(lp.state_fn, env.state)
+    child_state = await _project_state(it.state_fn, env.state)
     result: Any = node_args[0] if node_args else None
     started = time.monotonic()
     iteration = 0
     while True:
-        if lp.max_iters is not None and iteration >= lp.max_iters:
+        if it.max_iters is not None and iteration >= it.max_iters:
             break
-        if lp.deadline is not None and time.monotonic() - started >= lp.deadline:
+        if it.deadline is not None and time.monotonic() - started >= it.deadline:
             break
-        result = await lp.body._run_as_subflow(result, state=child_state, runtime=env.runtime)
+        if env.halt is not None and env.halt.is_set():
+            break
+        result = await it.body._run_as_subflow(result, state=child_state, runtime=env.runtime)
         iteration += 1
-        if await _check_until(lp.until, child_state, env):
+        if await _check_until(it.until, child_state, env):
             break
-    await _merge_state(lp.merge_fn, env.state, child_state)
+    await _merge_state(it.merge_fn, env.state, child_state)
     return result
 
 
@@ -260,11 +267,11 @@ async def _run_map(
     flow. Cancellation propagates unconditionally regardless.
 
     ``max_concurrency=N`` caps in-flight per-item runners via an
-    ``asyncio.Semaphore``; items above the cap wait for a slot.
-    :meth:`Flow.halt` mounts an ``asyncio.Event`` — items that have not
-    passed the per-item halt check short-circuit to :class:`Skipped`, so
-    once the event fires the remaining queue drains without running any
-    more bodies. Already-in-flight items complete.
+    ``asyncio.Semaphore``; items above the cap wait for a slot. An ambient
+    :meth:`Flow.with_halt` event, if set, short-circuits any per-item runner
+    that has not yet passed its halt check to :class:`Skipped`, so once the
+    event fires the remaining queue drains without running any more bodies.
+    Already-in-flight items complete.
 
     Scoped state is projected per item; per-item merges run only for items
     that completed successfully (skipped and errored items do not merge).
@@ -307,7 +314,7 @@ async def _run_map_item_strict(
     exceptions all propagate; ``on_error`` fires before the exception
     escapes.
     """
-    if mp.halt_event is not None and mp.halt_event.is_set():
+    if env.halt is not None and env.halt.is_set():
         return Skipped(item=item)
     item_ctx = _map_item_ctx(env, env.state)
     try:
@@ -340,7 +347,7 @@ async def _run_map_item(
     ``on_error``. Merge fires only for items that complete successfully —
     a failed or skipped item's partially-mutated child state is discarded.
     """
-    if mp.halt_event is not None and mp.halt_event.is_set():
+    if env.halt is not None and env.halt.is_set():
         return Skipped(item=item)
     item_ctx = _map_item_ctx(env, env.state)
     try:
@@ -365,7 +372,13 @@ def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context:
 
     These hooks run without a :class:`Role`, so ``ctx.saia`` is ``None``.
     """
-    return Context(role=None, state=child_state, flow=env.runtime, traits=env.runtime._traits)
+    return Context(
+        role=None,
+        state=child_state,
+        flow=env.runtime,
+        traits=env.runtime._traits,
+        halt=env.halt,
+    )
 
 
 async def _run_guard(guard_fn: Any, item: Any, ctx: Context) -> bool:
@@ -414,8 +427,8 @@ def _target_label(target: Any) -> str:
         return f"Flow({target.name!r})" if target.name else "Flow(<anonymous>)"
     if isinstance(target, _Branch):
         return "branch"
-    if isinstance(target, _Loop):
-        return "loop"
+    if isinstance(target, _Iterate):
+        return "iterate"
     if isinstance(target, _Map):
         return "map"
     return getattr(target, "__name__", type(target).__name__)

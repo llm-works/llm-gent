@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Tests for the branch/loop/map control-flow primitives on Flow."""
+"""Tests for the branch/iterate/map control-flow primitives on Flow."""
 
 from __future__ import annotations
 
@@ -200,47 +200,47 @@ class TestBranchExecution:
 
 
 # -----------------------------------------------------------------------------
-# .loop
+# .iterate
 # -----------------------------------------------------------------------------
 
 
-class TestLoopBuild:
-    """.loop build-time validation."""
+class TestIterateBuild:
+    """.iterate build-time validation."""
 
     def test_requires_until_or_max_iters(self) -> None:
         """Without ``until`` and without ``max_iters`` termination is not guaranteed."""
         flow = make_ff().create()
         with pytest.raises(ValueError, match="until= or max_iters"):
-            flow.loop(lambda f: f.call(_double))
+            flow.iterate(lambda f: f.call(_double))
 
     def test_max_iters_must_be_positive(self) -> None:
         """``max_iters`` of 0 or negative is a build error."""
         flow = make_ff().create()
         with pytest.raises(ValueError, match="max_iters"):
-            flow.loop(lambda f: f.call(_double), max_iters=0)
+            flow.iterate(lambda f: f.call(_double), max_iters=0)
 
     def test_deadline_must_be_positive(self) -> None:
         """``deadline`` of 0 or negative is a build error."""
         flow = make_ff().create()
         with pytest.raises(ValueError, match="deadline"):
-            flow.loop(lambda f: f.call(_double), max_iters=3, deadline=0)
+            flow.iterate(lambda f: f.call(_double), max_iters=3, deadline=0)
 
 
-class TestLoopExecution:
-    """.loop iterates the body under bounds and threads results."""
+class TestIterateExecution:
+    """.iterate iterates the body under bounds and threads results."""
 
     @pytest.mark.asyncio
     async def test_max_iters_bounds_iteration(self) -> None:
         """With only ``max_iters``, the loop runs exactly N iterations."""
         flow = make_ff().create()
-        flow.call(_identity).loop(lambda f: f.call(_double), max_iters=3)
+        flow.call(_identity).iterate(lambda f: f.call(_double), max_iters=3)
         assert await flow.run(1) == 8  # 1→2→4→8
 
     @pytest.mark.asyncio
     async def test_result_is_last_iteration(self) -> None:
         """The loop's output is the last iteration's return value."""
         flow = make_ff().create()
-        flow.call(_identity).loop(lambda f: f.call(_plus_one), max_iters=5)
+        flow.call(_identity).iterate(lambda f: f.call(_plus_one), max_iters=5)
         assert await flow.run(0) == 5
 
     @pytest.mark.asyncio
@@ -259,7 +259,7 @@ class TestLoopExecution:
             return counter["n"] >= 3
 
         flow = make_ff().create()
-        flow.call(_identity).loop(lambda f: f.call(tick), until=until, max_iters=10)
+        flow.call(_identity).iterate(lambda f: f.call(tick), until=until, max_iters=10)
         assert await flow.run(None) == 3
         assert counter["n"] == 3
 
@@ -267,7 +267,7 @@ class TestLoopExecution:
     async def test_until_never_true_hits_max_iters(self) -> None:
         """``max_iters`` is a hard cap even if ``until`` never fires."""
         flow = make_ff().create()
-        flow.call(_identity).loop(
+        flow.call(_identity).iterate(
             lambda f: f.call(_plus_one),
             until=lambda _c: False,
             max_iters=4,
@@ -289,7 +289,7 @@ class TestLoopExecution:
             return len(ctx.state.data["items"]) >= 3
 
         flow = make_ff().create(state={"items": []})
-        flow.call(_identity).loop(lambda f: f.call(push), until=until, max_iters=10)
+        flow.call(_identity).iterate(lambda f: f.call(push), until=until, max_iters=10)
         state: dict[str, Any] = {"items": []}
         await flow.run(0, state=state)
         assert state["items"] == [0, 1, 2]
@@ -311,14 +311,14 @@ class TestLoopExecution:
             return counter["n"] >= 2
 
         flow = make_ff().create()
-        flow.call(_identity).loop(lambda f: f.call(tick), until=until, max_iters=10)
+        flow.call(_identity).iterate(lambda f: f.call(tick), until=until, max_iters=10)
         assert await flow.run(None) == 2
 
     @pytest.mark.asyncio
     async def test_bare_verb_as_body(self) -> None:
         """A bare ``@verb`` is auto-wrapped as the loop body."""
         flow = make_ff().create()
-        flow.call(_identity).loop(_plus_one, max_iters=4)
+        flow.call(_identity).iterate(_plus_one, max_iters=4)
         assert await flow.run(0) == 4
 
     @pytest.mark.asyncio
@@ -326,7 +326,7 @@ class TestLoopExecution:
         """A pre-built Flow works as the loop body."""
         body = make_ff().create("step").call(_plus_one)
         flow = make_ff().create()
-        flow.call(_identity).loop(body, max_iters=3)
+        flow.call(_identity).iterate(body, max_iters=3)
         assert await flow.run(10) == 13
 
     @pytest.mark.asyncio
@@ -340,7 +340,7 @@ class TestLoopExecution:
             return x + 1
 
         flow = make_ff().create()
-        flow.call(_identity).loop(lambda f: f.call(slow), max_iters=100, deadline=0.06)
+        flow.call(_identity).iterate(lambda f: f.call(slow), max_iters=100, deadline=0.06)
         result = await flow.run(0)
         # ~1-2 iterations should fit in 60ms; must not run all 100.
         assert 1 <= result <= 5
@@ -363,7 +363,7 @@ class TestLoopExecution:
             return "swallowed"
 
         flow = make_ff().create()
-        flow.call(_identity).loop(
+        flow.call(_identity).iterate(
             lambda f: f.call(cancel_me),
             max_iters=3,
             rescue=rescue,
@@ -800,26 +800,6 @@ class TestMapChainedApi:
         with pytest.raises(TypeError, match="already set"):
             flow.guard(lambda _i, _c: True)
 
-    def test_halt_without_preceding_map_raises(self) -> None:
-        """Chain with no nodes rejects .halt() with a clear TypeError."""
-        flow = make_ff().create()
-        with pytest.raises(TypeError, match=r"\.halt\(\) requires a preceding .map"):
-            flow.halt(asyncio.Event())
-
-    def test_halt_on_non_map_node_raises(self) -> None:
-        """.halt() after a plain .call node rejects with a clear TypeError."""
-        flow = make_ff().create()
-        flow.call(_identity)
-        with pytest.raises(TypeError, match=r"\.halt\(\) applies to map nodes"):
-            flow.halt(asyncio.Event())
-
-    def test_double_halt_rejected(self) -> None:
-        """Calling .halt() twice on the same map node is a TypeError."""
-        flow = make_ff().create()
-        flow.call(_identity).map(_double).halt(asyncio.Event())
-        with pytest.raises(TypeError, match="already set"):
-            flow.halt(asyncio.Event())
-
 
 # -----------------------------------------------------------------------------
 # .map — max_concurrency= throttle
@@ -907,16 +887,20 @@ class TestMapMaxConcurrency:
 
 
 # -----------------------------------------------------------------------------
-# .map — .halt() chained method
+# Flow.with_halt — ambient halt reaches map and iterate boundaries
 # -----------------------------------------------------------------------------
 
 
-class TestMapHalt:
-    """.halt(event) short-circuits queued items to Skipped once the event fires."""
+class TestFlowWithHalt:
+    """`Flow.with_halt(event)` threads ``ctx.halt`` through every node.
+
+    Map short-circuits queued items to :class:`Skipped` once the event fires;
+    iterate exits between iterations; verbs may observe ``ctx.halt`` directly.
+    """
 
     @pytest.mark.asyncio
-    async def test_pre_set_halt_skips_every_item(self) -> None:
-        """A halt event that fires before .run() skips every item without running the body."""
+    async def test_pre_set_halt_skips_every_map_item(self) -> None:
+        """An event set before .run() drains the map body without executing it."""
         halt = asyncio.Event()
         halt.set()
         ran: list[int] = []
@@ -927,8 +911,8 @@ class TestMapHalt:
             ran.append(x)
             return x
 
-        flow = make_ff().create()
-        flow.call(_identity).map(track).halt(halt)
+        flow = make_ff().create().with_halt(halt)
+        flow.call(_identity).map(track)
         results = await flow.run([1, 2, 3])
         assert ran == []
         assert all(isinstance(r, Skipped) for r in results)
@@ -948,8 +932,8 @@ class TestMapHalt:
                 halt.set()
             return x * 10
 
-        flow = make_ff().create()
-        flow.call(_identity).map(track, max_concurrency=1).halt(halt)
+        flow = make_ff().create().with_halt(halt)
+        flow.call(_identity).map(track, max_concurrency=1)
         results = await flow.run([1, 2, 3, 4])
         assert ran == [1]
         assert results[0] == 10
@@ -957,7 +941,7 @@ class TestMapHalt:
         assert [r.item for r in results[1:]] == [2, 3, 4]
 
     @pytest.mark.asyncio
-    async def test_halt_does_not_fire_merge(self) -> None:
+    async def test_halt_does_not_fire_map_merge(self) -> None:
         """A halted item's projected child state must not merge back."""
         merged: list[int] = []
         halt = asyncio.Event()
@@ -971,18 +955,72 @@ class TestMapHalt:
             """Record any child payload that leaks past the halt."""
             merged.append(child["payload"])
 
-        flow = make_ff().create(state={})
-        flow.call(_identity).map(_double, state=project, merge=merge).halt(halt)
+        flow = make_ff().create(state={}).with_halt(halt)
+        flow.call(_identity).map(_double, state=project, merge=merge)
         await flow.run([1, 2, 3])
         assert merged == []
 
     @pytest.mark.asyncio
     async def test_halt_unset_leaves_all_items_processed(self) -> None:
-        """A halt event that never fires is a no-op — every item runs to completion."""
+        """An event that never fires is a no-op — every item runs to completion."""
         halt = asyncio.Event()  # never set
-        flow = make_ff().create()
-        flow.call(_identity).map(_double).halt(halt)
+        flow = make_ff().create().with_halt(halt)
+        flow.call(_identity).map(_double)
         assert await flow.run([1, 2, 3]) == [2, 4, 6]
+
+    @pytest.mark.asyncio
+    async def test_halt_stops_iterate_between_iterations(self) -> None:
+        """.iterate() exits after the current iteration once ``ctx.halt`` is set."""
+        halt = asyncio.Event()
+        ticks: list[int] = []
+
+        @verb(role=ROLE_A)
+        async def tick(_ctx: Context, n: int) -> int:
+            """Increment, set halt after 2, return the running count."""
+            ticks.append(n)
+            if n >= 2:
+                halt.set()
+            return n + 1
+
+        flow = make_ff().create().with_halt(halt)
+        flow.call(_identity).iterate(lambda f: f.call(tick), max_iters=10)
+        result = await flow.run(1)
+        # Body runs at least once; halt-between-iterations stops before a 4th.
+        assert ticks == [1, 2]
+        assert result == 3
+
+    @pytest.mark.asyncio
+    async def test_ctx_halt_reaches_verb_body(self) -> None:
+        """Verbs observe ``ctx.halt`` — the same event the map/iterate primitives check."""
+        halt = asyncio.Event()
+        halt.set()
+        seen: list[bool] = []
+
+        @verb(role=ROLE_A)
+        async def check(ctx: Context, x: int) -> int:
+            """Record whether ctx.halt is set at dispatch time."""
+            seen.append(ctx.halt is not None and ctx.halt.is_set())
+            return x
+
+        flow = make_ff().create().with_halt(halt)
+        flow.call(check)
+        await flow.run(42)
+        assert seen == [True]
+
+    @pytest.mark.asyncio
+    async def test_subflow_inherits_outer_halt(self) -> None:
+        """A subflow without its own halt inherits the outer runtime's event."""
+        halt = asyncio.Event()
+        halt.set()
+
+        inner = make_ff().create()
+        inner.call(_double)
+
+        outer = make_ff().create().with_halt(halt)
+        outer.call(_identity).map(inner)
+        results = await outer.run([1, 2, 3])
+        # Outer map short-circuits before the inner subflow ever runs.
+        assert all(isinstance(r, Skipped) for r in results)
 
 
 # -----------------------------------------------------------------------------
