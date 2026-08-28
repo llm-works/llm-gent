@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from appinfra import DotDict
 
-from llm_gent.core.agent import Agent, ExecutionResult
+from llm_gent.core.agent import Agent, ExecutionResult, RunnableAgent
 from llm_gent.core.agent.helpers import _substitute_variables
 from tests.helpers import create_mock_trait
 
@@ -17,39 +17,39 @@ pytestmark = pytest.mark.unit
 
 
 class TestAgentBaseClass:
-    """Tests for the abstract Agent base class."""
+    """Tests for the slim Agent container."""
 
     @pytest.fixture
     def mock_logger(self):
         """Create mock Logger."""
         return MagicMock()
 
-    def test_agent_is_abstract(self, mock_logger):
-        """Agent cannot be instantiated directly."""
-        with pytest.raises(TypeError, match="Can't instantiate abstract class"):
+    def test_agent_requires_identity(self, mock_logger):
+        """Agent construction fails without identity.name."""
+        from llm_gent.core.errors import ConfigError
+
+        with pytest.raises(ConfigError, match="identity.name is required"):
             Agent(lg=mock_logger)
 
-    def test_agent_subclass_must_implement_abstract_methods(self, mock_logger):
-        """Subclass must implement all abstract methods."""
+    def test_agent_container_can_be_instantiated(self, mock_logger):
+        """Plain Agent is directly instantiable with just identity."""
+        config = DotDict(identity={"name": "test"})
+        agent = Agent(lg=mock_logger, config=config)
+        assert agent.name == "test"
 
-        class IncompleteAgent(Agent):
+    def test_runnable_agent_requires_execution_methods(self, mock_logger):
+        """RunnableAgent subclass without abstracts cannot instantiate."""
+
+        class IncompleteRunnable(RunnableAgent):
             pass
 
         with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            IncompleteAgent(lg=mock_logger)
+            IncompleteRunnable(lg=mock_logger)
 
-    def test_agent_subclass_can_be_instantiated(self, mock_logger):
-        """Complete subclass can be instantiated."""
+    def test_runnable_agent_subclass_can_be_instantiated(self, mock_logger):
+        """RunnableAgent subclass with all abstracts is instantiable."""
 
-        class CompleteAgent(Agent):
-            def start(self) -> None:
-                self._start_traits()
-                self._started = True
-
-            def stop(self) -> None:
-                self._stop_traits()
-                self._started = False
-
+        class CompleteAgent(RunnableAgent):
             def run_once(self) -> ExecutionResult:
                 return ExecutionResult(success=True, content="done")
 
@@ -450,7 +450,7 @@ class TestFactorySystemPrompt:
         from unittest.mock import MagicMock
 
         from llm_gent.agents.default import Factory
-        from llm_gent.core.traits.factory import Factory as TraitFactory
+        from llm_gent.core.traits.factory import TraitFactory
 
         # Create mock platform context
         mock_platform = MagicMock()

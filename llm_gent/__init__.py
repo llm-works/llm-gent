@@ -61,7 +61,7 @@ from .core.traits import (
     TrainingTrait,
     Trait,
 )
-from .core.traits.factory import Factory as TraitFactory
+from .core.traits.factory import TraitFactory
 
 
 try:

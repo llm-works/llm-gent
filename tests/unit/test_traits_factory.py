@@ -14,7 +14,7 @@ from llm_gent.core.traits.builtin.directive import Directive, DirectiveTrait, Me
 from llm_gent.core.traits.builtin.llm import LLMTrait
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.training import TrainingTrait
-from llm_gent.core.traits.factory import Factory
+from llm_gent.core.traits.factory import TraitFactory
 
 
 pytestmark = pytest.mark.unit
@@ -38,8 +38,8 @@ def mock_platform():
 
 @pytest.fixture
 def factory(mock_platform):
-    """Create a Factory instance."""
-    return Factory(mock_platform)
+    """Create a TraitFactory instance."""
+    return TraitFactory(mock_platform)
 
 
 @pytest.fixture
@@ -53,7 +53,7 @@ def mock_agent():
 
 
 class TestCreate:
-    """Tests for Factory.create() dispatch."""
+    """Tests for TraitFactory.create() dispatch."""
 
     def test_unknown_trait_raises_config_error(self, factory, mock_agent):
         fake_trait = MagicMock()
@@ -78,7 +78,7 @@ class TestCreate:
 
 
 class TestCreateDirectiveTrait:
-    """Tests for Factory.create_directive_trait()."""
+    """Tests for TraitFactory.create_directive_trait()."""
 
     def test_string_config(self, factory, mock_agent):
         trait = factory.create_directive_trait(mock_agent, "You are a reviewer.")
@@ -106,7 +106,7 @@ class TestCreateDirectiveTrait:
 
 
 class TestCreateLLMTrait:
-    """Tests for Factory.create_llm_trait()."""
+    """Tests for TraitFactory.create_llm_trait()."""
 
     def test_none_config_raises(self, factory, mock_agent):
         with pytest.raises(ConfigError, match="LLM configuration required"):
@@ -119,7 +119,7 @@ class TestCreateLLMTrait:
 
 
 class TestCreateMemoryTrait:
-    """Tests for Factory.create_memory_trait()."""
+    """Tests for TraitFactory.create_memory_trait()."""
 
     def test_none_config_raises(self, factory, mock_agent):
         with pytest.raises(ConfigError, match="Memory configuration required"):
@@ -148,7 +148,7 @@ class TestCreateMemoryTrait:
 
 
 class TestCreateTrainingTrait:
-    """Tests for Factory.create_training_trait()."""
+    """Tests for TraitFactory.create_training_trait()."""
 
     def test_empty_source_yields_empty_config(self, factory, mock_agent):
         trait = factory.create_training_trait(mock_agent, None)
@@ -167,7 +167,7 @@ class TestCreateTrainingTrait:
 
 
 class TestCreateMethodTrait:
-    """Tests for Factory.create_method_trait()."""
+    """Tests for TraitFactory.create_method_trait()."""
 
     def test_none_raises(self, factory, mock_agent):
         with pytest.raises(ConfigError, match="Method configuration required"):
@@ -224,7 +224,7 @@ class TestCreateLLMRouting:
 
 
 class TestMergeLLMConfig:
-    """Tests for Factory._merge_llm_config()."""
+    """Tests for TraitFactory._merge_llm_config()."""
 
     def test_override_existing_backend(self, factory):
         base = DotDict(
@@ -348,7 +348,7 @@ class TestCreateMemoryRouting:
             "db": {"url": "postgresql://localhost/test"},
             "schema": {"name": "default"},
         }
-        factory_inst = Factory(mock_platform)
+        factory_inst = TraitFactory(mock_platform)
 
         mock_agent = MagicMock()
         mock_agent.config = DotDict({"kelt": {"schema": {"name": "custom", "enforce": True}}})
@@ -367,7 +367,7 @@ class TestCreateTrainingRouting:
 
     def test_empty_platform_config_creates_default_trait(self, mock_platform):
         mock_platform.learn_config.return_value = None
-        factory_inst = Factory(mock_platform)
+        factory_inst = TraitFactory(mock_platform)
 
         mock_agent = MagicMock()
         mock_agent.config = DotDict({})
@@ -381,7 +381,7 @@ class TestCreateTrainingRouting:
             "schema": {"name": "platform"},
             "adapters": {"lora": {"base_path": "/data/adapters"}},
         }
-        factory_inst = Factory(mock_platform)
+        factory_inst = TraitFactory(mock_platform)
 
         mock_agent = MagicMock()
         mock_agent.config = DotDict({})
@@ -395,7 +395,7 @@ class TestCreateTrainingRouting:
             "schema": {"name": "platform"},
             "adapters": {"lora": {"base_path": "/data/adapters"}},
         }
-        factory_inst = Factory(mock_platform)
+        factory_inst = TraitFactory(mock_platform)
 
         mock_agent = MagicMock()
         mock_agent.config = DotDict({"kelt": {"schema": {"name": "agent"}}})

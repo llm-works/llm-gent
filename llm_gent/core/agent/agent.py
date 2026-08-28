@@ -1,21 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Abstract base class for agents."""
+"""Slim Agent container.
+
+Agent = container + lifecycle + traits + identity. It is not itself a
+:class:`Runnable`; the runtime-executable surface (``run_once`` / ``ask`` /
+feedback) lives on :class:`RunnableAgent`. Consumers that only need the
+container (traits, lifecycle, identity) can construct a plain Agent and
+never see the runner abstracts.
+"""
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from appinfra import DotDict
 from appinfra.log import Logger
 
 from ..errors import TraitNotFoundError
-from ..runnable import Runnable
 from ..traits.base import BaseTrait
 from ..traits.registry import Registry as TraitRegistry
-from .types import ExecutionResult
 
 
 if TYPE_CHECKING:
@@ -24,42 +28,38 @@ if TYPE_CHECKING:
 TraitT = TypeVar("TraitT", bound=BaseTrait)
 
 
-class Agent(Runnable):
-    """Abstract base class for agents.
+class Agent:
+    """Trait container with lifecycle + identity.
 
-    Provides trait composition and lifecycle management. Subclasses
-    implement the concrete agent behavior.
+    Directly instantiable: an ``Agent(lg, config)`` wires up the trait
+    registry, resolves identity, and answers ``start`` / ``stop``. Consumers
+    that need execution semantics (``run_once`` / ``ask``) subclass
+    :class:`RunnableAgent` instead.
 
-    For LLM operations, attach SAIATrait and call agent.get_trait(SAIATrait).saia
-    directly. For memory, attach MemoryTrait and access via get_trait().
+    Trait attachment is via :meth:`add_trait`. Lifecycle is via :meth:`start`
+    / :meth:`stop`, or the ``async with agent`` context manager. Reaching
+    into a specific trait's surface goes through :meth:`get_trait` /
+    :meth:`require_trait`.
 
     Example:
-        class MyAgent(Agent):
-            def __init__(self, lg: Logger, name: str) -> None:
-                super().__init__(lg)
-                self._name = name
-
-            @property
-            def name(self) -> str:
-                return self._name
-
-            def start(self) -> None:
-                self._start_traits()
-
-            def stop(self) -> None:
-                self._stop_traits()
+        agent = Agent(lg, config=DotDict(identity={"name": "explorer"}))
+        agent.add_trait(SAIATrait(agent, backend=backend))
+        async with agent:
+            saia = agent.require_trait(SAIATrait).saia
+            ...
     """
 
     def __init__(self, lg: Logger, config: DotDict | dict[str, Any] | None = None) -> None:
-        """Initialize agent.
+        """Initialize the container.
 
         Args:
             lg: Logger instance.
-            config: Agent configuration (converted to DotDict if dict, empty if None).
-                   Must contain identity.name if config is provided.
+            config: Agent configuration (converted to DotDict if dict, empty
+                if None). Must contain ``identity.name`` if any config is
+                provided.
 
         Raises:
-            ConfigError: If identity.name is missing from config.
+            ConfigError: If ``identity.name`` is missing from config.
         """
         self._lg = lg
         if isinstance(config, DotDict):
@@ -69,7 +69,6 @@ class Agent(Runnable):
         else:
             self._config = DotDict()
 
-        # Identity is required - raises ConfigError if missing
         self._identity: Identity = self._resolve_identity()
         self._traits = TraitRegistry(lg)
         self._started = False
@@ -77,28 +76,20 @@ class Agent(Runnable):
 
     @property
     def name(self) -> str:
-        """Agent identifier from identity.
-
-        Returns:
-            Agent name from identity.
-        """
+        """Agent identifier from identity."""
         return self._identity.name
 
     @property
     def identity(self) -> Identity:
-        """Agent identity.
-
-        Returns:
-            Agent's Identity instance.
-        """
+        """Agent identity."""
         return self._identity
 
     @property
     def cycle_count(self) -> int:
         """Number of execution cycles completed.
 
-        Returns:
-            Count of execution cycles. Incremented by subclasses in run_once().
+        Base :class:`Agent` never increments this; runnable subclasses
+        maintain ``_cycle_count`` themselves.
         """
         return self._cycle_count
 
@@ -106,77 +97,50 @@ class Agent(Runnable):
     def lg(self) -> Logger:
         """Logger instance for this agent.
 
-        All traits should use self.agent.lg instead of storing their own logger.
+        Traits should read this via ``self.agent.lg`` rather than storing
+        their own.
         """
         return self._lg
 
     @property
     def config(self) -> DotDict:
-        """Agent configuration.
-
-        Returns empty DotDict if no configuration was provided.
-        Traits can access agent configuration via this method.
-
-        Returns:
-            Agent's configuration as DotDict.
-        """
+        """Agent configuration (empty DotDict if none was provided)."""
         return self._config
 
     @property
     def traits(self) -> TraitRegistry:
         """Trait registry for this agent.
 
-        Provides introspection of attached traits:
-        - traits.all() - get all trait instances
-        - traits.count() - count attached traits
-        - traits.types() - get all trait types
-
-        Note:
-            While the registry exposes mutation methods (register, replace, clear),
-            prefer using agent.add_trait() to add traits. This ensures proper
-            lifecycle management if the agent is already started.
-
-        Returns:
-            The agent's trait registry.
+        Introspection surface (``.all()`` / ``.count()`` / ``.types()``).
+        For attachment, prefer :meth:`add_trait` so lifecycle stays in sync
+        when the agent is already started.
         """
         return self._traits
 
-    @abstractmethod
+    # =========================================================================
+    # Lifecycle
+    # =========================================================================
+
     def start(self) -> None:
-        """Start the agent.
+        """Start attached traits. Idempotent — a second call is a no-op."""
+        if self._started:
+            return
+        self._start_traits()
 
-        Subclasses should call _start_traits() to start attached traits.
-        """
-        ...
-
-    @abstractmethod
     def stop(self) -> None:
-        """Stop the agent.
+        """Stop attached traits. Idempotent — a second call is a no-op."""
+        if not self._started:
+            return
+        self._stop_traits()
 
-        Subclasses should call _stop_traits() to stop attached traits.
-        """
-        ...
+    async def __aenter__(self) -> Agent:
+        """Async context-manager entry — calls :meth:`start`."""
+        self.start()
+        return self
 
-    @abstractmethod
-    def record_feedback(self, message: str) -> None:
-        """Record feedback about execution.
-
-        Args:
-            message: The feedback message.
-        """
-        ...
-
-    @abstractmethod
-    def get_recent_results(self, limit: int = 10) -> list[ExecutionResult]:
-        """Get recent execution results.
-
-        Args:
-            limit: Maximum number of results to return.
-
-        Returns:
-            List of recent ExecutionResult objects.
-        """
-        ...
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        """Async context-manager exit — calls :meth:`stop`."""
+        self.stop()
 
     # =========================================================================
     # Trait Management
@@ -185,11 +149,12 @@ class Agent(Runnable):
     def add_trait(self, trait: BaseTrait) -> None:
         """Add a trait to this agent.
 
-        Traits must be constructed with this agent as a parameter. If the agent
-        is already started, the trait's on_start() is called automatically.
+        Traits must be constructed with this agent as a parameter. If the
+        agent is already started, the trait's ``on_start()`` is called
+        automatically.
 
         Args:
-            trait: The trait instance to add (must be constructed with this agent).
+            trait: The trait instance to add.
 
         Raises:
             DuplicateTraitError: If a trait of this type is already added.
@@ -200,40 +165,19 @@ class Agent(Runnable):
             try:
                 trait.on_start()
             except Exception:
-                # Unregister trait if start failed to avoid partial initialization
                 self._traits.unregister(type(trait))
                 raise
 
     def get_trait(self, trait_type: type[TraitT]) -> TraitT | None:
-        """Get an attached trait by its type.
-
-        Args:
-            trait_type: The trait class to look up.
-
-        Returns:
-            The trait instance, or None if not attached.
-        """
+        """Get an attached trait by its type (or ``None``)."""
         return self._traits.get(trait_type)
 
     def has_trait(self, trait_type: type[BaseTrait]) -> bool:
-        """Check if a trait is attached.
-
-        Args:
-            trait_type: The trait class to check.
-
-        Returns:
-            True if the trait is attached.
-        """
+        """Return whether a trait of this type is attached."""
         return self._traits.has(trait_type)
 
     def require_trait(self, trait_type: type[TraitT]) -> TraitT:
         """Get a required trait, raising if not attached.
-
-        Args:
-            trait_type: The trait class to look up.
-
-        Returns:
-            The trait instance.
 
         Raises:
             TraitNotFoundError: If the trait is not attached.
@@ -241,7 +185,6 @@ class Agent(Runnable):
         try:
             return self._traits.require(trait_type)
         except TraitNotFoundError as e:
-            # Re-raise with agent-specific message
             raise TraitNotFoundError(
                 f"{trait_type.__name__} required but not attached - "
                 f"add it with agent.add_trait({trait_type.__name__}(...))"
@@ -252,14 +195,13 @@ class Agent(Runnable):
     # =========================================================================
 
     def _start_traits(self) -> None:
-        """Start all attached traits. Call from start()."""
+        """Start all attached traits; flip ``_started`` only on success."""
         for trait in self._traits.all():
             trait.on_start()
-        # Only mark as started after all traits successfully initialize
         self._started = True
 
     def _stop_traits(self) -> None:
-        """Stop all attached traits. Call from stop()."""
+        """Stop all attached traits; flip ``_started`` regardless of errors."""
         for trait in self._traits.all():
             try:
                 trait.on_stop()
@@ -275,18 +217,14 @@ class Agent(Runnable):
     # =========================================================================
 
     def _resolve_identity(self) -> Identity:
-        """Resolve Identity from self.config.
-
-        Returns:
-            Constructed Identity instance.
+        """Resolve :class:`Identity` from ``self.config``.
 
         Raises:
-            ConfigError: If identity.name is missing.
+            ConfigError: If ``identity.name`` is missing.
         """
         from ..errors import ConfigError
         from .identity import Identity
 
-        # Check top-level identity first, then fall back to kelt.identity
         identity_config = self.config.get("identity", {})
         if not identity_config.get("name"):
             kelt_config = self.config.get("kelt", {})

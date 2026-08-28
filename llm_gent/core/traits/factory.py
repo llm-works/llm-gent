@@ -23,16 +23,16 @@ if TYPE_CHECKING:
 from .base import Trait
 
 
-class Factory:
+class TraitFactory:
     """Factory for creating Trait instances from configuration.
 
     Has reference to platform for accessing configs.
 
     Example:
-        trait_factory = Factory(lg, platform)
+        trait_factory = TraitFactory(platform)
 
         # Generic creation
-        trait = trait_factory.create("llm", agent, agent_config={}, identity=agent.identity)
+        trait = trait_factory.create(TraitName.LLM, agent)
 
         # Or direct
         llm_trait = trait_factory.create_llm_trait(agent, platform.llm_config())

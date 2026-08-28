@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from appinfra.log import Logger
 
 from .tools.factory import ToolFactory
-from .traits.factory import Factory as TraitFactory
+from .traits.factory import TraitFactory
 
 
 if TYPE_CHECKING:

@@ -26,7 +26,7 @@ from .builtin import (
     TrainingConfig,
     TrainingTrait,
 )
-from .factory import Factory
+from .factory import TraitFactory
 from .registry import Registry
 
 
@@ -72,8 +72,8 @@ __all__ = [
     "TraitName",
     "ALL_TRAITS",
     # Factory & Registry
-    "Factory",
     "Registry",
+    "TraitFactory",
     # Directive/Method
     "Directive",
     "DirectiveTrait",
