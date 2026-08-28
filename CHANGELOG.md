@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CONTRIBUTING.md` with DCO sign-off requirements for external contributions.
 - `LLMTrait.complete()` and `complete_async()` accept OpenAI-style message
   dicts (`{"role": ..., "content": ...}`) in addition to `Message` instances.
 - `examples/quickstart.py` — runnable end-to-end example.

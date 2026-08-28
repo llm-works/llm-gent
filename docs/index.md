@@ -51,3 +51,7 @@ See the [README quick start](../README.md#quick-start) or
 - [llm-infer](https://github.com/llm-works/llm-infer) - LLM inference server and client
 - [llm-kelt](https://github.com/llm-works/llm-kelt) - Training infrastructure (SFT/DPO)
 - [appinfra](https://github.com/llm-works/appinfra) - Application infrastructure utilities
+
+---
+
+Maintained by [LLM Works LLC](https://llm-works.ai) and contributors.
