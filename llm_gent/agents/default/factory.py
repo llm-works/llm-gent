@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ...core.agent import Factory as BaseFactory
+from ...core.agent import AgentFactory as BaseFactory
 from ...core.traits.builtin.saia import SAIAConfig, SAIATrait
 from .agent import Agent
 

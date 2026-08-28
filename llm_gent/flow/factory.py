@@ -22,17 +22,18 @@ the concept; the type carries the mechanism.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Protocol
+
+from appinfra.log import Logger
 
 from ..core.traits import Registry as TraitRegistry
 from .nodes import UNSET
+from .role import Role
 
 
 if TYPE_CHECKING:
-    from appinfra.log import Logger
-
     from .flow import Flow
-    from .role import Role
 
 
 class SAIAFactory(Protocol):
@@ -87,6 +88,7 @@ class FlowFactory:
         saia_f: SAIAFactory | None = None,
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
+        halt: asyncio.Event | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -102,11 +104,16 @@ class FlowFactory:
                 built by this factory. Verbs reach mounted capabilities via
                 ``ctx.traits``. ``None`` yields flows with ``ctx.traits is
                 None``.
+            halt: Optional :class:`asyncio.Event` attached via
+                :meth:`Flow.with_halt` on every built flow. Wire once at
+                the factory to thread the same halt handle through an
+                entire agent shape.
         """
         self._lg = lg
         self._saia_f = saia_f
         self._state = state
         self._traits = traits
+        self._halt = halt
 
     def create(self, name: str = "", *, state: Any = UNSET) -> Flow:
         """Return a :class:`Flow` using this factory's captured environment.
@@ -123,27 +130,58 @@ class FlowFactory:
         from .flow import Flow
 
         resolved_state = self._state if state is UNSET else state
-        return Flow(
+        flow = Flow(
             self._lg,
             name,
             saia_f=self._saia_f,
             state=resolved_state,
             traits=self._traits,
         )
+        if self._halt is not None:
+            flow.with_halt(self._halt)
+        return flow
 
     def with_saia_f(self, saia_f: SAIAFactory) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
 
-        ``lg``, ``state``, and ``traits`` are preserved. Useful for
-        subsystems that share the app's logger but need a different saia
-        builder (e.g. a plugin with its own model wiring).
+        ``lg``, ``state``, ``traits``, and ``halt`` are preserved. Useful
+        for subsystems that share the app's logger but need a different
+        saia builder (e.g. a plugin with its own model wiring).
         """
-        return FlowFactory(self._lg, saia_f=saia_f, state=self._state, traits=self._traits)
+        return FlowFactory(
+            self._lg,
+            saia_f=saia_f,
+            state=self._state,
+            traits=self._traits,
+            halt=self._halt,
+        )
 
     def with_traits(self, traits: TraitRegistry | None) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose trait registry is swapped.
 
-        ``lg``, ``saia_f``, and ``state`` are preserved. Mirrors
+        ``lg``, ``saia_f``, ``state``, and ``halt`` are preserved. Mirrors
         :meth:`with_saia_f` for the trait dimension.
         """
-        return FlowFactory(self._lg, saia_f=self._saia_f, state=self._state, traits=traits)
+        return FlowFactory(
+            self._lg,
+            saia_f=self._saia_f,
+            state=self._state,
+            traits=traits,
+            halt=self._halt,
+        )
+
+    def with_halt(self, event: asyncio.Event) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose halt event is swapped.
+
+        ``lg``, ``saia_f``, ``state``, and ``traits`` are preserved. Every
+        subsequently created :class:`Flow` gets ``event`` attached via
+        :meth:`Flow.with_halt` — one wiring reaches every layer that
+        observes ``ctx.halt``.
+        """
+        return FlowFactory(
+            self._lg,
+            saia_f=self._saia_f,
+            state=self._state,
+            traits=self._traits,
+            halt=event,
+        )

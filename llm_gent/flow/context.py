@@ -19,6 +19,7 @@ Verbs read from this and (typically) mutate ``state.data`` in place.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,7 +49,7 @@ class Context:
 
     ``ctx.state.data`` is the scope's payload (user-owned; the flow does not
     inspect it). Shared with the parent by reference by default; the
-    ``state=`` / ``merge=`` kwargs on :meth:`Flow.call`, :meth:`Flow.loop`,
+    ``state=`` / ``merge=`` kwargs on :meth:`Flow.call`, :meth:`Flow.iterate`,
     and :meth:`Flow.map` project an isolated child payload for the subflow
     they contain. Verbs reach run-wide state via ``ctx.state.root().data``.
     """
@@ -73,6 +74,16 @@ class Context:
     ``TraitRegistry`` to disambiguate from other registry types in
     consumer codebases; the same class is exported as ``Registry`` from
     :mod:`llm_gent.core.traits`.
+    """
+
+    halt: asyncio.Event | None = None
+    """Ambient halt event attached via :meth:`Flow.with_halt`, or ``None``.
+
+    Verbs that expose their own inner loop (SAIA turn-by-turn, long-running
+    external calls) can observe ``ctx.halt`` to short-circuit gracefully.
+    :meth:`Flow.map` and :meth:`Flow.iterate` observe this at their natural
+    boundaries automatically; verbs are free to poll it when useful.
+    Subflows inherit the outer runtime's halt unless they declare their own.
     """
 
     @property

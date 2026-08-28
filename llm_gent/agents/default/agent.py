@@ -17,7 +17,7 @@ from appinfra import DotDict
 from appinfra.log import Logger
 from appinfra.time import time
 
-from ...core.agent import Agent as BaseAgent
+from ...core.agent import RunnableAgent as BaseAgent
 from ...core.dispatcher import Dispatcher
 from ...core.runnable import ExecutionResult
 from ...core.traits.builtin.memory import MemoryTrait

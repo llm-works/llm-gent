@@ -38,7 +38,7 @@ from .platform import PlatformContext
 from .runnable import Runnable
 from .task import Task, TaskResult
 from .tools.factory import ToolFactory
-from .traits.factory import Factory as TraitFactory
+from .traits.factory import TraitFactory
 
 
 __all__ = [

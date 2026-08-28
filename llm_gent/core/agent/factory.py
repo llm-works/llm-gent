@@ -19,10 +19,10 @@ if TYPE_CHECKING:
     from ..platform import PlatformContext
 
 
-class Factory:
+class AgentFactory:
     """Base factory for agents with standard initialization.
 
-    This factory handles common patterns:
+    Handles the common wiring:
     - Parses identity → constructs Identity
     - Extracts config params → passes to agent __init__
     - Creates and attaches traits based on requirements
@@ -34,7 +34,7 @@ class Factory:
               required: [llm, memory]
 
         2. Factory class variable:
-            class CustomFactory(Factory):
+            class CustomFactory(AgentFactory):
                 agent_class = MyAgent
                 required_traits = [TraitName.LLM, TraitName.MEMORY]
 
@@ -47,12 +47,12 @@ class Factory:
               recall: {}
 
         2. Factory class variable:
-            class CustomFactory(Factory):
+            class CustomFactory(AgentFactory):
                 agent_class = MyAgent
                 default_tools = {"remember": {}, "recall": {}}
 
     Usage:
-        class CustomFactory(Factory):
+        class CustomFactory(AgentFactory):
             agent_class = MyAgent  # Just specify your agent class
     """
 

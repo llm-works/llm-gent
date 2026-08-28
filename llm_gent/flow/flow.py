@@ -12,12 +12,12 @@ A :class:`Flow` plays two roles that share one object:
 
 2. **Composition graph.** A sequence of nodes built up via the fluent
    methods :meth:`call` / :meth:`then` / :meth:`rescue` / :meth:`after` /
-   :meth:`branch` / :meth:`loop` / :meth:`map` and executed by :meth:`run`.
-   A node's target is either a verb (any callable carrying a ``.role``),
-   another :class:`Flow`, or a control-flow primitive (branch, loop, map)
-   whose bodies are themselves subflows. Subflows are recursively run
-   against the same runtime, so saia caching is shared across the whole
-   tree.
+   :meth:`branch` / :meth:`iterate` / :meth:`map` and executed by
+   :meth:`run`. A node's target is either a verb (any callable carrying a
+   ``.role``), another :class:`Flow`, or a control-flow primitive (branch,
+   iterate, map) whose bodies are themselves subflows. Subflows are
+   recursively run against the same runtime, so saia caching is shared
+   across the whole tree.
 
 Both roles are optional. A top-level flow that only serves as a verb
 registry never needs to call the fluent methods; a subflow that only exists
@@ -36,7 +36,7 @@ wrapper:
 
 - ``ctx.state.data`` is the enclosing scope's payload — shared with the
   parent by reference by default. The ``state=`` / ``merge=`` kwargs on
-  :meth:`Flow.call`, :meth:`Flow.loop`, and :meth:`Flow.map` project an
+  :meth:`Flow.call`, :meth:`Flow.iterate`, and :meth:`Flow.map` project an
   isolated child payload for the block they contain and (optionally) merge it
   back when the block completes successfully.
 - ``ctx.state.root().data`` is the run-wide payload — the outermost
@@ -78,7 +78,7 @@ from .nodes import (
     UntilFn,
     WhenFn,
     _Branch,
-    _Loop,
+    _Iterate,
     _Map,
     _Node,
     _RunEnv,
@@ -141,6 +141,7 @@ class Flow:
         self._saia_f = saia_f
         self._state = state
         self._traits = traits
+        self._halt_event: asyncio.Event | None = None
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
@@ -197,7 +198,7 @@ class Flow:
     # Dispatch
     # -------------------------------------------------------------------------
 
-    async def dispatch(self, name: str, *args: Any, **kwargs: Any) -> Any:
+    async def dispatch(self, name: str, *args: Any, halt: Any = UNSET, **kwargs: Any) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
 
         The verb receives a fresh :class:`Context` as its first argument,
@@ -208,17 +209,24 @@ class Flow:
         state (defaulting to a fresh empty ``dict`` when none was supplied).
         Verbs that need a live run-wide payload from a :meth:`run` invocation
         must be reached via :meth:`run` rather than dispatched ad hoc.
+
+        Pass ``halt=ctx.halt`` from an in-flight verb to propagate its
+        effective halt to the dispatched sibling; omitting ``halt`` (or
+        passing ``halt=UNSET``) defaults to this flow's ``.with_halt()``
+        event if any.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
         self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
-        payload = self._state if self._state is not None else {}
+        payload = self._state if self._state is not UNSET else {}
+        effective_halt = self._halt_event if halt is UNSET else halt
         ctx = Context(
             role=verb.role,
             state=payload if isinstance(payload, State) else State(data=payload),
             flow=self,
             traits=self._traits,
+            halt=effective_halt,
         )
         return await verb(ctx, *args, **kwargs)
 
@@ -370,7 +378,7 @@ class Flow:
         self._nodes.append(node)
         return self
 
-    def loop(
+    def iterate(
         self,
         body: Any,
         *,
@@ -382,50 +390,52 @@ class Flow:
         state: StateProject | None = None,
         merge: StateMerge | None = None,
     ) -> Flow:
-        """Append a bounded loop: iterate ``body`` until a stop condition holds.
+        """Append a bounded iteration: run ``body`` until a stop condition holds.
 
         Each iteration's return becomes the next iteration's input; the first
-        iteration receives the loop node's input (previous chain step's
-        result). The loop's own result is the last iteration's return.
+        iteration receives the iterate node's input (previous chain step's
+        result). The node's own result is the last iteration's return.
 
         Args:
-            body: A :class:`Flow` or ``lambda f: ...`` callback for the loop
-                body. Runs at least once.
+            body: A :class:`Flow` or ``lambda f: ...`` callback for the body.
+                Runs at least once.
             until: ``(ctx) -> bool``. May be async. Checked **after** each
                 iteration completes — truthy → stop. State typically drives
                 termination via ``ctx.state``.
             max_iters: Hard upper bound on iteration count. Must be ``>= 1``.
-                Reached without ``until`` firing → loop exits with the last
+                Reached without ``until`` firing → exits with the last
                 iteration's result.
             deadline: Optional wall-clock budget in seconds. Checked **between**
                 iterations — a running body is not interrupted, so the actual
                 elapsed time may exceed ``deadline`` by one iteration.
-            rescue: Attached to the loop node — fires if any iteration raises.
-            after: Attached to the loop node — fires with the loop's final result.
+            rescue: Attached to the iterate node — fires if any iteration raises.
+            after: Attached to the iterate node — fires with the final result.
             state: Scoped-state projection. ``state(parent_state)`` runs once
                 before the first iteration; every iteration sees the same
                 projected child state on ``ctx.state``. Omitted → iterations
                 see the parent's ``state`` by reference.
             merge: Scoped-state merge. ``merge(parent_state, child_state)``
-                runs once after the loop exits successfully (via ``until``,
+                runs once after the block exits successfully (via ``until``,
                 ``max_iters``, or ``deadline``). Skipped if an iteration
                 raises past any ``rescue``. Requires ``state``.
 
         At least one of ``until`` or ``max_iters`` must be provided so the
-        loop is guaranteed to terminate.
+        iteration is guaranteed to terminate. An ambient :meth:`with_halt`
+        event, if set, is checked between iterations and terminates the
+        block gracefully once fired.
 
         Returns ``self`` for chaining.
         """
         if until is None and max_iters is None:
-            raise ValueError(".loop() requires until= or max_iters= (or both) to terminate")
+            raise ValueError(".iterate() requires until= or max_iters= (or both) to terminate")
         if max_iters is not None and max_iters < 1:
-            raise ValueError(f".loop(max_iters=) must be >= 1; got {max_iters}")
+            raise ValueError(f".iterate(max_iters=) must be >= 1; got {max_iters}")
         if deadline is not None and deadline <= 0:
-            raise ValueError(f".loop(deadline=) must be > 0; got {deadline}")
-        _require_state_for_merge(state, merge, ".loop")
-        body_flow = _materialize(body, self._lg, "loop.body")
+            raise ValueError(f".iterate(deadline=) must be > 0; got {deadline}")
+        _require_state_for_merge(state, merge, ".iterate")
+        body_flow = _materialize(body, self._lg, "iterate.body")
         node = _Node(
-            target=_Loop(
+            target=_Iterate(
                 body=body_flow,
                 until=until,
                 max_iters=max_iters,
@@ -567,29 +577,24 @@ class Flow:
         target.on_error = fn
         return self
 
-    def halt(self, event: asyncio.Event) -> Flow:
-        """Attach a halt signal to the preceding :meth:`map` node.
+    def with_halt(self, event: asyncio.Event) -> Flow:
+        """Attach an ambient halt signal that reaches every node in this Flow.
 
-        Once ``event`` is set, subsequent per-item runners short-circuit to
-        :class:`Skipped` without projecting state, running the guard, or
-        invoking the body — the halted item's per-item merge does not fire
-        either. Items already past the halt check run to completion; halting
-        an in-flight body mid-request is a body-level
-        :class:`asyncio.CancelledError` concern, not the map primitive's
-        job. Combined with ``max_concurrency=N``, at most ``N`` items complete
-        after the event fires.
+        Threads ``event`` through the execution environment as ``ctx.halt``,
+        available to any verb that wants to observe it. :meth:`map` and
+        :meth:`iterate` also check the event at their natural boundaries:
+        map short-circuits any per-item runner that hasn't yet passed its
+        halt check to :class:`Skipped`; iterate exits the loop between
+        iterations. In-flight bodies are not interrupted — a verb that
+        needs mid-request cancellation should read ``ctx.halt`` itself.
 
-        Only valid on a map node. Chainable form only — there is no
-        ``halt=`` kwarg on :meth:`map`.
+        A subflow inherits the outer runtime's halt event automatically;
+        calling ``.with_halt`` on a subflow overrides the ambient event for
+        that subtree.
 
-        Raises:
-            TypeError: The preceding node is missing, isn't a map, or already
-                has a halt attached.
+        Returns ``self`` for chaining.
         """
-        target = self._require_map_tail(".halt()")
-        if target.halt_event is not None:
-            raise TypeError(".halt() already set on the preceding map node")
-        target.halt_event = event
+        self._halt_event = event
         return self
 
     def _require_map_tail(self, method: str) -> _Map:
@@ -642,18 +647,31 @@ class Flow:
         active_state = self._wrap_top_state(state)
         return await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
 
-    async def _run_as_subflow(self, *args: Any, state: State, runtime: Flow, **kwargs: Any) -> Any:
+    async def _run_as_subflow(
+        self,
+        *args: Any,
+        state: State,
+        runtime: Flow,
+        parent_halt: asyncio.Event | None = None,
+        **kwargs: Any,
+    ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
 
         The executor's subflow helpers (``.call`` targeting a Flow, and the
-        ``.branch`` / ``.loop`` / ``.map`` bodies) invoke this directly so
+        ``.branch`` / ``.iterate`` / ``.map`` bodies) invoke this directly so
         the outer runtime's factory and saia cache are shared with the
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
+
+        ``parent_halt`` is the effective halt from the calling scope — nested
+        subflows fall back to it when they have no local ``.with_halt()``
+        override, preserving an intermediate layer's halt through arbitrarily
+        deep nesting.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg)
+        halt = self._halt_event if self._halt_event is not None else parent_halt
+        env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg, halt=halt)
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
         env.lg.debug(
