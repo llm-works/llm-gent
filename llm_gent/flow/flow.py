@@ -198,7 +198,7 @@ class Flow:
     # Dispatch
     # -------------------------------------------------------------------------
 
-    async def dispatch(self, name: str, *args: Any, **kwargs: Any) -> Any:
+    async def dispatch(self, name: str, *args: Any, halt: Any = UNSET, **kwargs: Any) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
 
         The verb receives a fresh :class:`Context` as its first argument,
@@ -209,18 +209,24 @@ class Flow:
         state (defaulting to a fresh empty ``dict`` when none was supplied).
         Verbs that need a live run-wide payload from a :meth:`run` invocation
         must be reached via :meth:`run` rather than dispatched ad hoc.
+
+        Pass ``halt=ctx.halt`` from an in-flight verb to propagate its
+        effective halt to the dispatched sibling; omitting ``halt`` (or
+        passing ``halt=UNSET``) defaults to this flow's ``.with_halt()``
+        event if any.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
         self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
         payload = self._state if self._state is not UNSET else {}
+        effective_halt = self._halt_event if halt is UNSET else halt
         ctx = Context(
             role=verb.role,
             state=payload if isinstance(payload, State) else State(data=payload),
             flow=self,
             traits=self._traits,
-            halt=self._halt_event,
+            halt=effective_halt,
         )
         return await verb(ctx, *args, **kwargs)
 

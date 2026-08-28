@@ -1058,6 +1058,36 @@ class TestFlowWithHalt:
         # Child inherited middle's local_halt, not root_halt.
         assert observed == [local_halt]
 
+    @pytest.mark.asyncio
+    async def test_dispatch_accepts_halt_parameter(self) -> None:
+        """dispatch(halt=event) passes that event instead of the flow's default."""
+        flow_halt = asyncio.Event()
+        caller_halt = asyncio.Event()
+        observed: list[asyncio.Event | None] = []
+
+        @verb(role=ROLE_A)
+        async def sibling(ctx: Context, x: int) -> int:
+            """Record the halt we received."""
+            observed.append(ctx.halt)
+            return x
+
+        flow = make_ff().create().with_halt(flow_halt)
+        flow.register(sibling)
+
+        # Dispatch without halt= uses flow's halt
+        await flow.dispatch("sibling", 1)
+        assert observed == [flow_halt]
+
+        # Dispatch with halt= uses the passed halt
+        observed.clear()
+        await flow.dispatch("sibling", 2, halt=caller_halt)
+        assert observed == [caller_halt]
+
+        # Dispatch with halt=None explicitly passes None
+        observed.clear()
+        await flow.dispatch("sibling", 3, halt=None)
+        assert observed == [None]
+
 
 # -----------------------------------------------------------------------------
 # .map — state-projection failure handling (CodeRabbit follow-up)
