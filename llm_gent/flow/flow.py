@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Flow — verb registry, role-routed dispatch, and fluent composition graph.
 
 A :class:`Flow` plays two roles that share one object:

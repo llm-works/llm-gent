@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """HTTP server for agent communication using FastAPI.
 
 Uses appinfra's subprocess + IPC pattern: FastAPI runs in a subprocess,

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """ZMQ transport adapters for appinfra's channel system.
 
 Implements appinfra's Transport protocol over ZMQ sockets, enabling

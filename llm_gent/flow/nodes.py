@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Composition-graph node types and per-run environment.
 
 Internal to :mod:`llm_gent.flow`: the private dataclasses (:class:`_Node`,

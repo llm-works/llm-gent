@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Directive and method traits for agents.
 
 Directive: "Why I exist" - the agent's core purpose and instructions.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Event dispatcher for agent execution.
 
 Provides event routing and handler registration for declarative agent behavior.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Agent registry for swarm membership and health tracking.
 
 Thread-safe registry tracking which agents are connected to the swarm,

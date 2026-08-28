@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Trait registry for managing available platform traits.
 
 The registry is a container for all configured platform traits (LLM, Memory, HTTP, etc.)

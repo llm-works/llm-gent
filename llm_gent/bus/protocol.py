@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Bus protocol: envelope, base message types, and v1 messages.
 
 All bus communication uses envelope-wrapped messages for versioning and routing.

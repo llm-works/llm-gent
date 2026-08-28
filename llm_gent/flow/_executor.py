@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Flow execution helpers — walk the composition graph, dispatch each node.
 
 Internal to :mod:`llm_gent.flow`: the coroutines that :meth:`Flow.run` calls

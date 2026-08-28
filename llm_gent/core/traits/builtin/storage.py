@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Storage trait for agent-defined relational schemas.
 
 Provides AgentStorage for defining and querying custom tables using SQLAlchemy directly.

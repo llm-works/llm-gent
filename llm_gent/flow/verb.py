@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Verb — a role-bound async callable dispatched by a :class:`Flow`.
 
 A verb is any async callable whose first argument is a :class:`Context` and

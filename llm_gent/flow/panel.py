@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Panel — fan-out N verbs in parallel and aggregate their results.
 
 A :class:`Panel` is a composition helper (not a verb). Called from inside a

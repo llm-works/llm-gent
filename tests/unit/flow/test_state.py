@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Unified ``ctx.state`` — :class:`State` wrapper, scoped projection, root navigation."""
 
 from __future__ import annotations

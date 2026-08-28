@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Web page fetch tool with HTML-to-text conversion.
 
 Fetches web pages and converts HTML to readable plain text suitable for

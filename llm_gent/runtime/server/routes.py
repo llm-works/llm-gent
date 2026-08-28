@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Route handlers for learning agent API.
 
 Creates an APIRouter with IPC-based handlers for protocol v1 endpoints.

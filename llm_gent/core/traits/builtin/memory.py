@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Memory trait for agent kelt-backed memory, feedback, and learned completions."""
 
 from __future__ import annotations

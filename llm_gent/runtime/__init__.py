@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Runtime infrastructure for operating agents.
 
 This package provides the operational infrastructure for running agents:

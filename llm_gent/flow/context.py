@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Context — runtime environment injected into every verb dispatch.
 
 A :class:`Context` is built by the :class:`Flow` at dispatch time and passed

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Rating service and backends for LLM-based content evaluation."""
 
 from .backends import AtomicFactsBackend

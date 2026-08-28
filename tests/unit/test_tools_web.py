@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Tests for WebFetchTool and WebSearchTool."""
 
 from unittest.mock import MagicMock, patch
