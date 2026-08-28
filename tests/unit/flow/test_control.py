@@ -1010,17 +1010,53 @@ class TestFlowWithHalt:
     @pytest.mark.asyncio
     async def test_subflow_inherits_outer_halt(self) -> None:
         """A subflow without its own halt inherits the outer runtime's event."""
-        halt = asyncio.Event()
-        halt.set()
+        halt = asyncio.Event()  # NOT set — inner flow runs and observes ctx.halt
+        observed: list[asyncio.Event | None] = []
+
+        @verb(role=ROLE_A)
+        async def capture_halt(ctx: Context, x: int) -> int:
+            """Record ctx.halt so we can verify inheritance."""
+            observed.append(ctx.halt)
+            return x * 2
 
         inner = make_ff().create()
-        inner.call(_double)
+        inner.call(capture_halt)
 
         outer = make_ff().create().with_halt(halt)
         outer.call(_identity).map(inner)
         results = await outer.run([1, 2, 3])
-        # Outer map short-circuits before the inner subflow ever runs.
-        assert all(isinstance(r, Skipped) for r in results)
+        # Inner verbs ran (no short-circuit) and inherited the outer halt.
+        assert results == [2, 4, 6]
+        assert observed == [halt, halt, halt]
+
+    @pytest.mark.asyncio
+    async def test_nested_subflow_inherits_intermediate_halt(self) -> None:
+        """A child subflow inherits its parent's halt, not the root's.
+
+        Scenario: outer.with_halt(root) → middle.with_halt(local) → child (no halt)
+        The child should observe ``local``, not ``root``.
+        """
+        root_halt = asyncio.Event()
+        local_halt = asyncio.Event()
+        observed: list[asyncio.Event | None] = []
+
+        @verb(role=ROLE_A)
+        async def capture(ctx: Context, x: int) -> int:
+            observed.append(ctx.halt)
+            return x
+
+        child = make_ff().create()
+        child.call(capture)
+
+        middle = make_ff().create().with_halt(local_halt)
+        middle.call(child)
+
+        outer = make_ff().create().with_halt(root_halt)
+        outer.call(middle)
+
+        await outer.run(1)
+        # Child inherited middle's local_halt, not root_halt.
+        assert observed == [local_halt]
 
 
 # -----------------------------------------------------------------------------

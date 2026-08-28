@@ -641,7 +641,14 @@ class Flow:
         active_state = self._wrap_top_state(state)
         return await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
 
-    async def _run_as_subflow(self, *args: Any, state: State, runtime: Flow, **kwargs: Any) -> Any:
+    async def _run_as_subflow(
+        self,
+        *args: Any,
+        state: State,
+        runtime: Flow,
+        parent_halt: asyncio.Event | None = None,
+        **kwargs: Any,
+    ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
 
         The executor's subflow helpers (``.call`` targeting a Flow, and the
@@ -649,10 +656,15 @@ class Flow:
         the outer runtime's factory and saia cache are shared with the
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
+
+        ``parent_halt`` is the effective halt from the calling scope — nested
+        subflows fall back to it when they have no local ``.with_halt()``
+        override, preserving an intermediate layer's halt through arbitrarily
+        deep nesting.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        halt = self._halt_event if self._halt_event is not None else runtime._halt_event
+        halt = self._halt_event if self._halt_event is not None else parent_halt
         env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg, halt=halt)
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self

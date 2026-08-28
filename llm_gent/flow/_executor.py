@@ -137,6 +137,7 @@ async def _run_subflow(
         *node_args,
         state=child_state,
         runtime=env.runtime,
+        parent_halt=env.halt,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -211,7 +212,9 @@ async def _run_branch(
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
         return prev_result
-    return await chosen._run_as_subflow(prev_result, state=env.state, runtime=env.runtime)
+    return await chosen._run_as_subflow(
+        prev_result, state=env.state, runtime=env.runtime, parent_halt=env.halt
+    )
 
 
 async def _run_iterate(
@@ -241,7 +244,9 @@ async def _run_iterate(
             break
         if env.halt is not None and env.halt.is_set():
             break
-        result = await it.body._run_as_subflow(result, state=child_state, runtime=env.runtime)
+        result = await it.body._run_as_subflow(
+            result, state=child_state, runtime=env.runtime, parent_halt=env.halt
+        )
         iteration += 1
         if await _check_until(it.until, child_state, env):
             break
@@ -322,7 +327,9 @@ async def _run_map_item_strict(
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
-        result = await mp.body._run_as_subflow(item, state=child_state, runtime=env.runtime)
+        result = await mp.body._run_as_subflow(
+            item, state=child_state, runtime=env.runtime, parent_halt=env.halt
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -355,7 +362,9 @@ async def _run_map_item(
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
-        result = await mp.body._run_as_subflow(item, state=child_state, runtime=env.runtime)
+        result = await mp.body._run_as_subflow(
+            item, state=child_state, runtime=env.runtime, parent_halt=env.halt
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
