@@ -58,6 +58,10 @@ class CheckpointStore(Protocol):
     the save timing is the consumer's responsibility (typically wired
     inside ``on_iteration`` so each turn's state is persisted before the
     next).
+
+    Methods are synchronous and called inline on the event loop.
+    Implementations performing disk or database I/O should avoid blocking
+    (e.g. use ``asyncio.to_thread`` internally or a non-blocking driver).
     """
 
     def save_checkpoint(self, scope_id: str, run_id: int, state: dict[str, Any]) -> None:
@@ -110,12 +114,13 @@ Skipped when the run paused. May be async; return value ignored.
 """
 
 OnExecutorReady = Callable[[Any, Context], Any]
-"""``(saia, ctx) -> None`` — fires once after ``ctx.saia`` is resolved.
+"""``(saia, ctx) -> None`` — fires once per dispatch after ``ctx.saia`` is resolved.
 
 Runs after the enclosing flow builds a role-bound saia and before
-:meth:`saia.complete`. Consumers reach into the saia instance's tool
-executor to inject per-run values that aren't known at
-saia-factory-construction time (``run_config``, ``campaign_id``,
+:meth:`saia.complete`, on every ``Loop.__call__`` (so once per iteration
+when the Loop is an ``.iterate`` or ``.map`` body). Consumers reach into
+the saia instance's tool executor to inject per-run values that aren't
+known at saia-factory-construction time (``run_config``, ``campaign_id``,
 ``budget``, etc.). May be async; return value ignored.
 """
 
@@ -184,8 +189,8 @@ class Loop:
                 was loaded — receives the loaded state.
             on_iteration: Bridges to SAIA's per-turn hook.
             on_complete: Fires after a non-paused ``saia.complete``.
-            on_executor_ready: Fires once after ``ctx.saia`` is
-                resolved, before ``saia.complete`` — for per-run
+            on_executor_ready: Fires on each dispatch after ``ctx.saia``
+                is resolved, before ``saia.complete`` — for per-run
                 injection into the tool executor.
             on_cost: Fires after ``saia.complete`` for cost accounting
                 (runs even on paused results).
@@ -383,6 +388,16 @@ class LoopFactory:
     def saia_f(self) -> SAIAFactory | None:
         """The SAIAFactory captured at construction, or ``None``."""
         return self._saia_f
+
+    @property
+    def checkpointer(self) -> CheckpointStore | None:
+        """The checkpointer captured at construction, or ``None``."""
+        return self._checkpointer
+
+    @property
+    def halt(self) -> asyncio.Event | None:
+        """The default halt event captured at construction, or ``None``."""
+        return self._halt
 
     def create(
         self,

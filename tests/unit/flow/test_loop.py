@@ -206,6 +206,16 @@ class TestFlowBodyIntegration:
         with pytest.raises(RuntimeError, match="SAIAFactory"):
             await flow.run("x")
 
+    def test_require_saia_raises_when_saia_is_none(self) -> None:
+        """``_require_saia`` raises with informative message when ctx.saia is None."""
+        from unittest.mock import MagicMock
+
+        ctx = MagicMock()
+        ctx.saia = None
+        ctx.role = ROLE_A
+        with pytest.raises(RuntimeError, match="Loop requires ctx.saia"):
+            Loop._require_saia(ctx)
+
 
 # -----------------------------------------------------------------------------
 # Halt resolution
@@ -454,8 +464,8 @@ class TestLoopFactory:
         new_event = asyncio.Event()
         second = first.with_halt(new_event)
         assert second is not first
-        assert second._halt is new_event
-        assert second._checkpointer is store
+        assert second.halt is new_event
+        assert second.checkpointer is store
         assert second._lg is first._lg
 
     def test_with_checkpointer_derivation_preserves_other_slots(self) -> None:
@@ -464,8 +474,8 @@ class TestLoopFactory:
         first = LoopFactory(make_test_logger(), halt=halt)
         new_store = _RecordingStore()
         second = first.with_checkpointer(new_store)
-        assert second._checkpointer is new_store
-        assert second._halt is halt
+        assert second.checkpointer is new_store
+        assert second.halt is halt
 
     def test_with_saia_f_preserves_halt_and_checkpointer(self) -> None:
         """``with_saia_f`` swaps only saia_f; halt + checkpointer carry over."""
@@ -477,10 +487,12 @@ class TestLoopFactory:
             def build(self, role: Role) -> Any:
                 return _CompleteSAIA(role)
 
-        second = first.with_saia_f(_F())
-        assert second.saia_f is not None
-        assert second._halt is halt
-        assert second._checkpointer is store
+        replacement = _F()
+        second = first.with_saia_f(replacement)
+        assert second.saia_f is replacement
+        assert first.saia_f is None
+        assert second.halt is halt
+        assert second.checkpointer is store
 
     @pytest.mark.asyncio
     async def test_factory_halt_reaches_saia_abort_signal_end_to_end(self) -> None:
@@ -503,14 +515,14 @@ class TestCheckpointStoreProtocol:
     """``_RecordingStore`` satisfies the CheckpointStore Protocol structurally."""
 
     def test_recording_store_matches_protocol(self) -> None:
-        """Structural typing: ``isinstance(store, CheckpointStore)`` holds."""
+        """``_RecordingStore`` satisfies CheckpointStore structurally."""
         store = _RecordingStore()
-        # Protocol without @runtime_checkable — verify method presence instead.
+        # Protocol without @runtime_checkable — verify method presence at runtime.
         assert callable(store.save_checkpoint)
         assert callable(store.load_checkpoint)
         assert callable(store.delete_checkpoint)
-        # And a Loop should accept it as a checkpointer arg without complaint.
-        _: CheckpointStore = store  # type: ignore[assignment]
+        # Static check: assignment to Protocol type verifies structural conformance.
+        _: CheckpointStore = store
         Loop(ROLE_A, checkpointer=store)
 
 
