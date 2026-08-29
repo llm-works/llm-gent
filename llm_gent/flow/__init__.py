@@ -16,6 +16,12 @@ Public surface:
 - :class:`FlowFactory` — app-scoped :class:`Flow` builder (captures ``lg``
   and one :class:`SAIAFactory`); preferred entry point at the application
   boundary
+- :class:`Loop` — Flow-body primitive wrapping one ``saia.complete()``
+  invocation with lifecycle hooks + halt bridging + optional checkpointer
+- :class:`LoopFactory` — app-scoped :class:`Loop` builder (mirrors
+  :class:`FlowFactory` for ``with_halt``); pair on the same halt event to
+  thread it across a mixed Loop-and-Flow tree
+- :class:`CheckpointStore` — 3-method Protocol Loop drives for pause/resume
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
 - :class:`Skipped` — sentinel returned for an item gated out by
   ``Flow.guard`` on a ``Flow.map`` node
@@ -38,6 +44,7 @@ from .archetypes import extractor, grader, planner, synthesizer
 from .context import Context
 from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
+from .loop import CheckpointStore, Loop, LoopFactory
 from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
 from .role import Role
@@ -47,10 +54,13 @@ from .verb import verb
 
 __all__ = [
     "UNSET",
+    "CheckpointStore",
     "Context",
     "Failure",
     "Flow",
     "FlowFactory",
+    "Loop",
+    "LoopFactory",
     "Panel",
     "Role",
     "SAIAFactory",
