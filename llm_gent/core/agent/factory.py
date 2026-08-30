@@ -91,7 +91,8 @@ class AgentFactory:
     """
 
     # Default agent class; subclasses override to instantiate custom Agent subclasses.
-    agent_class: ClassVar[type[Agent]] = Agent
+    # Typed as Optional so subclasses can set None to trigger the ConfigError guard.
+    agent_class: ClassVar[type[Agent] | None] = Agent
 
     # Optional: declare required traits at factory level
     required_traits: ClassVar[list[TraitName]] = []
