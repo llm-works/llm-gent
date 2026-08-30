@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 from typing import Any, Protocol, cast
 
 import httpx
@@ -22,7 +23,7 @@ class LLMBackend(Protocol):
 
     def complete(
         self,
-        messages: list[Message],
+        messages: Sequence[Message | dict[str, Any]],
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
@@ -31,7 +32,8 @@ class LLMBackend(Protocol):
         """Generate a completion.
 
         Args:
-            messages: Conversation messages.
+            messages: Conversation messages. Accepts Message instances or
+                OpenAI-style dicts (``{"role": ..., "content": ...}``).
             model: Model identifier (uses default if None).
             temperature: Sampling temperature.
             max_tokens: Maximum tokens to generate.
