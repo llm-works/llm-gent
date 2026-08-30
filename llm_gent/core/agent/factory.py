@@ -1,13 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Agent factory base class and configuration utilities."""
+"""Agent factory base class and configuration utilities.
+
+Config schema (agent-config dict passed to ``create`` / ``from_config``):
+
+    {
+        "identity":  {"name": str, "context_key": str | None},   # required
+        "llm":       str | dict,                                  # LLMTrait reads
+        "directive": str | dict,                                  # DirectiveTrait reads
+        "method":    str,                                         # MethodTrait reads
+        "kelt":      dict,                                        # Memory/Training read
+        "tools":     {name: config, ...},                         # ToolsTrait reads
+        "traits":    {"required": [name, ...]},                   # selects traits to attach
+    }
+
+Trait selection: ``config["traits"]["required"]`` (list of trait names, wins)
+or the factory-class ``required_traits`` class variable. Each builtin trait
+reads its own top-level key from ``agent.config``; nesting under
+``traits.<name>`` is NOT recognized.
+
+Two construction paths:
+
+- ``AgentFactory(lg)`` — bare-Logger tutorial path. Synthesizes an empty
+  ``PlatformContext(lg, {})``; platform-level ``llm`` / ``learn`` blocks are
+  empty, so the full trait configuration must live in the agent-config.
+- ``AgentFactory(platform)`` — advanced/multi-agent path. Uses the supplied
+  ``PlatformContext``; agent-config keys override platform-level defaults.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from appinfra import DotDict
+from appinfra.log import Logger
 
 from ..errors import ConfigError, TraitNotFoundError
 from ..traits import TraitName
@@ -20,44 +47,52 @@ if TYPE_CHECKING:
 
 
 class AgentFactory:
-    """Base factory for agents with standard initialization.
+    """Factory for creating :class:`Agent` instances from configuration.
 
-    Handles the common wiring:
-    - Parses identity → constructs Identity
-    - Extracts config params → passes to agent __init__
-    - Creates and attaches traits based on requirements
-    - Configures tools from YAML or factory defaults
+    Default construction returns a plain :class:`Agent` — no subclass
+    required. Advanced setups (custom agent class, factory-level trait
+    requirements, default tools) subclass and override the class variables.
 
-    Trait Requirements (3 ways, priority order):
-        1. YAML config (highest priority):
-            traits:
-              required: [llm, memory]
+    Trait requirements (priority order):
+        1. Config: ``config["traits"]["required"] = ["llm", ...]``
+        2. Class variable: ``required_traits = [TraitName.LLM, ...]``
+        3. None — agent starts without traits.
 
-        2. Factory class variable:
-            class CustomFactory(AgentFactory):
-                agent_class = MyAgent
-                required_traits = [TraitName.LLM, TraitName.MEMORY]
+    Tool configuration (priority order):
+        1. Config: ``config["tools"] = {name: cfg, ...}``
+        2. Class variable: ``default_tools = {name: cfg, ...}``
 
-        3. No requirements (agent handles validation in code)
+    Tutorial-shape usage (bare Logger, no subclass, no PlatformContext)::
 
-    Tool Configuration (2 ways, priority order):
-        1. YAML config (highest priority):
-            tools:
-              remember: {}
-              recall: {}
+        from llm_gent import AgentFactory, LLMTrait
+        from appinfra.log import create_lg
 
-        2. Factory class variable:
-            class CustomFactory(AgentFactory):
-                agent_class = MyAgent
-                default_tools = {"remember": {}, "recall": {}}
+        lg = create_lg("hello", "info")
+        agent = AgentFactory(lg).from_config({
+            "identity": {"name": "hello"},
+            "llm": {"default": "local", "backends": {...}},
+            "directive": "You are a helpful assistant.",
+            "traits": {"required": ["llm", "directive"]},
+        })
+        agent.start()
+        result = agent.require_trait(LLMTrait).complete(
+            [{"role": "user", "content": "Say hello."}]
+        )
+        agent.stop()
 
-    Usage:
+    Advanced multi-agent usage::
+
         class CustomFactory(AgentFactory):
-            agent_class = MyAgent  # Just specify your agent class
+            agent_class = MyAgent
+            required_traits = [TraitName.LLM, TraitName.MEMORY]
+
+        platform = PlatformContext.from_config(lg, llm_cfg, learn_cfg)
+        agent = CustomFactory(platform).create(config)
     """
 
-    # Subclasses must set this
-    agent_class: ClassVar[type[Agent]] = None  # type: ignore[assignment]
+    # Default agent class; subclasses override to instantiate custom Agent subclasses.
+    # Typed as Optional so subclasses can set None to trigger the ConfigError guard.
+    agent_class: ClassVar[type[Agent] | None] = Agent
 
     # Optional: declare required traits at factory level
     required_traits: ClassVar[list[TraitName]] = []
@@ -69,14 +104,42 @@ class AgentFactory:
     # When set, enables: ./llm-gent.py agent <agent-name> <command>
     cli_tool: ClassVar[type | None] = None
 
-    def __init__(self, platform: PlatformContext) -> None:
-        """Initialize factory with platform context.
+    def __init__(self, platform: Logger | PlatformContext) -> None:
+        """Initialize factory with a Logger or PlatformContext.
 
         Args:
-            platform: Platform context with all resources.
+            platform: Either a bare :class:`Logger` (tutorial path — an
+                empty :class:`PlatformContext` is synthesized, so all trait
+                config must live in agent-config) or a fully-configured
+                :class:`PlatformContext` (advanced path — platform-level
+                configs are exposed to trait creators). Parameter name
+                retained as ``platform`` for compatibility with existing
+                keyword callers.
         """
-        self._platform = platform
-        self._lg = platform.logger
+        from ..platform import PlatformContext
+
+        if isinstance(platform, Logger):
+            self._platform = PlatformContext(lg=platform, config={})
+        else:
+            self._platform = platform
+        self._lg = self._platform.logger
+
+    def from_config(self, config: dict[str, Any]) -> Agent:
+        """Build and wire an agent from a plain dict config.
+
+        Convenience wrapper over :meth:`create`: accepts a raw dict (the
+        tutorial-shape entry point) and returns the un-started agent. The
+        caller is expected to call ``agent.start()`` / ``agent.stop()``
+        (or use ``async with agent``).
+
+        Args:
+            config: Agent config (see module docstring for the schema).
+
+        Returns:
+            Configured agent, traits attached, not yet started.
+        """
+        dotdict = config if isinstance(config, DotDict) else DotDict(config)
+        return self.create(dotdict)
 
     def create(
         self,
