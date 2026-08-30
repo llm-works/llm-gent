@@ -180,7 +180,7 @@ jobs:
 
       - name: Import smoke check
         run: |
-          python -c "import llm_gent; print('llm-gent', llm_gent.__version__)"
+          python -I -c "import llm_gent; print('llm-gent', llm_gent.__version__)"
 
       - name: Run quickstart against stub router
         env:

@@ -101,7 +101,7 @@ class HTTPBackend:
 
     def complete(
         self,
-        messages: list[Message],
+        messages: Sequence[Message | dict[str, Any]],
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
@@ -110,7 +110,9 @@ class HTTPBackend:
         """Generate a completion using the HTTP API."""
         start_time = time.monotonic()
 
-        payload = self._build_payload(messages, model, temperature, max_tokens, tools)
+        # Normalize dict messages to Message objects
+        normalized: list[Message] = [Message(**m) if isinstance(m, dict) else m for m in messages]
+        payload = self._build_payload(normalized, model, temperature, max_tokens, tools)
         response = self._send_request(payload)
         result = self._parse_response(response)
 
