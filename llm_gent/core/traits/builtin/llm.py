@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 from ...llm.backend import StructuredOutputError
 from ...llm.types import CompletionResult, Message
 from ..base import BaseTrait
+from .directive import DirectiveTrait
 
 
 if TYPE_CHECKING:
@@ -197,7 +198,7 @@ class LLMTrait(BaseTrait):
         if tools and output_schema:
             raise ValueError("Cannot use both tools and output_schema")
 
-        normalized = _normalize_messages(messages)
+        normalized = self._apply_directive(_normalize_messages(messages))
         api_messages, extra_body = self._prepare_messages(normalized, output_schema)
         params = self._resolve_params(model, temperature, max_tokens, adapter)
 
@@ -258,7 +259,7 @@ class LLMTrait(BaseTrait):
         if tools and output_schema:
             raise ValueError("Cannot use both tools and output_schema")
 
-        normalized = _normalize_messages(messages)
+        normalized = self._apply_directive(_normalize_messages(messages))
         api_messages, extra_body = self._prepare_messages(normalized, output_schema)
         params = self._resolve_params(model, temperature, max_tokens, adapter)
 
@@ -284,6 +285,27 @@ class LLMTrait(BaseTrait):
             result.parsed = self._parse_structured_output(result.content, output_schema)
 
         return result
+
+    def _apply_directive(self, messages: list[Message]) -> list[Message]:
+        """Prepend DirectiveTrait's prompt as system message when attached.
+
+        Directive comes first: if the caller already supplied a system message,
+        the directive is merged as "<directive>\\n\\n<caller-system>" so the
+        agent's core purpose wins ordering while caller context is preserved.
+        Without an attached DirectiveTrait, messages pass through unchanged.
+        """
+        directive_trait = self.agent.get_trait(DirectiveTrait)
+        if directive_trait is None:
+            return messages
+
+        directive_prompt = directive_trait.directive.prompt
+        if messages and messages[0].role == "system":
+            merged = Message(
+                role="system",
+                content=f"{directive_prompt}\n\n{messages[0].content}",
+            )
+            return [merged, *messages[1:]]
+        return [Message(role="system", content=directive_prompt), *messages]
 
     def _prepare_messages(
         self, messages: list[Message], output_schema: type[BaseModel] | None

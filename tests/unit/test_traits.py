@@ -210,8 +210,10 @@ class TestLLMTraitStructuredOutput:
 
     @pytest.fixture
     def trait(self):
-        """Create LLMTrait with mocked router."""
-        trait = LLMTrait(MagicMock(), {})
+        """Create LLMTrait with mocked router (no DirectiveTrait attached)."""
+        agent = MagicMock()
+        agent.get_trait.return_value = None
+        trait = LLMTrait(agent, {})
         trait._router = MagicMock()
         return trait
 
@@ -375,8 +377,10 @@ class TestLLMTraitMessageFormat:
 
     @pytest.fixture
     def trait(self):
-        """Create LLMTrait with mocked router."""
-        trait = LLMTrait(MagicMock(), {})
+        """Create LLMTrait with mocked router (no DirectiveTrait attached)."""
+        agent = MagicMock()
+        agent.get_trait.return_value = None
+        trait = LLMTrait(agent, {})
         trait._router = MagicMock()
         return trait
 
@@ -439,6 +443,81 @@ class TestLLMTraitMessageFormat:
 
         with pytest.raises(ValidationError):
             trait.complete([{"role": "developer", "content": "hi"}])
+
+
+class TestLLMTraitDirectiveInjection:
+    """LLMTrait auto-injects DirectiveTrait's prompt as a system message."""
+
+    DIRECTIVE = "You are a triage bot. Answer in four sections."
+
+    @staticmethod
+    def _canned_response():
+        response = MagicMock()
+        response.content = "ok"
+        response.model = "test-model"
+        response.usage = MagicMock(total_tokens=1, prompt_tokens=1, completion_tokens=0)
+        response.tool_calls = None
+        response.adapter = None
+        return response
+
+    def _make_trait(self, *, directive: str | None):
+        """Build LLMTrait whose agent has DirectiveTrait attached iff directive is not None."""
+        agent = MagicMock()
+        if directive is None:
+            agent.get_trait.return_value = None
+        else:
+            directive_trait = DirectiveTrait(agent, directive)
+            agent.get_trait.side_effect = lambda t: directive_trait if t is DirectiveTrait else None
+        trait = LLMTrait(agent, {})
+        trait._router = MagicMock()
+        trait._router.chat.return_value = self._canned_response()
+        return trait
+
+    def test_directive_injected_when_no_system_message(self):
+        trait = self._make_trait(directive=self.DIRECTIVE)
+
+        trait.complete([Message(role="user", content="hi")])
+
+        sent = trait._router.chat.call_args.kwargs["messages"]
+        assert sent == [
+            {"role": "system", "content": self.DIRECTIVE},
+            {"role": "user", "content": "hi"},
+        ]
+
+    def test_directive_prepended_to_explicit_system(self):
+        trait = self._make_trait(directive=self.DIRECTIVE)
+
+        trait.complete(
+            [
+                Message(role="system", content="be brief"),
+                Message(role="user", content="hi"),
+            ]
+        )
+
+        sent = trait._router.chat.call_args.kwargs["messages"]
+        assert sent == [
+            {"role": "system", "content": f"{self.DIRECTIVE}\n\nbe brief"},
+            {"role": "user", "content": "hi"},
+        ]
+
+    def test_no_directive_trait_leaves_messages_unchanged(self):
+        trait = self._make_trait(directive=None)
+
+        trait.complete([Message(role="user", content="hi")])
+
+        sent = trait._router.chat.call_args.kwargs["messages"]
+        assert sent == [{"role": "user", "content": "hi"}]
+
+    def test_directive_applies_to_dict_messages(self):
+        trait = self._make_trait(directive=self.DIRECTIVE)
+
+        trait.complete([{"role": "user", "content": "hi"}])
+
+        sent = trait._router.chat.call_args.kwargs["messages"]
+        assert sent == [
+            {"role": "system", "content": self.DIRECTIVE},
+            {"role": "user", "content": "hi"},
+        ]
 
 
 class TestResolveLLMDefaults:

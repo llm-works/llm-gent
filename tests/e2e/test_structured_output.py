@@ -62,9 +62,10 @@ class TestStructuredOutputE2E:
 
         lg = LoggerFactory.create_root(LogConfig.from_params(level="warning"))
 
-        # Create a mock agent with required lg property
+        # Create a mock agent with required lg property and no attached traits
         mock_agent = Mock()
         mock_agent.lg = lg
+        mock_agent.get_trait.return_value = None
 
         trait = LLMTrait(
             mock_agent,
