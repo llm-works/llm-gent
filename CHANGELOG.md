@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `LLMTrait.complete()` and `complete_async()` accept OpenAI-style message
+  dicts (`{"role": ..., "content": ...}`) in addition to `Message` instances.
+- `examples/quickstart.py` — runnable end-to-end example.
+- Python 3.14 declared in package metadata.
+
+### Fixed
+
+- README and docs quick start now match the shipped API surface.
+- `LearnTrait` no longer passes the removed `ensure_schema` kwarg to
+  `llm_kelt.Client` — relies on the default `schema_mode=SchemaMode.ENSURE`,
+  which preserves the prior behavior. Restores compatibility with
+  `llm-kelt>=0.4`.
+
 ## [0.3.0] - 2026-06-19
 
 ### Added
