@@ -28,46 +28,82 @@ For HTTP server support:
 pip install llm-gent[http]
 ```
 
+## Supported Python versions
+
+CI tests against Python **3.11**, **3.12**, **3.13**, and **3.14** on every
+push. `requires-python = ">=3.11"`.
+
 ## Quick Start
 
 ```python
 from appinfra import DotDict
-from appinfra.log import LogConfig, LoggerFactory
+from appinfra.log import create_lg
 
-from llm_gent import Agent, Config, Identity, LLMTrait, DirectiveTrait
+from llm_gent import Agent, LLMTrait
+from llm_gent.core.agent.types import ExecutionResult
 
-# Setup logging
-log_config = LogConfig.from_params(level="info", handlers={"console": {"type": "console"}})
-lg = LoggerFactory.create_root(log_config)
 
-# Configure LLM backend
-llm_config = DotDict({
-    "default": "local",
-    "backends": {
-        "local": {
-            "type": "openai_compatible",
-            "base_url": "http://localhost:8000/v1",
-            "model": "default",
-        }
-    },
-})
+# The public Agent class is abstract — a real application defines a small
+# concrete subclass. Trivial stubs suffice when the workflow only uses
+# LLMTrait.complete() directly.
+class HelloAgent(Agent):
+    def start(self) -> None:
+        self._start_traits()
 
-# Create agent with traits
-identity = Identity(domain=None, workspace="demo", name="my-agent")
-config = Config(identity=identity)
-agent = Agent(lg, config)
+    def stop(self) -> None:
+        self._stop_traits()
 
-# Add capabilities via traits
-agent.add_trait(DirectiveTrait(agent, directive="You are a helpful assistant."))
+    def run_once(self) -> ExecutionResult:
+        return ExecutionResult(success=True, content="")
+
+    def ask(self, question: str) -> str:
+        return ""
+
+    def record_feedback(self, message: str) -> None:
+        pass
+
+    def get_recent_results(self, limit: int = 10) -> list[ExecutionResult]:
+        return []
+
+
+lg = create_lg("hello-agent", "info")
+
+# Agent reads config.identity.name internally.
+config = {"identity": {"name": "hello-agent"}}
+
+llm_config = DotDict(
+    {
+        "default": "local",
+        "backends": {
+            "local": {
+                "type": "openai_compatible",
+                "base_url": "http://localhost:8000/v1",
+                "model": "default",
+            }
+        },
+    }
+)
+
+agent = HelloAgent(lg, config)
 agent.add_trait(LLMTrait(agent, llm_config))
-
-# Start and use agent
 agent.start()
+
+# LLMTrait.complete() accepts OpenAI-style message dicts.
 llm = agent.require_trait(LLMTrait)
-result = llm.complete([{"role": "user", "content": "Hello!"}])
+result = llm.complete(
+    [
+        {"role": "system", "content": "You are a concise assistant."},
+        {"role": "user", "content": "Say hello."},
+    ]
+)
 print(result.content)
+
 agent.stop()
 ```
+
+A runnable version of this example lives at `examples/quickstart.py`. Set
+`LLM_GENT_SMOKE=1` to run it against a stub LLM router (used by CI's
+wheel-smoke job).
 
 ## Core Concepts
 

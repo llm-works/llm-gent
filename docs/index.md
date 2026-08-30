@@ -32,13 +32,19 @@ Traits provide specific capabilities to agents:
 
 ### Lifecycle
 
+`Agent` is an abstract base — a real application defines a small concrete
+subclass (see `examples/quickstart.py`). The lifecycle then looks like:
+
 ```python
-agent = Agent(lg, config)
+agent = MyAgent(lg, {"identity": {"name": "my-agent"}})
 agent.add_trait(LLMTrait(agent, llm_config))
-agent.start()      # Initialize all traits
+agent.start()  # Initialize all traits
 result = agent.run_once()  # Execute one cycle
-agent.stop()       # Cleanup all traits
+agent.stop()  # Cleanup all traits
 ```
+
+See the [README quick start](../README.md#quick-start) or
+`examples/quickstart.py` for a runnable end-to-end example.
 
 ## Related Projects
 

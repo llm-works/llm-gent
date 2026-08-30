@@ -134,7 +134,6 @@ class LearnTrait(BaseTrait):
             context=context,
             embedder=embedder,
             llm_client=llm_client,
-            ensure_schema=True,
             training_config=self.config.get("training"),
         )
 
