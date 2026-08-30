@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Handler protocol for agent runner dispatch.
 
 Defines the callback interface that runners use to dispatch incoming

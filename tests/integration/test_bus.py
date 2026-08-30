@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Integration tests for ZMQ bus communication.
 
 These tests start real ZMQ sockets on localhost and test actual

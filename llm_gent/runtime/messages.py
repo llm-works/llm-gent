@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Agent-specific message types for runtime communication.
 
 Defines the message protocol between Core (main process) and AgentService

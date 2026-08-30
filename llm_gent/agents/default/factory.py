@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Factory for creating Agent from configuration.
 
 Creates agents from YAML/dict configuration, wiring up traits automatically.

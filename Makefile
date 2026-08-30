@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 local := $(dir $(realpath $(lastword $(MAKEFILE_LIST))))
 infra := $(shell appinfra scripts-path)
 
@@ -8,6 +11,9 @@ INFRA_DEV_PKG_NAME := llm_gent
 # - true: Fail on any code quality violations (CI mode)
 # - false: Report violations but don't fail (development mode)
 INFRA_DEV_CQ_STRICT := true
+
+# SPDX header enforcement
+INFRA_DEV_CQ_SPDX := true
 
 # PyTest and Docstring coverage thresholds
 INFRA_PYTEST_COVERAGE_THRESHOLD := 70

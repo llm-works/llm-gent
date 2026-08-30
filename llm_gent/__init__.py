@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+#
+# Maintained by LLM Works LLC (https://llm-works.ai) and contributors.
+
 """Agent framework with learning capabilities."""
 
 from importlib.metadata import PackageNotFoundError, version

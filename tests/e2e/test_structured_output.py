@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """E2E tests for structured output with real LLM.
 
 These tests require an LLM server at localhost:18100 that supports JSON mode.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Batch rating service for CLI usage.
 
 Provides batch rating without requiring full agent/trait setup.

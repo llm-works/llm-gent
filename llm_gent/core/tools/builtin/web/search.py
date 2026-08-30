@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Web search tool with pluggable backend.
 
 Provides ``WebSearchTool`` — an LLM-facing tool that delegates actual search

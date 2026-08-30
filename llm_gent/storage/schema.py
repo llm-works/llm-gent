@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
 """Schema definitions for agent-defined storage.
 
 Provides AgentTable base class that all agent tables inherit from.
