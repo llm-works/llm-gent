@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from llm_infer.client import ChatClient, ChatResponse
@@ -41,6 +42,17 @@ Supports multi-backend format (see llm-infer LLMClient.from_config):
         type: anthropic
         model: claude-sonnet-4-20250514
 """
+
+
+def _normalize_messages(
+    messages: Sequence[Message | dict[str, Any]],
+) -> list[Message]:
+    """Accept both Message instances and OpenAI-style dicts.
+
+    A dict must have the shape {"role": ..., "content": ..., ...} matching
+    Message fields. Conversion uses Message(**d) so pydantic validates.
+    """
+    return [m if isinstance(m, Message) else Message(**m) for m in messages]
 
 
 def _resolve_llm_defaults(config: LLMConfig) -> dict[str, Any]:
@@ -148,7 +160,7 @@ class LLMTrait(BaseTrait):
 
     def complete(
         self,
-        messages: list[Message],
+        messages: Sequence[Message | dict[str, Any]],
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
@@ -160,7 +172,9 @@ class LLMTrait(BaseTrait):
         """Generate a completion.
 
         Args:
-            messages: Conversation messages.
+            messages: Conversation messages. Accepts Message instances or
+                OpenAI-style dicts (``{"role": ..., "content": ...}``); dicts
+                are converted to Message via pydantic validation.
             model: Model override (uses config default if None). Also used for
                 model-based routing if model is in the routing table.
             temperature: Temperature override (uses config default if None).
@@ -183,7 +197,8 @@ class LLMTrait(BaseTrait):
         if tools and output_schema:
             raise ValueError("Cannot use both tools and output_schema")
 
-        api_messages, extra_body = self._prepare_messages(messages, output_schema)
+        normalized = _normalize_messages(messages)
+        api_messages, extra_body = self._prepare_messages(normalized, output_schema)
         params = self._resolve_params(model, temperature, max_tokens, adapter)
 
         self._log_request(
@@ -211,7 +226,7 @@ class LLMTrait(BaseTrait):
 
     async def complete_async(
         self,
-        messages: list[Message],
+        messages: Sequence[Message | dict[str, Any]],
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
@@ -226,7 +241,9 @@ class LLMTrait(BaseTrait):
         Use with asyncio.gather() for parallel LLM calls.
 
         Args:
-            messages: Conversation messages.
+            messages: Conversation messages. Accepts Message instances or
+                OpenAI-style dicts (``{"role": ..., "content": ...}``); dicts
+                are converted to Message via pydantic validation.
             model: Model override (uses config default if None).
             temperature: Temperature override (uses config default if None).
             max_tokens: Max tokens override (uses config default if None).
@@ -241,7 +258,8 @@ class LLMTrait(BaseTrait):
         if tools and output_schema:
             raise ValueError("Cannot use both tools and output_schema")
 
-        api_messages, extra_body = self._prepare_messages(messages, output_schema)
+        normalized = _normalize_messages(messages)
+        api_messages, extra_body = self._prepare_messages(normalized, output_schema)
         params = self._resolve_params(model, temperature, max_tokens, adapter)
 
         self._log_request(
@@ -507,7 +525,7 @@ class LLMTraitBackend:
 
     def complete(
         self,
-        messages: list[Message],
+        messages: Sequence[Message | dict[str, Any]],
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,

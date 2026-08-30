@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-30
+
 ### Added
 
 - `CONTRIBUTING.md` with DCO sign-off requirements for external contributions.
+- `LLMTrait.complete()` and `complete_async()` accept OpenAI-style message
+  dicts (`{"role": ..., "content": ...}`) in addition to `Message` instances.
+- `examples/quickstart.py` — runnable end-to-end example.
+- Python 3.14 declared in package metadata.
+
+### Fixed
+
+- README and docs quick start now match the shipped API surface.
+- `LearnTrait` no longer passes the removed `ensure_schema` kwarg to
+  `llm_kelt.Client` — relies on the default `schema_mode=SchemaMode.ENSURE`,
+  which preserves the prior behavior. Restores compatibility with
+  `llm-kelt>=0.4`.
 
 ## [0.3.0] - 2026-06-19
 
@@ -90,7 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migrated from llm-learn to llm-kelt for training
 - Refactored training infrastructure to core modules
 
-[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/llm-works/llm-gent/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/llm-works/llm-gent/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/llm-works/llm-gent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/llm-works/llm-gent/releases/tag/v0.1.0
