@@ -28,6 +28,11 @@ For HTTP server support:
 pip install llm-gent[http]
 ```
 
+## Supported Python versions
+
+CI tests against Python **3.11**, **3.12**, **3.13**, and **3.14** on every
+push. `requires-python = ">=3.11"`.
+
 ## Quick Start
 
 ```python

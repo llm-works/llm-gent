@@ -370,6 +370,77 @@ class TestLLMTraitStructuredOutput:
             trait.complete(messages, tools=tools, output_schema=self.Answer)
 
 
+class TestLLMTraitMessageFormat:
+    """Tests for LLMTrait accepting both Message instances and OpenAI-style dicts."""
+
+    @pytest.fixture
+    def trait(self):
+        """Create LLMTrait with mocked router."""
+        trait = LLMTrait(MagicMock(), {})
+        trait._router = MagicMock()
+        return trait
+
+    @staticmethod
+    def _canned_response():
+        response = MagicMock()
+        response.content = "ok"
+        response.model = "test-model"
+        response.usage = MagicMock(total_tokens=1, prompt_tokens=1, completion_tokens=0)
+        response.tool_calls = None
+        response.adapter = None
+        return response
+
+    def test_dict_form_accepted(self, trait):
+        """OpenAI-style dicts are accepted without pre-converting to Message."""
+        trait._router.chat.return_value = self._canned_response()
+
+        result = trait.complete([{"role": "user", "content": "hi"}])
+
+        assert result.content == "ok"
+        sent = trait._router.chat.call_args.kwargs["messages"]
+        assert sent == [{"role": "user", "content": "hi"}]
+
+    def test_message_instances_still_accepted(self, trait):
+        """Existing Message-instance callers keep working."""
+        trait._router.chat.return_value = self._canned_response()
+
+        trait.complete([Message(role="user", content="hi")])
+
+        sent = trait._router.chat.call_args.kwargs["messages"]
+        assert sent == [{"role": "user", "content": "hi"}]
+
+    def test_mixed_forms_accepted(self, trait):
+        """A mixed list of Message and dict items works."""
+        trait._router.chat.return_value = self._canned_response()
+
+        trait.complete(
+            [
+                Message(role="system", content="be brief"),
+                {"role": "user", "content": "hi"},
+            ]
+        )
+
+        sent = trait._router.chat.call_args.kwargs["messages"]
+        assert sent == [
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": "hi"},
+        ]
+
+    def test_dict_missing_field_raises(self, trait):
+        """A dict missing required Message fields raises pydantic ValidationError."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            trait.complete([{"role": "user"}])  # no content
+
+    def test_dict_invalid_role_raises(self, trait):
+        """A dict with an invalid role raises pydantic ValidationError."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            trait.complete([{"role": "developer", "content": "hi"}])
+
+
 class TestResolveLLMDefaults:
     """Tests for _resolve_llm_defaults function."""
 
