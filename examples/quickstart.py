@@ -102,6 +102,8 @@ def main() -> None:
     llm = agent.require_trait(LLMTrait)
     if SMOKE:
         # Duck-typed stub — matches the .chat() surface LLMTrait actually calls.
+        if llm._router is not None:
+            llm._router.close()  # Close real client before replacing
         llm._router = _StubRouter()  # type: ignore[assignment]
 
     result = llm.complete(
