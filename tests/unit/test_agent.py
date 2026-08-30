@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from appinfra import DotDict
 
-from llm_gent.core.agent import Agent, ExecutionResult, RunnableAgent
+from llm_gent.core.agent import Agent, ExecutionResult, Identity, RunnableAgent
 from llm_gent.core.agent.helpers import _substitute_variables
 from tests.helpers import create_mock_trait
 
@@ -547,3 +547,42 @@ class TestFactorySystemPrompt:
         assert saia_trait is not None
         expected = "You are a code analyst.\n\n## Method\n- Analyze carefully"
         assert saia_trait.config.system_prompt == expected
+
+
+class TestIdentity:
+    """Tests for Identity construction ergonomics."""
+
+    def test_name_only_defaults_context_key_to_name(self):
+        identity = Identity("jokester")
+
+        assert identity.name == "jokester"
+        assert identity.context_key == "jokester"
+
+    def test_explicit_context_key_preserved(self):
+        identity = Identity("joke-master", context_key="jokester")
+
+        assert identity.name == "joke-master"
+        assert identity.context_key == "jokester"
+
+    def test_empty_context_key_falls_back_to_name(self):
+        identity = Identity(name="foo", context_key="")
+
+        assert identity.context_key == "foo"
+
+    def test_empty_name_rejected(self):
+        with pytest.raises(ValueError, match="name cannot be empty"):
+            Identity("")
+
+    def test_from_name_still_works(self):
+        identity = Identity.from_name("jokester")
+
+        assert identity.name == "jokester"
+        assert identity.context_key == "jokester"
+
+    def test_frozen_dataclass(self):
+        import dataclasses
+
+        identity = Identity("foo")
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            identity.name = "bar"  # type: ignore[misc]
