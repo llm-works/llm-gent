@@ -48,8 +48,8 @@ result = llm.complete([{"role": "user", "content": "Hello!"}])
 agent.stop()  # Cleanup all traits
 ```
 
-For cycle-driven agents (`agent.run_once()`), use `RunnableAgent` — pass
-`agent_class=RunnableAgent` to a `AgentFactory` subclass, or subclass
+For cycle-driven agents (`agent.run_once()`), use `RunnableAgent` — set
+`agent_class = RunnableAgent` on an `AgentFactory` subclass, or subclass
 `RunnableAgent` directly.
 
 ## Related Projects
