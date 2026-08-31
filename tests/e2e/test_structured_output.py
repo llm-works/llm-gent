@@ -60,6 +60,8 @@ class TestStructuredOutputE2E:
         """Create LLMTrait connected to LLM server."""
         from unittest.mock import Mock
 
+        from llm_infer.client import Factory as LLMClientFactory
+
         lg = LoggerFactory.create_root(LogConfig.from_params(level="warning"))
 
         # Create a mock agent with required lg property and no attached traits
@@ -67,15 +69,14 @@ class TestStructuredOutputE2E:
         mock_agent.lg = lg
         mock_agent.get_trait.return_value = None
 
-        trait = LLMTrait(
-            mock_agent,
-            config={
-                "type": "openai_compatible",
-                "base_url": LLM_BASE_URL,
-                "model": LLM_MODEL,
-                "temperature": 0.0,
-            },
-        )
+        config = {
+            "type": "openai_compatible",
+            "base_url": LLM_BASE_URL,
+            "model": LLM_MODEL,
+            "temperature": 0.0,
+        }
+        router = LLMClientFactory(lg).from_config(config)
+        trait = LLMTrait(mock_agent, router, config, owns_router=True)
         trait.on_start()
         yield trait
         trait.on_stop()

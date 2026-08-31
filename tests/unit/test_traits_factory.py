@@ -112,10 +112,20 @@ class TestCreateLLMTrait:
         with pytest.raises(ConfigError, match="LLM configuration required"):
             factory.create_llm_trait(mock_agent, None)
 
-    def test_valid_config(self, factory, mock_agent):
+    def test_builds_router_and_injects(self, factory, mock_agent):
         config = DotDict({"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}})
-        trait = factory.create_llm_trait(mock_agent, config)
-        assert isinstance(trait, LLMTrait)
+
+        with patch("llm_infer.client.Factory") as mock_factory:
+            mock_router = MagicMock()
+            mock_factory.return_value.from_config.return_value = mock_router
+
+            trait = factory.create_llm_trait(mock_agent, config)
+
+            mock_factory.assert_called_once_with(mock_agent.lg)
+            mock_factory.return_value.from_config.assert_called_once_with(config)
+            assert isinstance(trait, LLMTrait)
+            assert trait.router is mock_router
+            assert trait._owns_router is True
 
 
 class TestCreateMemoryTrait:

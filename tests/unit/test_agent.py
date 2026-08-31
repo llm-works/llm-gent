@@ -3,7 +3,7 @@
 
 """Tests for Agent base class and agents.default.Agent."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from appinfra import DotDict
@@ -135,11 +135,11 @@ class TestAgentTraits:
         from llm_gent.core.errors import DuplicateTraitError
         from llm_gent.core.traits.builtin.llm import LLMTrait
 
-        trait1 = LLMTrait(agent, {})
+        trait1 = LLMTrait(agent, MagicMock(), {})
         agent.add_trait(trait1)
 
         with pytest.raises(DuplicateTraitError, match="already registered"):
-            trait2 = LLMTrait(agent, {})
+            trait2 = LLMTrait(agent, MagicMock(), {})
             agent.add_trait(trait2)
 
     def test_get_trait(self, agent):
@@ -168,6 +168,159 @@ class TestAgentTraits:
 
         with pytest.raises(TraitNotFoundError, match="required but not attached"):
             agent.require_trait(MagicMock)
+
+
+class TestAgentReplaceTrait:
+    """Tests for Agent.replace_trait()."""
+
+    @pytest.fixture
+    def mock_logger(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def agent(self, mock_logger):
+        from llm_gent.agents.default import Agent as DefaultAgent
+
+        return DefaultAgent(
+            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+        )
+
+    def _make_llm_trait(self, agent, **kw):
+        from llm_gent.core.traits.builtin.llm import LLMTrait
+
+        return LLMTrait(agent, MagicMock(), {}, **kw)
+
+    def test_replace_swaps_registry_entry(self, agent):
+        from llm_gent.core.traits.builtin.llm import LLMTrait
+
+        original = self._make_llm_trait(agent)
+        agent.add_trait(original)
+
+        replacement = self._make_llm_trait(agent)
+        agent.replace_trait(replacement)
+
+        assert agent.require_trait(LLMTrait) is replacement
+
+    def test_replace_when_no_existing_trait(self, agent):
+        from llm_gent.core.traits.builtin.llm import LLMTrait
+
+        trait = self._make_llm_trait(agent)
+        agent.replace_trait(trait)
+
+        assert agent.require_trait(LLMTrait) is trait
+
+    def test_replace_calls_on_start_when_agent_started(self, agent):
+        original = self._make_llm_trait(agent)
+        agent.add_trait(original)
+        agent._started = True
+
+        replacement = self._make_llm_trait(agent)
+        with patch.object(replacement, "on_start") as mock_start:
+            agent.replace_trait(replacement)
+
+        mock_start.assert_called_once()
+
+    def test_replace_does_not_call_on_start_when_agent_not_started(self, agent):
+        original = self._make_llm_trait(agent)
+        agent.add_trait(original)
+
+        replacement = self._make_llm_trait(agent)
+        with patch.object(replacement, "on_start") as mock_start:
+            agent.replace_trait(replacement)
+
+        mock_start.assert_not_called()
+
+    def test_replace_auto_stops_old_trait_when_started(self, agent):
+        """Registry membership implies agent-managed lifecycle."""
+        original = self._make_llm_trait(agent)
+        agent.add_trait(original)
+        agent._started = True
+
+        replacement = self._make_llm_trait(agent)
+        with patch.object(original, "on_stop") as mock_stop:
+            agent.replace_trait(replacement)
+
+        mock_stop.assert_called_once()
+
+    def test_replace_does_not_stop_old_when_agent_not_started(self, agent):
+        """Only started agents own the lifecycle — unstarted swap is registry-only."""
+        original = self._make_llm_trait(agent)
+        agent.add_trait(original)
+
+        replacement = self._make_llm_trait(agent)
+        with patch.object(original, "on_stop") as mock_stop:
+            agent.replace_trait(replacement)
+
+        mock_stop.assert_not_called()
+
+    def test_replace_starts_new_before_stopping_old(self, agent):
+        """Order matters: a failing new.on_start must not have already closed old."""
+        original = self._make_llm_trait(agent)
+        agent.add_trait(original)
+        agent._started = True
+
+        events: list[str] = []
+        replacement = self._make_llm_trait(agent)
+        with (
+            patch.object(original, "on_stop", side_effect=lambda: events.append("old.on_stop")),
+            patch.object(
+                replacement, "on_start", side_effect=lambda: events.append("new.on_start")
+            ),
+        ):
+            agent.replace_trait(replacement)
+
+        assert events == ["new.on_start", "old.on_stop"]
+
+    def test_replace_rolls_back_on_new_on_start_failure(self, agent):
+        """On failure the old trait is restored and NOT stopped."""
+        from llm_gent.core.traits.builtin.llm import LLMTrait
+
+        original = self._make_llm_trait(agent)
+        agent.add_trait(original)
+        agent._started = True
+
+        replacement = self._make_llm_trait(agent)
+        with (
+            patch.object(replacement, "on_start", side_effect=RuntimeError("boom")),
+            patch.object(original, "on_stop") as mock_stop,
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            agent.replace_trait(replacement)
+
+        assert agent.require_trait(LLMTrait) is original
+        mock_stop.assert_not_called()
+
+    def test_replace_swallows_old_on_stop_exception(self, agent, mock_logger):
+        """A failing old.on_stop is logged but does not propagate."""
+        original = self._make_llm_trait(agent)
+        agent.add_trait(original)
+        agent._started = True
+
+        replacement = self._make_llm_trait(agent)
+        with patch.object(original, "on_stop", side_effect=RuntimeError("cleanup failed")):
+            agent.replace_trait(replacement)  # should not raise
+
+        mock_logger.warning.assert_called_once()
+
+    def test_with_router_and_replace_end_to_end(self, agent):
+        """with_router + replace_trait: registered old trait's on_stop fires,
+        closing its factory-owned router; the injected new_router is untouched."""
+        from llm_gent.core.traits.builtin.llm import LLMTrait
+
+        old_router = MagicMock()
+        original = LLMTrait(agent, old_router, {}, owns_router=True)
+        agent.add_trait(original)
+        agent._started = True
+
+        new_router = MagicMock()
+        replacement = agent.require_trait(LLMTrait).with_router(new_router)
+        agent.replace_trait(replacement)
+
+        assert agent.require_trait(LLMTrait) is replacement
+        # Old trait owned its router — replace_trait's auto-stop closed it.
+        old_router.close.assert_called_once()
+        # New trait was built with owns_router=False; its router is external.
+        new_router.close.assert_not_called()
 
 
 class TestAgentExecution:

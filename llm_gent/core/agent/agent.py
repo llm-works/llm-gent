@@ -190,9 +190,65 @@ class Agent:
                 f"add it with agent.add_trait({trait_type.__name__}(...))"
             ) from e
 
+    def replace_trait(self, trait: BaseTrait) -> None:
+        """Register ``trait``, replacing any existing entry of the same type.
+
+        Registry membership implies agent-managed lifecycle: when the agent
+        is started, the new trait's ``on_start`` is called and the ejected
+        trait's ``on_stop`` is called automatically. If the new trait's
+        ``on_start`` raises, the ejected trait is restored to the registry
+        (and not stopped) before the exception propagates.
+
+        Ordering is start-new-before-stop-old so a failing new-``on_start``
+        can roll back cleanly without having already closed the old trait's
+        resources.
+
+        The caller's live references to the ejected trait become stale after
+        this call — its ``on_stop`` has fired, and for ownership-carrying
+        traits like :class:`LLMTrait` with ``owns_router=True`` its
+        resources are closed. Re-fetch via :meth:`get_trait` or
+        :meth:`require_trait` to obtain a usable reference.
+
+        Typical pairing with ``LLMTrait.with_router``::
+
+            agent.replace_trait(
+                agent.require_trait(LLMTrait).with_router(other_router)
+            )
+            llm = agent.require_trait(LLMTrait)  # reload
+
+        Args:
+            trait: The trait instance to register or use as a replacement.
+        """
+        trait_type = type(trait)
+        old = self._traits.get(trait_type)
+        self._traits.replace(trait)
+
+        if not self._started:
+            return
+
+        try:
+            trait.on_start()
+        except Exception:
+            self._safe_stop_trait(trait, "failed trait cleanup during rollback")
+            if old is not None:
+                self._traits.replace(old)
+            else:
+                self._traits.unregister(trait_type)
+            raise
+
+        if old is not None:
+            self._safe_stop_trait(old, "ejected trait on_stop failed")
+
     # =========================================================================
     # Trait Lifecycle Helpers
     # =========================================================================
+
+    def _safe_stop_trait(self, trait: BaseTrait, context: str) -> None:
+        """Attempt on_stop, logging but swallowing any exception."""
+        try:
+            trait.on_stop()
+        except Exception as e:
+            self._lg.warning(context, extra={"exception": e, "trait": type(trait).__name__})
 
     def _start_traits(self) -> None:
         """Start all attached traits; flip ``_started`` only on success."""
