@@ -178,10 +178,12 @@ class MemoryTrait(BaseTrait):
 
     def on_stop(self) -> None:
         """Close the chat client and embedder iff this trait owns their lifecycles."""
-        if self._owns_chat_client:
-            self._client.close()
-        if self._owns_embedder and self._embedder is not None:
-            self._embedder.close()
+        try:
+            if self._owns_chat_client:
+                self._client.close()
+        finally:
+            if self._owns_embedder and self._embedder is not None:
+                self._embedder.close()
 
     def with_chat_client(self, chat_client: ChatClient) -> Self:
         """Return a new trait bound to ``chat_client``, detached from the registry.

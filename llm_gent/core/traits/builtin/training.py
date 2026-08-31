@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import threading
+from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
 from appinfra import DotDict
@@ -109,6 +111,7 @@ class TrainingTrait(BaseTrait):
         self.config = config if config is not None else TrainingConfig()
         self._train_factory: TrainFactory | None = train_factory
         self._owns_train_factory = owns_train_factory
+        self._factory_lock = threading.Lock()
 
     def on_start(self) -> None:
         """No connections; TrainFactory is created lazily on first lookup."""
@@ -139,18 +142,8 @@ class TrainingTrait(BaseTrait):
         schema_config = self.config.get("schema") or {}
         return str(schema_config.get("name") or "public")
 
-    def _get_train_factory(self) -> TrainFactory | None:
-        """Get or create training factory for manifest lookups.
-
-        Returns:
-            TrainFactory if adapters.lora.base_path is configured and exists,
-            None otherwise.
-        """
-        if self._train_factory is not None:
-            return self._train_factory
-
-        from pathlib import Path
-
+    def _resolve_registry_path(self) -> Path | None:
+        """Resolve and validate the adapter registry path from config."""
         adapters_config = self.config.get("adapters") or {}
         lora_config = adapters_config.get("lora") or {}
         base_path = lora_config.get("base_path")
@@ -169,10 +162,24 @@ class TrainingTrait(BaseTrait):
                 extra={"path": str(registry_path)},
             )
             return None
+        return registry_path
 
-        self._train_factory = TrainFactory(self.agent.lg, registry_path)
-        self._owns_train_factory = True
-        return self._train_factory
+    def _get_train_factory(self) -> TrainFactory | None:
+        """Get or create training factory for manifest lookups."""
+        if self._train_factory is not None:
+            return self._train_factory
+
+        with self._factory_lock:
+            if self._train_factory is not None:
+                return self._train_factory
+
+            registry_path = self._resolve_registry_path()
+            if registry_path is None:
+                return None
+
+            self._train_factory = TrainFactory(self.agent.lg, registry_path)
+            self._owns_train_factory = True
+            return self._train_factory
 
     def resolve_schema_for_adapter(self, adapter_info: AdapterInfo) -> str:
         """Resolve the schema for an adapter by looking up its manifest.

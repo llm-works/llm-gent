@@ -338,6 +338,8 @@ class TraitFactory:
             raise ConfigError("Memory configuration required but not provided")
         if "db" not in memory_config:
             raise ConfigError("Memory configuration missing required 'db' field")
+        if identity is None:
+            raise ConfigError("Memory configuration requires identity")
 
         return MemoryConfig(
             identity=identity,
@@ -367,11 +369,15 @@ class TraitFactory:
 
         embedder = None
         if config.embedder_url:
-            embedder = client_factory.embeddings(
-                base_url=config.embedder_url,
-                model=config.embedder_model,
-                timeout=config.embedder_timeout,
-            )
+            try:
+                embedder = client_factory.embeddings(
+                    base_url=config.embedder_url,
+                    model=config.embedder_model,
+                    timeout=config.embedder_timeout,
+                )
+            except Exception:
+                chat_client.close()
+                raise
         return chat_client, embedder
 
     def create_training_trait(
