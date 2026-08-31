@@ -69,7 +69,7 @@ class PlatformContext:
         self._tool_factory = ToolFactory(lg)
         self._trait_factory = TraitFactory(platform=self)
 
-        self._lg.info("platform context initialized")
+        self._lg.debug("platform context initialized")
 
     @classmethod
     def from_config(
@@ -138,11 +138,11 @@ class PlatformContext:
         Called during platform shutdown to release resources.
         Currently minimal - agents manage their own trait lifecycles.
         """
-        self._lg.info("cleaning up platform context")
+        self._lg.debug("cleaning up platform context...")
 
         # Future: Close shared resources (message bus, etc.)
 
-        self._lg.info("platform context cleaned up")
+        self._lg.debug("platform context cleaned up")
 
     def __repr__(self) -> str:
         """String representation of platform context."""

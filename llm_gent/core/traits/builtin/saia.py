@@ -112,11 +112,28 @@ class SAIATrait(BaseTrait):
 
     def on_start(self) -> None:
         """Build SAIA instance from backend + config, unless already injected."""
+        self.agent.lg.trace(
+            "starting SAIA trait...",
+            extra={"agent": self.agent.name, "injected": self._saia is not None},
+        )
         if self._saia is not None:
-            self.agent.lg.debug("SAIA trait started with injected instance")
+            self.agent.lg.trace(
+                "SAIA trait started with injected instance",
+                extra={"agent": self.agent.name, "owns_saia": self._owns_saia},
+            )
             return
 
         tools, executor = self._get_tools_and_executor()
+        self._log_tools_configured(tools, executor)
+        self._saia = self._build_saia(tools, executor)
+        self._owns_saia = True
+        self.agent.lg.trace(
+            "SAIA trait started",
+            extra={"agent": self.agent.name, "owns_saia": True},
+        )
+
+    def _log_tools_configured(self, tools: list[ToolDef], executor: Any) -> None:
+        """Debug-log SAIA tools + executor discovered from ToolsTrait."""
         self.agent.lg.debug(
             "SAIA tools configured",
             extra={
@@ -125,10 +142,6 @@ class SAIATrait(BaseTrait):
                 "has_executor": executor is not None,
             },
         )
-
-        self._saia = self._build_saia(tools, executor)
-        self._owns_saia = True
-        self.agent.lg.debug("SAIA trait started")
 
     def _build_saia(self, tools: list[ToolDef], executor: Any) -> SAIA:
         """Assemble a SAIA instance from ``self.backend`` + ``self.config``."""
@@ -149,11 +162,19 @@ class SAIATrait(BaseTrait):
 
     def on_stop(self) -> None:
         """Drop the SAIA reference iff this trait owns it."""
+        self.agent.lg.trace(
+            "stopping SAIA trait...",
+            extra={"agent": self.agent.name, "owns_saia": self._owns_saia},
+        )
         # Backend cleanup handled by caller (they own the backend)
+        dropped = self._owns_saia
         if self._owns_saia:
             self._saia = None
             self._owns_saia = False
-        self.agent.lg.debug("SAIA trait stopped")
+        self.agent.lg.trace(
+            "SAIA trait stopped",
+            extra={"agent": self.agent.name, "dropped_saia": dropped},
+        )
 
     def with_saia(self, saia: SAIA) -> Self:
         """Return a new trait bound to ``saia``, detached from the registry.
@@ -164,7 +185,12 @@ class SAIATrait(BaseTrait):
         retains ownership. For a persistent swap, call
         ``agent.replace_trait(new)``.
         """
-        return type(self)(self.agent, self.backend, self.config, saia=saia, owns_saia=False)
+        new = type(self)(self.agent, self.backend, self.config, saia=saia, owns_saia=False)
+        self.agent.lg.debug(
+            "SAIA trait detached with new instance",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
+        return new
 
     @property
     def saia(self) -> SAIA:

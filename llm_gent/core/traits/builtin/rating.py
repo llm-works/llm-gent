@@ -145,6 +145,7 @@ class RatingTrait(BaseTrait):
         from .llm import LLMTrait
         from .memory import MemoryTrait
 
+        self.agent.lg.trace("starting rating trait...", extra={"agent": self.agent.name})
         # Require dependencies
         memory_trait = self.agent.require_trait(MemoryTrait)
         llm_trait = self.agent.require_trait(LLMTrait)
@@ -170,7 +171,7 @@ class RatingTrait(BaseTrait):
 
     def _log_started(self) -> None:
         """Log trait started with config summary."""
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "rating trait started",
             extra={
                 "providers": len(self._providers),
@@ -182,12 +183,13 @@ class RatingTrait(BaseTrait):
 
     def on_stop(self) -> None:
         """Clean up rating resources."""
+        self.agent.lg.trace("stopping rating trait...", extra={"agent": self.agent.name})
         self._providers = []
         self._criteria = {}
         self._service = None
         self._backend = None
         self._batch = None
-        self.agent.lg.debug("rating trait stopped")
+        self.agent.lg.trace("rating trait stopped", extra={"agent": self.agent.name})
 
     # =========================================================================
     # Rating operations

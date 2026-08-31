@@ -95,18 +95,20 @@ class StorageTrait(BaseTrait):
         """
         from .memory import MemoryTrait
 
+        self.agent.lg.trace("starting storage trait...", extra={"agent": self.agent.name})
         # Require MemoryTrait
         memory_trait = self.agent.require_trait(MemoryTrait)
 
         # Create storage wrapping KeltClient
         self._storage = AgentStorage(self.agent.lg, memory_trait.kelt)
 
-        self.agent.lg.debug("storage trait started")
+        self.agent.lg.trace("storage trait started", extra={"agent": self.agent.name})
 
     def on_stop(self) -> None:
         """Clean up storage resources."""
+        self.agent.lg.trace("stopping storage trait...", extra={"agent": self.agent.name})
         self._storage = None
-        self.agent.lg.debug("storage trait stopped")
+        self.agent.lg.trace("storage trait stopped", extra={"agent": self.agent.name})
 
     @property
     def storage(self) -> AgentStorage:

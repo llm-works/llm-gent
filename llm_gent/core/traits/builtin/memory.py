@@ -177,16 +177,49 @@ class MemoryTrait(BaseTrait):
 
     def on_start(self) -> None:
         """Resolve config-derived LLM defaults. Clients are already injected."""
+        self.agent.lg.trace(
+            "starting memory trait...",
+            extra={
+                "agent": self.agent.name,
+                "owns_chat_client": self._owns_chat_client,
+                "owns_embedder": self._owns_embedder,
+                "has_embedder": self._embedder is not None,
+            },
+        )
         self._llm_defaults = _resolve_llm_defaults(self.config.get("llm") or DotDict())
+        self.agent.lg.trace(
+            "memory trait started",
+            extra={
+                "agent": self.agent.name,
+                "owns_chat_client": self._owns_chat_client,
+                "owns_embedder": self._owns_embedder,
+            },
+        )
 
     def on_stop(self) -> None:
         """Close the chat client and embedder iff this trait owns their lifecycles."""
+        self.agent.lg.trace(
+            "stopping memory trait...",
+            extra={
+                "agent": self.agent.name,
+                "owns_chat_client": self._owns_chat_client,
+                "owns_embedder": self._owns_embedder,
+            },
+        )
         try:
             if self._owns_chat_client:
                 self._client.close()
         finally:
             if self._owns_embedder and self._embedder is not None:
                 self._embedder.close()
+        self.agent.lg.trace(
+            "memory trait stopped",
+            extra={
+                "agent": self.agent.name,
+                "closed_chat_client": self._owns_chat_client,
+                "closed_embedder": self._owns_embedder and self._embedder is not None,
+            },
+        )
 
     def with_chat_client(self, chat_client: ChatClient) -> Self:
         """Return a new trait bound to ``chat_client``, detached from the registry.
@@ -200,7 +233,7 @@ class MemoryTrait(BaseTrait):
         caller owns the injected client's lifecycle. For a persistent swap,
         call ``agent.replace_trait(new)``.
         """
-        return type(self)(
+        new = type(self)(
             self.agent,
             self.config,
             database=self._database,
@@ -209,13 +242,18 @@ class MemoryTrait(BaseTrait):
             owns_chat_client=False,
             owns_embedder=False,
         )
+        self.agent.lg.debug(
+            "memory trait detached with new chat client",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
+        return new
 
     def with_embedder(self, embedder: EmbeddingClient | None) -> Self:
         """Return a new trait bound to ``embedder``, detached from the registry.
 
         See ``.with_chat_client()`` for the ownership and registry semantics.
         """
-        return type(self)(
+        new = type(self)(
             self.agent,
             self.config,
             database=self._database,
@@ -224,6 +262,15 @@ class MemoryTrait(BaseTrait):
             owns_chat_client=False,
             owns_embedder=False,
         )
+        self.agent.lg.debug(
+            "memory trait detached with new embedder",
+            extra={
+                "agent": self.agent.name,
+                "detached_from_registry": True,
+                "has_embedder": embedder is not None,
+            },
+        )
+        return new
 
     def with_database(self, database: Database) -> Self:
         """Return a new trait bound to ``database``, detached from the registry.
@@ -232,7 +279,7 @@ class MemoryTrait(BaseTrait):
         Database has no owned lifecycle on this trait; ownership stays with
         whoever built it (``TraitFactory`` in the standard path).
         """
-        return type(self)(
+        new = type(self)(
             self.agent,
             self.config,
             database=database,
@@ -241,6 +288,11 @@ class MemoryTrait(BaseTrait):
             owns_chat_client=False,
             owns_embedder=False,
         )
+        self.agent.lg.debug(
+            "memory trait detached with new database",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
+        return new
 
     # =========================================================================
     # Schema-aware client access

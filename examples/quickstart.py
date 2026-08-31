@@ -16,26 +16,33 @@ Tutorial-shape agent construction:
 - ``DirectiveTrait`` auto-prepends its directive as a system message on
   ``LLMTrait.complete()`` — no manual wiring.
 
-Set ``LLM_GENT_SMOKE=1`` to swap in a stub router that returns a canned
-response without contacting a real backend — used by CI's wheel-smoke job.
+Pass ``--smoke`` to swap in a stub router that returns a canned response
+without contacting a real backend — used by CI's wheel-smoke job.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, cast
 
-from appinfra.log import create_lg
+from appinfra.app import AppBuilder
 from llm_infer.client import ChatClient, ChatResponse
 
 from llm_gent import AgentFactory, LLMTrait
 
 
-SMOKE = os.getenv("LLM_GENT_SMOKE") == "1"
+app = (
+    AppBuilder("quickstart")
+    .with_description("llm-gent quick-start hello-agent")
+    .with_standard_args(log_level=True)
+    .with_main_tool("run")
+    .build()
+)
 
 
 class _StubRouter:
-    """Stub ChatClient used when LLM_GENT_SMOKE=1."""
+    """Stub ChatClient used when --smoke is passed."""
 
     def chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> ChatResponse:
         return ChatResponse(content="Hello from smoke-mode stub!")
@@ -63,10 +70,14 @@ def _llm_config() -> dict[str, Any]:
     }
 
 
-def main() -> None:
-    lg = create_lg("hello-agent", "info")
-
-    agent = AgentFactory(lg).from_config(
+@app.tool(name="run", help="Run the hello-agent example")
+@app.argument(  # type: ignore[untyped-decorator]
+    "--smoke",
+    action="store_true",
+    help="Swap in a stub router (no real backend contacted)",
+)
+def run(self: Any) -> int:
+    agent = AgentFactory(self.lg).from_config(
         {
             "identity": {"name": "hello-agent"},
             "llm": _llm_config(),
@@ -77,7 +88,7 @@ def main() -> None:
     agent.start()
 
     llm = agent.require_trait(LLMTrait)
-    if SMOKE:
+    if self.args.smoke:
         # _StubRouter is a minimal duck-type stub; cast acknowledges the
         # deliberate contract-narrowing for the smoke path.
         agent.replace_trait(llm.with_router(cast(ChatClient, _StubRouter())))
@@ -87,7 +98,8 @@ def main() -> None:
     print(f"agent said: {result.content}")
 
     agent.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(app.main())

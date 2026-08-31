@@ -75,8 +75,10 @@ class TestStorageTrait:
         # Verify storage was set
         assert trait._storage == mock_storage_instance
 
-        # Verify debug log
-        mock_agent.lg.debug.assert_called_with("storage trait started")
+        # Verify trace log
+        mock_agent.lg.trace.assert_called_with(
+            "storage trait started", extra={"agent": mock_agent.name}
+        )
 
     @patch("llm_gent.core.traits.builtin.storage.AgentStorage")
     def test_storage_property_returns_storage_after_start(
@@ -114,9 +116,11 @@ class TestStorageTrait:
         # Verify storage is cleared
         assert trait._storage is None
 
-        # Verify debug log
-        assert mock_agent.lg.debug.call_count == 2
-        mock_agent.lg.debug.assert_any_call("storage trait stopped")
+        # Verify trace log (start emits opener + closer; stop emits opener + closer)
+        assert mock_agent.lg.trace.call_count == 4
+        mock_agent.lg.trace.assert_any_call(
+            "storage trait stopped", extra={"agent": mock_agent.name}
+        )
 
     @patch("llm_gent.core.traits.builtin.storage.AgentStorage")
     def test_storage_property_raises_after_stop(

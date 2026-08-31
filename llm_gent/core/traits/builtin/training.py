@@ -115,13 +115,33 @@ class TrainingTrait(BaseTrait):
 
     def on_start(self) -> None:
         """No connections; TrainFactory is created lazily on first lookup."""
-        pass
+        self.agent.lg.trace("starting training trait...", extra={"agent": self.agent.name})
+        self.agent.lg.trace(
+            "training trait started",
+            extra={
+                "agent": self.agent.name,
+                "has_factory": self._train_factory is not None,
+                "owns_train_factory": self._owns_train_factory,
+            },
+        )
 
     def on_stop(self) -> None:
         """Drop the cached TrainFactory iff this trait owns it."""
+        self.agent.lg.trace(
+            "stopping training trait...",
+            extra={
+                "agent": self.agent.name,
+                "owns_train_factory": self._owns_train_factory,
+            },
+        )
+        dropped = self._owns_train_factory
         if self._owns_train_factory:
             self._train_factory = None
             self._owns_train_factory = False
+        self.agent.lg.trace(
+            "training trait stopped",
+            extra={"agent": self.agent.name, "dropped_factory": dropped},
+        )
 
     def with_train_factory(self, train_factory: TrainFactory) -> Self:
         """Return a new trait bound to ``train_factory``, detached from the registry.
@@ -132,9 +152,14 @@ class TrainingTrait(BaseTrait):
         the caller retains ownership. For a persistent swap, call
         ``agent.replace_trait(new)``.
         """
-        return type(self)(
+        new = type(self)(
             self.agent, self.config, train_factory=train_factory, owns_train_factory=False
         )
+        self.agent.lg.debug(
+            "training trait detached with new factory",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
+        return new
 
     @property
     def default_schema(self) -> str:
@@ -177,8 +202,16 @@ class TrainingTrait(BaseTrait):
             if registry_path is None:
                 return None
 
+            self.agent.lg.trace(
+                "building lazy train factory...",
+                extra={"agent": self.agent.name, "registry_path": str(registry_path)},
+            )
             self._train_factory = TrainFactory(self.agent.lg, registry_path)
             self._owns_train_factory = True
+            self.agent.lg.trace(
+                "train factory built",
+                extra={"agent": self.agent.name, "owns_train_factory": True},
+            )
             return self._train_factory
 
     def resolve_schema_for_adapter(self, adapter_info: AdapterInfo) -> str:

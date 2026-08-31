@@ -183,6 +183,4 @@ jobs:
           python -I -c "import llm_gent; print('llm-gent', llm_gent.__version__)"
 
       - name: Run quickstart against stub router
-        env:
-          LLM_GENT_SMOKE: '1'
-        run: python examples/quickstart.py
+        run: python examples/quickstart.py --smoke
