@@ -139,12 +139,32 @@ class LLMTrait(BaseTrait):
 
     def on_start(self) -> None:
         """Resolve config-derived defaults. Router is already injected."""
+        self.agent.lg.trace(
+            "starting LLM trait...",
+            extra={"agent": self.agent.name, "owns_router": self._owns_router},
+        )
         self._defaults = _resolve_llm_defaults(self.config)
+        self.agent.lg.debug(
+            "LLM trait started",
+            extra={
+                "agent": self.agent.name,
+                "owns_router": self._owns_router,
+                "adapter": self._defaults.get("adapter"),
+            },
+        )
 
     def on_stop(self) -> None:
         """Close the router iff this trait owns its lifecycle."""
+        self.agent.lg.trace(
+            "stopping LLM trait...",
+            extra={"agent": self.agent.name, "owns_router": self._owns_router},
+        )
         if self._owns_router:
             self._router.close()
+        self.agent.lg.debug(
+            "LLM trait stopped",
+            extra={"agent": self.agent.name, "closed_router": self._owns_router},
+        )
 
     @property
     def router(self) -> ChatClient:
@@ -171,6 +191,10 @@ class LLMTrait(BaseTrait):
         """
         new = type(self)(self.agent, router, self.config, owns_router=False)
         new._defaults = _resolve_llm_defaults(new.config)
+        self.agent.lg.debug(
+            "LLM trait detached with new router",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
         return new
 
     @property

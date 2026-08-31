@@ -137,7 +137,12 @@ class Registry:
         Returns:
             Trait instance if registered, None otherwise.
         """
-        return self._traits.get(trait_type)  # type: ignore[return-value]
+        trait = self._traits.get(trait_type)
+        self._lg.trace(
+            "trait lookup",
+            extra={"trait": trait_type.__name__, "hit": trait is not None},
+        )
+        return trait  # type: ignore[return-value]
 
     def get_by_name(self, name: TraitName) -> Trait | None:
         """Get a trait by name.

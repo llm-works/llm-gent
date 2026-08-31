@@ -125,13 +125,23 @@ class Agent:
         """Start attached traits. Idempotent — a second call is a no-op."""
         if self._started:
             return
+        self._lg.trace(
+            "starting agent...",
+            extra={"agent": self.name, "trait_count": self._traits.count()},
+        )
         self._start_traits()
+        self._lg.debug("agent started", extra={"agent": self.name})
 
     def stop(self) -> None:
         """Stop attached traits. Idempotent — a second call is a no-op."""
         if not self._started:
             return
+        self._lg.trace(
+            "stopping agent...",
+            extra={"agent": self.name, "trait_count": self._traits.count()},
+        )
         self._stop_traits()
+        self._lg.debug("agent stopped", extra={"agent": self.name})
 
     async def __aenter__(self) -> Agent:
         """Async context-manager entry — calls :meth:`start`."""
@@ -160,6 +170,14 @@ class Agent:
             DuplicateTraitError: If a trait of this type is already added.
         """
         self._traits.register(trait)
+        self._lg.debug(
+            "trait added",
+            extra={
+                "agent": self.name,
+                "trait": type(trait).__name__,
+                "started": self._started,
+            },
+        )
 
         if self._started:
             try:
@@ -221,23 +239,51 @@ class Agent:
         """
         trait_type = type(trait)
         old = self._traits.get(trait_type)
+        self._lg.trace(
+            "replacing trait...",
+            extra={
+                "agent": self.name,
+                "trait": trait_type.__name__,
+                "had_previous": old is not None,
+                "started": self._started,
+            },
+        )
         self._traits.replace(trait)
 
         if not self._started:
+            self._log_trait_replaced(trait_type, ejected=False)
             return
 
         try:
             trait.on_start()
         except Exception:
-            self._safe_stop_trait(trait, "failed trait cleanup during rollback")
-            if old is not None:
-                self._traits.replace(old)
-            else:
-                self._traits.unregister(trait_type)
+            self._rollback_trait_replace(trait, old, trait_type)
             raise
 
         if old is not None:
             self._safe_stop_trait(old, "ejected trait on_stop failed")
+        self._log_trait_replaced(trait_type, ejected=old is not None)
+
+    def _rollback_trait_replace(
+        self, trait: BaseTrait, old: BaseTrait | None, trait_type: type[BaseTrait]
+    ) -> None:
+        """Roll back a failed replace_trait: stop the new trait, restore the old."""
+        self._lg.debug(
+            "trait replace rolled back",
+            extra={"agent": self.name, "trait": trait_type.__name__},
+        )
+        self._safe_stop_trait(trait, "failed trait cleanup during rollback")
+        if old is not None:
+            self._traits.replace(old)
+        else:
+            self._traits.unregister(trait_type)
+
+    def _log_trait_replaced(self, trait_type: type[BaseTrait], *, ejected: bool) -> None:
+        """Debug-log the outcome of a successful replace_trait call."""
+        self._lg.debug(
+            "trait replaced",
+            extra={"agent": self.name, "trait": trait_type.__name__, "ejected": ejected},
+        )
 
     # =========================================================================
     # Trait Lifecycle Helpers
@@ -254,6 +300,10 @@ class Agent:
         """Start all attached traits; flip ``_started`` only on success."""
         for trait in self._traits.all():
             trait.on_start()
+            self._lg.debug(
+                "trait started",
+                extra={"agent": self.name, "trait": type(trait).__name__},
+            )
         self._started = True
 
     def _stop_traits(self) -> None:
@@ -261,6 +311,10 @@ class Agent:
         for trait in self._traits.all():
             try:
                 trait.on_stop()
+                self._lg.debug(
+                    "trait stopped",
+                    extra={"agent": self.name, "trait": type(trait).__name__},
+                )
             except Exception as e:
                 self._lg.warning(
                     "error stopping trait",

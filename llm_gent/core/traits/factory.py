@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from appinfra import DotDict
 from llm_infer.client import ChatClient, EmbeddingClient
+from llm_infer.client import Factory as LLMClientFactory
 from llm_kelt.core import Database
 
 
@@ -252,7 +253,15 @@ class TraitFactory:
         if not llm_config:
             raise ConfigError("LLM configuration required but not provided")
 
+        self._lg.trace(
+            "building LLM router...",
+            extra={"agent": agent.name, "default": llm_config.get("default")},
+        )
         router = LLMClientFactory(agent.lg).from_config(llm_config)
+        self._lg.debug(
+            "LLM router built",
+            extra={"agent": agent.name, "owns_router": True},
+        )
         return LLMTrait(agent, router, llm_config, owns_router=True)
 
     def create_directive_trait(
@@ -362,7 +371,13 @@ class TraitFactory:
         """Build the kelt Database wrapper from the memory config."""
         from appinfra.db.pg import PG
 
-        return Database(agent.lg, PG(agent.lg, config.db))
+        self._lg.trace(
+            "building memory database...",
+            extra={"agent": agent.name, "db_url": config.db.get("url")},
+        )
+        database = Database(agent.lg, PG(agent.lg, config.db))
+        self._lg.debug("memory database built", extra={"agent": agent.name})
+        return database
 
     def _build_memory_clients(
         self, agent: Agent, config: MemoryConfig
@@ -371,20 +386,48 @@ class TraitFactory:
         from llm_infer.client import Factory as LLMClientFactory
 
         client_factory = LLMClientFactory(agent.lg)
+        self._lg.trace("building memory chat client...", extra={"agent": agent.name})
         chat_client = client_factory.from_config(config.get("llm") or DotDict())
+        self._lg.debug(
+            "memory chat client built",
+            extra={"agent": agent.name, "owns_chat_client": True},
+        )
 
-        embedder = None
+        embedder: EmbeddingClient | None = None
         if config.embedder_url:
-            try:
-                embedder = client_factory.embeddings(
-                    base_url=config.embedder_url,
-                    model=config.embedder_model,
-                    timeout=config.embedder_timeout,
-                )
-            except Exception:
-                chat_client.close()
-                raise
+            embedder = self._build_memory_embedder(agent, config, client_factory, chat_client)
         return chat_client, embedder
+
+    def _build_memory_embedder(
+        self,
+        agent: Agent,
+        config: MemoryConfig,
+        client_factory: LLMClientFactory,
+        chat_client: ChatClient,
+    ) -> EmbeddingClient:
+        """Build the memory embedder; close chat_client on failure to prevent leak."""
+        self._lg.trace(
+            "building memory embedder...",
+            extra={
+                "agent": agent.name,
+                "url": config.embedder_url,
+                "model": config.embedder_model,
+            },
+        )
+        try:
+            embedder: EmbeddingClient = client_factory.embeddings(
+                base_url=config.embedder_url,
+                model=config.embedder_model,
+                timeout=config.embedder_timeout,
+            )
+        except Exception:
+            chat_client.close()
+            raise
+        self._lg.debug(
+            "memory embedder built",
+            extra={"agent": agent.name, "owns_embedder": True},
+        )
+        return embedder
 
     def create_training_trait(
         self, agent: Agent, source_config: dict[str, Any] | None

@@ -146,16 +146,42 @@ class HTTPTrait(BaseTrait):
         if self._server is None:
             raise RuntimeError("HTTPServer not initialized")
 
+        self.agent.lg.trace(
+            "starting HTTP trait...",
+            extra={
+                "agent": self.agent.name,
+                "owns_server": self._owns_server,
+                "host": self.config.host,
+                "port": self.config.port,
+            },
+        )
         self._server.start()
         self._start_ipc_thread()
-        self.agent.lg.info("HTTP server started")
+        self.agent.lg.info(
+            "HTTP trait started",
+            extra={
+                "agent": self.agent.name,
+                "owns_server": self._owns_server,
+                "host": self.config.host,
+                "port": self.config.port,
+            },
+        )
 
     def on_stop(self) -> None:
         """Stop IPC thread. Stop the server iff this trait owns it."""
+        self.agent.lg.trace(
+            "stopping HTTP trait...",
+            extra={"agent": self.agent.name, "owns_server": self._owns_server},
+        )
         self._stop_ipc_thread()
+        stopped_server = False
         if self._owns_server and self._server:
             self._server.stop()
-            self.agent.lg.info("HTTP server stopped")
+            stopped_server = True
+        self.agent.lg.info(
+            "HTTP trait stopped",
+            extra={"agent": self.agent.name, "stopped_server": stopped_server},
+        )
 
     def with_server(self, server: HTTPServer) -> Self:
         """Return a new trait bound to ``server``, detached from the registry.
@@ -166,7 +192,12 @@ class HTTPTrait(BaseTrait):
         retains stop responsibility. For a persistent swap, call
         ``agent.replace_trait(new)``.
         """
-        return type(self)(self.agent, self.config, self._handler, server=server, owns_server=False)
+        new = type(self)(self.agent, self.config, self._handler, server=server, owns_server=False)
+        self.agent.lg.debug(
+            "HTTP trait detached with new server",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
+        return new
 
     @property
     def server(self) -> HTTPServer | None:
