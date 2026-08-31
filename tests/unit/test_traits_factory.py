@@ -206,6 +206,25 @@ class TestCreateMemoryTrait:
         assert trait.config.embedder_model == "default"
         assert trait.config.embedder_timeout == 30.0
 
+    def test_embedder_failure_closes_chat_client(self, factory, mock_agent, mock_memory_deps):
+        """Ensure chat_client is closed if embedder creation fails (resource leak guard)."""
+        config = DotDict(
+            {
+                "db": {"url": "postgresql://localhost/test"},
+                "embedder_url": "http://localhost:9000",
+            }
+        )
+        chat_client = MagicMock()
+        mock_memory_deps["client_factory"].return_value.from_config.return_value = chat_client
+        mock_memory_deps["client_factory"].return_value.embeddings.side_effect = RuntimeError(
+            "embedder init failed"
+        )
+
+        with pytest.raises(RuntimeError, match="embedder init failed"):
+            factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+
+        chat_client.close.assert_called_once()
+
 
 class TestCreateTrainingTrait:
     """Tests for TraitFactory.create_training_trait()."""

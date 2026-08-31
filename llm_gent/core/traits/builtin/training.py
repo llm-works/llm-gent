@@ -115,6 +115,7 @@ class TrainingTrait(BaseTrait):
 
     def on_start(self) -> None:
         """No connections; TrainFactory is created lazily on first lookup."""
+        self.agent.lg.trace("starting training trait...", extra={"agent": self.agent.name})
         self.agent.lg.trace(
             "training trait started",
             extra={
