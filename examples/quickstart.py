@@ -23,10 +23,10 @@ response without contacting a real backend — used by CI's wheel-smoke job.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, cast
 
 from appinfra.log import create_lg
-from llm_infer.client import ChatResponse
+from llm_infer.client import ChatClient, ChatResponse
 
 from llm_gent import AgentFactory, LLMTrait
 
@@ -78,9 +78,10 @@ def main() -> None:
 
     llm = agent.require_trait(LLMTrait)
     if SMOKE:
-        if llm._router is not None:
-            llm._router.close()
-        llm._router = _StubRouter()  # type: ignore[assignment]
+        # _StubRouter is a minimal duck-type stub; cast acknowledges the
+        # deliberate contract-narrowing for the smoke path.
+        agent.replace_trait(llm.with_router(cast(ChatClient, _StubRouter())))
+        llm = agent.require_trait(LLMTrait)
 
     result = llm.complete([{"role": "user", "content": "Say hello."}])
     print(f"agent said: {result.content}")
