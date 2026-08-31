@@ -289,14 +289,27 @@ class LLMTrait(BaseTrait):
     def _apply_directive(self, messages: list[Message]) -> list[Message]:
         """Prepend DirectiveTrait's prompt as system message when attached.
 
-        Directive comes first: if the caller already supplied a system message,
-        the directive is merged as "<directive>\\n\\n<caller-system>" so the
-        agent's core purpose wins ordering while caller context is preserved.
-        Without an attached DirectiveTrait, messages pass through unchanged.
+        Directive comes first: if the caller already supplied a system message
+        at index 0, the directive is merged as "<directive>\\n\\n<caller-system>"
+        so the agent's core purpose wins ordering while caller context is
+        preserved. Without an attached DirectiveTrait, messages pass through
+        unchanged.
+
+        Contract: a system message, if present, must be at index 0. This matches
+        Anthropic's Messages API (which forbids ``role: "system"`` inside
+        ``messages`` — adapters hoist index-0 out to the top-level ``system``
+        parameter) and OpenAI convention. A ``role="system"`` at index >0
+        raises ``ValueError`` — silent misplacement would produce two system
+        messages after this merge and adapter-dependent behavior downstream.
         """
         directive_trait = self.agent.get_trait(DirectiveTrait)
         if directive_trait is None:
             return messages
+
+        if any(m.role == "system" for m in messages[1:]):
+            raise ValueError(
+                "system message must be at index 0; found role='system' at a non-zero position"
+            )
 
         directive_prompt = directive_trait.directive.prompt
         if messages and messages[0].role == "system":
@@ -454,10 +467,17 @@ class LLMTrait(BaseTrait):
     ) -> list[dict[str, Any]]:
         """Inject schema instruction into messages.
 
-        Appends schema prompt to existing system message or creates one.
+        Appends schema prompt to existing system message at index 0, or creates
+        one. See ``_apply_directive`` for the position-0-only contract; a
+        ``role="system"`` at index >0 raises ``ValueError``.
         """
         schema_prompt = self._build_schema_prompt(schema)
         result = list(messages)  # shallow copy
+
+        if any(m.get("role") == "system" for m in result[1:]):
+            raise ValueError(
+                "system message must be at index 0; found role='system' at a non-zero position"
+            )
 
         if result and result[0].get("role") == "system":
             # Append to existing system message

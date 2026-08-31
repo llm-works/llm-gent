@@ -281,6 +281,16 @@ class TestLLMTraitStructuredOutput:
         assert sent_messages[0]["role"] == "system"
         assert "json" in sent_messages[0]["content"].lower()
 
+    def test_schema_inject_non_zero_position_system_raises(self, trait):
+        """Schema inject enforces the same position-0-only system contract."""
+        messages = [
+            Message(role="user", content="Question?"),
+            Message(role="system", content="stray"),
+        ]
+
+        with pytest.raises(ValueError, match="system message must be at index 0"):
+            trait.complete(messages, output_schema=self.Answer)
+
     def test_structured_output_enables_json_mode(self, trait):
         """Test that JSON mode is enabled via extra_body."""
         mock_response = MagicMock()
@@ -518,6 +528,17 @@ class TestLLMTraitDirectiveInjection:
             {"role": "system", "content": self.DIRECTIVE},
             {"role": "user", "content": "hi"},
         ]
+
+    def test_non_zero_position_system_message_raises(self):
+        trait = self._make_trait(directive=self.DIRECTIVE)
+
+        with pytest.raises(ValueError, match="system message must be at index 0"):
+            trait.complete(
+                [
+                    Message(role="user", content="hi"),
+                    Message(role="system", content="stray"),
+                ]
+            )
 
 
 class TestResolveLLMDefaults:
