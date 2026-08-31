@@ -190,6 +190,49 @@ class Agent:
                 f"add it with agent.add_trait({trait_type.__name__}(...))"
             ) from e
 
+    def replace_trait(self, trait: BaseTrait) -> BaseTrait | None:
+        """Register ``trait``, replacing any existing entry of the same type.
+
+        Registry-level swap. If the agent is started, the new trait's
+        ``on_start`` is called (mirroring :meth:`add_trait`); on failure the
+        previous trait is restored to the registry and the exception
+        re-raises.
+
+        The returned previous trait's lifecycle is the caller's to manage:
+        call ``old.on_stop()`` to release resources it owns (a factory-built
+        router with ``owns_router=True``), or hold the reference if you plan
+        to swap back later. This method does not auto-stop the previous
+        trait — that would silently close resources callers may still want.
+
+        Typical pairing with ``LLMTrait.with_router``::
+
+            new = agent.require_trait(LLMTrait).with_router(other_router)
+            agent.replace_trait(new)  # persistent swap
+            # ``new`` was built with owns_router=False; caller owns other_router.
+
+        Args:
+            trait: The trait instance to register or use as a replacement.
+
+        Returns:
+            The previously registered trait of the same type, or ``None`` if
+            none was registered.
+        """
+        trait_type = type(trait)
+        old = self._traits.get(trait_type)
+        self._traits.replace(trait)
+
+        if self._started:
+            try:
+                trait.on_start()
+            except Exception:
+                if old is not None:
+                    self._traits.replace(old)
+                else:
+                    self._traits.unregister(trait_type)
+                raise
+
+        return old
+
     # =========================================================================
     # Trait Lifecycle Helpers
     # =========================================================================
