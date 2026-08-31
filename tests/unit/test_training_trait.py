@@ -53,11 +53,31 @@ class TestLifecycle:
         trait.on_start()  # must not raise or touch disk
         assert trait._train_factory is None
 
-    def test_on_stop_clears_cache(self, agent):
+    def test_on_stop_clears_owned_cache(self, agent):
+        """on_stop drops a factory the trait built lazily."""
         trait = TrainingTrait(agent)
         trait._train_factory = MagicMock()
+        trait._owns_train_factory = True
         trait.on_stop()
         assert trait._train_factory is None
+
+    def test_on_stop_keeps_injected_factory(self, agent):
+        """on_stop leaves an injected factory in place — caller owns lifecycle."""
+        injected = MagicMock()
+        trait = TrainingTrait(agent, train_factory=injected)
+        trait.on_stop()
+        assert trait._train_factory is injected
+
+
+class TestWithTrainFactory:
+    def test_returns_new_instance_with_injected_factory(self, agent):
+        base = TrainingTrait(agent, TrainingConfig(schema={"name": "custom"}))
+        replacement = MagicMock()
+        swapped = base.with_train_factory(replacement)
+        assert swapped is not base
+        assert swapped._train_factory is replacement
+        assert swapped._owns_train_factory is False
+        assert base._train_factory is None  # base unchanged
 
 
 class TestResolveSchemaForAdapter:
@@ -78,33 +98,35 @@ class TestResolveSchemaForAdapter:
         assert trait.resolve_schema_for_adapter(adapter_info) == "fallback"
 
     def test_manifest_found_returns_schema_name(self, agent, adapter_info):
-        trait = TrainingTrait(agent, TrainingConfig(schema={"name": "fallback"}))
-        # Prime the cached factory with a fake manifest chain.
         manifest = MagicMock()
         manifest.source = MagicMock(schema_name="resolved")
         fake_factory = MagicMock()
         fake_factory.manifest.get_manifest.return_value = manifest
-        trait._train_factory = fake_factory
+        trait = TrainingTrait(
+            agent, TrainingConfig(schema={"name": "fallback"}), train_factory=fake_factory
+        )
 
         assert trait.resolve_schema_for_adapter(adapter_info) == "resolved"
         fake_factory.manifest.get_manifest.assert_called_once_with("abc123")
 
     def test_manifest_missing_raises(self, agent, adapter_info):
-        trait = TrainingTrait(agent, TrainingConfig(schema={"name": "fallback"}))
         fake_factory = MagicMock()
         fake_factory.manifest.get_manifest.return_value = None
-        trait._train_factory = fake_factory
+        trait = TrainingTrait(
+            agent, TrainingConfig(schema={"name": "fallback"}), train_factory=fake_factory
+        )
 
         with pytest.raises(ManifestNotFoundError, match="abc123"):
             trait.resolve_schema_for_adapter(adapter_info)
 
     def test_manifest_without_source_raises(self, agent, adapter_info):
-        trait = TrainingTrait(agent, TrainingConfig(schema={"name": "fallback"}))
         manifest = MagicMock()
         manifest.source = None
         fake_factory = MagicMock()
         fake_factory.manifest.get_manifest.return_value = manifest
-        trait._train_factory = fake_factory
+        trait = TrainingTrait(
+            agent, TrainingConfig(schema={"name": "fallback"}), train_factory=fake_factory
+        )
 
         with pytest.raises(ManifestNotFoundError):
             trait.resolve_schema_for_adapter(adapter_info)

@@ -5,12 +5,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from appinfra import DotDict
-from appinfra.db.pg import PG
 from llm_infer.client import ChatClient, ChatResponse, EmbeddingClient
-from llm_infer.client import Factory as LLMClientFactory
 from llm_kelt import Client as KeltClient
 from llm_kelt import SchemaMode
 from llm_kelt.core import Database
@@ -62,47 +60,81 @@ class MemoryTrait(BaseTrait):
 
     Adapter-manifest-driven schema resolution lives in TrainingTrait (training.py).
 
-    Example:
-        from llm_gent.core.traits import MemoryTrait, MemoryConfig, LLMConfig
-        from llm_gent.core.agent import Agent, Identity
+    Dependency ownership: the trait imports no external factory. Database,
+    ChatClient, and EmbeddingClient are built by ``TraitFactory._create_memory``
+    and injected at construction. Two seams:
 
-        # Assumes: lg (Logger), config (agent config dict)
-        agent = Agent(lg, config)
-        memory_trait = MemoryTrait(agent, MemoryConfig(
-            identity=Identity.from_name("my-agent"),
-            llm=LLMConfig(base_url="http://localhost:8000/v1"),
-            db={"url": "postgresql://localhost/kelt"},
-            embedder_url="http://localhost:8001/v1",
-        ))
-        agent.add_trait(memory_trait)
+    - Config-time (standard path): ``TraitFactory.create_memory_trait`` builds
+      the three clients from ``memory_config`` and passes them with
+      ``owns_chat_client=True`` and ``owns_embedder=True`` so the trait closes
+      them on ``on_stop``.
+    - Direct injection (test / advanced): pass ``chat_client``, ``embedder``,
+      or ``database`` yourself with the corresponding ``owns_*=False``; caller
+      retains close responsibility. See ``.with_chat_client()``,
+      ``.with_embedder()``, and ``.with_database()`` for immutable-view
+      fluent overrides.
+
+    Example:
+        from llm_gent.agent import AgentFactory
+
+        # Standard construction — TraitFactory builds the external clients.
+        agent = AgentFactory(lg).from_config({
+            "identity": "my-agent",
+            "llm": {"backends": {"local": {...}}},
+            "memory": {
+                "db": {"url": "postgresql://localhost/kelt"},
+                "embedder_url": "http://localhost:8001/v1",
+            },
+        })
         agent.start()
 
         # Learned completion with fact injection
         result = agent.get_trait(MemoryTrait).complete("What do I prefer?")
 
-        # Store a fact
-        agent.get_trait(MemoryTrait).remember("User prefers concise answers")
-
     Lifecycle:
-        - on_start(): Creates Client, ChatClient, EmbeddingClient, ContextBuilder
-        - on_stop(): Closes ChatClient and EmbeddingClient
+        - ``__init__``: composes ``KeltClient`` and ``ContextBuilder`` from the
+          injected database, chat client, and embedder.
+        - ``on_start()``: resolves LLM defaults from config (no client build).
+        - ``on_stop()``: closes the chat client / embedder iff the matching
+          ``owns_*`` flag is True; drops kelt and context references.
     """
 
-    def __init__(self, agent: Agent, config: MemoryConfig) -> None:
-        """Initialize memory trait.
+    def __init__(
+        self,
+        agent: Agent,
+        config: MemoryConfig,
+        *,
+        database: Database,
+        chat_client: ChatClient,
+        embedder: EmbeddingClient | None = None,
+        owns_chat_client: bool = False,
+        owns_embedder: bool = False,
+    ) -> None:
+        """Initialize memory trait with injected clients.
 
         Args:
             agent: The agent this trait belongs to.
-            config: Memory configuration.
+            config: Memory configuration (identity, schema, llm defaults, etc.).
+            database: Live ``Database``. Built by ``TraitFactory`` in the
+                standard path; may be a stub for tests.
+            chat_client: Live ``ChatClient`` for learned completions.
+            embedder: Live ``EmbeddingClient`` for RAG, or None if no embedder
+                is configured.
+            owns_chat_client: If True, ``on_stop`` closes ``chat_client``. Set
+                by ``TraitFactory`` for factory-built clients. Callers that
+                inject their own client keep this False and clean up themselves.
+            owns_embedder: Same semantic for ``embedder``.
         """
         super().__init__(agent)
         self.config = config
-        self._database: Database | None = None
-        self._kelt: KeltClient | None = None
-        self._embedder: EmbeddingClient | None = None
-        self._context: ContextBuilder | None = None
-        self._client: ChatClient | None = None
+        self._database = database
+        self._client = chat_client
+        self._embedder = embedder
+        self._owns_chat_client = owns_chat_client
+        self._owns_embedder = owns_embedder
         self._llm_defaults: dict[str, Any] = {}
+        self._kelt: KeltClient = self._create_kelt_client(database, embedder, chat_client)
+        self._context: ContextBuilder = ContextBuilder(self._kelt.atomic.assertions)
 
     def _create_kelt_client(
         self, database: Database, embedder: EmbeddingClient | None, llm_client: ChatClient | None
@@ -141,45 +173,69 @@ class MemoryTrait(BaseTrait):
         return identity
 
     def on_start(self) -> None:
-        """Create memory client, LLM client, and embedder on agent start."""
-        from ...errors import ConfigError
-
-        # Create database from config
-        if self.config.db is None:
-            raise ConfigError("MemoryConfig.db is required")
-        pg = PG(self.agent.lg, self.config.db)
-        self._database = Database(self.agent.lg, pg)
-
-        # Create LLM client for completions (before Client)
-        llm_config: DotDict = self.config.get("llm") or DotDict()
-        self._client = LLMClientFactory(self.agent.lg).from_config(llm_config)
-        self._llm_defaults = _resolve_llm_defaults(llm_config)
-
-        # Create embedder if URL provided (before Client)
-        if self.config.embedder_url:
-            self._embedder = LLMClientFactory(self.agent.lg).embeddings(
-                base_url=self.config.embedder_url,
-                model=self.config.embedder_model,
-                timeout=self.config.embedder_timeout,
-            )
-        else:
-            self._embedder = None
-
-        # Create kelt client with embedder and llm_client already available
-        self._kelt = self._create_kelt_client(self._database, self._embedder, self._client)
-        self._context = ContextBuilder(self._kelt.atomic.assertions)
+        """Resolve config-derived LLM defaults. Clients are already injected."""
+        self._llm_defaults = _resolve_llm_defaults(self.config.get("llm") or DotDict())
 
     def on_stop(self) -> None:
-        """Close LLM client and embedder on agent stop."""
-        if self._client is not None:
+        """Close the chat client and embedder iff this trait owns their lifecycles."""
+        if self._owns_chat_client:
             self._client.close()
-            self._client = None
-        if self._embedder is not None:
+        if self._owns_embedder and self._embedder is not None:
             self._embedder.close()
-            self._embedder = None
-        self._kelt = None
-        self._context = None
-        self._database = None
+
+    def with_chat_client(self, chat_client: ChatClient) -> Self:
+        """Return a new trait bound to ``chat_client``, detached from the registry.
+
+        Immutable-view fluent (mirrors ``LLMTrait.with_router``): ``self`` stays
+        canonical for ``agent.get_trait(MemoryTrait)`` and its chat client is
+        unchanged. The returned instance shares ``agent``, ``config``,
+        ``database``, and ``embedder`` but is not registered.
+
+        Ownership: ``owns_chat_client`` on the returned trait is False. The
+        caller owns the injected client's lifecycle. For a persistent swap,
+        call ``agent.replace_trait(new)``.
+        """
+        return type(self)(
+            self.agent,
+            self.config,
+            database=self._database,
+            chat_client=chat_client,
+            embedder=self._embedder,
+            owns_chat_client=False,
+            owns_embedder=False,
+        )
+
+    def with_embedder(self, embedder: EmbeddingClient | None) -> Self:
+        """Return a new trait bound to ``embedder``, detached from the registry.
+
+        See ``.with_chat_client()`` for the ownership and registry semantics.
+        """
+        return type(self)(
+            self.agent,
+            self.config,
+            database=self._database,
+            chat_client=self._client,
+            embedder=embedder,
+            owns_chat_client=False,
+            owns_embedder=False,
+        )
+
+    def with_database(self, database: Database) -> Self:
+        """Return a new trait bound to ``database``, detached from the registry.
+
+        See ``.with_chat_client()`` for the ownership and registry semantics.
+        Database has no owned lifecycle on this trait; ownership stays with
+        whoever built it (``TraitFactory`` in the standard path).
+        """
+        return type(self)(
+            self.agent,
+            self.config,
+            database=database,
+            chat_client=self._client,
+            embedder=self._embedder,
+            owns_chat_client=False,
+            owns_embedder=False,
+        )
 
     # =========================================================================
     # Schema-aware client access
@@ -210,13 +266,7 @@ class MemoryTrait(BaseTrait):
 
     @property
     def kelt(self) -> KeltClient:
-        """Access the kelt client.
-
-        Raises:
-            RuntimeError: If trait not started.
-        """
-        if self._kelt is None:
-            raise RuntimeError("MemoryTrait not started - ensure agent.start() was called")
+        """Access the kelt client."""
         return self._kelt
 
     @property
@@ -231,13 +281,7 @@ class MemoryTrait(BaseTrait):
 
     @property
     def client(self) -> ChatClient:
-        """Access the LLM router.
-
-        Raises:
-            RuntimeError: If trait not started.
-        """
-        if self._client is None:
-            raise RuntimeError("MemoryTrait not started - ensure agent.start() was called")
+        """Access the LLM router."""
         return self._client
 
     # =========================================================================
@@ -438,9 +482,6 @@ class MemoryTrait(BaseTrait):
         Returns:
             System prompt with facts appended.
         """
-        if self._context is None:
-            raise RuntimeError("MemoryTrait not started")
-
         return self._context.build_system_prompt(
             base_prompt=base_prompt,
             categories=categories,
@@ -468,8 +509,6 @@ class MemoryTrait(BaseTrait):
         Raises:
             ValueError: If embedder not configured.
         """
-        if self._context is None:
-            raise RuntimeError("MemoryTrait not started")
         if self._embedder is None:
             raise ValueError("build_prompt_rag() requires embedder")
 
