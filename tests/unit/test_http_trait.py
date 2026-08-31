@@ -148,6 +148,70 @@ class TestHTTPTrait:
         assert not trait.is_running
 
 
+class TestHTTPTraitOwnership:
+    """Server-ownership contract: trait-built owns; injected does not."""
+
+    @pytest.fixture
+    def mock_agent(self):
+        agent = MagicMock()
+        agent.name = "test-agent"
+        agent.lg = MagicMock()
+        return agent
+
+    def test_trait_built_server_is_owned(self, mock_agent):
+        trait = HTTPTrait(mock_agent)
+        assert trait._owns_server is True
+
+    def test_injected_server_defaults_to_unowned(self, mock_agent):
+        injected = MagicMock()
+        trait = HTTPTrait(mock_agent, server=injected)
+        assert trait._server is injected
+        assert trait._owns_server is False
+
+    def test_on_stop_stops_owned_server(self, mock_agent):
+        mock_server = MagicMock()
+        trait = HTTPTrait(mock_agent, server=mock_server, owns_server=True)
+        trait.on_stop()
+        mock_server.stop.assert_called_once()
+
+    def test_on_stop_leaves_injected_server_alone(self, mock_agent):
+        injected = MagicMock()
+        trait = HTTPTrait(mock_agent, server=injected)
+        trait.on_stop()
+        injected.stop.assert_not_called()
+
+
+class TestHTTPTraitWithServer:
+    """Tests for HTTPTrait.with_server() immutable-view fluent."""
+
+    @pytest.fixture
+    def mock_agent(self):
+        agent = MagicMock()
+        agent.name = "test-agent"
+        agent.lg = MagicMock()
+        return agent
+
+    def test_returns_new_instance(self, mock_agent):
+        original = HTTPTrait(mock_agent)
+        replacement = MagicMock()
+        detached = original.with_server(replacement)
+        assert detached is not original
+        assert detached._server is replacement
+        assert detached._owns_server is False
+
+    def test_original_server_unchanged(self, mock_agent):
+        original = HTTPTrait(mock_agent)
+        original_server = original._server
+        original.with_server(MagicMock())
+        assert original._server is original_server
+
+    def test_not_written_to_registry(self, mock_agent):
+        original = HTTPTrait(mock_agent)
+        original.with_server(MagicMock())
+        mock_agent.add_trait.assert_not_called()
+        mock_agent.replace_trait.assert_not_called()
+
+
 class TestProtocolMessages:
     """Tests for protocol v1 messages."""
 
@@ -569,13 +633,12 @@ class TestHTTPTraitIPCLoop:
         mock_agent.name = "test-agent"
         mock_agent.lg = mock_logger
 
-        trait = HTTPTrait(mock_agent)
-
         # Create mock server with real queues for testing
         mock_server = MagicMock()
         mock_server.request_queue = Queue()
         mock_server.response_queue = Queue()
-        trait._server = mock_server
+
+        trait = HTTPTrait(mock_agent, server=mock_server)
 
         # Patch handle_request to raise an exception
         original_handle = trait.handle_request

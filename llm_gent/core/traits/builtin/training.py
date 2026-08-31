@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import threading
+from pathlib import Path
+from typing import TYPE_CHECKING, Self
 
 from appinfra import DotDict
 from llm_infer.client.types import AdapterInfo
@@ -62,29 +64,77 @@ class TrainingTrait(BaseTrait):
 
         schema = agent.get_trait(TrainingTrait).resolve_schema_for_adapter(adapter_info)
 
+    Dependency ownership: the trait can build its own ``TrainFactory``
+    lazily from ``config.adapters.lora.base_path``, or accept a pre-built
+    one via ``train_factory=`` at construction. Two seams:
+
+    - Lazy default: ``train_factory=None`` at construction. First
+      ``resolve_schema_for_adapter`` call builds a ``TrainFactory`` from
+      config; trait owns it and drops the reference on ``on_stop``.
+    - Direct injection (test / advanced): pass ``train_factory=`` with a
+      pre-built factory; ``owns_train_factory=False`` keeps the reference
+      across ``on_stop``. See ``.with_train_factory()`` for the
+      immutable-view fluent form.
+
+    ``TraitFactory._create_training`` uses the lazy default — the
+    ``TrainFactory`` constructor reads the on-disk manifest registry, so
+    eager construction at agent-start time is deliberately avoided.
+
     Lifecycle:
-        - on_start(): No I/O; TrainFactory is created lazily on first lookup.
-        - on_stop(): Drops the cached TrainFactory.
+        - ``__init__``: takes an optional injected ``TrainFactory``.
+        - ``on_start()``: no I/O; factory is created lazily on first lookup.
+        - ``on_stop()``: drops the cached factory iff this trait owns it.
     """
 
-    def __init__(self, agent: Agent, config: TrainingConfig | None = None) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        config: TrainingConfig | None = None,
+        *,
+        train_factory: TrainFactory | None = None,
+        owns_train_factory: bool = False,
+    ) -> None:
         """Initialize training trait.
 
         Args:
             agent: The agent this trait belongs to.
             config: Training configuration (None = empty DotDict).
+            train_factory: Pre-built ``TrainFactory`` for injection. When None,
+                a factory is built lazily from ``config.adapters.lora.base_path``
+                on first lookup.
+            owns_train_factory: If True, ``on_stop`` drops the factory
+                reference. Set automatically to True when the trait builds a
+                factory lazily itself. Injected factories default to False so
+                the caller retains ownership across stop/start cycles.
         """
         super().__init__(agent)
         self.config = config if config is not None else TrainingConfig()
-        self._train_factory: TrainFactory | None = None
+        self._train_factory: TrainFactory | None = train_factory
+        self._owns_train_factory = owns_train_factory
+        self._factory_lock = threading.Lock()
 
     def on_start(self) -> None:
         """No connections; TrainFactory is created lazily on first lookup."""
         pass
 
     def on_stop(self) -> None:
-        """Drop the cached TrainFactory."""
-        self._train_factory = None
+        """Drop the cached TrainFactory iff this trait owns it."""
+        if self._owns_train_factory:
+            self._train_factory = None
+            self._owns_train_factory = False
+
+    def with_train_factory(self, train_factory: TrainFactory) -> Self:
+        """Return a new trait bound to ``train_factory``, detached from the registry.
+
+        Immutable-view fluent (mirrors ``LLMTrait.with_router``): ``self``
+        stays canonical for ``agent.get_trait(TrainingTrait)`` and its factory
+        is unchanged. ``owns_train_factory`` on the returned trait is False;
+        the caller retains ownership. For a persistent swap, call
+        ``agent.replace_trait(new)``.
+        """
+        return type(self)(
+            self.agent, self.config, train_factory=train_factory, owns_train_factory=False
+        )
 
     @property
     def default_schema(self) -> str:
@@ -92,18 +142,8 @@ class TrainingTrait(BaseTrait):
         schema_config = self.config.get("schema") or {}
         return str(schema_config.get("name") or "public")
 
-    def _get_train_factory(self) -> TrainFactory | None:
-        """Get or create training factory for manifest lookups.
-
-        Returns:
-            TrainFactory if adapters.lora.base_path is configured and exists,
-            None otherwise.
-        """
-        if self._train_factory is not None:
-            return self._train_factory
-
-        from pathlib import Path
-
+    def _resolve_registry_path(self) -> Path | None:
+        """Resolve and validate the adapter registry path from config."""
         adapters_config = self.config.get("adapters") or {}
         lora_config = adapters_config.get("lora") or {}
         base_path = lora_config.get("base_path")
@@ -122,9 +162,24 @@ class TrainingTrait(BaseTrait):
                 extra={"path": str(registry_path)},
             )
             return None
+        return registry_path
 
-        self._train_factory = TrainFactory(self.agent.lg, registry_path)
-        return self._train_factory
+    def _get_train_factory(self) -> TrainFactory | None:
+        """Get or create training factory for manifest lookups."""
+        if self._train_factory is not None:
+            return self._train_factory
+
+        with self._factory_lock:
+            if self._train_factory is not None:
+                return self._train_factory
+
+            registry_path = self._resolve_registry_path()
+            if registry_path is None:
+                return None
+
+            self._train_factory = TrainFactory(self.agent.lg, registry_path)
+            self._owns_train_factory = True
+            return self._train_factory
 
     def resolve_schema_for_adapter(self, adapter_info: AdapterInfo) -> str:
         """Resolve the schema for an adapter by looking up its manifest.

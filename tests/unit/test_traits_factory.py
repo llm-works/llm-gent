@@ -128,6 +128,29 @@ class TestCreateLLMTrait:
             assert trait._owns_router is True
 
 
+@pytest.fixture
+def mock_memory_deps():
+    """Patch external clients built by create_memory_trait; return kelt mock for assertions."""
+    with (
+        patch("appinfra.db.pg.PG") as mock_pg,
+        patch("llm_gent.core.traits.factory.Database") as mock_database,
+        patch("llm_infer.client.Factory") as mock_client_factory,
+        patch("llm_gent.core.traits.builtin.memory.KeltClient") as mock_kelt,
+        patch("llm_gent.core.traits.builtin.memory.ContextBuilder"),
+    ):
+        # MagicMock intercepts `.assertions` for its assertion helpers; assign explicitly.
+        kelt_instance = MagicMock()
+        kelt_instance.atomic = MagicMock()
+        kelt_instance.atomic.assertions = MagicMock()
+        mock_kelt.return_value = kelt_instance
+        yield {
+            "pg": mock_pg,
+            "database": mock_database,
+            "client_factory": mock_client_factory,
+            "kelt": mock_kelt,
+        }
+
+
 class TestCreateMemoryTrait:
     """Tests for TraitFactory.create_memory_trait()."""
 
@@ -140,19 +163,46 @@ class TestCreateMemoryTrait:
         with pytest.raises(ConfigError, match="missing required 'db' field"):
             factory.create_memory_trait(mock_agent, mock_agent.identity, config)
 
-    def test_valid_config(self, factory, mock_agent):
+    def test_valid_config(self, factory, mock_agent, mock_memory_deps):
         config = DotDict(
             {
                 "db": {"url": "postgresql://localhost/test"},
                 "embedder_url": "http://localhost:9000",
             }
         )
-        trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
-        assert isinstance(trait, MemoryTrait)
+        chat_client = MagicMock()
+        embedder = MagicMock()
+        mock_memory_deps["client_factory"].return_value.from_config.return_value = chat_client
+        mock_memory_deps["client_factory"].return_value.embeddings.return_value = embedder
 
-    def test_defaults_applied(self, factory, mock_agent):
-        config = DotDict({"db": {"url": "postgresql://localhost/test"}})
         trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+
+        assert isinstance(trait, MemoryTrait)
+        assert trait._client is chat_client
+        assert trait._embedder is embedder
+        assert trait._owns_chat_client is True
+        assert trait._owns_embedder is True
+        mock_memory_deps["pg"].assert_called_once_with(mock_agent.lg, config["db"])
+        mock_memory_deps["database"].assert_called_once_with(
+            mock_agent.lg, mock_memory_deps["pg"].return_value
+        )
+
+    def test_no_embedder_when_url_missing(self, factory, mock_agent, mock_memory_deps):
+        config = DotDict({"db": {"url": "postgresql://localhost/test"}})
+        mock_memory_deps["client_factory"].return_value.from_config.return_value = MagicMock()
+
+        trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+
+        assert trait._embedder is None
+        assert trait._owns_embedder is False
+        mock_memory_deps["client_factory"].return_value.embeddings.assert_not_called()
+
+    def test_defaults_applied(self, factory, mock_agent, mock_memory_deps):
+        config = DotDict({"db": {"url": "postgresql://localhost/test"}})
+        mock_memory_deps["client_factory"].return_value.from_config.return_value = MagicMock()
+
+        trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+
         assert trait.config.embedder_model == "default"
         assert trait.config.embedder_timeout == 30.0
 

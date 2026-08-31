@@ -1,7 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Trait factory for creating Trait instances from configuration."""
+"""Trait factory for creating Trait instances from configuration.
+
+Dependency-inversion pattern
+----------------------------
+
+Traits receive their external dependencies through the constructor; this
+factory owns the construction of those dependencies. Traits import no
+resource factory of their own.
+
+Concretely:
+
+- ``_create_llm`` builds the ``ChatClient`` router (via
+  ``llm_infer.client.Factory``) and passes it to ``LLMTrait`` with
+  ``owns_router=True``.
+- ``_create_memory`` builds ``PG`` + ``Database`` + ``ChatClient`` +
+  ``EmbeddingClient`` and passes them to ``MemoryTrait`` with
+  ``owns_chat_client=True`` and ``owns_embedder=True`` (when configured).
+- ``_create_training`` leaves ``TrainFactory`` unbuilt — the trait builds
+  it lazily on first lookup to preserve the "no I/O in on_start" contract.
+
+The trait's ``on_stop`` closes each factory-built resource iff its
+``owns_*`` flag is True; injected resources keep their lifecycle with
+whoever passed them in.
+
+Runtime override
+----------------
+
+Each dependency-owning trait exposes per-resource fluent overrides
+(``.with_router``, ``.with_chat_client``, ``.with_embedder``,
+``.with_database``, ``.with_train_factory``) that return a new instance
+bound to the injected resource, detached from the agent's trait registry
+and with ``owns_*=False``. Use ``agent.replace_trait(new)`` for a
+persistent swap.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +42,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from appinfra import DotDict
+from llm_infer.client import ChatClient, EmbeddingClient
+from llm_kelt.core import Database
 
 
 if TYPE_CHECKING:
@@ -257,7 +292,12 @@ class TraitFactory:
     def create_memory_trait(
         self, agent: Agent, identity: Identity | None, memory_config: MemoryConfig | None
     ) -> MemoryTrait:
-        """Create MemoryTrait with agent-specific identity.
+        """Create MemoryTrait with factory-owned database, chat client, and embedder.
+
+        Builds the three external clients here (owning their lifecycle) and
+        injects them into ``MemoryTrait``. The trait itself imports no factory.
+        See ``MemoryTrait`` docstring for the two seams (config-time build vs
+        direct injection via ``.with_*()``).
 
         Args:
             agent: Agent instance that will own this trait.
@@ -265,21 +305,49 @@ class TraitFactory:
             memory_config: Memory configuration dict (db, embedder_url, etc.).
 
         Returns:
-            Configured MemoryTrait instance.
+            Configured MemoryTrait with factory-owned chat client and embedder
+            (``owns_chat_client=True``, ``owns_embedder=True`` when configured).
 
         Raises:
             ConfigError: If memory_config is None or missing required fields.
         """
+        from .builtin.memory import MemoryTrait
+
+        config = self._build_memory_config(identity, memory_config)
+        database = self._build_memory_database(agent, config)
+        chat_client, embedder = self._build_memory_clients(agent, config)
+
+        try:
+            return MemoryTrait(
+                agent,
+                config,
+                database=database,
+                chat_client=chat_client,
+                embedder=embedder,
+                owns_chat_client=True,
+                owns_embedder=embedder is not None,
+            )
+        except Exception:
+            chat_client.close()
+            if embedder is not None:
+                embedder.close()
+            raise
+
+    def _build_memory_config(
+        self, identity: Identity | None, memory_config: MemoryConfig | None
+    ) -> MemoryConfig:
+        """Validate and normalize the caller's memory config."""
         from ..errors import ConfigError
-        from .builtin.memory import MemoryConfig, MemoryTrait
+        from .builtin.memory import MemoryConfig
 
         if not memory_config:
             raise ConfigError("Memory configuration required but not provided")
-
         if "db" not in memory_config:
             raise ConfigError("Memory configuration missing required 'db' field")
+        if identity is None:
+            raise ConfigError("Memory configuration requires identity")
 
-        config = MemoryConfig(
+        return MemoryConfig(
             identity=identity,
             schema=memory_config.get("schema"),
             llm=memory_config.get("llm", {}),
@@ -289,7 +357,34 @@ class TraitFactory:
             embedder_timeout=memory_config.get("embedder_timeout", 30.0),
             training=memory_config.get("training"),
         )
-        return MemoryTrait(agent, config)
+
+    def _build_memory_database(self, agent: Agent, config: MemoryConfig) -> Database:
+        """Build the kelt Database wrapper from the memory config."""
+        from appinfra.db.pg import PG
+
+        return Database(agent.lg, PG(agent.lg, config.db))
+
+    def _build_memory_clients(
+        self, agent: Agent, config: MemoryConfig
+    ) -> tuple[ChatClient, EmbeddingClient | None]:
+        """Build the chat client and (optional) embedder from the memory config."""
+        from llm_infer.client import Factory as LLMClientFactory
+
+        client_factory = LLMClientFactory(agent.lg)
+        chat_client = client_factory.from_config(config.get("llm") or DotDict())
+
+        embedder = None
+        if config.embedder_url:
+            try:
+                embedder = client_factory.embeddings(
+                    base_url=config.embedder_url,
+                    model=config.embedder_model,
+                    timeout=config.embedder_timeout,
+                )
+            except Exception:
+                chat_client.close()
+                raise
+        return chat_client, embedder
 
     def create_training_trait(
         self, agent: Agent, source_config: dict[str, Any] | None

@@ -13,7 +13,7 @@ or add SAIATrait for structured operations, or use both.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from appinfra.log import Logger
 from llm_saia import SAIA, Backend, TaskResult, ToolDef
@@ -56,6 +56,14 @@ class SAIATrait(BaseTrait):
     - extract(): Pull structured data from content
     - And more...
 
+    Dependency ownership: ``backend`` is always injected at construction
+    (caller owns its lifecycle). The ``SAIA`` instance is built by the trait
+    in ``on_start`` via ``SAIA.builder`` — the trait owns it and drops the
+    reference on ``on_stop``. Advanced callers can inject a pre-built
+    ``SAIA`` via ``saia=`` at construction; ``owns_saia=False`` keeps the
+    reference across stop/start. See ``.with_saia()`` for the immutable-view
+    fluent form.
+
     Example:
         from llm_saia.backends.anthropic import AnthropicBackend
 
@@ -74,23 +82,41 @@ class SAIATrait(BaseTrait):
         verified = await saia_trait.saia.verify(output, "is valid JSON")
     """
 
-    def __init__(self, agent: Agent, backend: Backend, config: SAIAConfig | None = None) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        backend: Backend,
+        config: SAIAConfig | None = None,
+        *,
+        saia: SAIA | None = None,
+        owns_saia: bool = False,
+    ) -> None:
         """Initialize SAIA trait.
 
         Args:
             agent: The agent this trait belongs to.
-            backend: SAIA backend instance.
+            backend: SAIA backend instance (caller owns lifecycle).
             config: SAIA configuration.
+            saia: Pre-built SAIA instance for injection. When None, on_start
+                builds one from ``backend`` + ``config`` via ``SAIA.builder``.
+            owns_saia: If True, ``on_stop`` drops the instance reference. Set
+                automatically to True when the trait builds SAIA in on_start.
+                Injected instances default to False so the caller retains
+                ownership across stop/start cycles.
         """
         super().__init__(agent)
         self.backend = backend
         self.config = config or SAIAConfig()
-        self._saia: SAIA | None = None
+        self._saia: SAIA | None = saia
+        self._owns_saia = owns_saia
 
     def on_start(self) -> None:
-        """Build SAIA instance on agent start."""
-        tools, executor = self._get_tools_and_executor()
+        """Build SAIA instance from backend + config, unless already injected."""
+        if self._saia is not None:
+            self.agent.lg.debug("SAIA trait started with injected instance")
+            return
 
+        tools, executor = self._get_tools_and_executor()
         self.agent.lg.debug(
             "SAIA tools configured",
             extra={
@@ -100,6 +126,12 @@ class SAIATrait(BaseTrait):
             },
         )
 
+        self._saia = self._build_saia(tools, executor)
+        self._owns_saia = True
+        self.agent.lg.debug("SAIA trait started")
+
+    def _build_saia(self, tools: list[ToolDef], executor: Any) -> SAIA:
+        """Assemble a SAIA instance from ``self.backend`` + ``self.config``."""
         builder = (
             SAIA.builder()
             .backend(self.backend)
@@ -113,15 +145,26 @@ class SAIATrait(BaseTrait):
             builder = builder.system(self.config.system_prompt)
         if self.config.terminal_tool:
             builder = builder.terminal_tool(self.config.terminal_tool)
-
-        self._saia = builder.build()
-        self.agent.lg.debug("SAIA trait started")
+        return builder.build()
 
     def on_stop(self) -> None:
-        """Clean up on agent stop."""
+        """Drop the SAIA reference iff this trait owns it."""
         # Backend cleanup handled by caller (they own the backend)
-        self._saia = None
+        if self._owns_saia:
+            self._saia = None
+            self._owns_saia = False
         self.agent.lg.debug("SAIA trait stopped")
+
+    def with_saia(self, saia: SAIA) -> Self:
+        """Return a new trait bound to ``saia``, detached from the registry.
+
+        Immutable-view fluent (mirrors ``LLMTrait.with_router``): ``self``
+        stays canonical for ``agent.get_trait(SAIATrait)`` and its instance is
+        unchanged. ``owns_saia`` on the returned trait is False; the caller
+        retains ownership. For a persistent swap, call
+        ``agent.replace_trait(new)``.
+        """
+        return type(self)(self.agent, self.backend, self.config, saia=saia, owns_saia=False)
 
     @property
     def saia(self) -> SAIA:
