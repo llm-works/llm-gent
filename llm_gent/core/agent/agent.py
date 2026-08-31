@@ -190,48 +190,59 @@ class Agent:
                 f"add it with agent.add_trait({trait_type.__name__}(...))"
             ) from e
 
-    def replace_trait(self, trait: BaseTrait) -> BaseTrait | None:
+    def replace_trait(self, trait: BaseTrait) -> None:
         """Register ``trait``, replacing any existing entry of the same type.
 
-        Registry-level swap. If the agent is started, the new trait's
-        ``on_start`` is called (mirroring :meth:`add_trait`); on failure the
-        previous trait is restored to the registry and the exception
-        re-raises.
+        Registry membership implies agent-managed lifecycle: when the agent
+        is started, the new trait's ``on_start`` is called and the ejected
+        trait's ``on_stop`` is called automatically. If the new trait's
+        ``on_start`` raises, the ejected trait is restored to the registry
+        (and not stopped) before the exception propagates.
 
-        The returned previous trait's lifecycle is the caller's to manage:
-        call ``old.on_stop()`` to release resources it owns (a factory-built
-        router with ``owns_router=True``), or hold the reference if you plan
-        to swap back later. This method does not auto-stop the previous
-        trait — that would silently close resources callers may still want.
+        Ordering is start-new-before-stop-old so a failing new-``on_start``
+        can roll back cleanly without having already closed the old trait's
+        resources.
+
+        The caller's live references to the ejected trait become stale after
+        this call — its ``on_stop`` has fired, and for ownership-carrying
+        traits like :class:`LLMTrait` with ``owns_router=True`` its
+        resources are closed. Re-fetch via :meth:`get_trait` or
+        :meth:`require_trait` to obtain a usable reference.
 
         Typical pairing with ``LLMTrait.with_router``::
 
-            new = agent.require_trait(LLMTrait).with_router(other_router)
-            agent.replace_trait(new)  # persistent swap
-            # ``new`` was built with owns_router=False; caller owns other_router.
+            agent.replace_trait(
+                agent.require_trait(LLMTrait).with_router(other_router)
+            )
+            llm = agent.require_trait(LLMTrait)  # reload
 
         Args:
             trait: The trait instance to register or use as a replacement.
-
-        Returns:
-            The previously registered trait of the same type, or ``None`` if
-            none was registered.
         """
         trait_type = type(trait)
         old = self._traits.get(trait_type)
         self._traits.replace(trait)
 
-        if self._started:
-            try:
-                trait.on_start()
-            except Exception:
-                if old is not None:
-                    self._traits.replace(old)
-                else:
-                    self._traits.unregister(trait_type)
-                raise
+        if not self._started:
+            return
 
-        return old
+        try:
+            trait.on_start()
+        except Exception:
+            if old is not None:
+                self._traits.replace(old)
+            else:
+                self._traits.unregister(trait_type)
+            raise
+
+        if old is not None:
+            try:
+                old.on_stop()
+            except Exception as e:
+                self._lg.warning(
+                    "ejected trait on_stop failed",
+                    extra={"exception": e, "trait": trait_type.__name__},
+                )
 
     # =========================================================================
     # Trait Lifecycle Helpers
