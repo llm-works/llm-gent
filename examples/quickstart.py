@@ -3,19 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Quickstart for llm-gent 0.3.1.
+"""Quickstart for llm-gent.
 
-Demonstrates the working shape of the shipped API:
+Tutorial-shape agent construction:
 
-- Logger via ``appinfra.log.create_lg``.
-- Agent as a small concrete subclass (the public ``Agent`` class is abstract
-  and ships without a ready-to-instantiate default at 0.3.x).
-- Config as a plain dict with a nested identity block
-  (``{"identity": {"name": ...}}``) — the exported ``Config`` model does not
-  carry the identity contract the base Agent reads internally.
-- System message injected manually into the message list — ``DirectiveTrait``
-  does not auto-inject its directive into ``LLMTrait.complete()`` calls yet.
-- Dict-form messages passed to ``LLMTrait.complete()``.
+- :class:`AgentFactory` takes a bare :class:`~appinfra.log.Logger`; no
+  :class:`~llm_gent.core.platform.PlatformContext` boilerplate.
+- :meth:`AgentFactory.from_config` builds and returns a plain concrete
+  :class:`Agent` with traits attached — no subclass required.
+- Config is a plain dict with a nested identity block plus per-trait keys and
+  ``traits.required`` selecting which traits to attach.
+- ``DirectiveTrait`` auto-prepends its directive as a system message on
+  ``LLMTrait.complete()`` — no manual wiring.
 
 Set ``LLM_GENT_SMOKE=1`` to swap in a stub router that returns a canned
 response without contacting a real backend — used by CI's wheel-smoke job.
@@ -26,12 +25,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from appinfra import DotDict
 from appinfra.log import create_lg
 from llm_infer.client import ChatResponse
 
-from llm_gent import Agent, LLMTrait
-from llm_gent.core.agent.types import ExecutionResult
+from llm_gent import AgentFactory, LLMTrait
 
 
 SMOKE = os.getenv("LLM_GENT_SMOKE") == "1"
@@ -47,75 +44,45 @@ class _StubRouter:
         pass
 
 
-class HelloAgent(Agent):
-    """Minimal concrete Agent.
-
-    The public ``Agent`` class is abstract in 0.3.x. Real applications give the
-    lifecycle and execution methods meaningful bodies; this quickstart calls
-    ``LLMTrait.complete()`` directly, so the abstract methods are trivial stubs.
-    """
-
-    def start(self) -> None:
-        self._start_traits()
-
-    def stop(self) -> None:
-        self._stop_traits()
-
-    def run_once(self) -> ExecutionResult:
-        return ExecutionResult(success=True, content="")
-
-    def ask(self, question: str) -> str:
-        return ""
-
-    def record_feedback(self, message: str) -> None:
-        pass
-
-    def get_recent_results(self, limit: int = 10) -> list[ExecutionResult]:
-        return []
-
-
-def _build_llm_config() -> DotDict:
+def _llm_config() -> dict[str, Any]:
     """Point LLMTrait at a local OpenAI-compatible endpoint by default.
 
     Override the endpoint and model with ``LLM_GENT_BASE_URL`` and
     ``LLM_GENT_MODEL`` env vars; the openai_compatible backend picks up
     ``OPENAI_API_KEY`` from the environment automatically.
     """
-    return DotDict(
-        {
-            "default": "local",
-            "backends": {
-                "local": {
-                    "type": "openai_compatible",
-                    "base_url": os.getenv("LLM_GENT_BASE_URL", "http://localhost:8000/v1"),
-                    "model": os.getenv("LLM_GENT_MODEL", "default"),
-                }
-            },
-        }
-    )
+    return {
+        "default": "local",
+        "backends": {
+            "local": {
+                "type": "openai_compatible",
+                "base_url": os.getenv("LLM_GENT_BASE_URL", "http://localhost:8000/v1"),
+                "model": os.getenv("LLM_GENT_MODEL", "default"),
+            }
+        },
+    }
 
 
 def main() -> None:
     lg = create_lg("hello-agent", "info")
 
-    # Agent reads config.identity.name internally.
-    agent = HelloAgent(lg, {"identity": {"name": "hello-agent"}})
-    agent.add_trait(LLMTrait(agent, _build_llm_config()))
+    agent = AgentFactory(lg).from_config(
+        {
+            "identity": {"name": "hello-agent"},
+            "llm": _llm_config(),
+            "directive": "You are a concise assistant.",
+            "traits": {"required": ["llm", "directive"]},
+        }
+    )
     agent.start()
 
     llm = agent.require_trait(LLMTrait)
     if SMOKE:
-        # Duck-typed stub — matches the .chat() surface LLMTrait actually calls.
         if llm._router is not None:
-            llm._router.close()  # Close real client before replacing
+            llm._router.close()
         llm._router = _StubRouter()  # type: ignore[assignment]
 
-    result = llm.complete(
-        [
-            {"role": "system", "content": "You are a concise assistant."},
-            {"role": "user", "content": "Say hello."},
-        ]
-    )
+    result = llm.complete([{"role": "user", "content": "Say hello."}])
     print(f"agent said: {result.content}")
 
     agent.stop()

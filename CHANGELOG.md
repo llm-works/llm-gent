@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** exported `Config` (`llm_gent.Config`, `llm_gent.core.Config`,
+  `llm_gent.core.agent.Config`). Its flat shape was incompatible with
+  `Agent.__init__`, which reads a nested `identity.name` mapping. Use
+  `AgentFactory(lg).from_config({...})` with the nested-dict schema instead
+  (see `examples/quickstart.py`).
+
+### Changed
+
+- `examples/quickstart.py` rewritten around `AgentFactory.from_config` and
+  the auto-injected `DirectiveTrait` prompt; no subclass, no manual system
+  message.
+
 ## [0.3.1] - 2026-08-30
 
 ### Added

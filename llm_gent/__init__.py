@@ -10,7 +10,7 @@ from importlib.metadata import PackageNotFoundError, version
 from llm_kelt.core.types import ScoredEntity
 from llm_kelt.memory.atomic import Fact
 
-from .core.agent import Agent, Config, Identity
+from .core.agent import Agent, AgentFactory, Identity
 from .core.errors import AgentError, ConfigError
 from .core.llm import (
     CompletionResult,
@@ -72,12 +72,12 @@ except PackageNotFoundError:
 __all__ = [
     # Agents
     "Agent",
-    "Config",
     "Identity",
     # Errors
     "AgentError",
     "ConfigError",
     # Factories
+    "AgentFactory",
     "ToolFactory",
     "TraitFactory",
     # Tools
