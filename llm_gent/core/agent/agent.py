@@ -229,6 +229,7 @@ class Agent:
         try:
             trait.on_start()
         except Exception:
+            self._safe_stop_trait(trait, "failed trait cleanup during rollback")
             if old is not None:
                 self._traits.replace(old)
             else:
@@ -236,17 +237,18 @@ class Agent:
             raise
 
         if old is not None:
-            try:
-                old.on_stop()
-            except Exception as e:
-                self._lg.warning(
-                    "ejected trait on_stop failed",
-                    extra={"exception": e, "trait": trait_type.__name__},
-                )
+            self._safe_stop_trait(old, "ejected trait on_stop failed")
 
     # =========================================================================
     # Trait Lifecycle Helpers
     # =========================================================================
+
+    def _safe_stop_trait(self, trait: BaseTrait, context: str) -> None:
+        """Attempt on_stop, logging but swallowing any exception."""
+        try:
+            trait.on_stop()
+        except Exception as e:
+            self._lg.warning(context, extra={"exception": e, "trait": type(trait).__name__})
 
     def _start_traits(self) -> None:
         """Start all attached traits; flip ``_started`` only on success."""

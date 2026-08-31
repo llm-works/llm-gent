@@ -321,14 +321,14 @@ class LLMTrait(BaseTrait):
         raises ``ValueError`` — silent misplacement would produce two system
         messages after this merge and adapter-dependent behavior downstream.
         """
-        directive_trait = self.agent.get_trait(DirectiveTrait)
-        if directive_trait is None:
-            return messages
-
         if any(m.role == "system" for m in messages[1:]):
             raise ValueError(
                 "system message must be at index 0; found role='system' at a non-zero position"
             )
+
+        directive_trait = self.agent.get_trait(DirectiveTrait)
+        if directive_trait is None:
+            return messages
 
         directive_prompt = directive_trait.directive.prompt
         if messages and messages[0].role == "system":
