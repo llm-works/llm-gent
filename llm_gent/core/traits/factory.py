@@ -371,10 +371,7 @@ class TraitFactory:
         """Build the kelt Database wrapper from the memory config."""
         from appinfra.db.pg import PG
 
-        self._lg.trace(
-            "building memory database...",
-            extra={"agent": agent.name, "db_url": config.db.get("url")},
-        )
+        self._lg.trace("building memory database...", extra={"agent": agent.name})
         database = Database(agent.lg, PG(agent.lg, config.db))
         self._lg.trace("memory database built", extra={"agent": agent.name})
         return database
