@@ -194,23 +194,31 @@ class TraitFactory:
     def create_llm_trait(self, agent: Agent, llm_config: LLMConfig | None) -> LLMTrait:
         """Create LLMTrait with LLM backend configuration.
 
+        Builds the ``ChatClient`` here (owning its lifecycle) and injects it
+        into ``LLMTrait``. The trait itself imports no factory. See
+        ``LLMTrait`` docstring for the two seams (config-time build vs
+        direct injection).
+
         Args:
             agent: Agent instance that will own this trait.
             llm_config: LLM backend configuration dict.
 
         Returns:
-            Configured LLMTrait instance.
+            Configured LLMTrait instance with a factory-owned router.
 
         Raises:
             ConfigError: If llm_config is None or invalid.
         """
+        from llm_infer.client import Factory as LLMClientFactory
+
         from ..errors import ConfigError
         from .builtin.llm import LLMTrait
 
         if not llm_config:
             raise ConfigError("LLM configuration required but not provided")
 
-        return LLMTrait(agent, llm_config)
+        router = LLMClientFactory(agent.lg).from_config(llm_config)
+        return LLMTrait(agent, router, llm_config, owns_router=True)
 
     def create_directive_trait(
         self, agent: Agent, config: str | dict[str, Any] | Directive | None

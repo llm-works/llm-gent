@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `LLMTrait.__init__` now takes `router: ChatClient` as a
+  required argument; router construction moves from `on_start` into
+  `TraitFactory.create_llm_trait` (`owns_router=True` for factory-built
+  routers so they close on stop). `AgentFactory.from_config` unchanged.
 - `README.md` Quick Start, `docs/index.md` Lifecycle, and
   `examples/quickstart.py` rewritten around `AgentFactory.from_config` and
   the auto-injected `DirectiveTrait` prompt; no subclass, no manual system

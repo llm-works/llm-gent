@@ -213,9 +213,7 @@ class TestLLMTraitStructuredOutput:
         """Create LLMTrait with mocked router (no DirectiveTrait attached)."""
         agent = MagicMock()
         agent.get_trait.return_value = None
-        trait = LLMTrait(agent, {})
-        trait._router = MagicMock()
-        return trait
+        return LLMTrait(agent, MagicMock(), {})
 
     def test_structured_output_basic(self, trait):
         """Test successful structured output parsing."""
@@ -390,9 +388,7 @@ class TestLLMTraitMessageFormat:
         """Create LLMTrait with mocked router (no DirectiveTrait attached)."""
         agent = MagicMock()
         agent.get_trait.return_value = None
-        trait = LLMTrait(agent, {})
-        trait._router = MagicMock()
-        return trait
+        return LLMTrait(agent, MagicMock(), {})
 
     @staticmethod
     def _canned_response():
@@ -478,10 +474,9 @@ class TestLLMTraitDirectiveInjection:
         else:
             directive_trait = DirectiveTrait(agent, directive)
             agent.get_trait.side_effect = lambda t: directive_trait if t is DirectiveTrait else None
-        trait = LLMTrait(agent, {})
-        trait._router = MagicMock()
-        trait._router.chat.return_value = self._canned_response()
-        return trait
+        router = MagicMock()
+        router.chat.return_value = self._canned_response()
+        return LLMTrait(agent, router, {})
 
     def test_directive_injected_when_no_system_message(self):
         trait = self._make_trait(directive=self.DIRECTIVE)
@@ -606,61 +601,59 @@ class TestResolveLLMDefaults:
 
 
 class TestLLMTraitLifecycle:
-    """Tests for on_start/on_stop."""
+    """Tests for on_start/on_stop.
 
-    def test_on_start_creates_router(self):
-        from unittest.mock import patch
+    Router construction is TraitFactory's job (see TraitFactory tests);
+    LLMTrait receives an already-built router at __init__.
+    """
 
+    def test_on_start_resolves_defaults(self):
         from appinfra import DotDict
 
-        config = DotDict({"default": "test", "backends": {"test": {"type": "openai_compatible"}}})
-        trait = LLMTrait(MagicMock(), config)
+        config = DotDict({"model": "qwen2.5", "temperature": 0.3, "adapter": "lora-v1"})
+        trait = LLMTrait(MagicMock(), MagicMock(), config)
 
-        with patch("llm_gent.core.traits.builtin.llm.LLMClientFactory") as mock_factory:
-            mock_client = MagicMock()
-            mock_factory.return_value.from_config.return_value = mock_client
-            trait.on_start()
+        trait.on_start()
 
-            assert trait._router is mock_client
+        assert trait._defaults["model"] == "qwen2.5"
+        assert trait._defaults["temperature"] == 0.3
+        assert trait._defaults["adapter"] == "lora-v1"
 
-    def test_on_stop_closes_router(self):
-        trait = LLMTrait(MagicMock(), {})
+    def test_on_stop_closes_owned_router(self):
         router = MagicMock()
-        trait._router = router
+        trait = LLMTrait(MagicMock(), router, {}, owns_router=True)
+
         trait.on_stop()
 
         router.close.assert_called_once()
-        assert trait._router is None
 
-    def test_on_stop_safe_when_no_router(self):
-        trait = LLMTrait(MagicMock(), {})
-        trait.on_stop()  # Should not raise
+    def test_on_stop_leaves_injected_router(self):
+        router = MagicMock()
+        trait = LLMTrait(MagicMock(), router, {}, owns_router=False)
+
+        trait.on_stop()
+
+        router.close.assert_not_called()
 
 
 class TestLLMTraitRouterProperty:
     """Tests for router property."""
 
-    def test_raises_when_not_started(self):
-        trait = LLMTrait(MagicMock(), {})
-        with pytest.raises(RuntimeError, match="not started"):
-            _ = trait.router
-
-    def test_returns_client_when_started(self):
-        trait = LLMTrait(MagicMock(), {})
-        mock_client = MagicMock()
-        trait._router = mock_client
-        assert trait.router is mock_client
+    def test_returns_injected_router(self):
+        router = MagicMock()
+        trait = LLMTrait(MagicMock(), router, {})
+        assert trait.router is router
 
 
 class TestLLMTraitAdapterProperty:
     """Tests for adapter property."""
 
     def test_adapter_none_by_default(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         assert trait.adapter is None
 
     def test_adapter_from_defaults(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         trait._defaults = {"adapter": "lora-v1"}
         assert trait.adapter == "lora-v1"
 
@@ -669,7 +662,7 @@ class TestMessagesToDicts:
     """Tests for _messages_to_dicts."""
 
     def test_basic_messages(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         messages = [
             Message(role="system", content="You are helpful."),
             Message(role="user", content="Hi"),
@@ -679,19 +672,19 @@ class TestMessagesToDicts:
         assert result[0] == {"role": "system", "content": "You are helpful."}
 
     def test_message_with_tool_calls(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         messages = [Message(role="assistant", content="", tool_calls=[{"id": "tc1"}])]
         result = trait._messages_to_dicts(messages)
         assert result[0]["tool_calls"] == [{"id": "tc1"}]
 
     def test_message_with_tool_call_id(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         messages = [Message(role="tool", content="result", tool_call_id="tc1")]
         result = trait._messages_to_dicts(messages)
         assert result[0]["tool_call_id"] == "tc1"
 
     def test_omits_none_fields(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         messages = [Message(role="user", content="Hi")]
         result = trait._messages_to_dicts(messages)
         assert "tool_calls" not in result[0]
@@ -702,19 +695,19 @@ class TestExtractTokens:
     """Tests for _extract_tokens."""
 
     def test_no_usage(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         response = MagicMock()
         response.usage = None
         assert trait._extract_tokens(response) == 0
 
     def test_total_tokens(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         response = MagicMock()
         response.usage.total_tokens = 150
         assert trait._extract_tokens(response) == 150
 
     def test_fallback_prompt_plus_completion(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         response = MagicMock()
         response.usage.total_tokens = 0
         response.usage.prompt_tokens = 80
@@ -722,7 +715,7 @@ class TestExtractTokens:
         assert trait._extract_tokens(response) == 120
 
     def test_fallback_with_none_components(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         response = MagicMock()
         response.usage.total_tokens = 0
         response.usage.prompt_tokens = None
@@ -734,20 +727,20 @@ class TestCheckAdapterFallback:
     """Tests for _check_adapter_fallback."""
 
     def test_no_adapter_noop(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         response = MagicMock()
         response.adapter = None
         trait._check_adapter_fallback(response)  # Should not raise
 
     def test_no_fallback_noop(self):
-        trait = LLMTrait(MagicMock(), {})
+        trait = LLMTrait(MagicMock(), MagicMock(), {})
         response = MagicMock()
         response.adapter.fallback = False
         trait._check_adapter_fallback(response)  # Should not raise
 
     def test_first_fallback_warns(self):
         agent = MagicMock()
-        trait = LLMTrait(agent, {})
+        trait = LLMTrait(agent, MagicMock(), {})
         # Ensure enough elapsed time even on fresh CI containers where monotonic() starts near 0
         trait._last_adapter_fallback_warning = -600.0
 
@@ -761,7 +754,7 @@ class TestCheckAdapterFallback:
         import time
 
         agent = MagicMock()
-        trait = LLMTrait(agent, {})
+        trait = LLMTrait(agent, MagicMock(), {})
         trait._last_adapter_fallback_warning = time.monotonic()  # Just warned
 
         response = MagicMock()

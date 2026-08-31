@@ -135,11 +135,11 @@ class TestAgentTraits:
         from llm_gent.core.errors import DuplicateTraitError
         from llm_gent.core.traits.builtin.llm import LLMTrait
 
-        trait1 = LLMTrait(agent, {})
+        trait1 = LLMTrait(agent, MagicMock(), {})
         agent.add_trait(trait1)
 
         with pytest.raises(DuplicateTraitError, match="already registered"):
-            trait2 = LLMTrait(agent, {})
+            trait2 = LLMTrait(agent, MagicMock(), {})
             agent.add_trait(trait2)
 
     def test_get_trait(self, agent):

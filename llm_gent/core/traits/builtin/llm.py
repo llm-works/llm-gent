@@ -11,7 +11,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from llm_infer.client import ChatClient, ChatResponse
-from llm_infer.client import Factory as LLMClientFactory
 from pydantic import BaseModel, ValidationError
 
 from ...llm.backend import StructuredOutputError
@@ -88,70 +87,68 @@ def _resolve_llm_defaults(config: LLMConfig) -> dict[str, Any]:
 class LLMTrait(BaseTrait):
     """LLM capability trait.
 
-    Wraps llm_infer.client.ChatClient to provide completion capability
-    to agents with multi-backend support. Uses sync API for compatibility
-    with current agent architecture.
+    Wraps ``llm_infer.client.ChatClient`` to provide completion capability
+    to agents with multi-backend support. The router is injected at
+    construction: ``TraitFactory.create_llm_trait`` builds one from config,
+    or tests / smoke paths can pass a stub directly.
 
-    Example:
-        from llm_gent.core.traits import LLMTrait
+    Dependency ownership: the trait imports no factory. Router construction
+    lives in ``TraitFactory._create_llm``. Two seams:
 
-        llm_config = {
-            "default": "local",
-            "backends": {
-                "local": {"type": "openai_compatible", "base_url": "...", "model": "..."},
-                "cloud": {"type": "anthropic", "model": "claude-sonnet-4-20250514"},
-            }
-        }
-        agent = Agent(lg, config)
-        agent.add_trait(LLMTrait(agent, llm_config))
-
-        # Use default backend
-        result = llm_trait.complete(messages)
-
-        # Route to specific backend
-        result = llm_trait.complete(messages, backend="cloud")
-
-        # Model-based routing (automatic)
-        result = llm_trait.complete(messages, model="claude-sonnet-4-20250514")
+    - Config-time (test / smoke / declarative): ``TraitFactory`` builds the
+      router from ``llm_config``. Factory-built routers set
+      ``owns_router=True`` so the trait closes them on ``on_stop``.
+    - Direct injection (advanced): pass ``router=`` yourself with
+      ``owns_router=False``; caller retains close responsibility. See
+      ``.with_router()`` for the immutable-view fluent form.
 
     Lifecycle:
-        - on_start(): Creates ChatClient
-        - on_stop(): Closes ChatClient
+        - ``__init__``: takes an already-built router.
+        - ``on_start()``: resolves defaults from config (no router build).
+        - ``on_stop()``: closes the router iff ``owns_router`` is True.
     """
 
-    def __init__(self, agent: Agent, config: LLMConfig | None = None) -> None:
-        """Initialize LLM trait.
+    def __init__(
+        self,
+        agent: Agent,
+        router: ChatClient,
+        config: LLMConfig | None = None,
+        *,
+        owns_router: bool = False,
+    ) -> None:
+        """Initialize LLM trait with an injected router.
 
         Args:
             agent: The agent this trait belongs to.
-            config: LLM configuration dict.
+            router: Live ``ChatClient``. Built by ``TraitFactory`` in the
+                standard path; may be a stub for tests / smoke.
+            config: LLM configuration dict. Used only for defaults
+                (model / temperature / adapter) — construction of the
+                router itself is the factory's job.
+            owns_router: If True, ``on_stop`` closes the router. Set by
+                ``TraitFactory`` for factory-built routers. Callers that
+                inject their own router keep this False and clean up
+                themselves.
         """
         super().__init__(agent)
         self.config: LLMConfig = config or DotDict()
-        self._router: ChatClient | None = None
+        self._router: ChatClient = router
+        self._owns_router = owns_router
         self._defaults: dict[str, Any] = {}
         self._last_adapter_fallback_warning: float = 0.0
 
     def on_start(self) -> None:
-        """Create LLM router on agent start."""
-        self._router = LLMClientFactory(self.agent.lg).from_config(self.config)
+        """Resolve config-derived defaults. Router is already injected."""
         self._defaults = _resolve_llm_defaults(self.config)
 
     def on_stop(self) -> None:
-        """Close LLM router on agent stop."""
-        if self._router is not None:
+        """Close the router iff this trait owns its lifecycle."""
+        if self._owns_router:
             self._router.close()
-            self._router = None
 
     @property
     def router(self) -> ChatClient:
-        """Access the LLM router.
-
-        Raises:
-            RuntimeError: If trait not started (on_start not called).
-        """
-        if self._router is None:
-            raise RuntimeError("LLMTrait not started - ensure agent.start() was called")
+        """Access the injected LLM router."""
         return self._router
 
     @property
