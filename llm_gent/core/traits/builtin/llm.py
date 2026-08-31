@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from llm_infer.client import ChatClient, ChatResponse
 from pydantic import BaseModel, ValidationError
@@ -150,6 +150,28 @@ class LLMTrait(BaseTrait):
     def router(self) -> ChatClient:
         """Access the injected LLM router."""
         return self._router
+
+    def with_router(self, router: ChatClient) -> Self:
+        """Return a new trait bound to ``router``, detached from the registry.
+
+        Immutable-view fluent (mirrors ``llm_infer.client.BoundChatClient``):
+        ``self`` remains canonical for ``agent.get_trait(LLMTrait)`` and its
+        router is unchanged. The returned instance shares this trait's
+        ``agent`` and ``config`` but is not registered — it exists for the
+        caller's immediate use (e.g. one-shot swap for a specific call).
+
+        Ownership: ``owns_router`` on the returned trait is False. The caller
+        owns ``router``'s lifecycle; the returned trait will not close it.
+        For a persistent swap, write the returned instance back into the
+        agent's trait registry explicitly.
+
+        Concurrency: safe to construct while ``self.complete`` is in flight,
+        but the caller must not call ``.complete()`` on the returned instance
+        from another thread mid-call; there are no locks.
+        """
+        new = type(self)(self.agent, router, self.config, owns_router=False)
+        new._defaults = _resolve_llm_defaults(new.config)
+        return new
 
     @property
     def adapter(self) -> str | None:

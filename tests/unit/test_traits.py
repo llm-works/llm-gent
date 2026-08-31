@@ -645,6 +645,79 @@ class TestLLMTraitRouterProperty:
         assert trait.router is router
 
 
+class TestLLMTraitWithRouter:
+    """Tests for LLMTrait.with_router() immutable-view fluent."""
+
+    def test_returns_new_instance(self):
+        original = LLMTrait(MagicMock(), MagicMock(), {}, owns_router=True)
+        replacement = MagicMock()
+
+        detached = original.with_router(replacement)
+
+        assert detached is not original
+        assert isinstance(detached, LLMTrait)
+
+    def test_new_instance_uses_provided_router(self):
+        original_router = MagicMock()
+        replacement = MagicMock()
+        original = LLMTrait(MagicMock(), original_router, {}, owns_router=True)
+
+        detached = original.with_router(replacement)
+
+        assert detached.router is replacement
+        assert original.router is original_router
+
+    def test_new_instance_is_not_owner(self):
+        original = LLMTrait(MagicMock(), MagicMock(), {}, owns_router=True)
+
+        detached = original.with_router(MagicMock())
+
+        assert detached._owns_router is False
+
+    def test_new_instance_shares_agent_and_config(self):
+        from appinfra import DotDict
+
+        agent = MagicMock()
+        config = DotDict({"model": "qwen2.5"})
+        original = LLMTrait(agent, MagicMock(), config)
+
+        detached = original.with_router(MagicMock())
+
+        assert detached.agent is agent
+        assert detached.config is config
+
+    def test_new_instance_resolves_defaults(self):
+        from appinfra import DotDict
+
+        config = DotDict({"model": "qwen2.5", "temperature": 0.3})
+        original = LLMTrait(MagicMock(), MagicMock(), config)
+
+        detached = original.with_router(MagicMock())
+
+        assert detached._defaults["model"] == "qwen2.5"
+        assert detached._defaults["temperature"] == 0.3
+
+    def test_new_instance_not_written_to_registry(self):
+        """with_router does not touch the agent's trait registry."""
+        agent = MagicMock()
+        original = LLMTrait(agent, MagicMock(), {})
+
+        original.with_router(MagicMock())
+
+        agent.add_trait.assert_not_called()
+        agent.register.assert_not_called()
+
+    def test_on_stop_does_not_close_injected_router(self):
+        """The detached view's on_stop leaves the caller-owned router alone."""
+        replacement = MagicMock()
+        original = LLMTrait(MagicMock(), MagicMock(), {}, owns_router=True)
+
+        detached = original.with_router(replacement)
+        detached.on_stop()
+
+        replacement.close.assert_not_called()
+
+
 class TestLLMTraitAdapterProperty:
     """Tests for adapter property."""
 

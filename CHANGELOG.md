@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `LLMTrait.with_router(router)` returns a new trait bound to a different
+  router, detached from the agent's trait registry (`owns_router=False`;
+  `self` remains canonical for `agent.get_trait(LLMTrait)`). Immutable-view
+  fluent, mirrors `llm_infer.client.BoundChatClient`.
+
 ### Removed
 
 - **Breaking:** exported `Config` (`llm_gent.Config`, `llm_gent.core.Config`,
