@@ -112,7 +112,7 @@ class HTTPTrait(BaseTrait):
         self._ipc_thread: threading.Thread | None = None
         self._ipc_shutdown = threading.Event()
 
-        self.agent.lg.info(
+        self.agent.lg.trace(
             "HTTP server configured",
             extra={"host": self.config.host, "port": self.config.port},
         )
@@ -157,7 +157,7 @@ class HTTPTrait(BaseTrait):
         )
         self._server.start()
         self._start_ipc_thread()
-        self.agent.lg.info(
+        self.agent.lg.trace(
             "HTTP trait started",
             extra={
                 "agent": self.agent.name,
@@ -178,7 +178,7 @@ class HTTPTrait(BaseTrait):
         if self._owns_server and self._server:
             self._server.stop()
             stopped_server = True
-        self.agent.lg.info(
+        self.agent.lg.trace(
             "HTTP trait stopped",
             extra={"agent": self.agent.name, "stopped_server": stopped_server},
         )

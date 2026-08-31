@@ -144,7 +144,7 @@ class LLMTrait(BaseTrait):
             extra={"agent": self.agent.name, "owns_router": self._owns_router},
         )
         self._defaults = _resolve_llm_defaults(self.config)
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "LLM trait started",
             extra={
                 "agent": self.agent.name,
@@ -161,7 +161,7 @@ class LLMTrait(BaseTrait):
         )
         if self._owns_router:
             self._router.close()
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "LLM trait stopped",
             extra={"agent": self.agent.name, "closed_router": self._owns_router},
         )

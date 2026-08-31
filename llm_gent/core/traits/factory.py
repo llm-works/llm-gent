@@ -258,7 +258,7 @@ class TraitFactory:
             extra={"agent": agent.name, "default": llm_config.get("default")},
         )
         router = LLMClientFactory(agent.lg).from_config(llm_config)
-        self._lg.debug(
+        self._lg.trace(
             "LLM router built",
             extra={"agent": agent.name, "owns_router": True},
         )
@@ -376,7 +376,7 @@ class TraitFactory:
             extra={"agent": agent.name, "db_url": config.db.get("url")},
         )
         database = Database(agent.lg, PG(agent.lg, config.db))
-        self._lg.debug("memory database built", extra={"agent": agent.name})
+        self._lg.trace("memory database built", extra={"agent": agent.name})
         return database
 
     def _build_memory_clients(
@@ -388,7 +388,7 @@ class TraitFactory:
         client_factory = LLMClientFactory(agent.lg)
         self._lg.trace("building memory chat client...", extra={"agent": agent.name})
         chat_client = client_factory.from_config(config.get("llm") or DotDict())
-        self._lg.debug(
+        self._lg.trace(
             "memory chat client built",
             extra={"agent": agent.name, "owns_chat_client": True},
         )
@@ -423,7 +423,7 @@ class TraitFactory:
         except Exception:
             chat_client.close()
             raise
-        self._lg.debug(
+        self._lg.trace(
             "memory embedder built",
             extra={"agent": agent.name, "owns_embedder": True},
         )

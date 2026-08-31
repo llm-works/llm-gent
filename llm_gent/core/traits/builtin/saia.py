@@ -117,7 +117,7 @@ class SAIATrait(BaseTrait):
             extra={"agent": self.agent.name, "injected": self._saia is not None},
         )
         if self._saia is not None:
-            self.agent.lg.debug(
+            self.agent.lg.trace(
                 "SAIA trait started with injected instance",
                 extra={"agent": self.agent.name, "owns_saia": self._owns_saia},
             )
@@ -127,7 +127,7 @@ class SAIATrait(BaseTrait):
         self._log_tools_configured(tools, executor)
         self._saia = self._build_saia(tools, executor)
         self._owns_saia = True
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "SAIA trait started",
             extra={"agent": self.agent.name, "owns_saia": True},
         )
@@ -171,7 +171,7 @@ class SAIATrait(BaseTrait):
         if self._owns_saia:
             self._saia = None
             self._owns_saia = False
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "SAIA trait stopped",
             extra={"agent": self.agent.name, "dropped_saia": dropped},
         )

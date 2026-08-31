@@ -182,7 +182,15 @@ class Agent:
         if self._started:
             try:
                 trait.on_start()
-            except Exception:
+            except Exception as e:
+                self._lg.warning(
+                    "trait add rolled back",
+                    extra={
+                        "agent": self.name,
+                        "trait": type(trait).__name__,
+                        "exception": e,
+                    },
+                )
                 self._traits.unregister(type(trait))
                 raise
 
@@ -256,8 +264,8 @@ class Agent:
 
         try:
             trait.on_start()
-        except Exception:
-            self._rollback_trait_replace(trait, old, trait_type)
+        except Exception as e:
+            self._rollback_trait_replace(trait, old, trait_type, e)
             raise
 
         if old is not None:
@@ -265,12 +273,20 @@ class Agent:
         self._log_trait_replaced(trait_type, ejected=old is not None)
 
     def _rollback_trait_replace(
-        self, trait: BaseTrait, old: BaseTrait | None, trait_type: type[BaseTrait]
+        self,
+        trait: BaseTrait,
+        old: BaseTrait | None,
+        trait_type: type[BaseTrait],
+        exception: Exception,
     ) -> None:
         """Roll back a failed replace_trait: stop the new trait, restore the old."""
-        self._lg.debug(
+        self._lg.warning(
             "trait replace rolled back",
-            extra={"agent": self.name, "trait": trait_type.__name__},
+            extra={
+                "agent": self.name,
+                "trait": trait_type.__name__,
+                "exception": exception,
+            },
         )
         self._safe_stop_trait(trait, "failed trait cleanup during rollback")
         if old is not None:

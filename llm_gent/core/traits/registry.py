@@ -100,7 +100,7 @@ class Registry:
         if hasattr(trait, "trait_name"):
             self._by_name[trait.trait_name] = trait
 
-        self._lg.debug(
+        self._lg.trace(
             "trait registered",
             extra={"trait": trait_type.__name__, "total": len(self._traits)},
         )
@@ -126,7 +126,7 @@ class Registry:
         if hasattr(trait, "trait_name"):
             self._by_name[trait.trait_name] = trait
 
-        self._lg.debug("trait replaced", extra={"trait": trait_type.__name__})
+        self._lg.trace("trait replaced", extra={"trait": trait_type.__name__})
 
     def get(self, trait_type: type[T]) -> T | None:
         """Get a trait by type.
@@ -251,7 +251,7 @@ class Registry:
         if hasattr(trait, "trait_name"):
             self._by_name.pop(trait.trait_name, None)
 
-        self._lg.debug("trait unregistered", extra={"trait": trait_type.__name__})
+        self._lg.trace("trait unregistered", extra={"trait": trait_type.__name__})
 
     def clear(self) -> None:
         """Remove all traits from registry."""

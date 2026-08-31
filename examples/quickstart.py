@@ -23,15 +23,22 @@ response without contacting a real backend — used by CI's wheel-smoke job.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, cast
 
-from appinfra.log import create_lg
+from appinfra.app import AppBuilder
 from llm_infer.client import ChatClient, ChatResponse
 
 from llm_gent import AgentFactory, LLMTrait
 
 
-SMOKE = os.getenv("LLM_GENT_SMOKE") == "1"
+app = (
+    AppBuilder("quickstart")
+    .with_description("llm-gent quick-start hello-agent")
+    .with_standard_args(log_level=True)
+    .with_main_tool("run")
+    .build()
+)
 
 
 class _StubRouter:
@@ -63,10 +70,16 @@ def _llm_config() -> dict[str, Any]:
     }
 
 
-def main() -> None:
-    lg = create_lg("hello-agent", "info")
+@app.tool(name="run", help="Run the hello-agent example")
+@app.argument(  # type: ignore[untyped-decorator]
+    "--smoke",
+    action="store_true",
+    help="Swap in a stub router (also honored via LLM_GENT_SMOKE=1)",
+)
+def run(self: Any) -> int:
+    smoke = self.args.smoke or os.getenv("LLM_GENT_SMOKE") == "1"
 
-    agent = AgentFactory(lg).from_config(
+    agent = AgentFactory(self.lg).from_config(
         {
             "identity": {"name": "hello-agent"},
             "llm": _llm_config(),
@@ -77,7 +90,7 @@ def main() -> None:
     agent.start()
 
     llm = agent.require_trait(LLMTrait)
-    if SMOKE:
+    if smoke:
         # _StubRouter is a minimal duck-type stub; cast acknowledges the
         # deliberate contract-narrowing for the smoke path.
         agent.replace_trait(llm.with_router(cast(ChatClient, _StubRouter())))
@@ -87,7 +100,8 @@ def main() -> None:
     print(f"agent said: {result.content}")
 
     agent.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(app.main())

@@ -187,7 +187,7 @@ class MemoryTrait(BaseTrait):
             },
         )
         self._llm_defaults = _resolve_llm_defaults(self.config.get("llm") or DotDict())
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "memory trait started",
             extra={
                 "agent": self.agent.name,
@@ -212,7 +212,7 @@ class MemoryTrait(BaseTrait):
         finally:
             if self._owns_embedder and self._embedder is not None:
                 self._embedder.close()
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "memory trait stopped",
             extra={
                 "agent": self.agent.name,

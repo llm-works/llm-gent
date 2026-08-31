@@ -115,7 +115,7 @@ class TrainingTrait(BaseTrait):
 
     def on_start(self) -> None:
         """No connections; TrainFactory is created lazily on first lookup."""
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "training trait started",
             extra={
                 "agent": self.agent.name,
@@ -137,7 +137,7 @@ class TrainingTrait(BaseTrait):
         if self._owns_train_factory:
             self._train_factory = None
             self._owns_train_factory = False
-        self.agent.lg.debug(
+        self.agent.lg.trace(
             "training trait stopped",
             extra={"agent": self.agent.name, "dropped_factory": dropped},
         )
@@ -207,7 +207,7 @@ class TrainingTrait(BaseTrait):
             )
             self._train_factory = TrainFactory(self.agent.lg, registry_path)
             self._owns_train_factory = True
-            self.agent.lg.debug(
+            self.agent.lg.trace(
                 "train factory built",
                 extra={"agent": self.agent.name, "owns_train_factory": True},
             )
