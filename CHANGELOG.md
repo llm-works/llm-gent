@@ -7,33 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `LLMTrait.with_router(router)` returns a new trait bound to a different
-  router, detached from the agent's trait registry (`owns_router=False`;
-  `self` remains canonical for `agent.get_trait(LLMTrait)`). Immutable-view
-  fluent, mirrors `llm_infer.client.BoundChatClient`.
-
-### Removed
-
-- **Breaking:** exported `Config` (`llm_gent.Config`, `llm_gent.core.Config`,
-  `llm_gent.core.agent.Config`). Its flat shape was incompatible with
-  `Agent.__init__`, which reads a nested `identity.name` mapping. Use
-  `AgentFactory(lg).from_config({...})` with the nested-dict schema instead
-  (see `examples/quickstart.py`).
-
-### Changed
-
-- **Breaking:** `LLMTrait.__init__` now takes `router: ChatClient` as a
-  required argument; router construction moves from `on_start` into
-  `TraitFactory.create_llm_trait` (`owns_router=True` for factory-built
-  routers so they close on stop). `AgentFactory.from_config` unchanged.
-- `README.md` Quick Start, `docs/index.md` Lifecycle, and
-  `examples/quickstart.py` rewritten around `AgentFactory.from_config` and
-  the auto-injected `DirectiveTrait` prompt; no subclass, no manual system
-  message. Identity described as `name` + optional `context_key`, replacing
-  stale `domain`/`workspace` references.
-
 ## [0.3.1] - 2026-08-30
 
 ### Added
