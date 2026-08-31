@@ -16,8 +16,8 @@ Tutorial-shape agent construction:
 - ``DirectiveTrait`` auto-prepends its directive as a system message on
   ``LLMTrait.complete()`` — no manual wiring.
 
-Set ``LLM_GENT_SMOKE=1`` to swap in a stub router that returns a canned
-response without contacting a real backend — used by CI's wheel-smoke job.
+Pass ``--smoke`` to swap in a stub router that returns a canned response
+without contacting a real backend — used by CI's wheel-smoke job.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ app = (
 
 
 class _StubRouter:
-    """Stub ChatClient used when LLM_GENT_SMOKE=1."""
+    """Stub ChatClient used when --smoke is passed."""
 
     def chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> ChatResponse:
         return ChatResponse(content="Hello from smoke-mode stub!")
@@ -74,11 +74,9 @@ def _llm_config() -> dict[str, Any]:
 @app.argument(  # type: ignore[untyped-decorator]
     "--smoke",
     action="store_true",
-    help="Swap in a stub router (also honored via LLM_GENT_SMOKE=1)",
+    help="Swap in a stub router (no real backend contacted)",
 )
 def run(self: Any) -> int:
-    smoke = self.args.smoke or os.getenv("LLM_GENT_SMOKE") == "1"
-
     agent = AgentFactory(self.lg).from_config(
         {
             "identity": {"name": "hello-agent"},
@@ -90,7 +88,7 @@ def run(self: Any) -> int:
     agent.start()
 
     llm = agent.require_trait(LLMTrait)
-    if smoke:
+    if self.args.smoke:
         # _StubRouter is a minimal duck-type stub; cast acknowledges the
         # deliberate contract-narrowing for the smoke path.
         agent.replace_trait(llm.with_router(cast(ChatClient, _StubRouter())))
