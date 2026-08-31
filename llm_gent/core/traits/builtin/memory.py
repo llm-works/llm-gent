@@ -67,7 +67,10 @@ class MemoryTrait(BaseTrait):
     - Config-time (standard path): ``TraitFactory.create_memory_trait`` builds
       the three clients from ``memory_config`` and passes them with
       ``owns_chat_client=True`` and ``owns_embedder=True`` so the trait closes
-      them on ``on_stop``.
+      them on ``on_stop``. Note: Database/PG lifecycle is not managed by this
+      trait — the underlying connection pool outlives the trait. This is
+      intentional for shared-pool scenarios; explicit pool shutdown belongs
+      at the application layer.
     - Direct injection (test / advanced): pass ``chat_client``, ``embedder``,
       or ``database`` yourself with the corresponding ``owns_*=False``; caller
       retains close responsibility. See ``.with_chat_client()``,
@@ -96,7 +99,7 @@ class MemoryTrait(BaseTrait):
           injected database, chat client, and embedder.
         - ``on_start()``: resolves LLM defaults from config (no client build).
         - ``on_stop()``: closes the chat client / embedder iff the matching
-          ``owns_*`` flag is True; drops kelt and context references.
+          ``owns_*`` flag is True.
     """
 
     def __init__(

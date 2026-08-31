@@ -317,15 +317,21 @@ class TraitFactory:
         database = self._build_memory_database(agent, config)
         chat_client, embedder = self._build_memory_clients(agent, config)
 
-        return MemoryTrait(
-            agent,
-            config,
-            database=database,
-            chat_client=chat_client,
-            embedder=embedder,
-            owns_chat_client=True,
-            owns_embedder=embedder is not None,
-        )
+        try:
+            return MemoryTrait(
+                agent,
+                config,
+                database=database,
+                chat_client=chat_client,
+                embedder=embedder,
+                owns_chat_client=True,
+                owns_embedder=embedder is not None,
+            )
+        except Exception:
+            chat_client.close()
+            if embedder is not None:
+                embedder.close()
+            raise
 
     def _build_memory_config(
         self, identity: Identity | None, memory_config: MemoryConfig | None
