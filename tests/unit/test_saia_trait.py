@@ -140,14 +140,65 @@ class TestSAIATraitLifecycle:
 
         mock_saia_builder.system.assert_not_called()
 
-    def test_on_stop(self):
+    def test_on_stop_clears_owned_saia(self, mock_saia_builder):
+        """on_stop drops the SAIA instance the trait built in on_start."""
         agent = MagicMock()
+        agent.get_trait.return_value = None
         trait = SAIATrait(agent, MagicMock())
-        trait._saia = MagicMock()
+        trait.on_start()  # builds saia; sets owns_saia=True
+        assert trait._saia is not None
 
         trait.on_stop()
 
         assert trait._saia is None
+        assert trait._owns_saia is False
+
+    def test_on_stop_keeps_injected_saia(self):
+        """on_stop leaves an injected SAIA in place — caller owns lifecycle."""
+        injected = MagicMock()
+        trait = SAIATrait(MagicMock(), MagicMock(), saia=injected)
+        trait.on_stop()
+        assert trait._saia is injected
+
+    def test_on_start_skips_build_when_injected(self, mock_saia_builder):
+        """on_start does not call SAIA.builder when saia is already injected."""
+        agent = MagicMock()
+        agent.get_trait.return_value = None
+        injected = MagicMock()
+        trait = SAIATrait(agent, MagicMock(), saia=injected)
+
+        trait.on_start()
+
+        mock_saia_builder.build.assert_not_called()
+        assert trait._saia is injected
+
+
+class TestSAIATraitWithSaia:
+    def test_returns_new_instance_with_injected(self):
+        original = SAIATrait(MagicMock(), MagicMock())
+        replacement = MagicMock()
+        detached = original.with_saia(replacement)
+        assert detached is not original
+        assert detached._saia is replacement
+        assert detached._owns_saia is False
+        assert original._saia is None  # base unchanged
+
+    def test_shares_agent_backend_config(self):
+        agent = MagicMock()
+        backend = MagicMock()
+        cfg = SAIAConfig(max_iterations=7)
+        original = SAIATrait(agent, backend, config=cfg)
+        detached = original.with_saia(MagicMock())
+        assert detached.agent is agent
+        assert detached.backend is backend
+        assert detached.config is cfg
+
+    def test_not_written_to_registry(self):
+        agent = MagicMock()
+        original = SAIATrait(agent, MagicMock())
+        original.with_saia(MagicMock())
+        agent.add_trait.assert_not_called()
+        agent.replace_trait.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
