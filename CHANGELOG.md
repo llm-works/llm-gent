@@ -17,9 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `examples/quickstart.py` rewritten around `AgentFactory.from_config` and
+- `README.md` Quick Start, `docs/index.md` Lifecycle, and
+  `examples/quickstart.py` rewritten around `AgentFactory.from_config` and
   the auto-injected `DirectiveTrait` prompt; no subclass, no manual system
-  message.
+  message. Identity described as `name` + optional `context_key`, replacing
+  stale `domain`/`workspace` references.
 
 ## [0.3.1] - 2026-08-30
 
