@@ -36,39 +36,30 @@ push. `requires-python = ">=3.11"`.
 ## Quick Start
 
 ```python
-from appinfra import DotDict
-from appinfra.log import LogConfig, LoggerFactory
+from appinfra.log import create_lg
 
-from llm_gent import Agent, Config, Identity, LLMTrait, DirectiveTrait
+from llm_gent import AgentFactory, LLMTrait
 
-# Setup logging
-log_config = LogConfig.from_params(level="info", handlers={"console": {"type": "console"}})
-lg = LoggerFactory.create_root(log_config)
+lg = create_lg("my-agent", "info")
 
-# Configure LLM backend
-llm_config = DotDict(
+agent = AgentFactory(lg).from_config(
     {
-        "default": "local",
-        "backends": {
-            "local": {
-                "type": "openai_compatible",
-                "base_url": "http://localhost:8000/v1",
-                "model": "default",
-            }
+        "identity": {"name": "my-agent"},
+        "llm": {
+            "default": "local",
+            "backends": {
+                "local": {
+                    "type": "openai_compatible",
+                    "base_url": "http://localhost:8000/v1",
+                    "model": "default",
+                }
+            },
         },
+        "directive": "You are a helpful assistant.",
+        "traits": {"required": ["llm", "directive"]},
     }
 )
 
-# Create agent with traits
-identity = Identity(domain=None, workspace="demo", name="my-agent")
-config = Config(identity=identity)
-agent = Agent(lg, config)
-
-# Add capabilities via traits
-agent.add_trait(DirectiveTrait(agent, directive="You are a helpful assistant."))
-agent.add_trait(LLMTrait(agent, llm_config))
-
-# Start and use agent
 agent.start()
 llm = agent.require_trait(LLMTrait)
 result = llm.complete([{"role": "user", "content": "Hello!"}])
@@ -81,7 +72,8 @@ agent.stop()
 ### Agents
 
 An `Agent` is a container for traits with lifecycle management. Agents have an identity
-(domain/workspace/name) and can be started, stopped, and run in cycles.
+(`name` plus optional `context_key`) and can be started, stopped, and — via
+`RunnableAgent` — run in cycles.
 
 ### Traits
 

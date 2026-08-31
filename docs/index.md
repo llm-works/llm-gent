@@ -13,8 +13,8 @@ Agent framework with trait-based architecture and learning capabilities.
 
 An `Agent` is the central unit - a container for traits with lifecycle management. Each agent has:
 
-- **Identity** - domain/workspace/name tuple for namespacing
-- **Config** - agent-specific configuration
+- **Identity** - `name` plus optional `context_key` for namespacing
+- **Config** - agent-config dict passed to `AgentFactory.from_config`
 - **Traits** - pluggable capabilities
 
 ### Traits
@@ -33,12 +33,24 @@ Traits provide specific capabilities to agents:
 ### Lifecycle
 
 ```python
-agent = Agent(lg, config)
-agent.add_trait(LLMTrait(agent, llm_config))
+from llm_gent import AgentFactory, LLMTrait
+
+agent = AgentFactory(lg).from_config(
+    {
+        "identity": {"name": "my-agent"},
+        "llm": llm_config,
+        "traits": {"required": ["llm"]},
+    }
+)
 agent.start()  # Initialize all traits
-result = agent.run_once()  # Execute one cycle
+llm = agent.require_trait(LLMTrait)
+result = llm.complete([{"role": "user", "content": "Hello!"}])
 agent.stop()  # Cleanup all traits
 ```
+
+For cycle-driven agents (`agent.run_once()`), use `RunnableAgent` — set
+`agent_class = RunnableAgent` on an `AgentFactory` subclass, or subclass
+`RunnableAgent` directly.
 
 ## Related Projects
 

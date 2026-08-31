@@ -26,7 +26,7 @@ from llm_kelt.conversation import (
     Config as ConversationConfig,
 )
 
-from .agent import Agent, Config, ExecutionResult
+from .agent import Agent, ExecutionResult
 from .errors import (
     AgentError,
     ConfigError,
@@ -47,7 +47,6 @@ __all__ = [
     "Runnable",
     # Agents
     "Agent",
-    "Config",
     # Errors
     "AgentError",
     "ConfigError",
