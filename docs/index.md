@@ -52,6 +52,9 @@ For cycle-driven agents (`agent.run_once()`), use `RunnableAgent` — set
 `agent_class = RunnableAgent` on an `AgentFactory` subclass, or subclass
 `RunnableAgent` directly.
 
+See the [README quick start](../README.md#quick-start) or
+`llm_gent/examples/quickstart.py` for a runnable end-to-end example.
+
 ## Related Projects
 
 - [llm-infer](https://github.com/llm-works/llm-infer) - LLM inference server and client

@@ -60,7 +60,7 @@ fallback_version = "0.0.0.dev0"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["llm_gent*"]
-exclude = ["tests*", "etc*", "examples*"]
+exclude = ["tests*", "etc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -124,7 +124,12 @@ lines-after-imports = 2
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG001", "ARG002"]
-"examples/*" = ["E402", "I001"]
+"llm_gent/examples/*" = ["E402", "I001"]
+
+[tool.interrogate]
+# Runnable example scripts explain themselves via behavior and module-level
+# docstrings; per-function docstring coverage is not the right signal for them.
+exclude = ["llm_gent/examples"]
 
 [tool.coverage.run]
 source = ["llm_gent"]

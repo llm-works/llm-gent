@@ -67,6 +67,10 @@ print(result.content)
 agent.stop()
 ```
 
+A runnable version of this example lives at `llm_gent/examples/quickstart.py`. Set
+`LLM_GENT_SMOKE=1` to run it against a stub LLM router (used by CI's
+wheel-smoke job).
+
 ## Core Concepts
 
 ### Agents
