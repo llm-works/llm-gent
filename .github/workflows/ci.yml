@@ -180,9 +180,12 @@ jobs:
 
       - name: Import smoke check
         run: |
+          cd "$(mktemp -d)"
           python -c "import llm_gent; print('llm-gent', llm_gent.__version__)"
 
       - name: Run quickstart against stub router
         env:
           LLM_GENT_SMOKE: '1'
-        run: python -m llm_gent.examples.quickstart
+        run: |
+          cd "$(mktemp -d)"
+          python -m llm_gent.examples.quickstart
