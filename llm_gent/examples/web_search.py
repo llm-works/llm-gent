@@ -10,8 +10,8 @@ Serper, etc.) must be implemented separately and satisfy the WebSearchBackend
 protocol.
 
 Usage:
-    python examples/web_search.py "python asyncio tutorial"
-    python examples/web_search.py "rust vs go performance" --fetch 1
+    python -m llm_gent.examples.web_search "python asyncio tutorial"
+    python -m llm_gent.examples.web_search "rust vs go performance" --fetch 1
 
 Flags:
     --max-results N   Number of search results (1-8, default 5)
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import argparse
 

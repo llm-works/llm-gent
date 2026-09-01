@@ -6,7 +6,7 @@
 """Minimal external agent that connects to a running hub.
 
 Usage:
-    python examples/external_agent.py
+    python -m llm_gent.examples.external_agent
 
 Requires a hub running (llm-gent serve) on default ports.
 
@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import contextlib
 import signal

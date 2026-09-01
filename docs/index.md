@@ -33,7 +33,7 @@ Traits provide specific capabilities to agents:
 ### Lifecycle
 
 `Agent` is an abstract base — a real application defines a small concrete
-subclass (see `examples/quickstart.py`). The lifecycle then looks like:
+subclass (see `llm_gent/examples/quickstart.py`). The lifecycle then looks like:
 
 ```python
 agent = MyAgent(lg, {"identity": {"name": "my-agent"}})
@@ -44,7 +44,7 @@ agent.stop()  # Cleanup all traits
 ```
 
 See the [README quick start](../README.md#quick-start) or
-`examples/quickstart.py` for a runnable end-to-end example.
+`llm_gent/examples/quickstart.py` for a runnable end-to-end example.
 
 ## Related Projects
 
