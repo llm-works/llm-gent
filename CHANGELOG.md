@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Requires appinfra `>= 0.10.5`.
 - Removed the `.env.yaml`-alongside-etc convention; v1 protocol replaces
   it with XDG overlays.
+- `llm_gent/etc/pg.yaml` adopts canonical `pgserver.name: llm-works-pg`
+  and `port: 25432` (shared llm-works local container); main DB renamed
+  `gent_main` (was mis-pointing at `kelt`).
 
 ## [0.3.2] - 2026-08-31
 

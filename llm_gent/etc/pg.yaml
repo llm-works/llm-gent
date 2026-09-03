@@ -1,15 +1,14 @@
 # PostgreSQL configuration for llm-gent
-# Connects to same database as llm-kelt
 
 pgserver:
-  name: learn-pg               # Same server as llm-kelt
-  port: 7632                   # Same port as llm-kelt
+  name: llm-works-pg           # Shared canonical name — one local container across llm-works packages
+  port: 25432                  # Shared canonical port — override with INFRA_PGSERVER_PORT
   user: postgres
   pass: ''
 
 dbs:
   main:
-    url: "postgresql://${pgserver.user}:${pgserver.pass}@127.0.0.1:${pgserver.port}/kelt"
+    url: "postgresql://${pgserver.user}:${pgserver.pass}@127.0.0.1:${pgserver.port}/gent_main"
     create_db: true
     readonly: false
     pool_pre_ping: true
