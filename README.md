@@ -141,7 +141,7 @@ Built-in tools for agentic workflows:
 llm-gent serve
 
 # Or with specific config
-llm-gent -c etc/llm-gent.yaml serve
+llm-gent serve
 ```
 
 ## Related Projects

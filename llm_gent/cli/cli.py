@@ -15,6 +15,8 @@ Provides commands to:
 - rate: Rate agent responses
 """
 
+from pathlib import Path
+
 from appinfra.app import AppBuilder
 
 from .tools import (
@@ -29,12 +31,16 @@ from .tools import (
 )
 
 
+_BASE_CONFIG = Path(__file__).parent.parent / "etc" / "llm-gent.yaml"
+
+
 def main() -> int:
     """Main entry point for the CLI."""
     app = (
         AppBuilder("agent")
         .with_description("LLM agent server and management")
-        .with_config_file("llm-gent.yaml")
+        .with_config_spec("llm-works", "llm-gent", _BASE_CONFIG)
+        .with_standard_args(etc_dir=True)
         .tools.with_tool(ServeTool())
         .with_tool(ListTool())
         .with_tool(StartTool())

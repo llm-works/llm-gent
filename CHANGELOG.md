@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-03
+
+### Fixed
+
+- Base config `etc/llm-gent.yaml` now ships inside the wheel under
+  `llm_gent/etc/`; `llm-gent serve` on an installed package no longer
+  raises `FileNotFoundError`.
+
+### Changed
+
+- CLI adopts appinfra config protocol v1 via `with_config_spec`; user
+  overrides go under `$XDG_CONFIG_HOME/llm-works/llm-gent.yaml`.
+  Requires appinfra `>= 0.10.5`.
+- Removed the `.env.yaml`-alongside-etc convention; v1 protocol replaces
+  it with XDG overlays.
+
 ## [0.3.2] - 2026-08-31
 
 ### Fixed
