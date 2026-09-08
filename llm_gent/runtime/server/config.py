@@ -180,7 +180,7 @@ class HubConfigYAML(BaseModel):
 class AgentServerConfig(BaseModel):
     """Complete server configuration.
 
-    Loaded from etc/llm-gent.yaml:
+    Loaded from llm_gent/etc/llm-gent.yaml:
 
         server:
           host: 0.0.0.0

@@ -145,10 +145,8 @@ class HTTPServer:
             .with_version(self._config.version)
             .subprocess.with_ipc(self._request_q, self._response_q)
             .with_response_timeout(self._config.response_timeout)
-            .with_auto_restart(
-                enabled=self._config.auto_restart,
-                max_restarts=self._config.max_restarts,
-            )
+            .with_auto_restart(enabled=self._config.auto_restart)
+            .with_max_restarts(self._config.max_restarts)
             .done()
             .routes.with_router(router)
             .done()

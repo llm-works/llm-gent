@@ -16,7 +16,6 @@ llm: !include './llm.yaml'
 learn:
   db: !include './infra.yaml#dbs.main'
   embedder_url: http://localhost:8001/v1  # Optional: Enable for RAG/semantic search (set via EMBEDDER_URL env)
-  adapters: !include '../.env.yaml#adapters'
   training:
     default_profiles:
       sft:

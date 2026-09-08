@@ -566,6 +566,7 @@ class TestHTTPTraitLifecycle:
         mock_builder.subprocess.with_ipc.return_value = mock_builder.subprocess
         mock_builder.subprocess.with_response_timeout.return_value = mock_builder.subprocess
         mock_builder.subprocess.with_auto_restart.return_value = mock_builder.subprocess
+        mock_builder.subprocess.with_max_restarts.return_value = mock_builder.subprocess
         mock_builder.subprocess.done.return_value = mock_builder
         mock_builder.routes = MagicMock()
         mock_builder.routes.with_router.return_value = mock_builder.routes
@@ -602,6 +603,7 @@ class TestHTTPTraitLifecycle:
         mock_builder.subprocess.with_ipc.return_value = mock_builder.subprocess
         mock_builder.subprocess.with_response_timeout.return_value = mock_builder.subprocess
         mock_builder.subprocess.with_auto_restart.return_value = mock_builder.subprocess
+        mock_builder.subprocess.with_max_restarts.return_value = mock_builder.subprocess
         mock_builder.subprocess.done.return_value = mock_builder
         mock_builder.routes = MagicMock()
         mock_builder.routes.with_router.return_value = mock_builder.routes

@@ -17,6 +17,7 @@ Provides commands to:
 
 from appinfra.app import AppBuilder
 
+from .. import __version__
 from .tools import (
     AgentTool,
     AskTool,
@@ -32,17 +33,24 @@ from .tools import (
 def main() -> int:
     """Main entry point for the CLI."""
     app = (
-        AppBuilder("agent")
+        AppBuilder("llm-gent")
         .with_description("LLM agent server and management")
-        .with_config_file("llm-gent.yaml")
-        .tools.with_tool(ServeTool())
-        .with_tool(ListTool())
-        .with_tool(StartTool())
-        .with_tool(StopTool())
-        .with_tool(AskTool())
-        .with_tool(FeedbackTool())
-        .with_tool(RateTool())
-        .with_tool(AgentTool())
+        .version.with_semver(__version__)
+        .done()
+        .config.with_spec("llm-works", "llm-gent")
+        .done()
+        .cli.with_all_flags()
+        .done()
+        .tools.with_tools(
+            ServeTool(),
+            ListTool(),
+            StartTool(),
+            StopTool(),
+            AskTool(),
+            FeedbackTool(),
+            RateTool(),
+            AgentTool(),
+        )
         .done()
         .build()
     )
