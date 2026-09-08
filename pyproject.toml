@@ -22,7 +22,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "appinfra",
+    "appinfra>=0.11.0",
     "httpx>=0.27",
     "llm-infer",
     "llm-kelt>=0.4",
@@ -35,7 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 http = [
-    "appinfra[fastapi]",
+    "appinfra[fastapi]>=0.11.0",
 ]
 dev = [
     "mypy>=1.0",
@@ -60,7 +60,10 @@ fallback_version = "0.0.0.dev0"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["llm_gent*"]
-exclude = ["tests*", "etc*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+llm_gent = ["etc/*.yaml", "etc/agents/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

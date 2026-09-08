@@ -183,6 +183,12 @@ jobs:
           cd "$(mktemp -d)"
           python -c "import llm_gent; print('llm-gent', llm_gent.__version__)"
 
+      - name: CLI smoke check (packaged base config loadable)
+        run: |
+          cd "$(mktemp -d)"
+          llm-gent --help
+          llm-gent serve --help
+
       - name: Run quickstart against stub router
         env:
           LLM_GENT_SMOKE: '1'
