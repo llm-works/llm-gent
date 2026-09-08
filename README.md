@@ -137,11 +137,11 @@ Built-in tools for agentic workflows:
 ## Running as a Service
 
 ```bash
-# Start agent server
+# Start agent server (uses packaged default config)
 llm-gent serve
 
-# Or with specific config
-llm-gent serve
+# With custom config
+llm-gent --config path/to/config.yaml serve
 ```
 
 ## Related Projects
