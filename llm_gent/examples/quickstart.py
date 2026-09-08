@@ -35,8 +35,10 @@ from llm_gent import AgentFactory, LLMTrait
 app = (
     AppBuilder("quickstart")
     .with_description("llm-gent quick-start hello-agent")
-    .with_standard_args(log_level=True)
-    .with_main_tool("run")
+    .cli.with_flags(log_level=True)
+    .done()
+    .tools.with_main("run")
+    .done()
     .build()
 )
 
