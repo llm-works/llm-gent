@@ -22,7 +22,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "appinfra>=0.10.5",
+    "appinfra>=0.11.0",
     "httpx>=0.27",
     "llm-infer",
     "llm-kelt>=0.4",
@@ -35,7 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 http = [
-    "appinfra[fastapi]>=0.10.5",
+    "appinfra[fastapi]>=0.11.0",
 ]
 dev = [
     "mypy>=1.0",

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.3] - 2026-09-03
+## [0.3.3] - 2026-09-08
 
 ### Fixed
 
@@ -17,14 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- CLI adopts appinfra config protocol v1 via `with_config_spec`; user
-  overrides go under `$XDG_CONFIG_HOME/llm-works/llm-gent.yaml`.
-  Requires appinfra `>= 0.10.5`.
-- Removed the `.env.yaml`-alongside-etc convention; v1 protocol replaces
-  it with XDG overlays.
+- CLI adopts appinfra 0.11.0 faceted `AppBuilder`: `.config.with_spec`,
+  `.cli.with_all_flags`, `.tools.with_tools`. Full standard flag set
+  exposed (`--etc-dir`, `--config`, log flags, `-v/--version`).
+  Requires appinfra `>= 0.11.0`.
+- Removed the `.env.yaml`-alongside-etc convention; user overrides go
+  under `$XDG_CONFIG_HOME/llm-works/llm-gent.yaml` per config protocol.
 - `llm_gent/etc/pg.yaml` adopts canonical `pgserver.name: llm-works-pg`
   and `port: 25432` (shared llm-works local container); main DB renamed
-  `gent_main` (was mis-pointing at `kelt`).
+  `gent_main` (was mis-pointing at `kelt`). Existing local data requires
+  env override (`INFRA_PGSERVER_PORT=7632`) or manual migration.
 
 ## [0.3.2] - 2026-08-31
 
