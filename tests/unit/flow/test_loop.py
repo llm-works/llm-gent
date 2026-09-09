@@ -348,6 +348,218 @@ class TestLifecycleHooks:
         assert events == ["start"]
 
 
+class _RaisingSAIA:
+    """SAIA stub whose ``.complete`` raises a configured exception."""
+
+    def __init__(self, role: Role, *, exc: BaseException) -> None:
+        self.role = role
+        self._exc = exc
+
+    async def complete(self, task: str, **_: Any) -> Any:
+        raise self._exc
+
+
+class _RaisingFactory:
+    """SAIAFactory that hands out ``_RaisingSAIA`` instances."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def build(self, role: Role) -> _RaisingSAIA:
+        return _RaisingSAIA(role, exc=self._exc)
+
+
+class TestPausedAndCompleteReturn:
+    """on_paused / on_complete fire exclusively; non-None returns override."""
+
+    @pytest.mark.asyncio
+    async def test_paused_result_fires_on_paused_not_on_complete(self) -> None:
+        """Paused result → on_paused fires, on_complete skipped."""
+        events: list[str] = []
+        factory = _CompleteFactory(result=_StubResult(paused=True, reason="tool"))
+
+        def on_complete(result: Any, ctx: Context) -> None:
+            events.append("complete")
+
+        def on_paused(result: Any, ctx: Context) -> None:
+            events.append(f"paused:{result.reason}")
+
+        loop = Loop(ROLE_A, on_complete=on_complete, on_paused=on_paused)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        await flow.run("t")
+        assert events == ["paused:tool"]
+
+    @pytest.mark.asyncio
+    async def test_on_complete_non_none_return_replaces_result(self) -> None:
+        """Non-None from on_complete becomes Loop's return value."""
+        factory = _CompleteFactory()
+
+        def on_complete(result: Any, ctx: Context) -> dict[str, Any]:
+            return {"wrapped": result}
+
+        loop = Loop(ROLE_A, on_complete=on_complete)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        got = await flow.run("t")
+        assert isinstance(got, dict)
+        assert isinstance(got["wrapped"], _StubResult)
+
+    @pytest.mark.asyncio
+    async def test_on_complete_none_return_preserves_raw_result(self) -> None:
+        """Existing hooks returning None keep the raw SAIA result (bc-compat)."""
+        factory = _CompleteFactory()
+
+        def on_complete(result: Any, ctx: Context) -> None:
+            return None
+
+        loop = Loop(ROLE_A, on_complete=on_complete)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        got = await flow.run("t")
+        assert isinstance(got, _StubResult)
+
+    @pytest.mark.asyncio
+    async def test_on_paused_non_none_return_replaces_result(self) -> None:
+        """Non-None from on_paused becomes Loop's return value."""
+        factory = _CompleteFactory(result=_StubResult(paused=True, reason="halt"))
+
+        def on_paused(result: Any, ctx: Context) -> str:
+            return f"paused-token:{result.reason}"
+
+        loop = Loop(ROLE_A, on_paused=on_paused)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        got = await flow.run("t")
+        assert got == "paused-token:halt"
+
+
+class TestExceptionalPaths:
+    """on_cancelled / on_failed / on_finally lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_on_cancelled_fires_then_reraises(self) -> None:
+        """CancelledError → on_cancelled fires, on_finally fires, cancellation propagates."""
+        events: list[str] = []
+        factory = _RaisingFactory(asyncio.CancelledError())
+
+        def on_cancelled(ctx: Context) -> None:
+            events.append("cancelled")
+
+        def on_failed(exc: Exception, ctx: Context) -> None:
+            events.append("failed")
+
+        def on_finally(ctx: Context) -> None:
+            events.append("finally")
+
+        loop = Loop(
+            ROLE_A,
+            on_cancelled=on_cancelled,
+            on_failed=on_failed,
+            on_finally=on_finally,
+        )
+        flow = make_ff(saia_f=factory).create().call(loop)
+        with pytest.raises(asyncio.CancelledError):
+            await flow.run("t")
+        assert events == ["cancelled", "finally"]
+
+    @pytest.mark.asyncio
+    async def test_on_failed_fires_then_reraises(self) -> None:
+        """Non-cancellation Exception → on_failed fires with exc, on_finally, re-raise."""
+        events: list[Any] = []
+        boom = RuntimeError("boom")
+        factory = _RaisingFactory(boom)
+
+        def on_cancelled(ctx: Context) -> None:
+            events.append("cancelled")
+
+        def on_failed(exc: Exception, ctx: Context) -> None:
+            events.append(("failed", exc))
+
+        def on_finally(ctx: Context) -> None:
+            events.append("finally")
+
+        loop = Loop(
+            ROLE_A,
+            on_cancelled=on_cancelled,
+            on_failed=on_failed,
+            on_finally=on_finally,
+        )
+        flow = make_ff(saia_f=factory).create().call(loop)
+        with pytest.raises(RuntimeError, match="boom"):
+            await flow.run("t")
+        assert events == [("failed", boom), "finally"]
+
+    @pytest.mark.asyncio
+    async def test_on_finally_fires_on_normal_completion(self) -> None:
+        """Normal (non-paused) run: on_finally fires last, after on_complete."""
+        events: list[str] = []
+        factory = _CompleteFactory()
+
+        def on_complete(result: Any, ctx: Context) -> None:
+            events.append("complete")
+
+        def on_finally(ctx: Context) -> None:
+            events.append("finally")
+
+        loop = Loop(ROLE_A, on_complete=on_complete, on_finally=on_finally)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        await flow.run("t")
+        assert events == ["complete", "finally"]
+
+    @pytest.mark.asyncio
+    async def test_on_finally_fires_on_paused(self) -> None:
+        """Paused run: on_finally fires last, after on_paused."""
+        events: list[str] = []
+        factory = _CompleteFactory(result=_StubResult(paused=True))
+
+        def on_paused(result: Any, ctx: Context) -> None:
+            events.append("paused")
+
+        def on_finally(ctx: Context) -> None:
+            events.append("finally")
+
+        loop = Loop(ROLE_A, on_paused=on_paused, on_finally=on_finally)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        await flow.run("t")
+        assert events == ["paused", "finally"]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_does_not_delete_checkpoint(self) -> None:
+        """Cancellation preserves the checkpoint (resume path)."""
+        store = _RecordingStore()
+        factory = _RaisingFactory(asyncio.CancelledError())
+        loop = Loop(ROLE_A, checkpointer=store)
+        flow = make_ff(saia_f=factory).create()
+        flow.register(loop, name="loop")
+        with pytest.raises(asyncio.CancelledError):
+            await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
+        assert store.deletes == []
+
+    @pytest.mark.asyncio
+    async def test_failed_does_not_delete_checkpoint(self) -> None:
+        """Failure preserves the checkpoint (resume path)."""
+        store = _RecordingStore()
+        factory = _RaisingFactory(RuntimeError("boom"))
+        loop = Loop(ROLE_A, checkpointer=store)
+        flow = make_ff(saia_f=factory).create()
+        flow.register(loop, name="loop")
+        with pytest.raises(RuntimeError):
+            await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
+        assert store.deletes == []
+
+    @pytest.mark.asyncio
+    async def test_on_failed_does_not_swallow_cancellation(self) -> None:
+        """CancelledError takes on_cancelled path, NOT on_failed."""
+        called: list[str] = []
+        factory = _RaisingFactory(asyncio.CancelledError())
+
+        def on_failed(exc: Exception, ctx: Context) -> None:
+            called.append("failed")
+
+        loop = Loop(ROLE_A, on_failed=on_failed)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        with pytest.raises(asyncio.CancelledError):
+            await flow.run("t")
+        assert called == []
+
+
 # -----------------------------------------------------------------------------
 # Checkpointer seam
 # -----------------------------------------------------------------------------

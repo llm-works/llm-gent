@@ -8,7 +8,8 @@ dispatched by a :class:`Flow` like an ``@verb`` function or a bound-method
 verb. Its body is a single ``saia.complete(...)`` invocation, wired with:
 
 - lifecycle hooks (``on_start`` / ``on_resume`` / ``on_iteration`` /
-  ``on_complete`` / ``on_executor_ready`` / ``on_cost``)
+  ``on_executor_ready`` / ``on_cost`` / ``on_complete`` / ``on_paused`` /
+  ``on_cancelled`` / ``on_failed`` / ``on_finally``)
 - an optional checkpointer seam (3-method Protocol mirroring
   :class:`appware.CheckpointStore`) — ``Loop`` loads at start and deletes
   on successful completion; save timing is the consumer's responsibility
@@ -108,9 +109,52 @@ async; return value ignored.
 """
 
 OnComplete = Callable[[Any, Context], Any]
-"""``(saia_result, ctx) -> None`` — fires after :meth:`saia.complete` returns non-paused.
+"""``(saia_result, ctx) -> saia_result | override | None`` — fires after
+:meth:`saia.complete` returns non-paused.
 
-Skipped when the run paused. May be async; return value ignored.
+Skipped when the run paused. May be async. If the hook returns a non-``None``
+value, that value replaces the raw SAIA result as :meth:`Loop.__call__`'s
+return; returning ``None`` (or an implicit fall-through) preserves the raw
+result. Use this to map the SAIA ``TaskResult`` to a domain-specific shape
+without a closure smuggling the value out.
+"""
+
+OnPaused = Callable[[Any, Context], Any]
+"""``(saia_result, ctx) -> saia_result | override | None`` — fires after
+:meth:`saia.complete` returns paused (mirror of :data:`OnComplete`).
+
+Runs instead of ``on_complete``. Return-value semantics match
+:data:`OnComplete`: non-``None`` replaces the raw SAIA result. May be async.
+Consumers wire paused-status side effects (recorder marks, resumable-run
+notifications) here rather than around ``await loop(...)``.
+"""
+
+OnCancelled = Callable[[Context], Any]
+"""``(ctx) -> None`` — fires when :meth:`saia.complete` raises
+:class:`asyncio.CancelledError`.
+
+Runs before the cancellation is re-raised, then :data:`OnFinally` fires.
+The checkpoint is intentionally NOT deleted on this path so a subsequent
+resume can pick up. May be async; return value ignored.
+"""
+
+OnFailed = Callable[[Exception, Context], Any]
+"""``(exc, ctx) -> None`` — fires when :meth:`saia.complete` raises any
+non-cancellation :class:`Exception`.
+
+Runs before the exception is re-raised, then :data:`OnFinally` fires. The
+checkpoint is intentionally NOT deleted on this path. May be async; return
+value ignored.
+"""
+
+OnFinally = Callable[[Context], Any]
+"""``(ctx) -> None`` — fires last on every dispatch, regardless of outcome.
+
+Runs after exactly one of :data:`OnComplete` / :data:`OnPaused` /
+:data:`OnCancelled` / :data:`OnFailed` (and after :data:`OnCost` on the
+non-exception paths). Symmetric with a ``finally:`` block wrapped around
+``await loop(...)`` — for cleanup that must run whether the loop completed,
+paused, was cancelled, or failed. May be async; return value ignored.
 """
 
 OnExecutorReady = Callable[[Any, Context], Any]
@@ -168,6 +212,10 @@ class Loop:
         on_resume: OnResume | None = None,
         on_iteration: OnIteration | None = None,
         on_complete: OnComplete | None = None,
+        on_paused: OnPaused | None = None,
+        on_cancelled: OnCancelled | None = None,
+        on_failed: OnFailed | None = None,
+        on_finally: OnFinally | None = None,
         on_executor_ready: OnExecutorReady | None = None,
         on_cost: OnCost | None = None,
     ) -> None:
@@ -182,18 +230,33 @@ class Loop:
                 construction wins over ambient.
             checkpointer: Optional 3-method store. When set, Loop
                 loads-at-start (for resume) and deletes-on-complete
-                (only on non-paused results); save timing is the
-                consumer's, wired through ``on_iteration``.
+                (only on non-paused, non-cancelled, non-failed results);
+                save timing is the consumer's, wired through
+                ``on_iteration``.
             on_start: Fires before ``saia.complete`` when not resuming.
             on_resume: Fires instead of ``on_start`` when a checkpoint
                 was loaded — receives the loaded state.
             on_iteration: Bridges to SAIA's per-turn hook.
             on_complete: Fires after a non-paused ``saia.complete``.
+                Non-``None`` return replaces the raw SAIA result as
+                :meth:`__call__`'s return.
+            on_paused: Fires instead of ``on_complete`` when the result is
+                paused. Same return-value semantics.
+            on_cancelled: Fires when ``saia.complete`` raises
+                :class:`asyncio.CancelledError`; cancellation is re-raised
+                after the hook (and after ``on_finally``).
+            on_failed: Fires when ``saia.complete`` raises any other
+                :class:`Exception`; the exception is re-raised after the
+                hook (and after ``on_finally``).
+            on_finally: Fires last on every dispatch, regardless of
+                outcome. Symmetric with a ``finally:`` block around
+                ``await loop(...)``.
             on_executor_ready: Fires on each dispatch after ``ctx.saia``
                 is resolved, before ``saia.complete`` — for per-run
                 injection into the tool executor.
             on_cost: Fires after ``saia.complete`` for cost accounting
-                (runs even on paused results).
+                (runs on both complete and paused results; NOT on the
+                cancelled / failed paths since no result exists there).
         """
         self._role = role
         self._halt = halt
@@ -202,6 +265,10 @@ class Loop:
         self._on_resume = on_resume
         self._on_iteration = on_iteration
         self._on_complete = on_complete
+        self._on_paused = on_paused
+        self._on_cancelled = on_cancelled
+        self._on_failed = on_failed
+        self._on_finally = on_finally
         self._on_executor_ready = on_executor_ready
         self._on_cost = on_cost
 
@@ -244,24 +311,44 @@ class Loop:
 
         Returns:
             Whatever ``saia.complete`` returns (a ``TaskResult`` in
-            SAIA's vocab).
+            SAIA's vocab), UNLESS ``on_complete`` (non-paused path) or
+            ``on_paused`` (paused path) returned a non-``None`` value —
+            that value replaces the raw result. ``on_finally`` fires
+            after either path.
 
         Raises:
+            asyncio.CancelledError: Re-raised after ``on_cancelled`` and
+                ``on_finally`` fire. Checkpoint is preserved.
+            Exception: Re-raised after ``on_failed`` and ``on_finally``
+                fire. Checkpoint is preserved.
             RuntimeError: ``ctx.saia`` is ``None`` — either the ctx has
                 no role or the enclosing flow had no SAIAFactory.
         """
         saia = self._require_saia(ctx)
         checkpoint = self._load_checkpoint(scope_id, run_id)
         await self._before_run(saia, ctx, checkpoint)
-        result = await saia.complete(
-            task,
-            on_iteration=self._make_iter_bridge(ctx),
-            conversation=conversation,
-            abort_signal=self._resolve_halt(ctx),
-            resume=checkpoint is not None,
-        )
-        await self._after_run(result, ctx, scope_id, run_id)
-        return result
+        try:
+            try:
+                result = await saia.complete(
+                    task,
+                    on_iteration=self._make_iter_bridge(ctx),
+                    conversation=conversation,
+                    abort_signal=self._resolve_halt(ctx),
+                    resume=checkpoint is not None,
+                )
+            except asyncio.CancelledError:
+                if self._on_cancelled is not None:
+                    await _maybe_await(self._on_cancelled(ctx))
+                raise
+            except Exception as exc:
+                if self._on_failed is not None:
+                    await _maybe_await(self._on_failed(exc, ctx))
+                raise
+            override = await self._after_run(result, ctx, scope_id, run_id)
+            return override if override is not None else result
+        finally:
+            if self._on_finally is not None:
+                await _maybe_await(self._on_finally(ctx))
 
     # -------------------------------------------------------------------------
     # Internals
@@ -315,16 +402,24 @@ class Loop:
         ctx: Context,
         scope_id: str | None,
         run_id: int | None,
-    ) -> None:
-        """Cost hook (always), then checkpoint delete + ``on_complete`` on non-paused."""
+    ) -> Any:
+        """Cost hook, then paused-vs-complete branching + return override.
+
+        Returns the value from ``on_paused`` / ``on_complete`` when the
+        hook returned non-``None`` — :meth:`__call__` uses it to replace
+        the raw SAIA result. ``None`` means "no override, keep raw result".
+        """
         if self._on_cost is not None:
             await _maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
-            return
+            if self._on_paused is not None:
+                return await _maybe_await(self._on_paused(result, ctx))
+            return None
         if self._checkpointer is not None and scope_id is not None:
             self._checkpointer.delete_checkpoint(scope_id, run_id)
         if self._on_complete is not None:
-            await _maybe_await(self._on_complete(result, ctx))
+            return await _maybe_await(self._on_complete(result, ctx))
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -409,6 +504,10 @@ class LoopFactory:
         on_resume: OnResume | None = None,
         on_iteration: OnIteration | None = None,
         on_complete: OnComplete | None = None,
+        on_paused: OnPaused | None = None,
+        on_cancelled: OnCancelled | None = None,
+        on_failed: OnFailed | None = None,
+        on_finally: OnFinally | None = None,
         on_executor_ready: OnExecutorReady | None = None,
         on_cost: OnCost | None = None,
     ) -> Loop:
@@ -426,6 +525,10 @@ class LoopFactory:
             on_resume=on_resume,
             on_iteration=on_iteration,
             on_complete=on_complete,
+            on_paused=on_paused,
+            on_cancelled=on_cancelled,
+            on_failed=on_failed,
+            on_finally=on_finally,
             on_executor_ready=on_executor_ready,
             on_cost=on_cost,
         )
