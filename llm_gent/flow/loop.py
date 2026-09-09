@@ -338,8 +338,8 @@ class Loop:
         """
         saia = self._require_saia(ctx)
         checkpoint = self._load_checkpoint(scope_id, run_id)
-        await self._before_run(saia, ctx, checkpoint)
         try:
+            await self._before_run(saia, ctx, checkpoint)
             try:
                 result = await saia.complete(
                     task,

@@ -62,6 +62,9 @@ class Role:
     Participates in :meth:`__eq__` so roles differing only in ``params``
     correctly miss the ``Flow._saia_by_role`` cache — each unique
     ``params`` snapshot yields a distinct SAIA build.
+
+    Do not mutate ``params`` in place after construction — use
+    :meth:`with_params` to create a new Role with changed parameters.
     """
 
     def with_params(self, **kv: Any) -> Role:

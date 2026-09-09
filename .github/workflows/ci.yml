@@ -190,8 +190,6 @@ jobs:
           llm-gent serve --help
 
       - name: Run quickstart against stub router
-        env:
-          LLM_GENT_SMOKE: '1'
         run: |
           cd "$(mktemp -d)"
-          python -m llm_gent.examples.quickstart
+          python -m llm_gent.examples.quickstart --smoke

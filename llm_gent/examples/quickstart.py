@@ -17,7 +17,7 @@ Tutorial-shape agent construction:
   ``LLMTrait.complete()`` — no manual wiring.
 
 Pass ``--smoke`` to swap in a stub router that returns a canned response
-without contacting a real backend — used by CI's wheel-smoke job.
+without contacting a real backend.
 """
 
 from __future__ import annotations
