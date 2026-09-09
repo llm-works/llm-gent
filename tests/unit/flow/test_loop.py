@@ -214,12 +214,52 @@ class TestFlowBodyIntegration:
         ctx.saia = None
         ctx.role = ROLE_A
         with pytest.raises(RuntimeError, match="Loop requires ctx.saia"):
-            Loop._require_saia(ctx)
+            Loop(ROLE_A)._require_saia(ctx)
 
 
 # -----------------------------------------------------------------------------
 # Halt resolution
 # -----------------------------------------------------------------------------
+
+
+class TestSAIAResolution:
+    """Explicit ``Loop(saia=X)`` wins over ambient ``ctx.saia`` (halt precedent)."""
+
+    @pytest.mark.asyncio
+    async def test_explicit_saia_bypasses_ctx_saia(self) -> None:
+        """``Loop(saia=X)`` uses X; the enclosing flow's SAIAFactory is not consulted."""
+        explicit = _CompleteSAIA(ROLE_A)
+        factory = _CompleteFactory()
+        loop = Loop(ROLE_A, saia=explicit)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        await flow.run("t")
+        assert explicit.calls[0]["task"] == "t"
+        assert factory.built == []  # factory never consulted
+
+    @pytest.mark.asyncio
+    async def test_explicit_saia_works_without_saia_factory(self) -> None:
+        """Loop with explicit ``saia=`` runs even under a factoryless Flow."""
+        explicit = _CompleteSAIA(ROLE_A)
+        loop = Loop(ROLE_A, saia=explicit)
+        flow = Flow(make_test_logger()).call(loop)
+        await flow.run("t")
+        assert explicit.calls[0]["task"] == "t"
+
+    @pytest.mark.asyncio
+    async def test_no_explicit_saia_falls_back_to_ctx_saia(self) -> None:
+        """Without ``Loop(saia=)``, ctx.saia (from the flow's SAIAFactory) is used."""
+        factory = _CompleteFactory()
+        loop = Loop(ROLE_A)
+        flow = make_ff(saia_f=factory).create().call(loop)
+        await flow.run("t")
+        assert factory.built and factory.built[0].calls[0]["task"] == "t"
+
+    def test_loop_factory_create_forwards_explicit_saia(self) -> None:
+        """``LoopFactory.create(role, saia=X)`` pins X on the built Loop."""
+        explicit = _CompleteSAIA(ROLE_A)
+        lf = LoopFactory(make_test_logger())
+        loop = lf.create(ROLE_A, saia=explicit)
+        assert loop._saia is explicit
 
 
 class TestHaltResolution:

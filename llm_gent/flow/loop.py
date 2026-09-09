@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from appinfra.log import Logger
+from llm_saia import SAIA
 
 from .context import Context
 from .factory import SAIAFactory
@@ -206,6 +207,7 @@ class Loop:
         self,
         role: Role,
         *,
+        saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
         checkpointer: CheckpointStore | None = None,
         on_start: OnStart | None = None,
@@ -222,8 +224,17 @@ class Loop:
         """Initialize a Loop.
 
         Args:
-            role: The role under which this Loop runs. Determines which
-                saia the enclosing flow binds to ``ctx.saia``.
+            role: The role under which this Loop runs. Also determines
+                which saia the enclosing flow binds to ``ctx.saia`` when
+                ``saia=`` is not supplied.
+            saia: Optional explicit SAIA instance. When set, ``Loop`` uses
+                it directly and bypasses the enclosing flow's
+                :class:`SAIAFactory` for THIS Loop. Intended for consumers
+                that own the SAIA + its tool executor externally (e.g.
+                wiring per-run state onto the executor after
+                construction). Mirrors the ``halt`` precedent —
+                construction-time explicit wins over ambient
+                ``ctx.saia``.
             halt: Optional explicit halt event. When set, this event
                 (not ``ctx.halt``) becomes SAIA's ``abort_signal``.
                 Matches the ``ctx.saia`` precedent: explicit at
@@ -259,6 +270,7 @@ class Loop:
                 cancelled / failed paths since no result exists there).
         """
         self._role = role
+        self._saia = saia
         self._halt = halt
         self._checkpointer = checkpointer
         self._on_start = on_start
@@ -354,9 +366,10 @@ class Loop:
     # Internals
     # -------------------------------------------------------------------------
 
-    @staticmethod
-    def _require_saia(ctx: Context) -> Any:
-        """Return ``ctx.saia`` or raise an informative error."""
+    def _require_saia(self, ctx: Context) -> Any:
+        """Return the effective SAIA — explicit ``Loop(saia=X)`` wins over ``ctx.saia``."""
+        if self._saia is not None:
+            return self._saia
         saia = ctx.saia
         if saia is None:
             raise RuntimeError(
@@ -498,6 +511,7 @@ class LoopFactory:
         self,
         role: Role,
         *,
+        saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
         checkpointer: CheckpointStore | None = None,
         on_start: OnStart | None = None,
@@ -514,11 +528,14 @@ class LoopFactory:
         """Build a :class:`Loop` inheriting this factory's captured defaults.
 
         Per-``create`` ``halt=`` / ``checkpointer=`` override the factory
-        defaults (same explicit-wins rule the Loop itself uses). Hooks
-        are per-Loop and never inherited.
+        defaults (same explicit-wins rule the Loop itself uses). ``saia=``
+        pins an explicit SAIA instance on the resulting Loop, bypassing
+        the enclosing flow's :class:`SAIAFactory`. Hooks are per-Loop and
+        never inherited.
         """
         return Loop(
             role,
+            saia=saia,
             halt=halt if halt is not None else self._halt,
             checkpointer=(checkpointer if checkpointer is not None else self._checkpointer),
             on_start=on_start,
