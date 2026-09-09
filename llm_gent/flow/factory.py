@@ -44,6 +44,12 @@ class SAIAFactory(Protocol):
     :meth:`build` returns an object supporting saia's public surface — the
     verb calling code uses ``.verify(...)`` / ``.complete(...)`` / etc.
 
+    Implementations MAY read :attr:`Role.params` for per-run parameters
+    (max_iterations, cost trackers, campaign identifiers, plan state —
+    anything the consumer needs at build time that isn't captured in the
+    typed Role fields). Key naming inside ``params`` is a contract between
+    a factory and its callers; gent itself imposes none.
+
     Reference sketch (users typically write one specific to their yaml
     config)::
 
@@ -56,6 +62,8 @@ class SAIAFactory(Protocol):
             def build(self, role):
                 backend = build_backend_from_config(self._llm_yaml, role)
                 builder = SAIA.builder().backend(backend).logger(self._lg)
+                if "max_iterations" in role.params:
+                    builder = builder.max_iterations(role.params["max_iterations"])
                 if self._tools:
                     builder = builder.tools(self._tools, executor)
                 if role.style:
