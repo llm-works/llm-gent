@@ -60,6 +60,7 @@ from typing import Any
 
 from appinfra.log import Logger
 
+from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._executor import _build_ctx, _execute_node, _step_inputs
 from .context import Context
@@ -142,6 +143,7 @@ class Flow:
         self._state = state
         self._traits = traits
         self._halt_event: asyncio.Event | None = None
+        self._budget_tracker: Tracker | None = None
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
@@ -198,7 +200,14 @@ class Flow:
     # Dispatch
     # -------------------------------------------------------------------------
 
-    async def dispatch(self, name: str, *args: Any, halt: Any = UNSET, **kwargs: Any) -> Any:
+    async def dispatch(
+        self,
+        name: str,
+        *args: Any,
+        halt: Any = UNSET,
+        budget: Any = UNSET,
+        **kwargs: Any,
+    ) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
 
         The verb receives a fresh :class:`Context` as its first argument,
@@ -210,10 +219,10 @@ class Flow:
         Verbs that need a live run-wide payload from a :meth:`run` invocation
         must be reached via :meth:`run` rather than dispatched ad hoc.
 
-        Pass ``halt=ctx.halt`` from an in-flight verb to propagate its
-        effective halt to the dispatched sibling; omitting ``halt`` (or
-        passing ``halt=UNSET``) defaults to this flow's ``.with_halt()``
-        event if any.
+        Pass ``halt=ctx.halt`` and ``budget=ctx.budget`` from an in-flight
+        verb to propagate its effective ambients to the dispatched sibling;
+        omitting either (or passing ``UNSET``) defaults to this flow's
+        ``.with_halt()`` / ``.with_budget()`` binding if any.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
@@ -221,12 +230,14 @@ class Flow:
         self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
         payload = self._state if self._state is not UNSET else {}
         effective_halt = self._halt_event if halt is UNSET else halt
+        effective_budget = self._budget_tracker if budget is UNSET else budget
         ctx = Context(
             role=verb.role,
             state=payload if isinstance(payload, State) else State(data=payload),
             flow=self,
             traits=self._traits,
             halt=effective_halt,
+            budget=effective_budget,
         )
         return await verb(ctx, *args, **kwargs)
 
@@ -597,6 +608,27 @@ class Flow:
         self._halt_event = event
         return self
 
+    def with_budget(self, tracker: Tracker) -> Flow:
+        """Attach a :class:`Tracker` reachable as ``ctx.budget``.
+
+        Threads ``tracker`` through the execution environment so verbs
+        can record LLM and operation costs against its cap. Auto-halt
+        integration is opt-in on the tracker side: pass a shared
+        ``asyncio.Event`` to both :meth:`Tracker.__init__` (``halt=``)
+        and :meth:`with_halt`, and the tracker sets the event on the
+        first cross into ``exceeded``.
+
+        Consumers with hierarchical accounting attach the root tracker
+        here; verbs reach descendants via ``ctx.budget.child(...)``.
+
+        A subflow inherits the outer runtime's tracker automatically;
+        calling ``.with_budget`` on a subflow overrides it for that subtree.
+
+        Returns ``self`` for chaining.
+        """
+        self._budget_tracker = tracker
+        return self
+
     def _require_map_tail(self, method: str) -> _Map:
         """Return the last node's target if it is a :class:`_Map`, else raise."""
         if not self._nodes:
@@ -653,6 +685,7 @@ class Flow:
         state: State,
         runtime: Flow,
         parent_halt: asyncio.Event | None = None,
+        parent_budget: Tracker | None = None,
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -663,15 +696,17 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_halt`` is the effective halt from the calling scope — nested
-        subflows fall back to it when they have no local ``.with_halt()``
-        override, preserving an intermediate layer's halt through arbitrarily
+        ``parent_halt`` and ``parent_budget`` are the effective ambients
+        from the calling scope — nested subflows fall back to them when
+        they have no local ``.with_halt()`` / ``.with_budget()`` override,
+        preserving an intermediate layer's ambient through arbitrarily
         deep nesting.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
         halt = self._halt_event if self._halt_event is not None else parent_halt
-        env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg, halt=halt)
+        budget = self._budget_tracker if self._budget_tracker is not None else parent_budget
+        env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg, halt=halt, budget=budget)
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
         env.lg.debug(

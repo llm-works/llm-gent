@@ -3,6 +3,7 @@
 
 """Built-in traits for composable agent capabilities."""
 
+from .budget import BudgetTrait
 from .conversation import ConversationTrait, ConversationTraitConfig
 from .directive import Directive, DirectiveTrait, MethodTrait
 from .http import HTTPConfig, HTTPTrait
@@ -16,6 +17,8 @@ from .training import ManifestNotFoundError, TrainingConfig, TrainingTrait
 
 
 __all__ = [
+    # Budget
+    "BudgetTrait",
     # Conversation
     "ConversationTrait",
     "ConversationTraitConfig",
