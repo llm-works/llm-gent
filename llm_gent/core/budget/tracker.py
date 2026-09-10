@@ -235,9 +235,11 @@ class Tracker:
         """Amend the live cap.
 
         Loose contract — no comparison against ``spent``. When
-        ``new_budget < spent`` ``exceeded`` becomes True and the halt
-        event (if set) trips at the next recorded cost. Wallet-side
-        floors (e.g. billable >= spent) belong at the caller.
+        ``new_budget < spent`` ``exceeded`` becomes True immediately,
+        but the halt event does NOT fire (halt only fires on the
+        transition from not-exceeded to exceeded during a
+        :meth:`track` call). Wallet-side floors (e.g. billable >=
+        spent) belong at the caller.
 
         Raises:
             ValueError: When ``new_budget <= 0``.
