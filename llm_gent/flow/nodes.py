@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from appinfra.log import Logger
 
+from ..core.budget import Tracker
 from .context import Context
 from .state import State
 
@@ -166,18 +167,22 @@ class _RunEnv:
     """Per-run environment threaded through the execution helpers.
 
     Bundles the runtime flow (factory + saia cache + logger source), the
-    currently active :class:`State`, and any ambient halt event so helpers
-    do not each need to carry them as separate positional arguments. ``lg``
-    is cached off ``runtime`` at the top of :meth:`Flow.run` for brevity in
-    the debug/warning call sites. ``halt`` is the ambient
-    :class:`asyncio.Event` attached via :meth:`Flow.with_halt` (or inherited
-    from the outer runtime); ``None`` when no halt is in scope.
+    currently active :class:`State`, and any ambient halt event or budget
+    tracker so helpers do not each need to carry them as separate positional
+    arguments. ``lg`` is cached off ``runtime`` at the top of
+    :meth:`Flow.run` for brevity in the debug/warning call sites. ``halt``
+    is the ambient :class:`asyncio.Event` attached via :meth:`Flow.with_halt`
+    (or inherited from the outer runtime); ``None`` when no halt is in
+    scope. ``budget`` is the ambient session tracker attached via
+    :meth:`Flow.with_budget` (or inherited); ``None`` when no budget is in
+    scope.
     """
 
     runtime: Flow
     state: State
     lg: Logger
     halt: asyncio.Event | None = None
+    budget: Tracker | None = None
 
 
 @dataclass

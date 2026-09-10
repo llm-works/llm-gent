@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from appinfra.log import Logger
 
+from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from .nodes import UNSET
 from .role import Role
@@ -97,6 +98,7 @@ class FlowFactory:
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
         halt: asyncio.Event | None = None,
+        budget: Tracker | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -116,12 +118,17 @@ class FlowFactory:
                 :meth:`Flow.with_halt` on every built flow. Wire once at
                 the factory to thread the same halt handle through an
                 entire agent shape.
+            budget: Optional :class:`Tracker` attached via
+                :meth:`Flow.with_budget` on every built flow. Wire once at
+                the factory to thread the same cost tracker through an
+                entire agent shape.
         """
         self._lg = lg
         self._saia_f = saia_f
         self._state = state
         self._traits = traits
         self._halt = halt
+        self._budget = budget
 
     def create(self, name: str = "", *, state: Any = UNSET) -> Flow:
         """Return a :class:`Flow` using this factory's captured environment.
@@ -147,13 +154,15 @@ class FlowFactory:
         )
         if self._halt is not None:
             flow.with_halt(self._halt)
+        if self._budget is not None:
+            flow.with_budget(self._budget)
         return flow
 
     def with_saia_f(self, saia_f: SAIAFactory) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
 
-        ``lg``, ``state``, ``traits``, and ``halt`` are preserved. Useful
-        for subsystems that share the app's logger but need a different
+        ``lg``, ``state``, ``traits``, ``halt``, and ``budget`` are preserved.
+        Useful for subsystems that share the app's logger but need a different
         saia builder (e.g. a plugin with its own model wiring).
         """
         return FlowFactory(
@@ -162,13 +171,14 @@ class FlowFactory:
             state=self._state,
             traits=self._traits,
             halt=self._halt,
+            budget=self._budget,
         )
 
     def with_traits(self, traits: TraitRegistry | None) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose trait registry is swapped.
 
-        ``lg``, ``saia_f``, ``state``, and ``halt`` are preserved. Mirrors
-        :meth:`with_saia_f` for the trait dimension.
+        ``lg``, ``saia_f``, ``state``, ``halt``, and ``budget`` are preserved.
+        Mirrors :meth:`with_saia_f` for the trait dimension.
         """
         return FlowFactory(
             self._lg,
@@ -176,13 +186,14 @@ class FlowFactory:
             state=self._state,
             traits=traits,
             halt=self._halt,
+            budget=self._budget,
         )
 
     def with_halt(self, event: asyncio.Event) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose halt event is swapped.
 
-        ``lg``, ``saia_f``, ``state``, and ``traits`` are preserved. Every
-        subsequently created :class:`Flow` gets ``event`` attached via
+        ``lg``, ``saia_f``, ``state``, ``traits``, and ``budget`` are preserved.
+        Every subsequently created :class:`Flow` gets ``event`` attached via
         :meth:`Flow.with_halt` — one wiring reaches every layer that
         observes ``ctx.halt``.
         """
@@ -192,4 +203,22 @@ class FlowFactory:
             state=self._state,
             traits=self._traits,
             halt=event,
+            budget=self._budget,
+        )
+
+    def with_budget(self, tracker: Tracker) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose budget tracker is swapped.
+
+        ``lg``, ``saia_f``, ``state``, ``traits``, and ``halt`` are preserved.
+        Every subsequently created :class:`Flow` gets ``tracker`` attached via
+        :meth:`Flow.with_budget` — one wiring reaches every layer that
+        observes ``ctx.budget``.
+        """
+        return FlowFactory(
+            self._lg,
+            saia_f=self._saia_f,
+            state=self._state,
+            traits=self._traits,
+            halt=self._halt,
+            budget=tracker,
         )

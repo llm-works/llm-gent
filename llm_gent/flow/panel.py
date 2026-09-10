@@ -126,6 +126,7 @@ class Panel:
                     getattr(v, "_registered_name", v.__name__),
                     *args,
                     halt=ctx.halt,
+                    budget=ctx.budget,
                     **kwargs,
                 )
                 for v in self.verbs

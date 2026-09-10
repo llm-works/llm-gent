@@ -23,6 +23,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
+from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from .role import Role
 from .state import State
@@ -84,6 +85,18 @@ class Context:
     :meth:`Flow.map` and :meth:`Flow.iterate` observe this at their natural
     boundaries automatically; verbs are free to poll it when useful.
     Subflows inherit the outer runtime's halt unless they declare their own.
+    """
+
+    budget: Tracker | None = None
+    """Cost tracker attached via :meth:`Flow.with_budget`, or ``None``.
+
+    Verbs record LLM and operation costs via ``ctx.budget.track(...)`` (or
+    against a child obtained via ``ctx.budget.child(budget=...)`` for
+    per-scope caps). The tracker enforces its cap and, when configured
+    with a halt event, trips it on the first cross into ``exceeded``;
+    ancestors in the tracker chain do the same on their own caps.
+    Subflows inherit the outer runtime's budget unless they declare their
+    own via :meth:`Flow.with_budget`.
     """
 
     @property

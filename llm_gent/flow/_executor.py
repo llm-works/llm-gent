@@ -59,9 +59,21 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context:
 
     traits = env.runtime._traits
     if isinstance(target, Flow | _Branch | _Iterate | _Map):
-        return Context(role=None, state=env.state, flow=env.runtime, traits=traits, halt=env.halt)
+        return Context(
+            role=None,
+            state=env.state,
+            flow=env.runtime,
+            traits=traits,
+            halt=env.halt,
+            budget=env.budget,
+        )
     return Context(
-        role=target.role, state=env.state, flow=env.runtime, traits=traits, halt=env.halt
+        role=target.role,
+        state=env.state,
+        flow=env.runtime,
+        traits=traits,
+        halt=env.halt,
+        budget=env.budget,
     )
 
 
@@ -138,6 +150,7 @@ async def _run_subflow(
         state=child_state,
         runtime=env.runtime,
         parent_halt=env.halt,
+        parent_budget=env.budget,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -185,6 +198,7 @@ async def _check_until(until_fn: UntilFn | None, iterate_state: State, env: _Run
         flow=env.runtime,
         traits=env.runtime._traits,
         halt=env.halt,
+        budget=env.budget,
     )
     verdict = until_fn(ctx)
     if inspect.isawaitable(verdict):
@@ -213,7 +227,11 @@ async def _run_branch(
     if chosen is None:
         return prev_result
     return await chosen._run_as_subflow(
-        prev_result, state=env.state, runtime=env.runtime, parent_halt=env.halt
+        prev_result,
+        state=env.state,
+        runtime=env.runtime,
+        parent_halt=env.halt,
+        parent_budget=env.budget,
     )
 
 
@@ -245,7 +263,11 @@ async def _run_iterate(
         if env.halt is not None and env.halt.is_set():
             break
         result = await it.body._run_as_subflow(
-            result, state=child_state, runtime=env.runtime, parent_halt=env.halt
+            result,
+            state=child_state,
+            runtime=env.runtime,
+            parent_halt=env.halt,
+            parent_budget=env.budget,
         )
         iteration += 1
         if await _check_until(it.until, child_state, env):
@@ -328,7 +350,11 @@ async def _run_map_item_strict(
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
         result = await mp.body._run_as_subflow(
-            item, state=child_state, runtime=env.runtime, parent_halt=env.halt
+            item,
+            state=child_state,
+            runtime=env.runtime,
+            parent_halt=env.halt,
+            parent_budget=env.budget,
         )
     except asyncio.CancelledError:
         raise
@@ -363,7 +389,11 @@ async def _run_map_item(
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
         result = await mp.body._run_as_subflow(
-            item, state=child_state, runtime=env.runtime, parent_halt=env.halt
+            item,
+            state=child_state,
+            runtime=env.runtime,
+            parent_halt=env.halt,
+            parent_budget=env.budget,
         )
     except asyncio.CancelledError:
         raise
@@ -387,6 +417,7 @@ def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context:
         flow=env.runtime,
         traits=env.runtime._traits,
         halt=env.halt,
+        budget=env.budget,
     )
 
 
