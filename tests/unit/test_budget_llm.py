@@ -178,6 +178,11 @@ class TestPrecedence:
         with pytest.raises(ValueError, match="provider_cost"):
             p.compute("m", provider_cost=-0.01)
 
+    def test_provider_cost_rejects_bool(self) -> None:
+        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        with pytest.raises(TypeError, match="provider_cost"):
+            p.compute("m", provider_cost=True)
+
     def test_response_triggers_dispatch(self) -> None:
         p = LLMPricingProvider(_config(**{"m": _op("m")}))
         resp = _resp("openai", {"usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0}})
@@ -496,6 +501,10 @@ class TestProviderCostExtractor:
         raw = {"usage": {"cost_in_usd_ticks": -1}}
         assert ProviderCostExtractor.extract(raw) is None
 
+    def test_extract_none_when_ticks_bool(self) -> None:
+        raw = {"usage": {"cost_in_usd_ticks": True}}
+        assert ProviderCostExtractor.extract(raw) is None
+
     def test_cached_from_prompt_tokens_details(self) -> None:
         raw = {"usage": {"prompt_tokens_details": {"cached_tokens": 500}}}
         assert ProviderCostExtractor.extract_cached_tokens(raw) == 500
@@ -577,6 +586,26 @@ class TestLoadPricingConfig:
                     }
                 }
             )
+
+    def test_rejects_bool_rates(self) -> None:
+        with pytest.raises(TypeError, match="must be numbers"):
+            load_pricing_config({"m": {"input_per_mtok": True, "output_per_mtok": 1.0}})
+
+    def test_rejects_bool_cached_rate(self) -> None:
+        with pytest.raises(TypeError, match="must be a number"):
+            load_pricing_config(
+                {
+                    "m": {
+                        "input_per_mtok": 1.0,
+                        "output_per_mtok": 1.0,
+                        "cached_input_per_mtok": False,
+                    }
+                }
+            )
+
+    def test_rejects_non_string_model_name(self) -> None:
+        with pytest.raises(TypeError, match="must be a string"):
+            load_pricing_config({123: {"input_per_mtok": 1.0, "output_per_mtok": 1.0}})
 
     def test_cached_omitted_stays_none(self) -> None:
         cfg = load_pricing_config({"m": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}})

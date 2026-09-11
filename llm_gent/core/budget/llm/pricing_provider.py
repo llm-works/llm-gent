@@ -163,6 +163,8 @@ class LLMPricingProvider:
         """
         override = usage.pop("provider_cost", None)
         if override is not None:
+            if isinstance(override, bool):
+                raise TypeError("provider_cost must be a number, got bool")
             cost = float(override)
             if not math.isfinite(cost) or cost < 0:
                 raise ValueError(f"provider_cost must be finite and >= 0, got {override!r}")

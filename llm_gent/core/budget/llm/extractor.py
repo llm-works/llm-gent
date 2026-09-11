@@ -66,7 +66,7 @@ class ProviderCostExtractor:
         if not isinstance(usage, dict):
             return None
         cost_ticks = usage.get("cost_in_usd_ticks")
-        if cost_ticks is None:
+        if cost_ticks is None or isinstance(cost_ticks, bool):
             return None
         try:
             cost = float(cost_ticks) / 10_000_000_000

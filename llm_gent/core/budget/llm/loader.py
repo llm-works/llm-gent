@@ -52,6 +52,8 @@ def load_pricing_config(costs: dict[str, Any]) -> PricingConfig:
 
     ops: dict[str, Op] = {}
     for model_name, entry in costs.items():
+        if not isinstance(model_name, str):
+            raise TypeError(f"model name must be a string, got {type(model_name).__name__}")
         ops[model_name] = cast(Op, _parse_llm_op(model_name, entry))
     return PricingConfig(ops=ops)
 
@@ -63,13 +65,18 @@ def _parse_llm_op(model_name: str, entry: Any) -> LLMOp:
         raise ValueError(
             f"cost entry for '{model_name}' requires input_per_mtok and output_per_mtok"
         )
-    input_rate = float(entry["input_per_mtok"])
-    output_rate = float(entry["output_per_mtok"])
+    input_raw, output_raw = entry["input_per_mtok"], entry["output_per_mtok"]
+    if isinstance(input_raw, bool) or isinstance(output_raw, bool):
+        raise TypeError(f"rates for '{model_name}' must be numbers, not bool")
+    input_rate = float(input_raw)
+    output_rate = float(output_raw)
     if not math.isfinite(input_rate) or input_rate < 0:
         raise ValueError(f"input_per_mtok for '{model_name}' must be finite and >= 0")
     if not math.isfinite(output_rate) or output_rate < 0:
         raise ValueError(f"output_per_mtok for '{model_name}' must be finite and >= 0")
     cached_raw = entry.get("cached_input_per_mtok")
+    if isinstance(cached_raw, bool):
+        raise TypeError(f"cached_input_per_mtok for '{model_name}' must be a number, not bool")
     cached_rate = float(cached_raw) if cached_raw is not None else None
     if cached_rate is not None and (not math.isfinite(cached_rate) or cached_rate < 0):
         raise ValueError(f"cached_input_per_mtok for '{model_name}' must be finite and >= 0")
