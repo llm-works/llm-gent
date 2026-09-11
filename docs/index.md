@@ -98,7 +98,7 @@ async def execute(ctx: Context, _prev: Any) -> int:
     return target  # pretend we ran `target` steps
 
 
-ff = FlowFactory(lg)
+ff = FlowFactory(lg)  # lg: Logger — elided for brevity
 flow = ff.create("run", state={}).call(plan).call(execute)
 assert await flow.run("ship it") == 3
 ```
