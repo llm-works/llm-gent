@@ -26,6 +26,13 @@ Public shape:
   observability (aggregations, audit logs, dashboards).
 """
 
+from .llm import (
+    LLMPricingProvider,
+    MissingModelCostError,
+    OnMissing,
+    ProviderCostExtractor,
+    load_pricing_config,
+)
 from .pricing import FixedOp, LLMOp, Op, PricingConfig, PricingProvider
 from .tracker import CostCallback, Tracker
 
@@ -34,8 +41,13 @@ __all__ = [
     "CostCallback",
     "FixedOp",
     "LLMOp",
+    "LLMPricingProvider",
+    "MissingModelCostError",
     "Op",
+    "OnMissing",
     "PricingConfig",
     "PricingProvider",
+    "ProviderCostExtractor",
     "Tracker",
+    "load_pricing_config",
 ]
