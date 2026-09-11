@@ -188,8 +188,13 @@ async def _merge_state(merge_fn: StateMerge | None, parent: State, child: State)
         await result
 
 
-async def _check_until(until_fn: UntilFn | None, iterate_state: State, env: _RunEnv) -> bool:
-    """Evaluate the iterate node's until predicate with a ctx bound to its scoped state."""
+async def _check_until(
+    until_fn: UntilFn | None,
+    result: Any,
+    iterate_state: State,
+    env: _RunEnv,
+) -> bool:
+    """Evaluate the iterate node's until predicate with the last body result and scoped state."""
     if until_fn is None:
         return False
     ctx = Context(
@@ -200,7 +205,7 @@ async def _check_until(until_fn: UntilFn | None, iterate_state: State, env: _Run
         halt=env.halt,
         budget=env.budget,
     )
-    verdict = until_fn(ctx)
+    verdict = until_fn(result, ctx)
     if inspect.isawaitable(verdict):
         verdict = await verdict
     return bool(verdict)
@@ -270,7 +275,7 @@ async def _run_iterate(
             parent_budget=env.budget,
         )
         iteration += 1
-        if await _check_until(it.until, child_state, env):
+        if await _check_until(it.until, result, child_state, env):
             break
     await _merge_state(it.merge_fn, env.state, child_state)
     return result

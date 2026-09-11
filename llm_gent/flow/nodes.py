@@ -92,8 +92,13 @@ ProjectFn = Callable[[Any], Any]
 WhenFn = Callable[[Any, Context], Any]
 """Branch predicate: ``(prev_result, ctx) -> bool``. May be async."""
 
-UntilFn = Callable[[Context], Any]
-"""Iterate stop predicate: ``(ctx) -> bool``. May be async. State lives on ``ctx.state``."""
+UntilFn = Callable[[Any, Context], Any]
+"""Iterate stop predicate: ``(result, ctx) -> bool``. May be async.
+
+``result`` is the last iteration's body return value; ``ctx.state`` carries
+mutations made during the body. Either signal — or both — can drive
+termination.
+"""
 
 ItemsFn = Callable[[Any, Context], Any]
 """Map item source: ``(prev_result, ctx) -> iterable``. May be async. Consumed eagerly to a list."""

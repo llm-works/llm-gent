@@ -495,7 +495,7 @@ class TestScopedStateProjection:
         parent_state: dict = {"count": 999}
         top = ff.create("top", state=parent_state).iterate(
             lambda f: f.call(bump),
-            until=lambda ctx: ctx.state.data.get("count", 0) >= 3,
+            until=lambda _result, ctx: ctx.state.data.get("count", 0) >= 3,
             state=lambda _parent: {},
         )
 

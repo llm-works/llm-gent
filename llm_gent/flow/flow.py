@@ -410,9 +410,10 @@ class Flow:
         Args:
             body: A :class:`Flow` or ``lambda f: ...`` callback for the body.
                 Runs at least once.
-            until: ``(ctx) -> bool``. May be async. Checked **after** each
-                iteration completes — truthy → stop. State typically drives
-                termination via ``ctx.state``.
+            until: ``(result, ctx) -> bool``. May be async. Checked **after**
+                each iteration completes — truthy → stop. ``result`` is that
+                iteration's body return; ``ctx.state`` carries any mutations
+                the body made. Either signal — or both — can drive termination.
             max_iters: Hard upper bound on iteration count. Must be ``>= 1``.
                 Reached without ``until`` firing → exits with the last
                 iteration's result.
