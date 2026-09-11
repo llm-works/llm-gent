@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from llm_infer.client import Provider
 
 from llm_gent.core.budget import (
     FixedOp,
@@ -405,6 +406,22 @@ class TestProviderDetection:
         p = LLMPricingProvider(_config(**{"m": _op("m")}))
         resp = _resp(None, {"usage": {"prompt_tokens": 1_000_000}})
         cost = p.compute("m", response=resp, input_tokens=1_000_000, output_tokens=0)
+        assert cost == pytest.approx(1.0)
+
+    def test_provider_enum_member_routes_to_anthropic(self) -> None:
+        # llm-infer's ChatResponse.provider is typed as str but stores
+        # Provider enum values by convention. Passing the enum member
+        # directly must dispatch identically to the string value.
+        p = LLMPricingProvider(_config(**{"claude": _op("claude")}))
+        raw = {"usage": {"cache_creation_input_tokens": 1_000_000}}
+        resp = _resp(Provider.ANTHROPIC, raw)
+        cost = p.compute("claude", response=resp, input_tokens=0, output_tokens=0)
+        assert cost == pytest.approx(1.25)  # Anthropic cache_write path
+
+    def test_provider_enum_google_routes_to_gemini(self) -> None:
+        p = LLMPricingProvider(_config(**{"gemini": _op("gemini")}))
+        resp = _resp(Provider.GOOGLE, {"usage": {}})
+        cost = p.compute("gemini", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)
 
 

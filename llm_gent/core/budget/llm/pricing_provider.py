@@ -13,8 +13,9 @@ LLM-cost consumer needs but nobody wants to re-implement:
 - **Boundary-safe prefix match** — a ``grok-3`` key no longer silently
   matches a call for ``grok-30``. The next character after the match
   must be one of ``-_./`` or end-of-string.
-- **Per-provider dispatch** on ``response.provider`` (duck-typed —
-  no llm-infer hard dep):
+- **Per-provider dispatch** on ``response.provider`` (matched against
+  :class:`llm_infer.client.Provider` enum values; extra string aliases
+  accepted for consumers passing bespoke response wrappers):
 
   - Anthropic — ``prompt_tokens`` on the wire is uncached-only;
     ``cache_read_input_tokens`` bills at ``cached_input_per_mtok``
@@ -26,9 +27,10 @@ LLM-cost consumer needs but nobody wants to re-implement:
     subset billed at the cached rate. xAI reports cost in
     ``usage.cost_in_usd_ticks`` (via :class:`ProviderCostExtractor`)
     and that wins verbatim.
-  - Gemini — standard input/output token math only. Priority-tier
-    surcharges and Gemini's context-caching API are consumer concerns;
-    wrap this class if you need them.
+  - Gemini (Provider.GOOGLE or the aliases ``gemini`` / ``vertex`` /
+    ``vertexai``) — standard input/output token math only. Priority-
+    tier surcharges and Gemini's context-caching API are consumer
+    concerns; wrap this class if you need them.
   - Unknown / missing ``provider`` — best-effort OpenAI-compat path.
 
 - **``provider_cost=<float>`` scalar override** short-circuits every
@@ -47,6 +49,8 @@ from __future__ import annotations
 import math
 from enum import StrEnum
 from typing import Any
+
+from llm_infer.client import Provider
 
 from ..pricing import LLMOp, Op, PricingConfig
 from .extractor import ProviderCostExtractor
@@ -87,8 +91,11 @@ class MissingModelCostError(LookupError):
 
 _DEFAULT_ANTHROPIC_CACHE_WRITE_MULTIPLIER = 1.25
 _DEFAULT_ANTHROPIC_CACHE_READ_MULTIPLIER = 0.1
-_ANTHROPIC_PROVIDERS = frozenset({"anthropic"})
-_GEMINI_PROVIDERS = frozenset({"gemini", "google", "vertex", "vertexai"})
+# Provider tag sets: llm-infer's canonical enum values plus string aliases
+# for bespoke callers (test fixtures, invoice loops, non-llm-infer wrappers).
+# StrEnum equality lets enum members and plain strings coexist in one set.
+_ANTHROPIC_PROVIDERS: frozenset[str] = frozenset({Provider.ANTHROPIC})
+_GEMINI_PROVIDERS: frozenset[str] = frozenset({Provider.GOOGLE, "gemini", "vertex", "vertexai"})
 _BOUNDARY_CHARS = "-_./"
 
 
@@ -350,7 +357,8 @@ def _detect_provider(response: Any, raw: dict[str, Any] | None) -> str:
 
     Preference: ``response.provider`` when a non-empty string. Falls
     back to sniffing the wire dict for provider-exclusive field names
-    (Anthropic's ``cache_*_input_tokens``). Unknown → ``"openai"``.
+    (Anthropic's ``cache_*_input_tokens``). Unknown →
+    :attr:`Provider.OPENAI` (ecosystem majority; safest default).
     """
     tag = getattr(response, "provider", None)
     if isinstance(tag, str) and tag.strip():
@@ -360,8 +368,8 @@ def _detect_provider(response: Any, raw: dict[str, Any] | None) -> str:
         if isinstance(usage, dict) and any(
             key in usage for key in ("cache_creation_input_tokens", "cache_read_input_tokens")
         ):
-            return "anthropic"
-    return "openai"
+            return Provider.ANTHROPIC
+    return Provider.OPENAI
 
 
 def _raw_dict(response: Any) -> dict[str, Any] | None:
