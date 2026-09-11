@@ -115,6 +115,28 @@ class TestPricingProviderSeam:
         t.track("web_search", override_cost=0.123)  # overridden
         assert flags == [False, True]
 
+    def test_override_cost_rejects_nan(self) -> None:
+        t = Tracker(_lg(), _pricing(), budget=10.0)
+        with pytest.raises(ValueError, match="cost must be finite"):
+            t.track("op", override_cost=float("nan"))
+        assert t.spent == 0.0  # no corruption
+
+    def test_override_cost_rejects_inf(self) -> None:
+        t = Tracker(_lg(), _pricing(), budget=10.0)
+        with pytest.raises(ValueError, match="cost must be finite"):
+            t.track("op", override_cost=float("inf"))
+        assert t.spent == 0.0
+
+    def test_provider_computed_nan_rejected(self) -> None:
+        class NanProvider:
+            def compute(self, op_name: str, /, **usage: Any) -> float:
+                return float("nan")
+
+        t = Tracker(_lg(), NanProvider(), budget=10.0)
+        with pytest.raises(ValueError, match="cost must be finite"):
+            t.track("op")
+        assert t.spent == 0.0
+
 
 class TestCap:
     """spent / remaining / exceeded on a capped tracker."""

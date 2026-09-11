@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import math
 from typing import Any, Protocol
 
 from appinfra.log import Logger
@@ -239,6 +240,8 @@ class Tracker:
         else:
             cost = self._pricing.compute(op_name, **usage)
             overridden = False
+        if not math.isfinite(cost):
+            raise ValueError(f"cost must be finite, got {cost}")
         self._record_cost(
             cost, op_name, context if context is not None else {}, overridden=overridden
         )
