@@ -82,16 +82,20 @@ it back and returns the count of steps it produced.
 from typing import Any
 from llm_gent import verb, Context
 from llm_gent.flow import FlowFactory
+from llm_gent.role import Role
+
+planner = Role(name="planner", backend="anthropic", model="claude-sonnet-4-20250514")
+worker = Role(name="worker", backend="anthropic", model="claude-sonnet-4-20250514")
 
 
-@verb(role="planner")
+@verb(role=planner)
 async def plan(ctx: Context, goal: str) -> str:
     """Compute a plan and stash the target on state for downstream verbs."""
     ctx.state.data["target"] = 3  # e.g. derived from goal
     return goal
 
 
-@verb(role="worker")
+@verb(role=worker)
 async def execute(ctx: Context, _prev: Any) -> int:
     """Read the target from state, do the work, return step count."""
     target = ctx.state.data["target"]
