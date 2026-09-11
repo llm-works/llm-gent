@@ -254,7 +254,7 @@ class TestIterateExecution:
             counter["n"] += 1
             return counter["n"]
 
-        def until(ctx: Context) -> bool:
+        def until(_result: Any, ctx: Context) -> bool:
             """Stop when counter has reached 3."""
             return counter["n"] >= 3
 
@@ -269,7 +269,7 @@ class TestIterateExecution:
         flow = make_ff().create()
         flow.call(_identity).iterate(
             lambda f: f.call(_plus_one),
-            until=lambda _c: False,
+            until=lambda _r, _c: False,
             max_iters=4,
         )
         assert await flow.run(0) == 4
@@ -284,7 +284,7 @@ class TestIterateExecution:
             ctx.state.data["items"].append(item)
             return item + 1
 
-        def until(ctx: Context) -> bool:
+        def until(_result: Any, ctx: Context) -> bool:
             """Stop after 3 items."""
             return len(ctx.state.data["items"]) >= 3
 
@@ -293,6 +293,17 @@ class TestIterateExecution:
         state: dict[str, Any] = {"items": []}
         await flow.run(0, state=state)
         assert state["items"] == [0, 1, 2]
+
+    @pytest.mark.asyncio
+    async def test_until_sees_body_result(self) -> None:
+        """``until`` reads each iteration's return — no state channel needed."""
+        flow = make_ff().create()
+        flow.call(_identity).iterate(
+            lambda f: f.call(_plus_one),
+            until=lambda result, _ctx: result >= 3,
+            max_iters=10,
+        )
+        assert await flow.run(0) == 3
 
     @pytest.mark.asyncio
     async def test_async_until_awaited(self) -> None:
@@ -305,7 +316,7 @@ class TestIterateExecution:
             counter["n"] += 1
             return counter["n"]
 
-        async def until(_ctx: Context) -> bool:
+        async def until(_result: Any, _ctx: Context) -> bool:
             """Async predicate."""
             await asyncio.sleep(0)
             return counter["n"] >= 2
