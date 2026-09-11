@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from llm_gent.flow import Flow, FlowFactory, Role, SAIAFactory
+import pytest
 
-from .conftest import StubFactory, make_test_logger
+from llm_gent.core.budget import Tracker
+from llm_gent.flow import Context, Flow, FlowFactory, Role, SAIAFactory, verb
+
+from .conftest import ROLE_A, StubFactory, make_test_logger
 
 
 class _StubSAIA:
@@ -113,3 +116,29 @@ class TestFlowFactory:
         ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), state=state)
         derived = ff.with_saia_f(StubFactory())
         assert derived.create().state is state
+
+
+class TestPricingProviderSwap:
+    """A stub PricingProvider injected via FlowFactory.with_budget reaches ctx.budget.track."""
+
+    @pytest.mark.asyncio
+    async def test_verb_sees_stub_pricing(self) -> None:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        class StubProvider:
+            def compute(self, op_name: str, /, **usage: Any) -> float:
+                calls.append((op_name, dict(usage)))
+                return 0.42
+
+        tracker = Tracker(make_test_logger(), StubProvider(), budget=10.0)
+        recorded: dict[str, float] = {}
+
+        @verb(role=ROLE_A)
+        async def spend(ctx: Context) -> None:
+            recorded["cost"] = ctx.budget.track("some-model", input_tokens=1000, output_tokens=100)
+
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory()).with_budget(tracker)
+        await ff.create().call(spend).run()
+        assert recorded["cost"] == pytest.approx(0.42)
+        assert tracker.spent == pytest.approx(0.42)
+        assert calls == [("some-model", {"input_tokens": 1000, "output_tokens": 100})]

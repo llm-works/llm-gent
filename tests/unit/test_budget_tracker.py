@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from appinfra.log import quick_console_logger
 
-from llm_gent.core.budget import FixedOp, LLMOp, PricingConfig, Tracker
+from llm_gent.core.budget import FixedOp, LLMOp, PricingConfig, PricingProvider, Tracker
 
 
 pytestmark = pytest.mark.unit
@@ -67,15 +67,28 @@ class TestTrackDispatch:
         assert t.track("nothing-here") == 0.0
         assert t.spent == 0.0
 
-    def test_provider_cost_wins_over_computed(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
-        cost = t.track(
-            "some-model",
-            input_tokens=1_000_000,
-            output_tokens=1_000_000,
-            provider_cost=0.42,
-        )
+
+class TestPricingProviderSeam:
+    """Tracker delegates cost computation to its PricingProvider."""
+
+    def test_stub_provider_return_wins(self) -> None:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        class StubProvider:
+            def compute(self, op_name: str, /, **usage: Any) -> float:
+                calls.append((op_name, dict(usage)))
+                return 0.42
+
+        t = Tracker(_lg(), StubProvider(), budget=1.0)
+        cost = t.track("some-model", input_tokens=1000, output_tokens=100)
         assert cost == pytest.approx(0.42)
+        assert t.spent == pytest.approx(0.42)
+        assert calls == [("some-model", {"input_tokens": 1000, "output_tokens": 100})]
+
+    def test_pricing_config_satisfies_protocol(self) -> None:
+        provider: PricingProvider = PricingConfig(ops={"m": FixedOp(name="m", unit_cost=0.05)})
+        t = Tracker(_lg(), provider, budget=1.0)
+        assert t.track("m", count=3) == pytest.approx(0.15)
 
 
 class TestCap:

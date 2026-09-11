@@ -3,11 +3,19 @@
 
 """Pricing configuration — currency-agnostic op cost lookup.
 
+:class:`PricingProvider` is the plug seam :class:`Tracker` calls on
+every recorded usage event. Substrate ships :class:`PricingConfig` as
+the default static implementation — a name-indexed :class:`Op`
+registry with prefix/default fallback. Consumers that need dynamic or
+provider-aware pricing (per-request surcharges, negotiated rates,
+invoice reconciliation) implement their own :class:`PricingProvider`
+and inject it on :class:`Tracker` construction.
+
 An :class:`Op` is a named, billable operation. Each Op exposes a
 ``cost()`` method whose signature is implementation-defined; callers
 pass matching kwargs when tracking usage.
 
-Substrate ships two built-ins:
+Substrate ships two built-in Ops:
 
 - :class:`LLMOp` — token-based (input / output / cached) with per-mtok
   rates and an optional cache discount.
@@ -100,9 +108,44 @@ class FixedOp:
         return self.unit_cost * max(count, 0)
 
 
+class PricingProvider(Protocol):
+    """Cost-computation seam :class:`Tracker` calls on every event.
+
+    Implementations own the pricing math. The default
+    :class:`PricingConfig` computes from a static per-op registry;
+    downstream implementations plug in dynamic or provider-aware
+    pricing (Anthropic cache-creation multipliers, Gemini service-tier
+    surcharges, negotiated rates, invoice reconciliation) without
+    changing the tracker or verb-body call shape.
+
+    Wiring: pass the implementation as the ``pricing`` argument to
+    :class:`Tracker`. Every :meth:`Tracker.track` call forwards
+    ``op_name`` and the usage kwargs directly to :meth:`compute`.
+    """
+
+    def compute(self, op_name: str, /, **usage: Any) -> float:
+        """Compute cost for one usage event.
+
+        The kwargs are whatever the caller passed to
+        :meth:`Tracker.track` alongside ``op_name`` (token counts,
+        cached-token counts, provider signals, ...). Implementations
+        return the cost in the consumer's chosen currency.
+
+        Unknown ops should return ``0.0`` — matches the passive
+        default of :class:`PricingConfig` and lets consumers keep
+        tracking calls in place while pricing rules roll out.
+        """
+        ...
+
+
 @dataclass
 class PricingConfig:
-    """Registry of named :class:`Op` instances.
+    """Default :class:`PricingProvider` — static per-op registry.
+
+    Composes an :class:`Op`-per-name table with prefix/default
+    fallback. Suitable for tests, simple consumers, and any workload
+    where per-op rates are known ahead of time. Consumers needing
+    dynamic pricing implement :class:`PricingProvider` directly.
 
     Example::
 
@@ -115,8 +158,7 @@ class PricingConfig:
             ),
             "web_search": FixedOp(name="web_search", unit_cost=0.001),
         })
-        op = pricing.get("some-fast-model")
-        cost = op.cost(input_tokens=1000, output_tokens=100) if op else 0.0
+        cost = pricing.compute("some-fast-model", input_tokens=1000, output_tokens=100)
     """
 
     ops: dict[str, Op] = field(default_factory=dict)
@@ -137,5 +179,13 @@ class PricingConfig:
 
         return self.ops.get("default")
 
+    def compute(self, op_name: str, /, **usage: Any) -> float:
+        """Look up ``op_name`` and forward ``usage`` to ``op.cost``.
 
-__all__ = ["FixedOp", "LLMOp", "Op", "PricingConfig"]
+        Returns ``0.0`` when no rule applies for ``op_name``.
+        """
+        op = self.get(op_name)
+        return op.cost(**usage) if op is not None else 0.0
+
+
+__all__ = ["FixedOp", "LLMOp", "Op", "PricingConfig", "PricingProvider"]

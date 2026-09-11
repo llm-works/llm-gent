@@ -35,7 +35,7 @@ from typing import Any, Protocol
 
 from appinfra.log import Logger
 
-from .pricing import PricingConfig
+from .pricing import PricingProvider
 
 
 class CostCallback(Protocol):
@@ -83,7 +83,7 @@ class Tracker:
     def __init__(
         self,
         lg: Logger,
-        pricing: PricingConfig,
+        pricing: PricingProvider,
         budget: float | None = None,
         *,
         parent: Tracker | None = None,
@@ -94,8 +94,11 @@ class Tracker:
 
         Args:
             lg: appinfra Logger.
-            pricing: :class:`PricingConfig` used by this tracker and
-                every descendant created via :meth:`child`.
+            pricing: :class:`PricingProvider` used by this tracker and
+                every descendant created via :meth:`child`. Substrate
+                ships :class:`PricingConfig` as the default static
+                implementation; consumers plug their own for dynamic
+                pricing.
             budget: Optional cap. When set, must be > 0. When ``None``
                 this tracker is uncapped — ``exceeded`` is always
                 False and ``urgent_wrapup`` never latches from cap
@@ -195,17 +198,17 @@ class Tracker:
         self,
         op_name: str,
         *,
-        provider_cost: float | None = None,
         context: dict[str, Any] | None = None,
         **usage: Any,
     ) -> float:
         """Record a usage event at this tracker level.
 
-        Looks up the :class:`Op` for ``op_name`` via the pricing
-        config and forwards ``usage`` to ``op.cost(**usage)``. When
-        ``provider_cost`` is set it wins over the computed value —
-        for cases where the provider reports the actual charge
-        directly.
+        Delegates cost computation to the tracker's
+        :class:`PricingProvider` — ``op_name`` and ``usage`` are
+        forwarded verbatim to :meth:`PricingProvider.compute`. Any
+        provider-specific math (cache-creation multipliers,
+        service-tier surcharges, negotiated rates, invoice
+        reconciliation) lives in that implementation, not here.
 
         Cost propagates up the parent chain: every ancestor's
         ``spent`` advances, and any ancestor whose cap crosses on
@@ -220,14 +223,10 @@ class Tracker:
         hot-path callers with observed deep trees should keep
         ``context`` shallow (or pre-frozen) to keep the copy cheap.
 
-        Returns ``0.0`` when the op is unknown and no
-        ``provider_cost`` was supplied.
+        Returns the cost the provider computed (``0.0`` when the op
+        is unknown under the default :class:`PricingConfig`).
         """
-        if provider_cost is not None:
-            cost = provider_cost
-        else:
-            op = self._pricing.get(op_name)
-            cost = op.cost(**usage) if op is not None else 0.0
+        cost = self._pricing.compute(op_name, **usage)
         self._record_cost(cost, op_name, context if context is not None else {})
         return cost
 
