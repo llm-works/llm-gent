@@ -196,6 +196,7 @@ class LLMPricingProvider:
         input_tokens = _nonneg_int(caller_usage.get("input_tokens"))
         output_tokens = _nonneg_int(caller_usage.get("output_tokens"))
         explicit_cached = caller_usage.get("cached_tokens")
+        explicit_cache_write = caller_usage.get("cache_creation_tokens")
         if provider in _ANTHROPIC_PROVIDERS:
             return _compute_anthropic(
                 op,
@@ -203,6 +204,7 @@ class LLMPricingProvider:
                 input_tokens,
                 output_tokens,
                 explicit_cached,
+                explicit_cache_write,
                 cache_read_mult=self._cache_read_mult,
                 cache_write_mult=self._cache_write_mult,
             )
@@ -261,6 +263,7 @@ def _compute_anthropic(
     input_tokens: int,
     output_tokens: int,
     explicit_cached: Any,
+    explicit_cache_write: Any,
     *,
     cache_read_mult: float,
     cache_write_mult: float,
@@ -271,8 +274,11 @@ def _compute_anthropic(
       ``input_tokens``) is uncached-only. Cache read + cache write are
       separate fields.
     - ``cache_read_input_tokens`` × ``cached_input_per_mtok`` when set,
-      otherwise × ``cache_read_mult`` × ``input_per_mtok``.
+      otherwise × ``cache_read_mult`` × ``input_per_mtok``. Overridable
+      via ``cached_tokens=`` kwarg (test fixtures, invoice reconciliation).
     - ``cache_creation_input_tokens`` × ``cache_write_mult`` × input rate.
+      Overridable via ``cache_creation_tokens=`` kwarg — symmetric with
+      the cache_read override.
     """
     wire_usage = raw.get("usage") if isinstance(raw, dict) else None
     if not isinstance(wire_usage, dict):
@@ -282,7 +288,10 @@ def _compute_anthropic(
         cache_read = _nonneg_int(wire_usage.get("cache_read_input_tokens"))
     else:
         cache_read = _nonneg_int(explicit_cached)
-    cache_write = _nonneg_int(wire_usage.get("cache_creation_input_tokens"))
+    if explicit_cache_write is None:
+        cache_write = _nonneg_int(wire_usage.get("cache_creation_input_tokens"))
+    else:
+        cache_write = _nonneg_int(explicit_cache_write)
 
     cache_read_rate = (
         op.cached_input_per_mtok
@@ -313,13 +322,13 @@ def _compute_openai_compat(
     include-cached-in-input math to :meth:`LLMOp.cost`.
     """
     if explicit_cached is None and raw is not None:
-        cached: int | None = ProviderCostExtractor.extract_cached_tokens(raw)
+        cached = ProviderCostExtractor.extract_cached_tokens(raw)
     else:
         cached = _nonneg_int(explicit_cached)
     return op.cost(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        cached_tokens=cached or 0,
+        cached_tokens=cached,
     )
 
 
@@ -363,9 +372,15 @@ def _raw_dict(response: Any) -> dict[str, Any] | None:
 
 
 def _nonneg_int(value: Any) -> int:
-    """Coerce to non-negative int; ``None``/non-int/bool/negative collapse to 0."""
+    """Coerce to non-negative int; ``None``/bool/non-numeric/NaN/inf/negative
+    collapse to 0. Finite floats (some JSON decoders return token counts as
+    ``1500.0``) are truncated to int rather than silently zeroed, so an
+    off-type wire value fails loud on the invoice rather than silent-$0.
+    """
     if value is None or isinstance(value, bool):
         return 0
-    if not isinstance(value, int):
-        return 0
-    return max(value, 0)
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float) and math.isfinite(value):
+        return max(int(value), 0)
+    return 0

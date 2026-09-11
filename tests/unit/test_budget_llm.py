@@ -260,6 +260,21 @@ class TestAnthropicDispatch:
         )
         assert cost == pytest.approx(0.1)
 
+    def test_explicit_cache_creation_overrides_wire(self) -> None:
+        # Symmetric with cached_tokens override — invoice reconciliation
+        # or test fixtures can inject cache_creation_tokens without wire.
+        p = LLMPricingProvider(_config(**{"claude": _op("claude")}))
+        raw = {"usage": {"cache_creation_input_tokens": 999_999}}
+        resp = _resp("anthropic", raw)
+        cost = p.compute(
+            "claude",
+            response=resp,
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_tokens=1_000_000,
+        )
+        assert cost == pytest.approx(1.25)  # 1M @ input rate * 1.25 mult
+
 
 # -----------------------------------------------------------------------------
 # OpenAI-compat dispatch
@@ -327,6 +342,42 @@ class TestGeminiDispatch:
         resp = _resp("vertex", {"usage": {}})
         cost = p.compute("gemini", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)
+
+
+# -----------------------------------------------------------------------------
+# Float token counts (some JSON decoders): coerced, not silent-zeroed
+# -----------------------------------------------------------------------------
+
+
+class TestFloatTokenCounts:
+    def test_float_input_tokens_coerced_not_zeroed(self) -> None:
+        # 1500.0 from a JSON decoder that upcast the int must NOT bill $0.
+        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        resp = _resp("openai", {"usage": {}})
+        cost = p.compute("m", response=resp, input_tokens=1_500_000.0, output_tokens=0)
+        assert cost == pytest.approx(1.5)
+
+    def test_float_from_wire_cache_read_coerced(self) -> None:
+        # Wire-side value arriving as float (uncommon but possible from
+        # loose JSON decoders) still bills correctly.
+        p = LLMPricingProvider(_config(**{"claude": _op("claude", cached=0.1)}))
+        raw = {"usage": {"cache_read_input_tokens": 1_000_000.0}}
+        resp = _resp("anthropic", raw)
+        cost = p.compute("claude", response=resp, input_tokens=0, output_tokens=0)
+        assert cost == pytest.approx(0.1)
+
+    def test_nan_float_still_zeroed(self) -> None:
+        # NaN must not silently propagate as a huge int() cast — collapse to 0.
+        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        resp = _resp("openai", {"usage": {}})
+        cost = p.compute("m", response=resp, input_tokens=math.nan, output_tokens=0)
+        assert cost == 0.0
+
+    def test_non_numeric_string_still_zeroed(self) -> None:
+        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        resp = _resp("openai", {"usage": {}})
+        cost = p.compute("m", response=resp, input_tokens="oops", output_tokens=0)
+        assert cost == 0.0
 
 
 # -----------------------------------------------------------------------------
