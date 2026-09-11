@@ -41,8 +41,13 @@ from .pricing import PricingProvider
 class CostCallback(Protocol):
     """Callback invoked on every cost recorded at a tracker."""
 
-    def __call__(self, cost: float, context: dict[str, Any]) -> None:
-        """Handle one recorded cost event."""
+    def __call__(self, cost: float, context: dict[str, Any], *, overridden: bool) -> None:
+        """Handle one recorded cost event.
+
+        ``overridden`` is True when the cost came from an explicit
+        ``override_cost`` argument to :meth:`Tracker.track` rather
+        than being computed by the pricing provider.
+        """
         ...
 
 
@@ -198,6 +203,7 @@ class Tracker:
         self,
         op_name: str,
         *,
+        override_cost: float | None = None,
         context: dict[str, Any] | None = None,
         **usage: Any,
     ) -> float:
@@ -205,10 +211,10 @@ class Tracker:
 
         Delegates cost computation to the tracker's
         :class:`PricingProvider` — ``op_name`` and ``usage`` are
-        forwarded verbatim to :meth:`PricingProvider.compute`. Any
-        provider-specific math (cache-creation multipliers,
-        service-tier surcharges, negotiated rates, invoice
-        reconciliation) lives in that implementation, not here.
+        forwarded verbatim to :meth:`PricingProvider.compute`. When
+        ``override_cost`` is supplied, the provider is skipped and
+        the given value is recorded directly — useful for invoice
+        reconciliation, provider-reported costs, or test ergonomics.
 
         Cost propagates up the parent chain: every ancestor's
         ``spent`` advances, and any ancestor whose cap crosses on
@@ -223,11 +229,19 @@ class Tracker:
         hot-path callers with observed deep trees should keep
         ``context`` shallow (or pre-frozen) to keep the copy cheap.
 
-        Returns the cost the provider computed (``0.0`` when the op
-        is unknown under the default :class:`PricingConfig`).
+        Returns the cost recorded (``0.0`` when the op is unknown
+        under the default :class:`PricingConfig` and no override was
+        supplied).
         """
-        cost = self._pricing.compute(op_name, **usage)
-        self._record_cost(cost, op_name, context if context is not None else {})
+        if override_cost is not None:
+            cost = override_cost
+            overridden = True
+        else:
+            cost = self._pricing.compute(op_name, **usage)
+            overridden = False
+        self._record_cost(
+            cost, op_name, context if context is not None else {}, overridden=overridden
+        )
         return cost
 
     def update_budget(self, new_budget: float) -> None:
@@ -263,7 +277,14 @@ class Tracker:
         self._spent = amount
         self._lg.debug("restored spend", extra={"spent": amount})
 
-    def _record_cost(self, cost: float, op_name: str, context: dict[str, Any]) -> None:
+    def _record_cost(
+        self,
+        cost: float,
+        op_name: str,
+        context: dict[str, Any],
+        *,
+        overridden: bool,
+    ) -> None:
         """Record one cost event and propagate up.
 
         Order at each level is load-bearing: spend increment →
@@ -284,9 +305,9 @@ class Tracker:
                 self._halt.set()
             self._urgent_wrapup = True
         if self._parent is not None:
-            self._parent._record_cost(cost, op_name, context)
+            self._parent._record_cost(cost, op_name, context, overridden=overridden)
         if self._on_cost is not None:
-            self._on_cost(cost, copy.deepcopy(context))
+            self._on_cost(cost, copy.deepcopy(context), overridden=overridden)
 
 
 __all__ = ["CostCallback", "Tracker"]

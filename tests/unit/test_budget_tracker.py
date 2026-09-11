@@ -90,6 +90,31 @@ class TestPricingProviderSeam:
         t = Tracker(_lg(), provider, budget=1.0)
         assert t.track("m", count=3) == pytest.approx(0.15)
 
+    def test_override_cost_skips_provider(self) -> None:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        class StubProvider:
+            def compute(self, op_name: str, /, **usage: Any) -> float:
+                calls.append((op_name, dict(usage)))
+                return 999.0
+
+        t = Tracker(_lg(), StubProvider(), budget=10.0)
+        cost = t.track("some-model", override_cost=0.05, input_tokens=1000)
+        assert cost == pytest.approx(0.05)
+        assert t.spent == pytest.approx(0.05)
+        assert calls == []  # provider never called
+
+    def test_override_cost_sets_overridden_flag_in_callback(self) -> None:
+        flags: list[bool] = []
+
+        def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
+            flags.append(overridden)
+
+        t = Tracker(_lg(), _pricing(), budget=10.0, on_cost=cb)
+        t.track("web_search", count=1)  # computed
+        t.track("web_search", override_cost=0.123)  # overridden
+        assert flags == [False, True]
+
 
 class TestCap:
     """spent / remaining / exceeded on a capped tracker."""
@@ -244,22 +269,23 @@ class TestCallback:
     """on_cost fires at each level whose scope saw the cost."""
 
     def test_callback_receives_cost_and_context(self) -> None:
-        events: list[tuple[float, dict[str, Any]]] = []
+        events: list[tuple[float, dict[str, Any], bool]] = []
 
-        def cb(cost: float, ctx: dict[str, Any]) -> None:
-            events.append((cost, ctx))
+        def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
+            events.append((cost, ctx, overridden))
 
         t = Tracker(_lg(), _pricing(), budget=1.0, on_cost=cb)
         t.track("web_search", count=2, context={"phase": "x"})
         assert len(events) == 1
-        cost, ctx = events[0]
+        cost, ctx, was_overridden = events[0]
         assert cost == pytest.approx(0.002)
         assert ctx == {"phase": "x"}
+        assert was_overridden is False
 
     def test_context_passed_through_unchanged(self) -> None:
         events: list[dict[str, Any]] = []
 
-        def cb(cost: float, ctx: dict[str, Any]) -> None:
+        def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             events.append(ctx)
 
         t = Tracker(_lg(), _pricing(), budget=1.0, on_cost=cb)
@@ -270,7 +296,7 @@ class TestCallback:
         seen: list[str] = []
 
         def make_cb(label: str):
-            def cb(cost: float, ctx: dict[str, Any]) -> None:
+            def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
                 seen.append(label)
 
             return cb
@@ -285,7 +311,7 @@ class TestCallback:
         halt = asyncio.Event()
         observed: list[bool] = []
 
-        def cb(cost: float, ctx: dict[str, Any]) -> None:
+        def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             observed.append(halt.is_set())
 
         t = Tracker(_lg(), _pricing(), budget=0.001, on_cost=cb, halt=halt)
@@ -295,7 +321,7 @@ class TestCallback:
     def test_halt_set_when_callback_raises(self) -> None:
         halt = asyncio.Event()
 
-        def bad_cb(cost: float, ctx: dict[str, Any]) -> None:
+        def bad_cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             raise RuntimeError("intentional")
 
         t = Tracker(_lg(), _pricing(), budget=0.001, on_cost=bad_cb, halt=halt)
@@ -306,7 +332,7 @@ class TestCallback:
     def test_all_accounting_completes_before_callbacks(self) -> None:
         """A raising callback leaves the whole tree's spend intact."""
 
-        def bad_cb(cost: float, ctx: dict[str, Any]) -> None:
+        def bad_cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             raise RuntimeError("intentional")
 
         root = Tracker(_lg(), _pricing(), budget=10.0, on_cost=bad_cb)
