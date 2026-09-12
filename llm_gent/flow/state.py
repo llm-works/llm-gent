@@ -17,12 +17,15 @@ Checkpoint serialization contract
 Payloads that need to round-trip through a checkpoint MUST satisfy
 :class:`StateData` — implement ``to_dict()`` and
 ``classmethod from_dict(cls, data)`` — OR be a plain ``dict``. Dicts pass
-through the serializer as-is; :class:`StateData`-conforming values
-serialize via ``to_dict``.
+through the checkpointer as-is.
 
-The framework never inspects payloads at verb-invocation time; the contract
-only surfaces when ``.with_checkpointer(...)`` is wired on the enclosing
-flow. Consumers who never checkpoint don't need to conform.
+Serialization is **consumer-owned**: the framework cannot call ``from_dict``
+because it doesn't know the payload's concrete type. Consumers call
+``state.data.to_dict()`` in their save hook and
+``PayloadClass.from_dict(checkpoint["data"])`` in their resume hook.
+
+The contract only surfaces when ``.with_checkpointer(...)`` is wired on
+the enclosing flow. Consumers who never checkpoint don't need to conform.
 """
 
 from __future__ import annotations
@@ -45,9 +48,12 @@ class StateData(Protocol):
     Structural: any class (Pydantic, dataclass, TypedDict wrapper, custom)
     with both methods satisfies. No inheritance required.
 
-    Enforced at checkpoint save/load time; the framework never calls these
-    on payloads that don't reach a checkpointer. Plain dicts pass through
-    the serializer as-is and are NOT required to implement :class:`StateData`.
+    **Consumer-owned:** the framework exposes the contract but does not call
+    these methods automatically — it cannot call ``from_dict`` without knowing
+    the concrete class. Consumers serialize in their checkpoint hooks.
+
+    Plain dicts pass through the checkpointer as-is and are NOT required to
+    implement :class:`StateData`.
     """
 
     def to_dict(self) -> dict[str, Any]: ...
