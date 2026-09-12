@@ -12,6 +12,8 @@ Public surface:
 - :class:`State` — scope-aware wrapper around the user-owned payload on
   ``ctx.state`` (``.data`` reaches the payload; ``.root()`` walks to the
   outermost scope)
+- :class:`StateData` — serialization contract for ``state.data`` payloads
+  that need to round-trip through a checkpoint (``to_dict`` + ``from_dict``)
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
 - :class:`FlowFactory` — app-scoped :class:`Flow` builder (captures ``lg``
   and one :class:`SAIAFactory`); preferred entry point at the application
@@ -48,7 +50,7 @@ from .loop import CheckpointStore, Loop, LoopFactory
 from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
 from .role import Role
-from .state import State
+from .state import State, StateData
 from .verb import verb
 
 
@@ -66,6 +68,7 @@ __all__ = [
     "SAIAFactory",
     "Skipped",
     "State",
+    "StateData",
     "Unset",
     "extractor",
     "grader",
