@@ -26,10 +26,10 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import (
-    CheckpointStore,
     Context,
     Flow,
     Loop,
+    LoopCheckpointStore,
     LoopFactory,
     Role,
     verb,
@@ -117,7 +117,7 @@ class _CompleteFactory:
 
 @dataclass
 class _RecordingStore:
-    """CheckpointStore stub recording every call.
+    """LoopCheckpointStore stub recording every call.
 
     ``preload`` is what :meth:`load_checkpoint` returns for
     ``(scope_id, run_id)`` matches (any scope_id + any run_id → the same
@@ -763,18 +763,18 @@ class TestLoopFactory:
 # -----------------------------------------------------------------------------
 
 
-class TestCheckpointStoreProtocol:
-    """``_RecordingStore`` satisfies the CheckpointStore Protocol structurally."""
+class TestLoopCheckpointStoreProtocol:
+    """``_RecordingStore`` satisfies the LoopCheckpointStore Protocol structurally."""
 
     def test_recording_store_matches_protocol(self) -> None:
-        """``_RecordingStore`` satisfies CheckpointStore structurally."""
+        """``_RecordingStore`` satisfies LoopCheckpointStore structurally."""
         store = _RecordingStore()
         # Protocol without @runtime_checkable — verify method presence at runtime.
         assert callable(store.save_checkpoint)
         assert callable(store.load_checkpoint)
         assert callable(store.delete_checkpoint)
         # Static check: assignment to Protocol type verifies structural conformance.
-        _: CheckpointStore = store
+        _: LoopCheckpointStore = store
         Loop(ROLE_A, checkpointer=store)
 
 

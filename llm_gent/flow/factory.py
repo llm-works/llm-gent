@@ -29,8 +29,10 @@ from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
+from .checkpoint import CheckpointStore
 from .nodes import UNSET
 from .role import Role
+from .state import StateData
 
 
 if TYPE_CHECKING:
@@ -99,6 +101,8 @@ class FlowFactory:
         traits: TraitRegistry | None = None,
         halt: asyncio.Event | None = None,
         budget: Tracker | None = None,
+        state_type: type[StateData] | None = None,
+        checkpointer: CheckpointStore | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -122,6 +126,16 @@ class FlowFactory:
                 :meth:`Flow.with_budget` on every built flow. Wire once at
                 the factory to thread the same cost tracker through an
                 entire agent shape.
+            state_type: Optional :class:`StateData` payload class threaded
+                into every :class:`Flow`'s ``state_type=`` slot. Consumed
+                by :meth:`Flow.run` ``resume=True`` to hydrate
+                ``ctx.state.data`` from a loaded checkpoint. ``None``
+                (default) treats the payload as a plain dict.
+            checkpointer: Optional :class:`CheckpointStore` captured for
+                subsequent :meth:`create` calls. Only wired onto a built
+                :class:`Flow` when :meth:`create` is passed a
+                ``client_flow_id=`` — the id scopes the trajectory and is
+                agent-owned per Flow instance.
         """
         self._lg = lg
         self._saia_f = saia_f
@@ -129,8 +143,16 @@ class FlowFactory:
         self._traits = traits
         self._halt = halt
         self._budget = budget
+        self._state_type = state_type
+        self._checkpointer = checkpointer
 
-    def create(self, name: str = "", *, state: Any = UNSET) -> Flow:
+    def create(
+        self,
+        name: str = "",
+        *,
+        state: Any = UNSET,
+        client_flow_id: str | None = None,
+    ) -> Flow:
         """Return a :class:`Flow` using this factory's captured environment.
 
         Args:
@@ -141,6 +163,14 @@ class FlowFactory:
                 :data:`UNSET` (default) inherits the factory's ``state``;
                 passing ``None`` explicitly is honored as "payload is
                 ``None``"; any other value replaces the factory default.
+            client_flow_id: Per-Flow trajectory identifier for the
+                captured :class:`CheckpointStore`. Required to bind the
+                store — the built Flow gets
+                :meth:`Flow.with_checkpointer` called with
+                ``(store, client_flow_id)`` only when both this argument
+                is supplied AND the factory carries a checkpointer.
+                ``None`` (default) leaves the built Flow unwired even
+                when the factory carries a store.
         """
         from .flow import Flow
 
@@ -151,18 +181,22 @@ class FlowFactory:
             saia_f=self._saia_f,
             state=resolved_state,
             traits=self._traits,
+            state_type=self._state_type,
         )
         if self._halt is not None:
             flow.with_halt(self._halt)
         if self._budget is not None:
             flow.with_budget(self._budget)
+        if self._checkpointer is not None and client_flow_id is not None:
+            flow.with_checkpointer(self._checkpointer, client_flow_id)
         return flow
 
     def with_saia_f(self, saia_f: SAIAFactory) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
 
-        ``lg``, ``state``, ``traits``, ``halt``, and ``budget`` are preserved.
-        Useful for subsystems that share the app's logger but need a different
+        Every other captured slot (``lg``, ``state``, ``traits``, ``halt``,
+        ``budget``, ``state_type``, ``checkpointer``) carries over. Useful
+        for subsystems that share the app's logger but need a different
         saia builder (e.g. a plugin with its own model wiring).
         """
         return FlowFactory(
@@ -172,13 +206,15 @@ class FlowFactory:
             traits=self._traits,
             halt=self._halt,
             budget=self._budget,
+            state_type=self._state_type,
+            checkpointer=self._checkpointer,
         )
 
     def with_traits(self, traits: TraitRegistry | None) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose trait registry is swapped.
 
-        ``lg``, ``saia_f``, ``state``, ``halt``, and ``budget`` are preserved.
-        Mirrors :meth:`with_saia_f` for the trait dimension.
+        Every other captured slot carries over. Mirrors :meth:`with_saia_f`
+        for the trait dimension.
         """
         return FlowFactory(
             self._lg,
@@ -187,15 +223,16 @@ class FlowFactory:
             traits=traits,
             halt=self._halt,
             budget=self._budget,
+            state_type=self._state_type,
+            checkpointer=self._checkpointer,
         )
 
     def with_halt(self, event: asyncio.Event) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose halt event is swapped.
 
-        ``lg``, ``saia_f``, ``state``, ``traits``, and ``budget`` are preserved.
-        Every subsequently created :class:`Flow` gets ``event`` attached via
-        :meth:`Flow.with_halt` — one wiring reaches every layer that
-        observes ``ctx.halt``.
+        Every other captured slot carries over. Every subsequently created
+        :class:`Flow` gets ``event`` attached via :meth:`Flow.with_halt` —
+        one wiring reaches every layer that observes ``ctx.halt``.
         """
         return FlowFactory(
             self._lg,
@@ -204,15 +241,16 @@ class FlowFactory:
             traits=self._traits,
             halt=event,
             budget=self._budget,
+            state_type=self._state_type,
+            checkpointer=self._checkpointer,
         )
 
     def with_budget(self, tracker: Tracker) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose budget tracker is swapped.
 
-        ``lg``, ``saia_f``, ``state``, ``traits``, and ``halt`` are preserved.
-        Every subsequently created :class:`Flow` gets ``tracker`` attached via
-        :meth:`Flow.with_budget` — one wiring reaches every layer that
-        observes ``ctx.budget``.
+        Every other captured slot carries over. Every subsequently created
+        :class:`Flow` gets ``tracker`` attached via :meth:`Flow.with_budget`
+        — one wiring reaches every layer that observes ``ctx.budget``.
         """
         return FlowFactory(
             self._lg,
@@ -221,4 +259,26 @@ class FlowFactory:
             traits=self._traits,
             halt=self._halt,
             budget=tracker,
+            state_type=self._state_type,
+            checkpointer=self._checkpointer,
+        )
+
+    def with_checkpointer(self, store: CheckpointStore) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose checkpointer is swapped.
+
+        Every other captured slot carries over. The store binds to each
+        built :class:`Flow` only when :meth:`create` is called with a
+        ``client_flow_id=`` — the trajectory identifier is agent-owned
+        per Flow instance, so the factory captures the store once and
+        the id is chosen at construction time.
+        """
+        return FlowFactory(
+            self._lg,
+            saia_f=self._saia_f,
+            state=self._state,
+            traits=self._traits,
+            halt=self._halt,
+            budget=self._budget,
+            state_type=self._state_type,
+            checkpointer=store,
         )

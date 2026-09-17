@@ -43,12 +43,17 @@ from .role import Role
 
 
 # ----------------------------------------------------------------------------
-# CheckpointStore Protocol
+# LoopCheckpointStore Protocol
 # ----------------------------------------------------------------------------
 
 
-class CheckpointStore(Protocol):
-    """3-method Protocol for persisting Loop checkpoints.
+class LoopCheckpointStore(Protocol):
+    """3-method Protocol for persisting :class:`Loop` checkpoints (per-SAIA-turn).
+
+    Scoped to Loop's saia-turn lifecycle. The Flow-level composition
+    checkpointer (:class:`llm_gent.flow.CheckpointStore`) lives at a
+    different layer with a different Protocol; the two names disambiguate
+    at import.
 
     Mirrors :class:`appware.CheckpointStore` (``save_checkpoint`` /
     ``load_checkpoint`` / ``delete_checkpoint``) so an existing consumer
@@ -209,7 +214,7 @@ class Loop:
         *,
         saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
-        checkpointer: CheckpointStore | None = None,
+        checkpointer: LoopCheckpointStore | None = None,
         on_start: OnStart | None = None,
         on_resume: OnResume | None = None,
         on_iteration: OnIteration | None = None,
@@ -465,7 +470,7 @@ class LoopFactory:
         lg: Logger,
         *,
         saia_f: SAIAFactory | None = None,
-        checkpointer: CheckpointStore | None = None,
+        checkpointer: LoopCheckpointStore | None = None,
         halt: asyncio.Event | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
@@ -477,7 +482,7 @@ class LoopFactory:
             saia_f: Optional :class:`SAIAFactory`. Reserved for
                 standalone-Loop use; Flow-body Loops read ``ctx.saia``
                 from the enclosing Flow's factory.
-            checkpointer: Optional :class:`CheckpointStore`. Every
+            checkpointer: Optional :class:`LoopCheckpointStore`. Every
                 :meth:`create` inherits it as the Loop's default
                 checkpointer unless per-call overridden.
             halt: Optional :class:`asyncio.Event` used as the default
@@ -500,7 +505,7 @@ class LoopFactory:
         return self._saia_f
 
     @property
-    def checkpointer(self) -> CheckpointStore | None:
+    def checkpointer(self) -> LoopCheckpointStore | None:
         """The checkpointer captured at construction, or ``None``."""
         return self._checkpointer
 
@@ -515,7 +520,7 @@ class LoopFactory:
         *,
         saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
-        checkpointer: CheckpointStore | None = None,
+        checkpointer: LoopCheckpointStore | None = None,
         on_start: OnStart | None = None,
         on_resume: OnResume | None = None,
         on_iteration: OnIteration | None = None,
@@ -561,7 +566,7 @@ class LoopFactory:
             halt=self._halt,
         )
 
-    def with_checkpointer(self, checkpointer: CheckpointStore | None) -> LoopFactory:
+    def with_checkpointer(self, checkpointer: LoopCheckpointStore | None) -> LoopFactory:
         """Return a new :class:`LoopFactory` whose checkpointer is swapped."""
         return LoopFactory(
             self._lg,
