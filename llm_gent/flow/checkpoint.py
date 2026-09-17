@@ -40,6 +40,14 @@ the framework calls :meth:`delete_checkpoint` so the resumable trajectory
 does not leak past its own completion. Cancellation, halt-triggered exit,
 and unhandled exceptions preserve the checkpoint so a later ``resume=True``
 run can pick up.
+
+Resume limitations
+------------------
+The checkpoint stores ``state.data`` only — the iteration counter is not
+persisted. On resume, ``.iterate`` restarts from iteration 0, so
+``max_iters`` bounds per-run iterations, not total iterations across
+resumes. For absolute bounds, track iteration count in ``state.data``
+and use ``until=`` for termination.
 """
 
 from __future__ import annotations

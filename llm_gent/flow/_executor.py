@@ -265,7 +265,11 @@ async def _run_iterate(
     framework calls :meth:`CheckpointStore.save_checkpoint` after each
     successful iteration with the parent-scope payload (``env.state``,
     which is the outer scope's :class:`State` that persists across
-    iterations of this block).
+    iterations of this block). Note: when ``state=`` projects a child
+    scope, only the parent state is checkpointed — progress in the child
+    state is lost on resume. To preserve iteration progress, accumulate
+    results in the parent state or use ``until=`` with state-driven
+    termination.
     """
     child_state = await _project_state(it.state_fn, env.state)
     result: Any = node_args[0] if node_args else None

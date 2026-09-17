@@ -751,7 +751,12 @@ class Flow:
         if resume:
             active_state = self._hydrate_resume_state(active_state)
         result = await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
-        if self._checkpointer is not None and self._client_flow_id is not None:
+        # Preserve checkpoint on halt-triggered exit per delete policy
+        if (
+            self._checkpointer is not None
+            and self._client_flow_id is not None
+            and (self._halt_event is None or not self._halt_event.is_set())
+        ):
             self._checkpointer.delete_checkpoint(self._client_flow_id)
         return result
 
@@ -926,6 +931,7 @@ def _validate_target(target: Any) -> None:
         )
     _reject_reserved_kwarg(target, "state")
     _reject_reserved_kwarg(target, "runtime")
+    _reject_reserved_kwarg(target, "resume")
 
 
 def _reject_reserved_kwarg(verb: Any, name: str) -> None:
