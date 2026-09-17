@@ -170,6 +170,28 @@ class Skipped:
 
 
 @dataclass(frozen=True)
+class _ResumeReplay:
+    """Threaded through the executor when :meth:`Flow.run` resumes.
+
+    ``remaining_path`` is the ancestor chain of node IDs still to match
+    on descent — a tuple of content-addressed hashes assembled from
+    root to the save-point iterate (the leaf ID is included). Each
+    descent site pops its head after validation (computed node_id at
+    the current chain step equals the head) and passes the tail on.
+    When ``remaining_path`` empties at an iterate, ``iteration`` gives
+    the completed-count to fast-forward to.
+
+    A mismatch is a hard error: the composition graph has changed
+    structurally since the checkpoint was written, and silently
+    restarting or best-effort re-mapping would either lose work or
+    silently produce wrong output.
+    """
+
+    remaining_path: tuple[str, ...]
+    iteration: int = 0
+
+
+@dataclass(frozen=True)
 class _RunEnv:
     """Per-run environment threaded through the execution helpers.
 
@@ -183,6 +205,14 @@ class _RunEnv:
     scope. ``budget`` is the ambient session tracker attached via
     :meth:`Flow.with_budget` (or inherited); ``None`` when no budget is in
     scope.
+
+    Composition-graph position is threaded via a pair of content-addressed
+    hashes: ``chain_context`` is the hash used to compute this Flow's own
+    chain-step node IDs, and ``ancestor_chain`` is the tuple of ancestor
+    ``_Node`` IDs from the run's root down to the ``_Node`` whose descent
+    entered this Flow. Extended pairwise on every subflow / branch-arm /
+    iterate-body descent. The pair is what the checkpoint layer walks to
+    address any point in the composition tree.
     """
 
     runtime: Flow
@@ -192,6 +222,9 @@ class _RunEnv:
     budget: Tracker | None = None
     checkpointer: CheckpointStore | None = None
     client_flow_id: str | None = None
+    chain_context: str = ""
+    ancestor_chain: tuple[str, ...] = ()
+    replay: _ResumeReplay | None = None
 
 
 @dataclass
@@ -234,7 +267,16 @@ class _Map:
 
 @dataclass
 class _Node:
-    """One step in a Flow composition chain."""
+    """One step in a Flow composition chain.
+
+    Identity is content-addressed but derived lazily, not stored: the
+    executor computes each node's runtime ``node_id`` from the enclosing
+    :attr:`_RunEnv.chain_context` plus the node's local key
+    (kind + target qualname + chain position) on descent. The hash chain
+    from root gives every node in the composition tree a globally-unique
+    identifier the checkpoint layer uses; see
+    :func:`llm_gent.flow.flow._compute_node_id`.
+    """
 
     target: Any
     project: ProjectFn | None = None

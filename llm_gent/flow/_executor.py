@@ -83,6 +83,7 @@ async def _execute_node(
     env: _RunEnv,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
+    node_id: str,
 ) -> Any:
     """Invoke a node's target with cancellation-safe rescue + optional after hook.
 
@@ -93,7 +94,7 @@ async def _execute_node(
     target_name = _target_label(node.target)
     env.lg.debug("executing node", extra={"target": target_name})
     try:
-        result = await _invoke_target(node, ctx, env, node_args, node_kwargs)
+        result = await _invoke_target(node, ctx, env, node_args, node_kwargs, node_id)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -119,17 +120,20 @@ async def _invoke_target(
     env: _RunEnv,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
+    node_id: str,
 ) -> Any:
     """Dispatch a node's target: verb, subflow, or control-flow primitive."""
     from .flow import Flow
 
     target = node.target
     if isinstance(target, Flow):
-        return await _run_subflow(target, env, node.state_fn, node.merge_fn, node_args, node_kwargs)
+        return await _run_subflow(
+            target, env, node.state_fn, node.merge_fn, node_args, node_kwargs, node_id
+        )
     if isinstance(target, _Branch):
-        return await _run_branch(target, ctx, env, node_args)
+        return await _run_branch(target, ctx, env, node_args, node_id)
     if isinstance(target, _Iterate):
-        return await _run_iterate(target, ctx, env, node_args)
+        return await _run_iterate(target, ctx, env, node_args, node_id)
     if isinstance(target, _Map):
         return await _run_map(target, ctx, env, node_args)
     return await target(ctx, *node_args, **node_kwargs)
@@ -142,8 +146,18 @@ async def _run_subflow(
     merge_fn: StateMerge | None,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
+    node_id: str,
 ) -> Any:
-    """Run a subflow node, honoring optional scoped-state projection/merge."""
+    """Run a subflow node, honoring optional scoped-state projection/merge.
+
+    Threads the composition-tree identity into the child Flow:
+    ``ancestor_chain`` gains ``node_id`` (this call's ``_Node`` is now
+    an ancestor of everything inside), and ``chain_context`` becomes
+    ``_descend_context(node_id, "call")`` — the hash the child's
+    chain-step IDs are computed against.
+    """
+    from .flow import _descend_context
+
     child_state = await _project_state(state_fn, env.state)
     result = await body._run_as_subflow(
         *node_args,
@@ -153,6 +167,9 @@ async def _run_subflow(
         parent_budget=env.budget,
         parent_checkpointer=env.checkpointer,
         parent_client_flow_id=env.client_flow_id,
+        parent_chain_context=_descend_context(node_id, "call"),
+        parent_ancestor_chain=env.ancestor_chain + (node_id,),
+        parent_replay=env.replay,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -218,6 +235,7 @@ async def _run_branch(
     ctx: Context[Any],
     env: _RunEnv,
     node_args: tuple[Any, ...],
+    node_id: str,
 ) -> Any:
     """Evaluate the predicate and dispatch the chosen subflow.
 
@@ -225,7 +243,14 @@ async def _run_branch(
     is the chain's head with no positional) as the sole positional to the
     chosen subflow. Falsy predicate with no ``else_`` returns the input
     unchanged. Both bodies share the parent's active state.
+
+    The chosen arm's ``chain_context`` is
+    ``_descend_context(node_id, "then"|"else")`` so the two arms are at
+    identity-distinct positions in the composition tree even when they
+    share a target Flow.
     """
+    from .flow import _descend_context
+
     prev_result = node_args[0] if node_args else None
     verdict = br.when(prev_result, ctx)
     if inspect.isawaitable(verdict):
@@ -241,6 +266,9 @@ async def _run_branch(
         parent_budget=env.budget,
         parent_checkpointer=env.checkpointer,
         parent_client_flow_id=env.client_flow_id,
+        parent_chain_context=_descend_context(node_id, "then" if verdict else "else"),
+        parent_ancestor_chain=env.ancestor_chain + (node_id,),
+        parent_replay=env.replay,
     )
 
 
@@ -249,6 +277,7 @@ async def _run_iterate(
     ctx: Context[Any],
     env: _RunEnv,
     node_args: tuple[Any, ...],
+    node_id: str,
 ) -> Any:
     """Iterate the body under bounds, threading each result to the next.
 
@@ -270,11 +299,22 @@ async def _run_iterate(
     state is lost on resume. To preserve iteration progress, accumulate
     results in the parent state or use ``until=`` with state-driven
     termination.
+
+    Resume: when a ``_ResumeReplay`` is threaded via :attr:`_RunEnv.replay`
+    and its save-point (path leaf) matches this iterate's runtime
+    ``node_id``, the counter starts at the saved iteration instead of 0
+    — the folded fix for the note-423 gap (``max_iters`` becomes a
+    cumulative bound across resumes, not per-run). At most one iterate
+    per run consumes the replay; :attr:`Flow._replay_consumed` flips the
+    first time a match fires so re-entrant dispatches of the same node
+    (e.g., an inner iterate spun up by an outer loop) do not re-apply
+    the fast-forward. ``deadline`` is not restored — the wall clock
+    resets each run.
     """
     child_state = await _project_state(it.state_fn, env.state)
     result: Any = node_args[0] if node_args else None
     started = time.monotonic()
-    iteration = 0
+    iteration = _resume_iteration_for(env, node_id)
     while True:
         if it.max_iters is not None and iteration >= it.max_iters:
             break
@@ -282,35 +322,124 @@ async def _run_iterate(
             break
         if env.halt is not None and env.halt.is_set():
             break
-        result = await it.body._run_as_subflow(
-            result,
-            state=child_state,
-            runtime=env.runtime,
-            parent_halt=env.halt,
-            parent_budget=env.budget,
-            parent_checkpointer=env.checkpointer,
-            parent_client_flow_id=env.client_flow_id,
-        )
+        result = await _dispatch_iterate_body(it, env, child_state, result, node_id)
         iteration += 1
-        _save_iterate_checkpoint(env, iteration)
+        _save_iterate_checkpoint(env, iteration, node_id, child_state)
         if await _check_until(it.until, result, child_state, env):
             break
     await _merge_state(it.merge_fn, env.state, child_state)
     return result
 
 
-def _save_iterate_checkpoint(env: _RunEnv, iteration: int) -> None:
-    """Persist ``env.state.data`` when a checkpointer is wired on the runtime.
+def _resume_iteration_for(env: _RunEnv, node_id: str) -> int:
+    """Return the starting iteration count for ``_run_iterate``.
 
-    Called once per completed iteration inside :func:`_run_iterate`. Skips
-    silently when no checkpointer or ``client_flow_id`` is bound on the
-    runtime — the flow simply runs without persistence.
+    ``0`` for a fresh run. On resume, when ``env.replay`` is set and its
+    path leaf matches this iterate's ``node_id`` and no earlier iterate
+    in the run has consumed the replay, returns the saved iteration and
+    flips :attr:`Flow._replay_consumed` on the top-level runtime so the
+    fast-forward fires exactly once. A non-matching id or an already-
+    consumed replay yields ``0`` and the iterate runs from scratch.
+    """
+    replay = env.replay
+    if replay is None or not replay.remaining_path:
+        return 0
+    if env.runtime._replay_consumed:
+        return 0
+    if node_id != replay.remaining_path[-1]:
+        return 0
+    env.runtime._replay_consumed = True
+    return replay.iteration
+
+
+async def _dispatch_iterate_body(
+    it: _Iterate,
+    env: _RunEnv,
+    child_state: State[Any],
+    prev_result: Any,
+    node_id: str,
+) -> Any:
+    """Run one pass of an ``.iterate`` body under the current env.
+
+    Descends into the body with ``chain_context =
+    _descend_context(node_id, "body")`` and ``ancestor_chain`` extended
+    by ``node_id`` — the same context every pass, so the body's chain
+    steps have iteration-invariant IDs (the runtime pass counter is
+    stored alongside the path, not baked into node identity).
+    """
+    from .flow import _descend_context
+
+    return await it.body._run_as_subflow(
+        prev_result,
+        state=child_state,
+        runtime=env.runtime,
+        parent_halt=env.halt,
+        parent_budget=env.budget,
+        parent_checkpointer=env.checkpointer,
+        parent_client_flow_id=env.client_flow_id,
+        parent_chain_context=_descend_context(node_id, "body"),
+        parent_ancestor_chain=env.ancestor_chain + (node_id,),
+        parent_replay=env.replay,
+    )
+
+
+def _save_iterate_checkpoint(
+    env: _RunEnv,
+    iteration: int,
+    node_id: str,
+    current_state: State[Any],
+) -> None:
+    """Persist a recursive snapshot at an iterate boundary.
+
+    ``state_json`` carries the state stack from root to ``current_state``
+    as a nested ``{data, children}`` tree — ``data`` at the top is the
+    outermost run-level payload, and each layer of ``children`` is one
+    step deeper into scoped composition. Old-shape readers looking at
+    ``state_json["data"]`` still see the outermost payload; the tree
+    extension is additive.
+
+    ``metadata_json`` carries the schema version, the composition-tree
+    path (a flat list of content-addressed node IDs from root to and
+    including this iterate — the ancestor chain in ``env`` plus this
+    iterate's own ID), and the completed iteration count. Resume walks
+    the graph, matching each id at the corresponding chain step to
+    relocate the same iterate; a mismatch is a hard error at that
+    depth.
+
+    No-op when the runtime has no checkpointer / client_flow_id bound.
     """
     if env.checkpointer is None or env.client_flow_id is None:
         return
-    state_json = {"data": _serialize_state_data(env.state.data)}
-    metadata_json = {"schema_version": 1}
+    state_json = _serialize_state_tree(current_state)
+    path = list(env.ancestor_chain + (node_id,))
+    metadata_json = {"schema_version": 1, "path": path, "iteration": iteration}
     env.checkpointer.save_checkpoint(env.client_flow_id, iteration, state_json, metadata_json)
+
+
+def _serialize_state_tree(current: State[Any]) -> dict[str, Any]:
+    """Serialize the state stack from root to ``current`` as a nested tree.
+
+    Returns ``{data, children}`` where the outermost dict is the run-level
+    (root) scope and each ``children`` slot descends one scoped layer;
+    ``children`` at the innermost scope is ``[]``. Every ``data`` is
+    normalized via :func:`_serialize_state_data` (plain-dict passthrough
+    or :class:`StateData.to_dict`).
+
+    The current stack is linear (each :class:`State` has one
+    ``_parent``) — a list would suffice today, but the nested shape
+    leaves room for a future scoped-composition site that fans out into
+    sibling children without a schema break.
+    """
+    scopes: list[State[Any]] = []
+    node: State[Any] | None = current
+    while node is not None:
+        scopes.append(node)
+        node = node._parent
+    scopes.reverse()
+    tree: dict[str, Any] = {"data": _serialize_state_data(scopes[-1].data), "children": []}
+    for scope in reversed(scopes[:-1]):
+        tree = {"data": _serialize_state_data(scope.data), "children": [tree]}
+    return tree
 
 
 def _serialize_state_data(data: Any) -> Any:
