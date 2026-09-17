@@ -114,7 +114,7 @@ class Panel:
         self.verbs = list(verbs)
         self.aggregate = aggregate
 
-    async def run(self, ctx: Context, *args: Any, **kwargs: Any) -> Any:
+    async def run(self, ctx: Context[Any], *args: Any, **kwargs: Any) -> Any:
         """Dispatch each inner verb in parallel and aggregate the results.
 
         Each inner verb must have been registered with the flow referenced by

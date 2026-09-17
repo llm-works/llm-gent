@@ -31,7 +31,17 @@ the enclosing flow. Consumers who never checkpoint don't need to conform.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, Self, runtime_checkable
+from typing import Any, Generic, Protocol, Self, TypeVar, cast, runtime_checkable
+
+
+T = TypeVar("T")
+"""Payload type carried by a :class:`State`.
+
+Consumers who want typed payload access annotate the enclosing
+:class:`~llm_gent.flow.context.Context` as ``Context[MyState]``; the parameter
+threads through to ``ctx.state.data``. Unparameterized usage remains valid
+and treats the payload as :data:`Any`.
+"""
 
 
 @runtime_checkable
@@ -63,26 +73,33 @@ class StateData(Protocol):
 
 
 @dataclass(frozen=True)
-class State:
+class State(Generic[T]):
     """Scope-aware wrapper around a user-owned payload.
 
     ``data`` is the payload the caller supplied at :meth:`Flow.run` (or the
     child payload produced by a ``state=`` projection); the framework carries
     it verbatim without inspecting or dictating its shape.
 
+    Generic in the payload type :data:`T`. Unparameterized ``State`` treats
+    the payload as :data:`Any`; ``State[MyState]`` narrows ``data`` to
+    ``MyState`` for type-checked access. Runtime shape is unchanged either
+    way — the framework never inspects the payload.
+
     Payloads that need checkpoint round-tripping MUST be plain dicts or
     satisfy :class:`StateData`; see the module docstring.
     """
 
-    data: Any = None
+    data: T = cast(T, None)
     """User-owned payload (dict, dataclass, Pydantic model, arbitrary object).
 
-    Typed ``Any`` so verbs retain rich payload access (dict indexing,
-    attribute access, etc.). The checkpoint serialization contract is
-    :class:`StateData`, enforced only at snapshot time.
+    Typed via the generic parameter :data:`T` — unparameterized ``State`` is
+    ``State[Any]``, so verbs retain rich payload access (dict indexing,
+    attribute access, etc.). Defaults to ``None`` for backwards compatibility
+    with zero-argument ``State()`` construction. The checkpoint serialization
+    contract is :class:`StateData`, enforced only at snapshot time.
     """
 
-    _parent: State | None = field(default=None, repr=False)
+    _parent: State[Any] | None = field(default=None, repr=False)
     """Link to the enclosing scope's :class:`State`, or ``None`` at the root.
 
     Private on purpose — public traversal is via :meth:`root` /
@@ -94,14 +111,17 @@ class State:
         """True when this state has no parent — the outermost scope of a run."""
         return self._parent is None
 
-    def root(self) -> State:
+    def root(self) -> State[Any]:
         """Walk the parent chain to the outermost :class:`State`.
 
         Returns ``self`` when already at the root. Verbs reading run-wide
         state (budgets, deadlines, shared registries) reach it via
-        ``ctx.state.root().data``.
+        ``ctx.state.root().data``. The return type is ``State[Any]``
+        because a scoped child's payload type has no static relationship
+        to its ancestors' — callers know their runtime's top-level type
+        and can annotate the read site accordingly.
         """
-        node = self
+        node: State[Any] = self
         while node._parent is not None:
             node = node._parent
         return node

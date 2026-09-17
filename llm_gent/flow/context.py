@@ -13,15 +13,26 @@ as the first argument to every verb. It exposes:
   reached via ``ctx.state.data``; run-wide payload via ``ctx.state.root().data``)
 - ``flow`` — back-reference to the dispatching flow (enables inner verb calls
   from composition helpers like :class:`Panel`)
+- ``lg`` — the dispatching flow's :class:`~appinfra.log.Logger`, so verbs
+  written as module-level ``async def`` (rather than :class:`Verb` classes
+  that capture ``lg`` at ``__init__``) can trace without threading it
+  through state
 
 Verbs read from this and (typically) mutate ``state.data`` in place.
+
+Generic in the payload type :data:`T`. Annotating a verb parameter as
+``ctx: Context[MyState]`` narrows ``ctx.state.data`` to ``MyState`` for
+type-checked access; unparameterized ``Context`` remains valid and treats the
+payload as :data:`Any`.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generic, TypeVar
+
+from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
@@ -29,12 +40,17 @@ from .role import Role
 from .state import State
 
 
+T = TypeVar("T")
+"""Payload type — threads to ``ctx.state.data``. See module docstring."""
+
+
 @dataclass(frozen=True)
-class Context:
+class Context(Generic[T]):
     """Runtime environment injected into every verb.
 
     Constructed by the flow at dispatch time. Verbs receive it as their first
-    positional argument.
+    positional argument. Generic in the payload type; ``Context[MyState]``
+    narrows ``ctx.state.data`` for type-checked access.
     """
 
     role: Role | None
@@ -45,14 +61,16 @@ class Context:
     layer, above any single role. Verb-level contexts always carry a role.
     """
 
-    state: State
+    state: State[T]
     """The enclosing scope's :class:`State` wrapper.
 
     ``ctx.state.data`` is the scope's payload (user-owned; the flow does not
-    inspect it). Shared with the parent by reference by default; the
-    ``state=`` / ``merge=`` kwargs on :meth:`Flow.call`, :meth:`Flow.iterate`,
-    and :meth:`Flow.map` project an isolated child payload for the subflow
-    they contain. Verbs reach run-wide state via ``ctx.state.root().data``.
+    inspect it), typed as :data:`T`. Shared with the parent by reference by
+    default; the ``state=`` / ``merge=`` kwargs on :meth:`Flow.call`,
+    :meth:`Flow.iterate`, and :meth:`Flow.map` project an isolated child
+    payload for the subflow they contain. Verbs reach run-wide state via
+    ``ctx.state.root().data`` (typed :data:`Any` because a child's payload
+    type has no static relationship to its ancestors').
     """
 
     flow: Any
@@ -119,3 +137,15 @@ class Context:
         if self.role is None:
             return None
         return self.flow._saia_for(self.role)
+
+    @property
+    def lg(self) -> Logger:
+        """The dispatching flow's :class:`~appinfra.log.Logger`.
+
+        Delegates to the flow's construction-time ``lg``. Module-level
+        ``@verb`` functions (which can't capture ``lg`` at ``__init__``
+        the way :class:`Verb` classes can) reach the ambient logger via
+        ``ctx.lg`` instead of threading it through ``state``.
+        """
+        lg: Logger = self.flow._lg
+        return lg

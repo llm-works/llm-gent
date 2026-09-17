@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -204,7 +205,7 @@ class TestStateNavigation:
 
     async def test_subflow_without_projection_shares_root(self) -> None:
         """Without a state= projection, the subflow's ``ctx.state`` IS the parent's."""
-        captured: list[State] = []
+        captured: list[State[Any]] = []
 
         @verb(role=ROLE_A)
         async def top_verb(ctx) -> None:
@@ -279,7 +280,7 @@ class TestStateNavigation:
 
     async def test_root_of_root_is_self(self) -> None:
         """At the outermost scope, ``root()`` returns the same object."""
-        captured: list[State] = []
+        captured: list[State[Any]] = []
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
