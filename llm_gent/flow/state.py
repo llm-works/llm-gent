@@ -31,7 +31,7 @@ the enclosing flow. Consumers who never checkpoint don't need to conform.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Generic, Protocol, Self, TypeVar, runtime_checkable
+from typing import Any, Generic, Protocol, Self, TypeVar, cast, runtime_checkable
 
 
 T = TypeVar("T")
@@ -89,13 +89,14 @@ class State(Generic[T]):
     satisfy :class:`StateData`; see the module docstring.
     """
 
-    data: T
+    data: T = cast(T, None)
     """User-owned payload (dict, dataclass, Pydantic model, arbitrary object).
 
     Typed via the generic parameter :data:`T` — unparameterized ``State`` is
     ``State[Any]``, so verbs retain rich payload access (dict indexing,
-    attribute access, etc.). The checkpoint serialization contract is
-    :class:`StateData`, enforced only at snapshot time.
+    attribute access, etc.). Defaults to ``None`` for backwards compatibility
+    with zero-argument ``State()`` construction. The checkpoint serialization
+    contract is :class:`StateData`, enforced only at snapshot time.
     """
 
     _parent: State[Any] | None = field(default=None, repr=False)
