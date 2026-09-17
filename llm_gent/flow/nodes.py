@@ -73,7 +73,7 @@ Surfaces in two places on the public API:
 """
 
 
-RescuePolicy = Callable[[BaseException, Any, Context], Any]
+RescuePolicy = Callable[[BaseException, Any, Context[Any]], Any]
 """Failure hook: ``(exception, pending_input, ctx) -> fallback``. May be async.
 
 ``pending_input`` is the value that would have been passed into the failing
@@ -83,16 +83,16 @@ the failing node is the chain's first node and :meth:`Flow.run` had no
 positional argument, ``pending_input`` is :data:`UNSET`.
 """
 
-AfterHook = Callable[[Any, Context], Any]
+AfterHook = Callable[[Any, Context[Any]], Any]
 """Success hook: ``(result, ctx) -> None`` (return value ignored). May be async."""
 
 ProjectFn = Callable[[Any], Any]
 """Data-flow projection: transforms the previous node's result into the next input."""
 
-WhenFn = Callable[[Any, Context], Any]
+WhenFn = Callable[[Any, Context[Any]], Any]
 """Branch predicate: ``(prev_result, ctx) -> bool``. May be async."""
 
-UntilFn = Callable[[Any, Context], Any]
+UntilFn = Callable[[Any, Context[Any]], Any]
 """Iterate stop predicate: ``(result, ctx) -> bool``. May be async.
 
 ``result`` is the last iteration's body return value; ``ctx.state`` carries
@@ -100,13 +100,13 @@ mutations made during the body. Either signal — or both — can drive
 termination.
 """
 
-ItemsFn = Callable[[Any, Context], Any]
+ItemsFn = Callable[[Any, Context[Any]], Any]
 """Map item source: ``(prev_result, ctx) -> iterable``. May be async. Consumed eagerly to a list."""
 
 AggregateFn = Callable[[list[Any]], Any]
 """Map result reducer: ``list[R] -> R'``. May be async. If omitted, .map returns the list as-is."""
 
-GuardFn = Callable[[Any, Context], Any]
+GuardFn = Callable[[Any, Context[Any]], Any]
 """Map per-item skip predicate: ``(item, ctx) -> bool``. May be async.
 
 Falsy return skips the item; a :class:`Skipped` sentinel lands in that
@@ -114,7 +114,7 @@ position of the result list. The predicate runs after per-item state
 projection so it can read ``ctx.state``.
 """
 
-OnErrorFn = Callable[[BaseException, Any, Context], Any]
+OnErrorFn = Callable[[BaseException, Any, Context[Any]], Any]
 """Map per-item error hook: ``(exception, item, ctx) -> None``. Return value ignored.
 
 Fires in both ``strict`` modes for side-effect narration (logging,
@@ -184,7 +184,7 @@ class _RunEnv:
     """
 
     runtime: Flow
-    state: State
+    state: State[Any]
     lg: Logger
     halt: asyncio.Event | None = None
     budget: Tracker | None = None

@@ -88,20 +88,20 @@ class CheckpointStore(Protocol):
 # ----------------------------------------------------------------------------
 
 
-OnStart = Callable[[Context], Any]
+OnStart = Callable[[Context[Any]], Any]
 """``(ctx) -> None`` — fires before :meth:`saia.complete` when not resuming.
 
 May be async. Return value is ignored.
 """
 
-OnResume = Callable[[dict[str, Any], Context], Any]
+OnResume = Callable[[dict[str, Any], Context[Any]], Any]
 """``(checkpoint_state, ctx) -> None`` — fires when a checkpoint was loaded.
 
 Runs instead of ``on_start``. Consumer decides how to hydrate the run
 from ``checkpoint_state``. May be async; return value ignored.
 """
 
-OnIteration = Callable[[int, Any, Context], Any]
+OnIteration = Callable[[int, Any, Context[Any]], Any]
 """``(iteration, response, ctx) -> None`` — bridges to SAIA's per-turn hook.
 
 The second positional is the raw SAIA ``ChatResponse`` for that turn
@@ -109,7 +109,7 @@ The second positional is the raw SAIA ``ChatResponse`` for that turn
 async; return value ignored.
 """
 
-OnComplete = Callable[[Any, Context], Any]
+OnComplete = Callable[[Any, Context[Any]], Any]
 """``(saia_result, ctx) -> saia_result | override | None`` — fires after
 :meth:`saia.complete` returns non-paused.
 
@@ -120,7 +120,7 @@ result. Use this to map the SAIA ``TaskResult`` to a domain-specific shape
 without a closure smuggling the value out.
 """
 
-OnPaused = Callable[[Any, Context], Any]
+OnPaused = Callable[[Any, Context[Any]], Any]
 """``(saia_result, ctx) -> saia_result | override | None`` — fires after
 :meth:`saia.complete` returns paused (mirror of :data:`OnComplete`).
 
@@ -130,7 +130,7 @@ Consumers wire paused-status side effects (recorder marks, resumable-run
 notifications) here rather than around ``await loop(...)``.
 """
 
-OnCancelled = Callable[[Context], Any]
+OnCancelled = Callable[[Context[Any]], Any]
 """``(ctx) -> None`` — fires when :meth:`saia.complete` raises
 :class:`asyncio.CancelledError`.
 
@@ -139,7 +139,7 @@ The checkpoint is intentionally NOT deleted on this path so a subsequent
 resume can pick up. May be async; return value ignored.
 """
 
-OnFailed = Callable[[Exception, Context], Any]
+OnFailed = Callable[[Exception, Context[Any]], Any]
 """``(exc, ctx) -> None`` — fires when :meth:`saia.complete` raises any
 non-cancellation :class:`Exception`.
 
@@ -148,7 +148,7 @@ checkpoint is intentionally NOT deleted on this path. May be async; return
 value ignored.
 """
 
-OnFinally = Callable[[Context], Any]
+OnFinally = Callable[[Context[Any]], Any]
 """``(ctx) -> None`` — fires last on every dispatch, regardless of outcome.
 
 Runs after exactly one of :data:`OnComplete` / :data:`OnPaused` /
@@ -158,7 +158,7 @@ non-exception paths). Symmetric with a ``finally:`` block wrapped around
 paused, was cancelled, or failed. May be async; return value ignored.
 """
 
-OnExecutorReady = Callable[[Any, Context], Any]
+OnExecutorReady = Callable[[Any, Context[Any]], Any]
 """``(saia, ctx) -> None`` — fires once per dispatch after ``ctx.saia`` is resolved.
 
 Runs after the enclosing flow builds a role-bound saia and before
@@ -169,7 +169,7 @@ known at saia-factory-construction time (``run_config``, ``campaign_id``,
 ``budget``, etc.). May be async; return value ignored.
 """
 
-OnCost = Callable[[Any, Context], Any]
+OnCost = Callable[[Any, Context[Any]], Any]
 """``(saia_result, ctx) -> None`` — fires after :meth:`saia.complete` for cost accounting.
 
 Distinct from ``on_complete``: resource cost is a separate concern from
@@ -296,7 +296,7 @@ class Loop:
 
     async def __call__(
         self,
-        ctx: Context,
+        ctx: Context[Any],
         task: str,
         *,
         scope_id: str | None = None,
@@ -366,7 +366,7 @@ class Loop:
     # Internals
     # -------------------------------------------------------------------------
 
-    def _require_saia(self, ctx: Context) -> Any:
+    def _require_saia(self, ctx: Context[Any]) -> Any:
         """Return the effective SAIA — explicit ``Loop(saia=X)`` wins over ``ctx.saia``."""
         if self._saia is not None:
             return self._saia
@@ -378,7 +378,7 @@ class Loop:
             )
         return saia
 
-    def _resolve_halt(self, ctx: Context) -> asyncio.Event | None:
+    def _resolve_halt(self, ctx: Context[Any]) -> asyncio.Event | None:
         """Explicit ``Loop(halt=X)`` wins over ambient ``ctx.halt``."""
         return self._halt if self._halt is not None else ctx.halt
 
@@ -388,7 +388,9 @@ class Loop:
             return None
         return self._checkpointer.load_checkpoint(scope_id, run_id)
 
-    async def _before_run(self, saia: Any, ctx: Context, checkpoint: dict[str, Any] | None) -> None:
+    async def _before_run(
+        self, saia: Any, ctx: Context[Any], checkpoint: dict[str, Any] | None
+    ) -> None:
         """Fire ``on_executor_ready`` and the start/resume lifecycle hook."""
         if self._on_executor_ready is not None:
             await _maybe_await(self._on_executor_ready(saia, ctx))
@@ -398,7 +400,7 @@ class Loop:
         elif self._on_start is not None:
             await _maybe_await(self._on_start(ctx))
 
-    def _make_iter_bridge(self, ctx: Context) -> Callable[[int, Any], Awaitable[None]] | None:
+    def _make_iter_bridge(self, ctx: Context[Any]) -> Callable[[int, Any], Awaitable[None]] | None:
         """Return a SAIA-compatible per-turn bridge, or ``None`` when unwired."""
         hook = self._on_iteration
         if hook is None:
@@ -412,7 +414,7 @@ class Loop:
     async def _after_run(
         self,
         result: Any,
-        ctx: Context,
+        ctx: Context[Any],
         scope_id: str | None,
         run_id: int | None,
     ) -> Any:

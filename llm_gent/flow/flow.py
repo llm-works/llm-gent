@@ -683,7 +683,7 @@ class Flow:
     async def _run_as_subflow(
         self,
         *args: Any,
-        state: State,
+        state: State[Any],
         runtime: Flow,
         parent_halt: asyncio.Event | None = None,
         parent_budget: Tracker | None = None,
@@ -722,7 +722,7 @@ class Flow:
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
-    def _wrap_top_state(self, state: Any) -> State:
+    def _wrap_top_state(self, state: Any) -> State[Any]:
         """Wrap a top-level ``run(state=...)`` payload as :class:`State`.
 
         Resolves the ``state=UNSET`` sentinel to the flow's construction

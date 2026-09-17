@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from .flow import Flow
 
 
-def _build_ctx(target: Any, env: _RunEnv) -> Context:
+def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
     """Build the Context passed to the node's verb (and to its hooks).
 
     Verb nodes get a role-bound ctx; ``ctx.saia`` resolves lazily on first
@@ -79,7 +79,7 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context:
 
 async def _execute_node(
     node: _Node,
-    ctx: Context,
+    ctx: Context[Any],
     env: _RunEnv,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
@@ -115,7 +115,7 @@ async def _execute_node(
 
 async def _invoke_target(
     node: _Node,
-    ctx: Context,
+    ctx: Context[Any],
     env: _RunEnv,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
@@ -157,7 +157,7 @@ async def _run_subflow(
     return result
 
 
-async def _project_state(state_fn: StateProject | None, parent: State) -> State:
+async def _project_state(state_fn: StateProject | None, parent: State[Any]) -> State[Any]:
     """Build the child :class:`State` for a scoped block; pass-through when unset.
 
     With no projection, the subflow sees the parent's :class:`State` object
@@ -174,7 +174,7 @@ async def _project_state(state_fn: StateProject | None, parent: State) -> State:
     return State(data=child_payload, _parent=parent)
 
 
-async def _merge_state(merge_fn: StateMerge | None, parent: State, child: State) -> None:
+async def _merge_state(merge_fn: StateMerge | None, parent: State[Any], child: State[Any]) -> None:
     """Fold the child payload back into the parent's; no-op when unset.
 
     The merge callback receives the two payloads (``parent.data``,
@@ -191,7 +191,7 @@ async def _merge_state(merge_fn: StateMerge | None, parent: State, child: State)
 async def _check_until(
     until_fn: UntilFn | None,
     result: Any,
-    iterate_state: State,
+    iterate_state: State[Any],
     env: _RunEnv,
 ) -> bool:
     """Evaluate the iterate node's until predicate with the last body result and scoped state."""
@@ -213,7 +213,7 @@ async def _check_until(
 
 async def _run_branch(
     br: _Branch,
-    ctx: Context,
+    ctx: Context[Any],
     env: _RunEnv,
     node_args: tuple[Any, ...],
 ) -> Any:
@@ -242,7 +242,7 @@ async def _run_branch(
 
 async def _run_iterate(
     it: _Iterate,
-    ctx: Context,
+    ctx: Context[Any],
     env: _RunEnv,
     node_args: tuple[Any, ...],
 ) -> Any:
@@ -283,7 +283,7 @@ async def _run_iterate(
 
 async def _run_map(
     mp: _Map,
-    ctx: Context,
+    ctx: Context[Any],
     env: _RunEnv,
     node_args: tuple[Any, ...],
 ) -> Any:
@@ -411,7 +411,7 @@ async def _run_map_item(
     return result
 
 
-def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context:
+def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
     """Build the per-item :class:`Context` fed to guard and on_error hooks.
 
     These hooks run without a :class:`Role`, so ``ctx.saia`` is ``None``.
@@ -426,7 +426,7 @@ def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context:
     )
 
 
-async def _run_guard(guard_fn: Any, item: Any, ctx: Context) -> bool:
+async def _run_guard(guard_fn: Any, item: Any, ctx: Context[Any]) -> bool:
     """Evaluate the guard predicate, awaiting when async, coercing to bool."""
     verdict = guard_fn(item, ctx)
     if inspect.isawaitable(verdict):
@@ -438,7 +438,7 @@ async def _run_on_error(
     on_error_fn: OnErrorFn,
     exc: BaseException,
     item: Any,
-    ctx: Context,
+    ctx: Context[Any],
     env: _RunEnv,
 ) -> None:
     """Invoke on_error and swallow any exception it raises (never mask the original)."""
@@ -453,7 +453,9 @@ async def _run_on_error(
         )
 
 
-async def _resolve_items(items_fn: ItemsFn | None, prev_result: Any, ctx: Context) -> list[Any]:
+async def _resolve_items(
+    items_fn: ItemsFn | None, prev_result: Any, ctx: Context[Any]
+) -> list[Any]:
     """Materialize the map input list from ``items_fn`` (or ``prev_result``)."""
     source = prev_result if items_fn is None else items_fn(prev_result, ctx)
     if inspect.isawaitable(source):
