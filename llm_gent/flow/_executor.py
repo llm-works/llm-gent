@@ -151,6 +151,8 @@ async def _run_subflow(
         runtime=env.runtime,
         parent_halt=env.halt,
         parent_budget=env.budget,
+        parent_checkpointer=env.checkpointer,
+        parent_client_flow_id=env.client_flow_id,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -237,6 +239,8 @@ async def _run_branch(
         runtime=env.runtime,
         parent_halt=env.halt,
         parent_budget=env.budget,
+        parent_checkpointer=env.checkpointer,
+        parent_client_flow_id=env.client_flow_id,
     )
 
 
@@ -255,6 +259,17 @@ async def _run_iterate(
     running body is not interrupted mid-request. Scoped state is projected
     once before the first iteration; every iteration sees the same child
     state, and the merge fires once after the block exits successfully.
+
+    Save-at-iterate-boundary: when the runtime carries a checkpointer +
+    ``client_flow_id`` (attached via :meth:`Flow.with_checkpointer`), the
+    framework calls :meth:`CheckpointStore.save_checkpoint` after each
+    successful iteration with the parent-scope payload (``env.state``,
+    which is the outer scope's :class:`State` that persists across
+    iterations of this block). Note: when ``state=`` projects a child
+    scope, only the parent state is checkpointed — progress in the child
+    state is lost on resume. To preserve iteration progress, accumulate
+    results in the parent state or use ``until=`` with state-driven
+    termination.
     """
     child_state = await _project_state(it.state_fn, env.state)
     result: Any = node_args[0] if node_args else None
@@ -273,12 +288,50 @@ async def _run_iterate(
             runtime=env.runtime,
             parent_halt=env.halt,
             parent_budget=env.budget,
+            parent_checkpointer=env.checkpointer,
+            parent_client_flow_id=env.client_flow_id,
         )
         iteration += 1
+        _save_iterate_checkpoint(env, iteration)
         if await _check_until(it.until, result, child_state, env):
             break
     await _merge_state(it.merge_fn, env.state, child_state)
     return result
+
+
+def _save_iterate_checkpoint(env: _RunEnv, iteration: int) -> None:
+    """Persist ``env.state.data`` when a checkpointer is wired on the runtime.
+
+    Called once per completed iteration inside :func:`_run_iterate`. Skips
+    silently when no checkpointer or ``client_flow_id`` is bound on the
+    runtime — the flow simply runs without persistence.
+    """
+    if env.checkpointer is None or env.client_flow_id is None:
+        return
+    state_json = {"data": _serialize_state_data(env.state.data)}
+    metadata_json = {"schema_version": 1}
+    env.checkpointer.save_checkpoint(env.client_flow_id, iteration, state_json, metadata_json)
+
+
+def _serialize_state_data(data: Any) -> Any:
+    """Return a JSON-compatible view of ``data`` for the checkpoint.
+
+    Plain dicts pass through as-is (the framework does not deep-copy — the
+    store implementation owns durability). Objects satisfying
+    :class:`StateData` are converted via ``to_dict()``. ``None`` also
+    passes through (a payload that never carried structured data).
+    Anything else raises :class:`TypeError` at the save site with a
+    pointer to the contract.
+    """
+    if data is None or isinstance(data, dict):
+        return data
+    to_dict = getattr(data, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    raise TypeError(
+        f"cannot checkpoint state.data of type {type(data).__name__} — "
+        f"payload must be a plain dict or satisfy StateData (to_dict/from_dict)"
+    )
 
 
 async def _run_map(
@@ -360,6 +413,8 @@ async def _run_map_item_strict(
             runtime=env.runtime,
             parent_halt=env.halt,
             parent_budget=env.budget,
+            parent_checkpointer=env.checkpointer,
+            parent_client_flow_id=env.client_flow_id,
         )
     except asyncio.CancelledError:
         raise
@@ -399,6 +454,8 @@ async def _run_map_item(
             runtime=env.runtime,
             parent_halt=env.halt,
             parent_budget=env.budget,
+            parent_checkpointer=env.checkpointer,
+            parent_client_flow_id=env.client_flow_id,
         )
     except asyncio.CancelledError:
         raise

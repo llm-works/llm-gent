@@ -110,6 +110,17 @@ class TestBuilderValidation:
         with pytest.raises(TypeError, match="reserved parameter 'runtime'"):
             flow.call(bad)
 
+    def test_call_rejects_verb_declaring_resume_kwarg(self) -> None:
+        """A verb with a ``resume=`` parameter collides with ``Flow.run(resume=...)``."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def bad(ctx: Context, *, resume: bool) -> None:
+            """Verb tries to bind ``resume`` — would never receive it via .run()."""
+
+        with pytest.raises(TypeError, match="reserved parameter 'resume'"):
+            flow.call(bad)
+
     def test_rescue_before_any_call_raises(self) -> None:
         """.rescue requires a preceding node to attach to."""
         flow = make_ff().create()

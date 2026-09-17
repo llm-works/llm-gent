@@ -23,7 +23,10 @@ Public surface:
 - :class:`LoopFactory` — app-scoped :class:`Loop` builder (mirrors
   :class:`FlowFactory` for ``with_halt``); pair on the same halt event to
   thread it across a mixed Loop-and-Flow tree
-- :class:`CheckpointStore` — 3-method Protocol Loop drives for pause/resume
+- :class:`CheckpointStore` — Flow-level pause/resume Protocol; persists
+  composition-graph state at ``.iterate`` boundaries
+- :class:`LoopCheckpointStore` — 3-method Protocol :class:`Loop` drives
+  for SAIA-turn pause/resume (distinct layer from the Flow-level Protocol)
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
 - :class:`Skipped` — sentinel returned for an item gated out by
   ``Flow.guard`` on a ``Flow.map`` node
@@ -43,10 +46,11 @@ mount them via the existing trait system.
 """
 
 from .archetypes import extractor, grader, planner, synthesizer
+from .checkpoint import CheckpointStore
 from .context import Context
 from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
-from .loop import CheckpointStore, Loop, LoopFactory
+from .loop import Loop, LoopCheckpointStore, LoopFactory
 from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
 from .role import Role
@@ -62,6 +66,7 @@ __all__ = [
     "Flow",
     "FlowFactory",
     "Loop",
+    "LoopCheckpointStore",
     "LoopFactory",
     "Panel",
     "Role",

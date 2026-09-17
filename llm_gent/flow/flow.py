@@ -63,6 +63,7 @@ from appinfra.log import Logger
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._executor import _build_ctx, _execute_node, _step_inputs
+from .checkpoint import CheckpointStore
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -85,7 +86,7 @@ from .nodes import (
     _RunEnv,
 )
 from .role import Role
-from .state import State
+from .state import State, StateData
 
 
 class Flow:
@@ -105,6 +106,7 @@ class Flow:
         saia_f: SAIAFactory | None = None,
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
+        state_type: type[StateData] | None = None,
     ) -> None:
         """Initialize a flow.
 
@@ -136,14 +138,24 @@ class Flow:
                 runtime's registry (like the saia cache) via the same
                 internal handoff, so mounting on the top-level flow is
                 enough to reach every nested dispatch.
+            state_type: Payload class satisfying :class:`StateData` — the
+                framework calls ``state_type.from_dict(...)`` on
+                :meth:`run` ``resume=True`` to reconstruct
+                ``ctx.state.data`` from the loaded checkpoint. Only
+                consulted when :meth:`with_checkpointer` is wired. ``None``
+                (default) treats ``ctx.state.data`` as a plain dict that
+                round-trips through the checkpointer as-is.
         """
         self._lg = lg
         self._name = name
         self._saia_f = saia_f
         self._state = state
         self._traits = traits
+        self._state_type = state_type
         self._halt_event: asyncio.Event | None = None
         self._budget_tracker: Tracker | None = None
+        self._checkpointer: CheckpointStore | None = None
+        self._client_flow_id: str | None = None
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
@@ -254,6 +266,7 @@ class Flow:
         after: AfterHook | None = None,
         state: StateProject | None = None,
         merge: StateMerge | None = None,
+        state_type: type[StateData] | None = None,
     ) -> Flow:
         """Append a node to the composition chain.
 
@@ -295,6 +308,7 @@ class Flow:
                 after=after,
                 state_fn=state,
                 merge_fn=merge,
+                state_type=state_type,
             )
         )
         return self
@@ -308,6 +322,7 @@ class Flow:
         after: AfterHook | None = None,
         state: StateProject | None = None,
         merge: StateMerge | None = None,
+        state_type: type[StateData] | None = None,
     ) -> Flow:
         """Append a chained node — semantic alias for :meth:`call`.
 
@@ -322,6 +337,7 @@ class Flow:
             after=after,
             state=state,
             merge=merge,
+            state_type=state_type,
         )
 
     def rescue(self, policy: RescuePolicy) -> Flow:
@@ -400,6 +416,7 @@ class Flow:
         after: AfterHook | None = None,
         state: StateProject | None = None,
         merge: StateMerge | None = None,
+        state_type: type[StateData] | None = None,
     ) -> Flow:
         """Append a bounded iteration: run ``body`` until a stop condition holds.
 
@@ -454,6 +471,7 @@ class Flow:
                 deadline=deadline,
                 state_fn=state,
                 merge_fn=merge,
+                state_type=state_type,
             ),
             rescue=rescue,
             after=after,
@@ -473,6 +491,7 @@ class Flow:
         after: AfterHook | None = None,
         state: StateProject | None = None,
         merge: StateMerge | None = None,
+        state_type: type[StateData] | None = None,
     ) -> Flow:
         """Append a parallel fan-out: run ``body`` per item concurrently.
 
@@ -535,6 +554,7 @@ class Flow:
                 state_fn=state,
                 merge_fn=merge,
                 max_concurrency=max_concurrency,
+                state_type=state_type,
             ),
             rescue=rescue,
             after=after,
@@ -630,6 +650,31 @@ class Flow:
         self._budget_tracker = tracker
         return self
 
+    def with_checkpointer(self, store: CheckpointStore, client_flow_id: str) -> Flow:
+        """Attach a :class:`CheckpointStore` + agent-owned ``client_flow_id``.
+
+        Wires save-at-``.iterate``-boundary saves and, on
+        :meth:`run` ``resume=True``, a load-at-start that hydrates the
+        run's payload before the first node dispatches. On fully
+        successful :meth:`run` completion the framework calls
+        :meth:`CheckpointStore.delete_checkpoint`; cancellation, halt
+        exits, and unhandled exceptions preserve the checkpoint so a
+        subsequent resume can pick up.
+
+        Both arguments bind together — the ``client_flow_id`` scopes every
+        save/load/delete call and identifies the resumable trajectory. It
+        is agent-owned: the framework never assigns one automatically.
+
+        A subflow inherits the outer runtime's checkpointer + id
+        automatically; calling ``.with_checkpointer`` on a subflow
+        overrides both for that subtree.
+
+        Returns ``self`` for chaining.
+        """
+        self._checkpointer = store
+        self._client_flow_id = client_flow_id
+        return self
+
     def _require_map_tail(self, method: str) -> _Map:
         """Return the last node's target if it is a :class:`_Map`, else raise."""
         if not self._nodes:
@@ -646,7 +691,13 @@ class Flow:
     # Execution
     # -------------------------------------------------------------------------
 
-    async def run(self, *args: Any, state: Any = UNSET, **kwargs: Any) -> Any:
+    async def run(
+        self,
+        *args: Any,
+        state: Any = UNSET,
+        resume: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """Execute the composition graph as the top-level runtime.
 
         The first node receives ``*args`` / ``**kwargs``. Each subsequent
@@ -668,17 +719,46 @@ class Flow:
                 ``None`` and verbs must guard). ``state`` is a bound
                 parameter — it is not forwarded to the first node; verbs
                 needing it as a kwarg are rejected at :meth:`call` time.
+            resume: When ``True`` and :meth:`with_checkpointer` is wired,
+                the framework calls
+                :meth:`CheckpointStore.load_checkpoint` at start and, if a
+                checkpoint exists, replaces ``state`` with the hydrated
+                payload. A flow with ``state_type=T`` reconstructs the
+                payload via ``T.from_dict(state_json['data'])``; a flow
+                without ``state_type`` treats the stored payload as a
+                plain dict. Absent-checkpoint resume is a no-op — the run
+                proceeds with ``state`` as given. On fully successful
+                completion the checkpoint is deleted. Requires
+                :meth:`with_checkpointer` to be wired; raises otherwise.
+                Bound parameter: not forwarded to the first node.
             **kwargs: Keyword inputs to the first node.
 
         Raises:
-            RuntimeError: The flow has no nodes to run. Missing
-                :class:`SAIAFactory` no longer raises at run start — the
-                error surfaces at the first ``ctx.saia`` access instead,
-                so verbs that don't consume ``ctx.saia`` can run under a
-                factoryless flow.
+            RuntimeError: The flow has no nodes to run, OR ``resume=True``
+                was requested without :meth:`with_checkpointer` wired.
+                Missing :class:`SAIAFactory` no longer raises at run
+                start — the error surfaces at the first ``ctx.saia``
+                access instead, so verbs that don't consume ``ctx.saia``
+                can run under a factoryless flow.
         """
+        if resume and self._checkpointer is None:
+            label = self._name or "<anonymous>"
+            raise RuntimeError(
+                f"Flow {label!r} was run with resume=True but has no "
+                f"checkpointer — call .with_checkpointer(store, client_flow_id) first"
+            )
         active_state = self._wrap_top_state(state)
-        return await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
+        if resume:
+            active_state = self._hydrate_resume_state(active_state)
+        result = await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
+        # Preserve checkpoint on halt-triggered exit per delete policy
+        if (
+            self._checkpointer is not None
+            and self._client_flow_id is not None
+            and (self._halt_event is None or not self._halt_event.is_set())
+        ):
+            self._checkpointer.delete_checkpoint(self._client_flow_id)
+        return result
 
     async def _run_as_subflow(
         self,
@@ -687,6 +767,8 @@ class Flow:
         runtime: Flow,
         parent_halt: asyncio.Event | None = None,
         parent_budget: Tracker | None = None,
+        parent_checkpointer: CheckpointStore | None = None,
+        parent_client_flow_id: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -697,17 +779,25 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_halt`` and ``parent_budget`` are the effective ambients
-        from the calling scope — nested subflows fall back to them when
-        they have no local ``.with_halt()`` / ``.with_budget()`` override,
-        preserving an intermediate layer's ambient through arbitrarily
-        deep nesting.
+        ``parent_halt`` / ``parent_budget`` / ``parent_checkpointer`` are the
+        effective ambients from the calling scope — nested subflows fall
+        back to them when they have no local
+        ``.with_halt()`` / ``.with_budget()`` / ``.with_checkpointer()``
+        override, preserving an intermediate layer's ambient through
+        arbitrarily deep nesting. ``parent_client_flow_id`` pairs with
+        ``parent_checkpointer``; either both are inherited or a local
+        override supplies both.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        halt = self._halt_event if self._halt_event is not None else parent_halt
-        budget = self._budget_tracker if self._budget_tracker is not None else parent_budget
-        env = _RunEnv(runtime=runtime, state=state, lg=runtime._lg, halt=halt, budget=budget)
+        env = self._make_run_env(
+            runtime=runtime,
+            state=state,
+            parent_halt=parent_halt,
+            parent_budget=parent_budget,
+            parent_checkpointer=parent_checkpointer,
+            parent_client_flow_id=parent_client_flow_id,
+        )
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
         env.lg.debug(
@@ -722,6 +812,43 @@ class Flow:
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
+    def _make_run_env(
+        self,
+        *,
+        runtime: Flow,
+        state: State[Any],
+        parent_halt: asyncio.Event | None,
+        parent_budget: Tracker | None,
+        parent_checkpointer: CheckpointStore | None,
+        parent_client_flow_id: str | None,
+    ) -> _RunEnv:
+        """Resolve local-override-wins ambients and build the per-run environment.
+
+        Local ``.with_halt`` / ``.with_budget`` / ``.with_checkpointer``
+        wins over the caller's parent ambients; unset locals fall back to
+        the parent so an intermediate layer's ambient survives arbitrarily
+        deep nesting. Checkpointer + ``client_flow_id`` inherit as a pair.
+        """
+        halt = self._halt_event if self._halt_event is not None else parent_halt
+        budget = self._budget_tracker if self._budget_tracker is not None else parent_budget
+        checkpointer: CheckpointStore | None
+        client_flow_id: str | None
+        if self._checkpointer is not None:
+            checkpointer = self._checkpointer
+            client_flow_id = self._client_flow_id
+        else:
+            checkpointer = parent_checkpointer
+            client_flow_id = parent_client_flow_id
+        return _RunEnv(
+            runtime=runtime,
+            state=state,
+            lg=runtime._lg,
+            halt=halt,
+            budget=budget,
+            checkpointer=checkpointer,
+            client_flow_id=client_flow_id,
+        )
+
     def _wrap_top_state(self, state: Any) -> State[Any]:
         """Wrap a top-level ``run(state=...)`` payload as :class:`State`.
 
@@ -733,6 +860,35 @@ class Flow:
         """
         payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
         return payload if isinstance(payload, State) else State(data=payload)
+
+    def _hydrate_resume_state(self, fallback: State[Any]) -> State[Any]:
+        """Load the latest checkpoint and reconstruct ``ctx.state.data``.
+
+        Called only when :meth:`run` was invoked with ``resume=True``.
+        Consults :attr:`_checkpointer` for a checkpoint under
+        :attr:`_client_flow_id`; if absent, returns ``fallback`` unchanged so
+        the run proceeds with the caller's ``state=`` (or the flow's
+        construction state). When a checkpoint exists, deserializes
+        ``state_json['data']`` via ``state_type.from_dict`` (or passes it
+        through when ``state_type`` is ``None`` — the plain-dict contract).
+        """
+        assert self._checkpointer is not None
+        if self._client_flow_id is None:
+            label = self._name or "<anonymous>"
+            raise RuntimeError(
+                f"Flow {label!r} was run with resume=True but has no "
+                f"client_flow_id — call .with_checkpointer(store, client_flow_id) first"
+            )
+        loaded = self._checkpointer.load_checkpoint(self._client_flow_id)
+        if loaded is None:
+            return fallback
+        state_json, _metadata_json = loaded
+        raw = state_json.get("data")
+        if self._state_type is None:
+            hydrated = raw
+        else:
+            hydrated = self._state_type.from_dict(raw if isinstance(raw, dict) else {})
+        return State(data=hydrated)
 
     # -------------------------------------------------------------------------
     # Internals
@@ -775,6 +931,7 @@ def _validate_target(target: Any) -> None:
         )
     _reject_reserved_kwarg(target, "state")
     _reject_reserved_kwarg(target, "runtime")
+    _reject_reserved_kwarg(target, "resume")
 
 
 def _reject_reserved_kwarg(verb: Any, name: str) -> None:
