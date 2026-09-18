@@ -19,6 +19,7 @@ circular dependency between the executor and the class it operates on.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import time
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,7 @@ from .nodes import (
     _Iterate,
     _Map,
     _Node,
+    _ResumeReplay,
     _RunEnv,
 )
 from .state import State
@@ -169,7 +171,7 @@ async def _run_subflow(
         parent_client_flow_id=env.client_flow_id,
         parent_chain_context=_descend_context(node_id, "call"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=env.replay,
+        parent_replay=_pop_replay_for(env, node_id),
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -257,6 +259,13 @@ async def _run_branch(
         verdict = await verdict
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
+        _assert_replay_allows_skip(
+            env,
+            node_id,
+            "branch predicate returned falsy with no else_ arm, but resume "
+            "path expected descent through this branch — predicate behavior "
+            "has changed since checkpoint.",
+        )
         return prev_result
     return await chosen._run_as_subflow(
         prev_result,
@@ -268,7 +277,7 @@ async def _run_branch(
         parent_client_flow_id=env.client_flow_id,
         parent_chain_context=_descend_context(node_id, "then" if verdict else "else"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=env.replay,
+        parent_replay=_pop_replay_for(env, node_id),
     )
 
 
@@ -301,15 +310,16 @@ async def _run_iterate(
     termination.
 
     Resume: when a ``_ResumeReplay`` is threaded via :attr:`_RunEnv.replay`
-    and its save-point (path leaf) matches this iterate's runtime
-    ``node_id``, the counter starts at the saved iteration instead of 0
-    — the folded fix for the note-423 gap (``max_iters`` becomes a
-    cumulative bound across resumes, not per-run). At most one iterate
-    per run consumes the replay; :attr:`Flow._replay_consumed` flips the
-    first time a match fires so re-entrant dispatches of the same node
-    (e.g., an inner iterate spun up by an outer loop) do not re-apply
-    the fast-forward. ``deadline`` is not restored — the wall clock
-    resets each run.
+    and its ``remaining_path`` has been head-popped down to a single
+    entry equal to this iterate's runtime ``node_id`` (i.e., this
+    iterate IS the save-point leaf), the counter starts at the saved
+    iteration instead of 0 — the folded fix for the note-423 gap
+    (``max_iters`` becomes a cumulative bound across resumes, not
+    per-run). At most one iterate per run consumes the replay;
+    :attr:`Flow._replay_consumed` flips the first time a match fires
+    so re-entrant dispatches of the same node (e.g., an inner iterate
+    spun up by an outer loop) do not re-apply the fast-forward.
+    ``deadline`` is not restored — the wall clock resets each run.
 
     When resuming, if ``child_state_data`` is present in the replay, it
     replaces the projected child state — restoring mutations that
@@ -342,22 +352,98 @@ def _resume_iteration_for(env: _RunEnv, node_id: str) -> tuple[int, Any]:
     """Return the starting iteration count and restored child state for ``_run_iterate``.
 
     ``(0, None)`` for a fresh run. On resume, when ``env.replay`` is set
-    and its path leaf matches this iterate's ``node_id`` and no earlier
-    iterate in the run has consumed the replay, returns the saved
-    iteration and child_state_data (if present) and flips
+    and ``remaining_path == (node_id,)`` — the head-pop path has shrunk
+    to a single entry equal to this iterate's ``node_id`` — this iterate
+    IS the save-point leaf: returns the saved iteration and
+    ``child_state_data`` (if present) and flips
     :attr:`Flow._replay_consumed` on the top-level runtime so the
-    fast-forward fires exactly once. A non-matching id or an already-
-    consumed replay yields ``(0, None)`` and the iterate runs from scratch.
+    fast-forward fires exactly once. Any longer remaining path means
+    this iterate is an ancestor of the leaf (its body descent will
+    head-pop and thread the tail); a non-matching head, empty path, or
+    already-consumed replay all yield ``(0, None)`` and the iterate
+    runs from scratch.
     """
     replay = env.replay
     if replay is None or not replay.remaining_path:
         return 0, None
     if env.runtime._replay_consumed:
         return 0, None
-    if node_id != replay.remaining_path[-1]:
+    if replay.remaining_path[0] != node_id or len(replay.remaining_path) != 1:
         return 0, None
     env.runtime._replay_consumed = True
     return replay.iteration, replay.child_state_data
+
+
+def _pop_replay_for(env: _RunEnv, node_id: str) -> _ResumeReplay | None:
+    """Return the replay to thread through a descent under ``node_id``.
+
+    Head-pop at descent site: when ``env.replay.remaining_path[0]``
+    equals ``node_id``, the descent is on the saved ancestor chain —
+    pop the head and thread the tail to the child Flow. Otherwise the
+    descent is off-path (its subtree cannot contain the leaf) or the
+    replay has already been consumed at the leaf, and no replay is
+    threaded. Called by every descent helper (``_run_subflow``,
+    ``_run_branch``, ``_dispatch_iterate_body``, ``_dispatch_map_body``).
+    ``full_path`` is preserved verbatim across the pop so downstream
+    triage messages can show the whole saved ancestor chain.
+    """
+    replay = env.replay
+    if replay is None or not replay.remaining_path:
+        return None
+    if env.runtime._replay_consumed:
+        return None
+    if replay.remaining_path[0] != node_id:
+        return None
+    return dataclasses.replace(replay, remaining_path=replay.remaining_path[1:])
+
+
+def _resolve_map_item_replay(
+    mp: _Map, env: _RunEnv, node_id: str, item_count: int
+) -> dict[int, _ResumeReplay | None]:
+    """Determine which map item (if any) gets the replay.
+
+    Pop replay once at the map boundary. Then, for each item, check if
+    the popped path's head matches any node_id in that item's body.
+    Only the matching item gets the replay; all others get ``None``.
+    This prevents scheduling-dependent replay failures when concurrent
+    map items race to validate the path.
+    """
+    from .flow import _compute_node_id, _descend_context
+
+    result: dict[int, _ResumeReplay | None] = {}
+    popped = _pop_replay_for(env, node_id)
+    if popped is None or not popped.remaining_path:
+        return result
+    head = popped.remaining_path[0]
+    for i in range(item_count):
+        item_ctx = _descend_context(node_id, f"map:{i}")
+        item_ids = tuple(_compute_node_id(item_ctx, n, j) for j, n in enumerate(mp.body._nodes))
+        if head in item_ids:
+            result[i] = popped
+            break
+    return result
+
+
+def _assert_replay_allows_skip(env: _RunEnv, node_id: str, reason: str) -> None:
+    """Fail-fast when a skipped descent was on the replay's saved path.
+
+    Called when a descent site decides not to descend (e.g., branch with
+    falsy predicate and no ``else_`` arm). If the replay's
+    ``remaining_path[0]`` equals ``node_id``, the checkpoint expected
+    descent through this node — skipping it means the composition
+    graph's runtime behavior has changed since the checkpoint was
+    written. Raising here preserves the head-pop invariant: no chain
+    step after a doomed skip runs before the error.
+    """
+    replay = env.replay
+    if replay is None or not replay.remaining_path:
+        return
+    if env.runtime._replay_consumed:
+        return
+    if replay.remaining_path[0] != node_id:
+        return
+    path_repr = " → ".join(replay.full_path) if replay.full_path else "<empty>"
+    raise RuntimeError(f"{reason} Saved path: {path_repr}")
 
 
 async def _dispatch_iterate_body(
@@ -387,7 +473,7 @@ async def _dispatch_iterate_body(
         parent_client_flow_id=env.client_flow_id,
         parent_chain_context=_descend_context(node_id, "body"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=env.replay,
+        parent_replay=_pop_replay_for(env, node_id),
     )
 
 
@@ -504,12 +590,14 @@ async def _run_map(
     merge_lock = asyncio.Lock()
     runner = _run_map_item_strict if mp.strict else _run_map_item
     sem = asyncio.Semaphore(mp.max_concurrency) if mp.max_concurrency is not None else None
+    item_replays = _resolve_map_item_replay(mp, env, node_id, len(items))
 
     async def _gated(index: int, item: Any) -> Any:
+        replay = item_replays.get(index)
         if sem is None:
-            return await runner(mp, item, env, merge_lock, node_id, index)
+            return await runner(mp, item, env, merge_lock, node_id, index, replay)
         async with sem:
-            return await runner(mp, item, env, merge_lock, node_id, index)
+            return await runner(mp, item, env, merge_lock, node_id, index, replay)
 
     coros = [_gated(i, item) for i, item in enumerate(items)]
     if mp.strict:
@@ -532,6 +620,7 @@ async def _dispatch_map_body(
     env: _RunEnv,
     node_id: str,
     item_index: int,
+    replay: _ResumeReplay | None,
 ) -> Any:
     """Run a map body's subflow with per-item composition-tree identity.
 
@@ -539,6 +628,11 @@ async def _dispatch_map_body(
     ``item_index``, so nested iterates produce unique node IDs per item.
     This prevents checkpoint overwrites and replay race conditions when
     the map body contains checkpointed primitives.
+
+    ``replay`` is pre-resolved at the map boundary by
+    :func:`_resolve_map_item_replay` — only the item whose body
+    contains the replay's path head receives a non-None value; all
+    others receive ``None`` and skip replay validation.
     """
     from .flow import _descend_context
 
@@ -552,7 +646,7 @@ async def _dispatch_map_body(
         parent_client_flow_id=env.client_flow_id,
         parent_chain_context=_descend_context(node_id, f"map:{item_index}"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=env.replay,
+        parent_replay=replay,
     )
 
 
@@ -563,6 +657,7 @@ async def _run_map_item_strict(
     merge_lock: asyncio.Lock,
     node_id: str,
     item_index: int,
+    replay: _ResumeReplay | None,
 ) -> Any:
     """Run one strict-mode map item; merge fires only when the body succeeds.
 
@@ -578,7 +673,7 @@ async def _run_map_item_strict(
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
-        result = await _dispatch_map_body(mp, item, child_state, env, node_id, item_index)
+        result = await _dispatch_map_body(mp, item, child_state, env, node_id, item_index, replay)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -597,6 +692,7 @@ async def _run_map_item(
     merge_lock: asyncio.Lock,
     node_id: str,
     item_index: int,
+    replay: _ResumeReplay | None,
 ) -> Any:
     """Run one non-strict map item; wrap non-cancellation exceptions as :class:`Failure`.
 
@@ -613,7 +709,7 @@ async def _run_map_item(
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
-        result = await _dispatch_map_body(mp, item, child_state, env, node_id, item_index)
+        result = await _dispatch_map_body(mp, item, child_state, env, node_id, item_index, replay)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

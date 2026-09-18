@@ -713,6 +713,98 @@ class TestResumePositionReplay:
         assert "deadbeefdeadbeef" in message
         assert "root→leaf" in message
 
+    async def test_head_pop_fails_before_sibling_verbs_run(self) -> None:
+        """Structural-change raise fires at chain entry, before any pre-iterate verb runs.
+
+        Pre-head-pop, an unreachable-leaf resume would walk the whole
+        chain (running every verb, running every iterate from 0)
+        before ``_assert_replay_consumed`` finally raised. The fail-
+        fast pre-scan at Flow entry catches the mismatch as soon as
+        no chain-step id matches the replay's remaining-path head —
+        no chain step at that level runs at all.
+        """
+        import pytest
+
+        calls: list[str] = []
+
+        @verb(role=ROLE_A)
+        async def pre_verb(ctx: Context[Any], _prev: Any = None) -> None:
+            calls.append("pre")
+
+        @verb(role=ROLE_A)
+        async def body(ctx: Context[Any], _prev: Any = None) -> None:
+            calls.append("body")
+
+        stale_path = ["cafebabecafebabe", "deadbeefdeadbeef"]
+        store = _RecordingStore(
+            preload=(
+                {"data": {}, "children": []},
+                {"schema_version": 1, "path": stale_path, "iteration": 2},
+            )
+        )
+        flow = (
+            make_ff()
+            .create(state={})
+            .with_checkpointer(store, "traj-headpop")
+            .then(pre_verb)
+            .iterate(body, max_iters=3)
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            await flow.run(resume=True)
+        assert calls == []  # neither pre_verb nor any iterate body fired
+        message = str(excinfo.value)
+        assert "structurally changed" in message
+        # Pre-scan raise names both the unreachable head and the full path.
+        assert "cafebabecafebabe" in message
+        assert "deadbeefdeadbeef" in message
+
+    async def test_head_pop_fails_at_inner_flow_with_full_path(self) -> None:
+        """A stale id in the inner Flow's chain raises there, preserving full path.
+
+        Root chain matches path head, so descent proceeds into the
+        subflow. The subflow's chain-entry pre-scan then rejects the
+        stale inner id. The raise still carries the whole root→leaf
+        path (via ``_ResumeReplay.full_path``, threaded verbatim
+        across the head-pop) so ops triage sees the ancestor context.
+        """
+        import pytest
+
+        @verb(role=ROLE_A)
+        async def body(ctx: Context[Any], _prev: Any = None) -> None:
+            return None
+
+        # First run: real save, capture the root-level call id.
+        real_store = _RecordingStore()
+        inner = make_ff().create(state={}).iterate(body, max_iters=2)
+        outer = make_ff().create(state={}).with_checkpointer(real_store, "traj-inner").call(inner)
+        await outer.run()
+        assert real_store.saves, "expected the inner iterate to have saved"
+        saved_path = real_store.saves[-1][3]["path"]
+        assert len(saved_path) == 2  # [outer .call id, inner .iterate id]
+
+        # Second run: swap the inner id for a stale hash — the root-level
+        # descent parent is still real, so pre-scan passes at root and
+        # fails at the subflow level.
+        stale_inner = "0badc0de0badc0de"
+        preload = (
+            {"data": {}, "children": []},
+            {
+                "schema_version": 1,
+                "path": [saved_path[0], stale_inner],
+                "iteration": 1,
+            },
+        )
+        replay_store = _RecordingStore(preload=preload)
+        outer2 = (
+            make_ff().create(state={}).with_checkpointer(replay_store, "traj-inner").call(inner)
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            await outer2.run(resume=True)
+        message = str(excinfo.value)
+        assert stale_inner in message
+        assert saved_path[0] in message  # full path threaded through head-pop
+        assert "structurally changed" in message
+
     async def test_resume_rebuilds_ambient_halt(self) -> None:
         """Ambients (halt/budget/traits/…) are not serialized; the resumed run wires fresh ones.
 
@@ -863,3 +955,88 @@ class TestResumePositionReplay:
 
         result = await _mk_flow(3).run(resume=True)
         assert result == 3
+
+    async def test_branch_no_else_predicate_change_fails_fast(self) -> None:
+        """Fail-fast when branch predicate changes and no else_ arm exists.
+
+        Checkpoint saved through the ``then`` arm. On resume, predicate
+        returns falsy with no ``else_`` arm to descend — the fail-fast
+        check fires immediately, before any subsequent chain steps run.
+        """
+        import pytest
+
+        calls: list[str] = []
+
+        @verb(role=ROLE_A)
+        async def body(ctx: Context[Any], _prev: Any = None) -> None:
+            calls.append("body")
+
+        @verb(role=ROLE_A)
+        async def post_branch(ctx: Context[Any], _prev: Any = None) -> None:
+            calls.append("post")
+
+        predicate_value = True
+        store = _RecordingStore()
+        flow = (
+            make_ff()
+            .create(state={})
+            .with_checkpointer(store, "traj-branch-noelse")
+            .branch(
+                when=lambda _r, _c: predicate_value, then=lambda f: f.iterate(body, max_iters=2)
+            )
+            .then(post_branch)
+        )
+        await flow.run()
+        assert "body" in calls
+        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.saves.clear()
+
+        # Resume with falsy predicate — no else_ arm, so fail-fast triggers.
+        predicate_value = False
+        calls.clear()
+        with pytest.raises(RuntimeError) as excinfo:
+            await flow.run(resume=True)
+        assert calls == []  # post_branch never ran
+        message = str(excinfo.value)
+        assert "predicate" in message
+        assert "no else_ arm" in message
+
+    async def test_map_replay_routes_to_correct_item(self) -> None:
+        """Replay is routed only to the saved map item, not all items.
+
+        When a checkpoint is saved inside map item N's body, resuming
+        should route the replay only to item N. Other items should
+        receive no replay and run fresh. This test verifies the fix
+        for scheduling-dependent replay failures: without the fix,
+        a non-target item running first would fail replay validation.
+        """
+        calls: list[tuple[str, int]] = []
+
+        @verb(role=ROLE_A)
+        async def body(ctx: Context[dict[str, int]], item: int) -> int:
+            calls.append(("body", item))
+            ctx.state.data["sum"] = ctx.state.data.get("sum", 0) + item
+            return item
+
+        store = _RecordingStore()
+        flow = (
+            make_ff()
+            .create(state={"sum": 0})
+            .with_checkpointer(store, "traj-map")
+            .map(
+                lambda f: f.iterate(body, max_iters=2),
+                items=lambda _p, _c: [10, 20, 30],
+            )
+        )
+        await flow.run()
+        assert store.saves, "expected iterate inside map to save"
+        saved_path = store.saves[-1][3]["path"]
+        assert len(saved_path) == 2  # [map_node_id, iterate_inside_item]
+
+        # Resume should route replay to the correct item without error.
+        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.saves.clear()
+        calls.clear()
+        await flow.run(resume=True)
+        # All items should complete: item 0, 1, 2 each run their iterate bodies.
+        assert len([c for c in calls if c[0] == "body"]) >= 3
