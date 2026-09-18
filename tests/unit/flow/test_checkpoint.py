@@ -955,3 +955,48 @@ class TestResumePositionReplay:
 
         result = await _mk_flow(3).run(resume=True)
         assert result == 3
+
+    async def test_branch_no_else_predicate_change_fails_fast(self) -> None:
+        """Fail-fast when branch predicate changes and no else_ arm exists.
+
+        Checkpoint saved through the ``then`` arm. On resume, predicate
+        returns falsy with no ``else_`` arm to descend — the fail-fast
+        check fires immediately, before any subsequent chain steps run.
+        """
+        import pytest
+
+        calls: list[str] = []
+
+        @verb(role=ROLE_A)
+        async def body(ctx: Context[Any], _prev: Any = None) -> None:
+            calls.append("body")
+
+        @verb(role=ROLE_A)
+        async def post_branch(ctx: Context[Any], _prev: Any = None) -> None:
+            calls.append("post")
+
+        predicate_value = True
+        store = _RecordingStore()
+        flow = (
+            make_ff()
+            .create(state={})
+            .with_checkpointer(store, "traj-branch-noelse")
+            .branch(
+                when=lambda _r, _c: predicate_value, then=lambda f: f.iterate(body, max_iters=2)
+            )
+            .then(post_branch)
+        )
+        await flow.run()
+        assert "body" in calls
+        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.saves.clear()
+
+        # Resume with falsy predicate — no else_ arm, so fail-fast triggers.
+        predicate_value = False
+        calls.clear()
+        with pytest.raises(RuntimeError) as excinfo:
+            await flow.run(resume=True)
+        assert calls == []  # post_branch never ran
+        message = str(excinfo.value)
+        assert "predicate" in message
+        assert "no else_ arm" in message

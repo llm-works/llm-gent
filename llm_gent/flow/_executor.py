@@ -259,6 +259,13 @@ async def _run_branch(
         verdict = await verdict
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
+        _assert_replay_allows_skip(
+            env,
+            node_id,
+            "branch predicate returned falsy with no else_ arm, but resume "
+            "path expected descent through this branch — predicate behavior "
+            "has changed since checkpoint.",
+        )
         return prev_result
     return await chosen._run_as_subflow(
         prev_result,
@@ -388,6 +395,28 @@ def _pop_replay_for(env: _RunEnv, node_id: str) -> _ResumeReplay | None:
     if replay.remaining_path[0] != node_id:
         return None
     return dataclasses.replace(replay, remaining_path=replay.remaining_path[1:])
+
+
+def _assert_replay_allows_skip(env: _RunEnv, node_id: str, reason: str) -> None:
+    """Fail-fast when a skipped descent was on the replay's saved path.
+
+    Called when a descent site decides not to descend (e.g., branch with
+    falsy predicate and no ``else_`` arm). If the replay's
+    ``remaining_path[0]`` equals ``node_id``, the checkpoint expected
+    descent through this node — skipping it means the composition
+    graph's runtime behavior has changed since the checkpoint was
+    written. Raising here preserves the head-pop invariant: no chain
+    step after a doomed skip runs before the error.
+    """
+    replay = env.replay
+    if replay is None or not replay.remaining_path:
+        return
+    if env.runtime._replay_consumed:
+        return
+    if replay.remaining_path[0] != node_id:
+        return
+    path_repr = " → ".join(replay.full_path) if replay.full_path else "<empty>"
+    raise RuntimeError(f"{reason} Saved path: {path_repr}")
 
 
 async def _dispatch_iterate_body(
