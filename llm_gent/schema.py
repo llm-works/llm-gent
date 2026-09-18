@@ -244,8 +244,12 @@ class SchemaManager:
         return self._migrate_with_lock(wait, timeout_seconds)
 
     def _migrate_with_lock(self, wait: bool, timeout_seconds: float) -> SchemaStatus:
-        """Acquire the advisory lock, re-check under it, apply migration."""
-        with self._engine.connect() as conn:
+        """Acquire the advisory lock, re-check under it, apply migration.
+
+        Uses autocommit isolation so the lock connection never enters
+        ``idle in transaction`` state while Alembic runs its own DDL.
+        """
+        with self._engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             if not self._acquire_lock(conn, wait, timeout_seconds):
                 raise TimeoutError(
                     f"could not acquire llm-gent schema lock within {timeout_seconds}s"
@@ -261,22 +265,28 @@ class SchemaManager:
                 self._release_lock(conn)
 
     def _acquire_lock(self, conn: Any, wait: bool, timeout_seconds: float) -> bool:
-        """Take the session-level advisory lock; blocks if ``wait`` is true."""
+        """Take the session-level advisory lock; blocks if ``wait`` is true.
+
+        Uses ``SET statement_timeout`` (not ``SET LOCAL``) because the
+        connection runs in autocommit mode — there is no transaction for
+        ``LOCAL`` to scope to.
+        """
         if wait:
-            conn.execute(text(f"SET LOCAL statement_timeout = '{int(timeout_seconds * 1000)}ms'"))
+            conn.execute(text(f"SET statement_timeout = '{int(timeout_seconds * 1000)}ms'"))
             try:
                 conn.execute(text(f"SELECT pg_advisory_lock({_ADVISORY_LOCK_KEY})"))
                 return True
             except Exception as e:
                 self._lg.warning("failed to acquire llm-gent schema lock", extra={"exception": e})
                 return False
+            finally:
+                conn.execute(text("RESET statement_timeout"))
         result = conn.execute(text(f"SELECT pg_try_advisory_lock({_ADVISORY_LOCK_KEY})")).scalar()
         return bool(result)
 
     def _release_lock(self, conn: Any) -> None:
-        """Release the advisory lock and commit so it clears immediately."""
+        """Release the advisory lock (autocommit — no explicit commit needed)."""
         conn.execute(text(f"SELECT pg_advisory_unlock({_ADVISORY_LOCK_KEY})"))
-        conn.commit()
 
     def _apply_migration(self, status: SchemaStatus) -> None:
         """Bootstrap or upgrade depending on state."""
