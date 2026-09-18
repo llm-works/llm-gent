@@ -677,19 +677,25 @@ class TestResumePositionReplay:
         assert seen == [1, 2]  # iterations 5 and 6 only
 
     async def test_structural_change_raises(self) -> None:
-        """A checkpoint whose save-point iterate no longer exists in the graph raises."""
+        """A checkpoint whose save-point iterate no longer exists in the graph raises.
+
+        The raise carries the full saved path (root → leaf) so ops
+        triage can correlate the ancestor chain against the current
+        composition tree and locate the layer that diverged.
+        """
         import pytest
 
         @verb(role=ROLE_A)
         async def noop(ctx: Context[Any], _prev: Any = None) -> None:
             return None
 
-        # Fabricate a checkpoint pointing at an id that will not appear in
-        # any composition the resume flow constructs.
+        # Fabricate a checkpoint pointing at a path whose ids will not
+        # appear in the resume flow's composition.
+        stale_path = ["cafebabecafebabe", "deadbeefdeadbeef"]
         store = _RecordingStore(
             preload=(
                 {"data": {}, "children": []},
-                {"schema_version": 1, "path": ["deadbeefdeadbeef"], "iteration": 2},
+                {"schema_version": 1, "path": stale_path, "iteration": 2},
             )
         )
         flow = (
@@ -698,8 +704,14 @@ class TestResumePositionReplay:
             .with_checkpointer(store, "traj-stale")
             .iterate(noop, max_iters=3)
         )
-        with pytest.raises(RuntimeError, match="structurally changed"):
+        with pytest.raises(RuntimeError) as excinfo:
             await flow.run(resume=True)
+        message = str(excinfo.value)
+        assert "structurally changed" in message
+        # Full path appears in the raise (root → leaf), not just the leaf.
+        assert "cafebabecafebabe" in message
+        assert "deadbeefdeadbeef" in message
+        assert "root→leaf" in message
 
     async def test_resume_rebuilds_ambient_halt(self) -> None:
         """Ambients (halt/budget/traits/…) are not serialized; the resumed run wires fresh ones.

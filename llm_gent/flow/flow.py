@@ -795,16 +795,22 @@ class Flow:
         id — the graph has structurally changed since the checkpoint,
         and finishing silently would either lose the resume request or
         (worse) re-run work the checkpoint expected to skip.
+
+        The raise includes the full saved path (root → leaf) so ops
+        triage can correlate the ancestor chain with the current
+        composition tree and locate the layer where the graph diverged.
         """
         if replay is None or self._replay_consumed:
             return
         target_id = replay.remaining_path[-1] if replay.remaining_path else "<empty>"
         label = self._name or "<anonymous>"
+        path_repr = " → ".join(replay.remaining_path) if replay.remaining_path else "<empty>"
         raise RuntimeError(
             f"Flow {label!r}: resume checkpoint's save-point iterate "
             f"id {target_id!r} was not found in the composition graph "
             f"during the run — the graph has structurally changed "
-            f"since the checkpoint was written"
+            f"since the checkpoint was written. "
+            f"Saved path (root→leaf): {path_repr}"
         )
 
     async def _run_as_subflow(
