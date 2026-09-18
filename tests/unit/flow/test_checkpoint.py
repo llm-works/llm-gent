@@ -1000,3 +1000,43 @@ class TestResumePositionReplay:
         message = str(excinfo.value)
         assert "predicate" in message
         assert "no else_ arm" in message
+
+    async def test_map_replay_routes_to_correct_item(self) -> None:
+        """Replay is routed only to the saved map item, not all items.
+
+        When a checkpoint is saved inside map item N's body, resuming
+        should route the replay only to item N. Other items should
+        receive no replay and run fresh. This test verifies the fix
+        for scheduling-dependent replay failures: without the fix,
+        a non-target item running first would fail replay validation.
+        """
+        calls: list[tuple[str, int]] = []
+
+        @verb(role=ROLE_A)
+        async def body(ctx: Context[dict[str, int]], item: int) -> int:
+            calls.append(("body", item))
+            ctx.state.data["sum"] = ctx.state.data.get("sum", 0) + item
+            return item
+
+        store = _RecordingStore()
+        flow = (
+            make_ff()
+            .create(state={"sum": 0})
+            .with_checkpointer(store, "traj-map")
+            .map(
+                lambda f: f.iterate(body, max_iters=2),
+                items=lambda _p, _c: [10, 20, 30],
+            )
+        )
+        await flow.run()
+        assert store.saves, "expected iterate inside map to save"
+        saved_path = store.saves[-1][3]["path"]
+        assert len(saved_path) == 2  # [map_node_id, iterate_inside_item]
+
+        # Resume should route replay to the correct item without error.
+        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.saves.clear()
+        calls.clear()
+        await flow.run(resume=True)
+        # All items should complete: item 0, 1, 2 each run their iterate bodies.
+        assert len([c for c in calls if c[0] == "body"]) >= 3
