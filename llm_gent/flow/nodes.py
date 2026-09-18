@@ -181,6 +181,11 @@ class _ResumeReplay:
     When ``remaining_path`` empties at an iterate, ``iteration`` gives
     the completed-count to fast-forward to.
 
+    ``child_state_data`` carries the innermost scoped state from the
+    checkpoint tree. When the target iterate is reached, this data is
+    used instead of projecting fresh — restoring child mutations that
+    occurred before the checkpoint was saved.
+
     A mismatch is a hard error: the composition graph has changed
     structurally since the checkpoint was written, and silently
     restarting or best-effort re-mapping would either lose work or
@@ -189,6 +194,7 @@ class _ResumeReplay:
 
     remaining_path: tuple[str, ...]
     iteration: int = 0
+    child_state_data: Any = None
 
 
 @dataclass(frozen=True)

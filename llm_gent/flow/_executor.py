@@ -310,11 +310,18 @@ async def _run_iterate(
     (e.g., an inner iterate spun up by an outer loop) do not re-apply
     the fast-forward. ``deadline`` is not restored — the wall clock
     resets each run.
+
+    When resuming, if ``child_state_data`` is present in the replay, it
+    replaces the projected child state — restoring mutations that
+    occurred before the checkpoint was saved.
     """
-    child_state = await _project_state(it.state_fn, env.state)
+    iteration, restored_child = _resume_iteration_for(env, node_id)
+    if restored_child is not None:
+        child_state = State(data=restored_child, _parent=env.state)
+    else:
+        child_state = await _project_state(it.state_fn, env.state)
     result: Any = node_args[0] if node_args else None
     started = time.monotonic()
-    iteration = _resume_iteration_for(env, node_id)
     while True:
         if it.max_iters is not None and iteration >= it.max_iters:
             break
@@ -331,25 +338,26 @@ async def _run_iterate(
     return result
 
 
-def _resume_iteration_for(env: _RunEnv, node_id: str) -> int:
-    """Return the starting iteration count for ``_run_iterate``.
+def _resume_iteration_for(env: _RunEnv, node_id: str) -> tuple[int, Any]:
+    """Return the starting iteration count and restored child state for ``_run_iterate``.
 
-    ``0`` for a fresh run. On resume, when ``env.replay`` is set and its
-    path leaf matches this iterate's ``node_id`` and no earlier iterate
-    in the run has consumed the replay, returns the saved iteration and
-    flips :attr:`Flow._replay_consumed` on the top-level runtime so the
+    ``(0, None)`` for a fresh run. On resume, when ``env.replay`` is set
+    and its path leaf matches this iterate's ``node_id`` and no earlier
+    iterate in the run has consumed the replay, returns the saved
+    iteration and child_state_data (if present) and flips
+    :attr:`Flow._replay_consumed` on the top-level runtime so the
     fast-forward fires exactly once. A non-matching id or an already-
-    consumed replay yields ``0`` and the iterate runs from scratch.
+    consumed replay yields ``(0, None)`` and the iterate runs from scratch.
     """
     replay = env.replay
     if replay is None or not replay.remaining_path:
-        return 0
+        return 0, None
     if env.runtime._replay_consumed:
-        return 0
+        return 0, None
     if node_id != replay.remaining_path[-1]:
-        return 0
+        return 0, None
     env.runtime._replay_consumed = True
-    return replay.iteration
+    return replay.iteration, replay.child_state_data
 
 
 async def _dispatch_iterate_body(
@@ -497,13 +505,13 @@ async def _run_map(
     runner = _run_map_item_strict if mp.strict else _run_map_item
     sem = asyncio.Semaphore(mp.max_concurrency) if mp.max_concurrency is not None else None
 
-    async def _gated(item: Any) -> Any:
+    async def _gated(index: int, item: Any) -> Any:
         if sem is None:
-            return await runner(mp, item, env, merge_lock, node_id)
+            return await runner(mp, item, env, merge_lock, node_id, index)
         async with sem:
-            return await runner(mp, item, env, merge_lock, node_id)
+            return await runner(mp, item, env, merge_lock, node_id, index)
 
-    coros = [_gated(item) for item in items]
+    coros = [_gated(i, item) for i, item in enumerate(items)]
     if mp.strict:
         results = list(await asyncio.gather(*coros, return_exceptions=True))
         for r in results:
@@ -523,8 +531,15 @@ async def _dispatch_map_body(
     child_state: State[Any],
     env: _RunEnv,
     node_id: str,
+    item_index: int,
 ) -> Any:
-    """Run a map body's subflow with composition-tree identity threaded through."""
+    """Run a map body's subflow with per-item composition-tree identity.
+
+    Each item descends with a distinct ``chain_context`` keyed by
+    ``item_index``, so nested iterates produce unique node IDs per item.
+    This prevents checkpoint overwrites and replay race conditions when
+    the map body contains checkpointed primitives.
+    """
     from .flow import _descend_context
 
     return await mp.body._run_as_subflow(
@@ -535,7 +550,7 @@ async def _dispatch_map_body(
         parent_budget=env.budget,
         parent_checkpointer=env.checkpointer,
         parent_client_flow_id=env.client_flow_id,
-        parent_chain_context=_descend_context(node_id, "map"),
+        parent_chain_context=_descend_context(node_id, f"map:{item_index}"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=env.replay,
     )
@@ -547,6 +562,7 @@ async def _run_map_item_strict(
     env: _RunEnv,
     merge_lock: asyncio.Lock,
     node_id: str,
+    item_index: int,
 ) -> Any:
     """Run one strict-mode map item; merge fires only when the body succeeds.
 
@@ -562,7 +578,7 @@ async def _run_map_item_strict(
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
-        result = await _dispatch_map_body(mp, item, child_state, env, node_id)
+        result = await _dispatch_map_body(mp, item, child_state, env, node_id, item_index)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -580,6 +596,7 @@ async def _run_map_item(
     env: _RunEnv,
     merge_lock: asyncio.Lock,
     node_id: str,
+    item_index: int,
 ) -> Any:
     """Run one non-strict map item; wrap non-cancellation exceptions as :class:`Failure`.
 
@@ -596,7 +613,7 @@ async def _run_map_item(
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
-        result = await _dispatch_map_body(mp, item, child_state, env, node_id)
+        result = await _dispatch_map_body(mp, item, child_state, env, node_id, item_index)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

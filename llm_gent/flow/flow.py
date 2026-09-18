@@ -979,9 +979,14 @@ class Flow:
             hydrated = self._state_type.from_dict(raw if isinstance(raw, dict) else {})
         raw_path = metadata_json.get("path", [])
         iteration = int(metadata_json.get("iteration", 0))
+        child_state_data = _extract_innermost_child(state_json)
         replay: _ResumeReplay | None
         if raw_path:
-            replay = _ResumeReplay(remaining_path=tuple(raw_path), iteration=iteration)
+            replay = _ResumeReplay(
+                remaining_path=tuple(raw_path),
+                iteration=iteration,
+                child_state_data=child_state_data,
+            )
         else:
             replay = None
         return State(data=hydrated), replay
@@ -1103,6 +1108,24 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
     fresh = Flow(lg=lg, name=name)
     buildable(fresh)
     return fresh
+
+
+def _extract_innermost_child(state_json: dict[str, Any]) -> Any:
+    """Walk the state tree to find the innermost child's data.
+
+    The checkpoint tree is ``{data, children}`` where ``children`` is a list
+    (currently always 0 or 1 element). Returns the ``data`` of the deepest
+    nested child, or ``None`` if there are no children (root-only state).
+    """
+    node = state_json
+    while True:
+        children = node.get("children", [])
+        if not children:
+            # We're at the innermost scope; return None if this is root
+            if node is state_json:
+                return None
+            return node.get("data")
+        node = children[0]
 
 
 _NODE_ID_DIGEST_SIZE = 8
