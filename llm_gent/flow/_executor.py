@@ -135,7 +135,7 @@ async def _invoke_target(
     if isinstance(target, _Iterate):
         return await _run_iterate(target, ctx, env, node_args, node_id)
     if isinstance(target, _Map):
-        return await _run_map(target, ctx, env, node_args)
+        return await _run_map(target, ctx, env, node_args, node_id)
     return await target(ctx, *node_args, **node_kwargs)
 
 
@@ -468,6 +468,7 @@ async def _run_map(
     ctx: Context[Any],
     env: _RunEnv,
     node_args: tuple[Any, ...],
+    node_id: str,
 ) -> Any:
     """Fan out the body over items concurrently, then (optionally) aggregate.
 
@@ -498,9 +499,9 @@ async def _run_map(
 
     async def _gated(item: Any) -> Any:
         if sem is None:
-            return await runner(mp, item, env, merge_lock)
+            return await runner(mp, item, env, merge_lock, node_id)
         async with sem:
-            return await runner(mp, item, env, merge_lock)
+            return await runner(mp, item, env, merge_lock, node_id)
 
     coros = [_gated(item) for item in items]
     if mp.strict:
@@ -516,11 +517,36 @@ async def _run_map(
     return result
 
 
+async def _dispatch_map_body(
+    mp: _Map,
+    item: Any,
+    child_state: State[Any],
+    env: _RunEnv,
+    node_id: str,
+) -> Any:
+    """Run a map body's subflow with composition-tree identity threaded through."""
+    from .flow import _descend_context
+
+    return await mp.body._run_as_subflow(
+        item,
+        state=child_state,
+        runtime=env.runtime,
+        parent_halt=env.halt,
+        parent_budget=env.budget,
+        parent_checkpointer=env.checkpointer,
+        parent_client_flow_id=env.client_flow_id,
+        parent_chain_context=_descend_context(node_id, "map"),
+        parent_ancestor_chain=env.ancestor_chain + (node_id,),
+        parent_replay=env.replay,
+    )
+
+
 async def _run_map_item_strict(
     mp: _Map,
     item: Any,
     env: _RunEnv,
     merge_lock: asyncio.Lock,
+    node_id: str,
 ) -> Any:
     """Run one strict-mode map item; merge fires only when the body succeeds.
 
@@ -536,15 +562,7 @@ async def _run_map_item_strict(
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
-        result = await mp.body._run_as_subflow(
-            item,
-            state=child_state,
-            runtime=env.runtime,
-            parent_halt=env.halt,
-            parent_budget=env.budget,
-            parent_checkpointer=env.checkpointer,
-            parent_client_flow_id=env.client_flow_id,
-        )
+        result = await _dispatch_map_body(mp, item, child_state, env, node_id)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -561,6 +579,7 @@ async def _run_map_item(
     item: Any,
     env: _RunEnv,
     merge_lock: asyncio.Lock,
+    node_id: str,
 ) -> Any:
     """Run one non-strict map item; wrap non-cancellation exceptions as :class:`Failure`.
 
@@ -577,15 +596,7 @@ async def _run_map_item(
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
-        result = await mp.body._run_as_subflow(
-            item,
-            state=child_state,
-            runtime=env.runtime,
-            parent_halt=env.halt,
-            parent_budget=env.budget,
-            parent_checkpointer=env.checkpointer,
-            parent_client_flow_id=env.client_flow_id,
-        )
+        result = await _dispatch_map_body(mp, item, child_state, env, node_id)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
