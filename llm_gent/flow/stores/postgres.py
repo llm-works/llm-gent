@@ -53,7 +53,7 @@ class FlowCheckpoint(Base):
     __tablename__ = "llm_gent_flow_checkpoint"
 
     db_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    client_flow_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    client_flow_id: Mapped[str] = mapped_column(String(255), nullable=False)
     iteration: Mapped[int] = mapped_column(Integer, nullable=False)
     state_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -108,7 +108,6 @@ class PgCheckpointStore:
             set_={
                 "state_json": stmt.excluded.state_json,
                 "metadata_json": stmt.excluded.metadata_json,
-                "created_at": datetime.now(UTC),
             },
         )
         with self._pg.session() as session:

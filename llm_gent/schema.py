@@ -30,6 +30,7 @@ Public entry points:
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -60,6 +61,11 @@ _ADVISORY_LOCK_KEY = 4923108657234587123
 _VERSION_TABLE_NAME = "alembic_version_llm_gent"
 
 _SCHEMA_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+
+# Thread lock for Base.metadata mutation in _create_tables_in_schema.
+# The advisory lock serializes DB writes across processes, but not
+# Python-side metadata mutation within a single process.
+_METADATA_LOCK = threading.Lock()
 
 
 class Base(DeclarativeBase):
@@ -131,16 +137,15 @@ class SchemaManager:
     ) -> None:
         """Bind a logger and appinfra PG handle.
 
-        The bound schema (``pg._schema_mgr.schema`` when the PG handle
-        was constructed with ``schema=``, else ``"public"``) is used for
+        The bound schema (``pg.schema`` when the PG handle was
+        constructed with ``schema=``, else ``"public"``) is used for
         the version-table location, ``search_path`` on migration
         transactions, and ``create_all`` bootstrap on a fresh database.
         """
         self._lg = lg
         self._pg = pg
-        self._engine = pg._engine
-        schema_mgr = pg._schema_mgr
-        self._schema_name = schema_mgr.schema if schema_mgr is not None else "public"
+        self._engine = pg.engine
+        self._schema_name = pg.schema or "public"
         if not _SCHEMA_NAME_PATTERN.match(self._schema_name):
             raise ValueError(
                 f"Invalid schema name {self._schema_name!r}: must be 1-63 chars, "
@@ -322,14 +327,15 @@ class SchemaManager:
     def _create_tables_in_schema(self, conn: Any) -> None:
         """``create_all`` against ``Base.metadata`` under the target schema."""
         original: dict[str, str | None] = {}
-        try:
-            for table in Base.metadata.tables.values():
-                original[table.name] = table.schema
-                table.schema = self._schema_name
-            Base.metadata.create_all(conn)
-        finally:
-            for table in Base.metadata.tables.values():
-                table.schema = original.get(table.name)
+        with _METADATA_LOCK:
+            try:
+                for table in Base.metadata.tables.values():
+                    original[table.name] = table.schema
+                    table.schema = self._schema_name
+                Base.metadata.create_all(conn)
+            finally:
+                for table in Base.metadata.tables.values():
+                    table.schema = original.get(table.name)
 
     def _stamp_alembic_version(self, conn: Any, version: str) -> None:
         """Write ``version`` into the version table (creating it if absent)."""

@@ -30,7 +30,7 @@ def upgrade() -> None:
     op.create_table(
         "llm_gent_flow_checkpoint",
         sa.Column("db_id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("client_flow_id", sa.String(length=96), nullable=False),
+        sa.Column("client_flow_id", sa.String(length=255), nullable=False),
         sa.Column("iteration", sa.Integer(), nullable=False),
         sa.Column("state_json", postgresql.JSONB(), nullable=False),
         sa.Column("metadata_json", postgresql.JSONB(), nullable=False),

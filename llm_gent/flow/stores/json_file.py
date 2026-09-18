@@ -148,13 +148,13 @@ class JsonFileCheckpointStore:
         """Load one on-disk record; warn and skip on parse failure."""
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
+            return payload["state"], payload["metadata"]
+        except (OSError, json.JSONDecodeError, KeyError) as e:
             self._lg.warning(
                 "checkpoint file unreadable; treating as absent",
                 extra={"exception": e, "path": str(path)},
             )
             return None
-        return payload["state"], payload["metadata"]
 
     @staticmethod
     def _decode_id(dirname: str) -> str:
