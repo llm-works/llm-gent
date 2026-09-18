@@ -134,3 +134,72 @@ class TestJsonFileCheckpointStore:
         target = tmp_path / "checkpoints" / "traj-1" / "iter-1.json"
         target.write_text("{not valid json", encoding="utf-8")
         assert store.load_checkpoint("traj-1", iteration=1) is None
+
+
+class TestJsonFileCheckpointStoreAdversarialIds:
+    """Path-traversal / malformed-id rejection at :meth:`_trajectory_dir`.
+
+    :func:`urllib.parse.quote` leaves the RFC-3986 "unreserved" set
+    unencoded, which includes ``.`` — so a naive ``quote(id, safe="")``
+    round-trips ``"."`` and ``".."`` verbatim and lets a caller escape
+    the store root. Every public method routes through
+    :meth:`_trajectory_dir`, so validating there is sufficient.
+    """
+
+    @pytest.mark.parametrize("bad_id", ["", ".", ".."])
+    def test_save_rejects_adversarial_id(self, store: JsonFileCheckpointStore, bad_id: str) -> None:
+        """Every save-time rejection surfaces as :exc:`ValueError`, not a silent write."""
+        with pytest.raises(ValueError):
+            store.save_checkpoint(bad_id, 1, _state(1), _meta(1))
+
+    @pytest.mark.parametrize("bad_id", ["", ".", ".."])
+    def test_load_rejects_adversarial_id(self, store: JsonFileCheckpointStore, bad_id: str) -> None:
+        """Load through the same validator; no silent read from outside root."""
+        with pytest.raises(ValueError):
+            store.load_checkpoint(bad_id)
+
+    @pytest.mark.parametrize("bad_id", ["", ".", ".."])
+    def test_delete_rejects_adversarial_id(
+        self, store: JsonFileCheckpointStore, bad_id: str
+    ) -> None:
+        """Delete through the same validator; no silent wipe outside root."""
+        with pytest.raises(ValueError):
+            store.delete_checkpoint(bad_id)
+
+    def test_slash_and_special_chars_still_supported(self, store: JsonFileCheckpointStore) -> None:
+        """Slashes / colons / spaces / backslashes / NUL round-trip via URL-quote.
+
+        :func:`urllib.parse.quote` encodes every path-relevant char that
+        isn't in the RFC-3986 unreserved set, so these safely collapse
+        to a single directory name inside the root. Only ``.`` and
+        ``..`` need explicit rejection (they are unreserved).
+        """
+        for weird_id in [
+            "team/agent-1:run 42",
+            "back\\slash",
+            "nul\x00byte",
+            "..foo",
+            "foo..",
+        ]:
+            store.save_checkpoint(weird_id, 1, _state(1), _meta(1))
+            loaded = store.load_checkpoint(weird_id)
+            assert loaded is not None
+            assert loaded[0] == _state(1)
+
+    def test_dotdot_would_have_escaped_root(
+        self, tmp_path: Path, store: JsonFileCheckpointStore
+    ) -> None:
+        """Sanity check: a sibling of the root MUST NOT be reachable via ``..``.
+
+        Plants a marker file at ``tmp_path/marker.json`` (a sibling of the
+        store root), attempts a rejected save/delete with ``client_flow_id="..``,
+        then asserts the marker survives. Locks the fix in against a future
+        regression that would let ``..`` through the validator.
+        """
+        marker = tmp_path / "marker.json"
+        marker.write_text("keep me", encoding="utf-8")
+        with pytest.raises(ValueError):
+            store.save_checkpoint("..", 1, _state(1), _meta(1))
+        with pytest.raises(ValueError):
+            store.delete_checkpoint("..")
+        assert marker.read_text(encoding="utf-8") == "keep me"

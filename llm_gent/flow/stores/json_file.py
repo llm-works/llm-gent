@@ -109,8 +109,28 @@ class JsonFileCheckpointStore:
             traj_dir.rmdir()
 
     def _trajectory_dir(self, client_flow_id: str) -> Path:
-        """URL-encode the id so arbitrary caller strings are path-safe."""
-        return self._root / quote(client_flow_id, safe="")
+        """URL-encode the id so arbitrary caller strings are path-safe.
+
+        :func:`urllib.parse.quote` encodes every path-relevant char
+        that isn't in the RFC-3986 unreserved set (alphanum + ``-._~``).
+        Slashes / colons / spaces / NUL bytes all round-trip safely
+        through percent-encoding into a single directory name inside
+        the root. The one gap is ``.`` and ``..``, which are unreserved
+        and pass through verbatim — those would resolve to a traversal
+        into the root's parent, so reject them (plus empty strings) up
+        front. A resolved-path containment check locks the invariant
+        in as defense in depth.
+        """
+        if not client_flow_id:
+            raise ValueError("client_flow_id must not be empty")
+        if client_flow_id in (".", ".."):
+            raise ValueError(f"client_flow_id must not be {client_flow_id!r} (path-traversal risk)")
+        candidate = self._root / quote(client_flow_id, safe="")
+        root_resolved = self._root.resolve()
+        candidate_resolved = candidate.resolve()
+        if root_resolved != candidate_resolved and root_resolved not in candidate_resolved.parents:
+            raise ValueError(f"client_flow_id resolves outside store root; got {client_flow_id!r}")
+        return candidate
 
     def _latest_file(self, traj_dir: Path) -> Path | None:
         """Scan for ``iter-N.json`` files; return the highest-N path."""
