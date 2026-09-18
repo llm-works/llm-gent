@@ -26,6 +26,7 @@ import contextlib
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
@@ -70,10 +71,16 @@ class JsonFileCheckpointStore:
         traj_dir = self._trajectory_dir(client_flow_id)
         traj_dir.mkdir(parents=True, exist_ok=True)
         target = traj_dir / f"iter-{iteration}.json"
-        tmp = target.with_suffix(".json.tmp")
         payload = {"state": state_json, "metadata": metadata_json}
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(tmp, target)
+        fd, tmp_path = tempfile.mkstemp(dir=traj_dir, prefix=f"iter-{iteration}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload))
+            os.replace(tmp_path, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
 
     def load_checkpoint(
         self,
@@ -149,7 +156,7 @@ class JsonFileCheckpointStore:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             return payload["state"], payload["metadata"]
-        except (OSError, json.JSONDecodeError, KeyError) as e:
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
             self._lg.warning(
                 "checkpoint file unreadable; treating as absent",
                 extra={"exception": e, "path": str(path)},

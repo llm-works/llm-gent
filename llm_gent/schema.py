@@ -30,7 +30,6 @@ Public entry points:
 from __future__ import annotations
 
 import re
-import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -61,11 +60,6 @@ _ADVISORY_LOCK_KEY = 4923108657234587123
 _VERSION_TABLE_NAME = "alembic_version_llm_gent"
 
 _SCHEMA_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
-
-# Thread lock for Base.metadata mutation in _create_tables_in_schema.
-# The advisory lock serializes DB writes across processes, but not
-# Python-side metadata mutation within a single process.
-_METADATA_LOCK = threading.Lock()
 
 
 class Base(DeclarativeBase):
@@ -158,7 +152,9 @@ class SchemaManager:
         """Assemble the alembic ``Config`` pointed at this package's migrations."""
         config = AlembicConfig(str(self._migrations_path / "alembic.ini"))
         config.set_main_option("script_location", str(self._migrations_path))
-        config.set_main_option("sqlalchemy.url", str(self._engine.url))
+        # Escape % as %% for ConfigParser interpolation safety (passwords may contain %).
+        url_escaped = str(self._engine.url).replace("%", "%%")
+        config.set_main_option("sqlalchemy.url", url_escaped)
         config.set_main_option("version_table_schema", self._schema_name)
         config.set_main_option("version_table", _VERSION_TABLE_NAME)
         return config
@@ -325,17 +321,13 @@ class SchemaManager:
         conn.execute(text(f'SET LOCAL search_path TO "{self._schema_name}", public'))
 
     def _create_tables_in_schema(self, conn: Any) -> None:
-        """``create_all`` against ``Base.metadata`` under the target schema."""
-        original: dict[str, str | None] = {}
-        with _METADATA_LOCK:
-            try:
-                for table in Base.metadata.tables.values():
-                    original[table.name] = table.schema
-                    table.schema = self._schema_name
-                Base.metadata.create_all(conn)
-            finally:
-                for table in Base.metadata.tables.values():
-                    table.schema = original.get(table.name)
+        """``create_all`` against a copy of ``Base.metadata`` under the target schema."""
+        from sqlalchemy import MetaData
+
+        scoped = MetaData()
+        for table in Base.metadata.tables.values():
+            table.to_metadata(scoped, schema=self._schema_name)
+        scoped.create_all(conn)
 
     def _stamp_alembic_version(self, conn: Any, version: str) -> None:
         """Write ``version`` into the version table (creating it if absent)."""

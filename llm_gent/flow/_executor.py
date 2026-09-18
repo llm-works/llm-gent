@@ -492,10 +492,10 @@ def _save_iterate_checkpoint(
     ``state_json["data"]`` still see the outermost payload; the tree
     extension is additive.
 
-    ``metadata_json`` carries the schema version, the composition-tree
-    path (a flat list of content-addressed node IDs from root to and
-    including this iterate — the ancestor chain in ``env`` plus this
-    iterate's own ID), and the completed iteration count. Resume walks
+    ``metadata_json`` carries the composition-tree path (a flat list of
+    content-addressed node IDs from root to and including this iterate —
+    the ancestor chain in ``env`` plus this iterate's own ID) and the
+    completed iteration count. Resume walks
     the graph, matching each id at the corresponding chain step to
     relocate the same iterate; a mismatch is a hard error at that
     depth.
