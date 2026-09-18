@@ -19,6 +19,7 @@ circular dependency between the executor and the class it operates on.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import time
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,7 @@ from .nodes import (
     _Iterate,
     _Map,
     _Node,
+    _ResumeReplay,
     _RunEnv,
 )
 from .state import State
@@ -169,7 +171,7 @@ async def _run_subflow(
         parent_client_flow_id=env.client_flow_id,
         parent_chain_context=_descend_context(node_id, "call"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=env.replay,
+        parent_replay=_pop_replay_for(env, node_id),
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -268,7 +270,7 @@ async def _run_branch(
         parent_client_flow_id=env.client_flow_id,
         parent_chain_context=_descend_context(node_id, "then" if verdict else "else"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=env.replay,
+        parent_replay=_pop_replay_for(env, node_id),
     )
 
 
@@ -301,15 +303,16 @@ async def _run_iterate(
     termination.
 
     Resume: when a ``_ResumeReplay`` is threaded via :attr:`_RunEnv.replay`
-    and its save-point (path leaf) matches this iterate's runtime
-    ``node_id``, the counter starts at the saved iteration instead of 0
-    — the folded fix for the note-423 gap (``max_iters`` becomes a
-    cumulative bound across resumes, not per-run). At most one iterate
-    per run consumes the replay; :attr:`Flow._replay_consumed` flips the
-    first time a match fires so re-entrant dispatches of the same node
-    (e.g., an inner iterate spun up by an outer loop) do not re-apply
-    the fast-forward. ``deadline`` is not restored — the wall clock
-    resets each run.
+    and its ``remaining_path`` has been head-popped down to a single
+    entry equal to this iterate's runtime ``node_id`` (i.e., this
+    iterate IS the save-point leaf), the counter starts at the saved
+    iteration instead of 0 — the folded fix for the note-423 gap
+    (``max_iters`` becomes a cumulative bound across resumes, not
+    per-run). At most one iterate per run consumes the replay;
+    :attr:`Flow._replay_consumed` flips the first time a match fires
+    so re-entrant dispatches of the same node (e.g., an inner iterate
+    spun up by an outer loop) do not re-apply the fast-forward.
+    ``deadline`` is not restored — the wall clock resets each run.
 
     When resuming, if ``child_state_data`` is present in the replay, it
     replaces the projected child state — restoring mutations that
@@ -342,22 +345,49 @@ def _resume_iteration_for(env: _RunEnv, node_id: str) -> tuple[int, Any]:
     """Return the starting iteration count and restored child state for ``_run_iterate``.
 
     ``(0, None)`` for a fresh run. On resume, when ``env.replay`` is set
-    and its path leaf matches this iterate's ``node_id`` and no earlier
-    iterate in the run has consumed the replay, returns the saved
-    iteration and child_state_data (if present) and flips
+    and ``remaining_path == (node_id,)`` — the head-pop path has shrunk
+    to a single entry equal to this iterate's ``node_id`` — this iterate
+    IS the save-point leaf: returns the saved iteration and
+    ``child_state_data`` (if present) and flips
     :attr:`Flow._replay_consumed` on the top-level runtime so the
-    fast-forward fires exactly once. A non-matching id or an already-
-    consumed replay yields ``(0, None)`` and the iterate runs from scratch.
+    fast-forward fires exactly once. Any longer remaining path means
+    this iterate is an ancestor of the leaf (its body descent will
+    head-pop and thread the tail); a non-matching head, empty path, or
+    already-consumed replay all yield ``(0, None)`` and the iterate
+    runs from scratch.
     """
     replay = env.replay
     if replay is None or not replay.remaining_path:
         return 0, None
     if env.runtime._replay_consumed:
         return 0, None
-    if node_id != replay.remaining_path[-1]:
+    if replay.remaining_path[0] != node_id or len(replay.remaining_path) != 1:
         return 0, None
     env.runtime._replay_consumed = True
     return replay.iteration, replay.child_state_data
+
+
+def _pop_replay_for(env: _RunEnv, node_id: str) -> _ResumeReplay | None:
+    """Return the replay to thread through a descent under ``node_id``.
+
+    Head-pop at descent site: when ``env.replay.remaining_path[0]``
+    equals ``node_id``, the descent is on the saved ancestor chain —
+    pop the head and thread the tail to the child Flow. Otherwise the
+    descent is off-path (its subtree cannot contain the leaf) or the
+    replay has already been consumed at the leaf, and no replay is
+    threaded. Called by every descent helper (``_run_subflow``,
+    ``_run_branch``, ``_dispatch_iterate_body``, ``_dispatch_map_body``).
+    ``full_path`` is preserved verbatim across the pop so downstream
+    triage messages can show the whole saved ancestor chain.
+    """
+    replay = env.replay
+    if replay is None or not replay.remaining_path:
+        return None
+    if env.runtime._replay_consumed:
+        return None
+    if replay.remaining_path[0] != node_id:
+        return None
+    return dataclasses.replace(replay, remaining_path=replay.remaining_path[1:])
 
 
 async def _dispatch_iterate_body(
@@ -387,7 +417,7 @@ async def _dispatch_iterate_body(
         parent_client_flow_id=env.client_flow_id,
         parent_chain_context=_descend_context(node_id, "body"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=env.replay,
+        parent_replay=_pop_replay_for(env, node_id),
     )
 
 
@@ -552,7 +582,7 @@ async def _dispatch_map_body(
         parent_client_flow_id=env.client_flow_id,
         parent_chain_context=_descend_context(node_id, f"map:{item_index}"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=env.replay,
+        parent_replay=_pop_replay_for(env, node_id),
     )
 
 

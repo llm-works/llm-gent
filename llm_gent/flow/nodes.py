@@ -176,23 +176,29 @@ class _ResumeReplay:
     ``remaining_path`` is the ancestor chain of node IDs still to match
     on descent — a tuple of content-addressed hashes assembled from
     root to the save-point iterate (the leaf ID is included). Each
-    descent site pops its head after validation (computed node_id at
-    the current chain step equals the head) and passes the tail on.
-    When ``remaining_path`` empties at an iterate, ``iteration`` gives
-    the completed-count to fast-forward to.
+    Flow entry pre-scans its chain-step ids: exactly one must equal
+    ``remaining_path[0]`` (the on-path descent parent), or the entry
+    raises structural-change immediately — no chain step runs at a
+    level whose path head is unreachable. On the matched step's
+    descent, the head is popped and the tail is threaded into the
+    child Flow; every off-path sibling descent threads ``None`` (its
+    subtree cannot contain the leaf). When the matched step is itself
+    the save-point iterate (``len(remaining_path) == 1``), the iterate
+    consumes the replay and fast-forwards to ``iteration``.
+
+    ``full_path`` is the un-popped path from root to leaf, kept
+    verbatim across descent for triage — a pre-scan raise at depth N
+    can still show the full ancestor chain the checkpoint was written
+    against.
 
     ``child_state_data`` carries the innermost scoped state from the
     checkpoint tree. When the target iterate is reached, this data is
     used instead of projecting fresh — restoring child mutations that
     occurred before the checkpoint was saved.
-
-    A mismatch is a hard error: the composition graph has changed
-    structurally since the checkpoint was written, and silently
-    restarting or best-effort re-mapping would either lose work or
-    silently produce wrong output.
     """
 
     remaining_path: tuple[str, ...]
+    full_path: tuple[str, ...] = ()
     iteration: int = 0
     child_state_data: Any = None
 

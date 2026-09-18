@@ -789,12 +789,14 @@ class Flow:
     def _assert_replay_consumed(self, replay: _ResumeReplay | None) -> None:
         """Raise if a resume request never found its save-point iterate.
 
-        Called after :meth:`_run_as_subflow` returns. When ``replay`` was
-        threaded in but :attr:`_replay_consumed` is still ``False``, no
-        iterate anywhere in the composition tree matched the saved leaf
-        id — the graph has structurally changed since the checkpoint,
-        and finishing silently would either lose the resume request or
-        (worse) re-run work the checkpoint expected to skip.
+        Belt-and-suspenders check called after :meth:`_run_as_subflow`
+        returns. :meth:`_assert_replay_reachable` will typically have
+        raised earlier — as soon as a Flow entry sees a path head that
+        no chain step at that level provides. This post-run raise
+        catches the residual cases where the entry-level pre-scan
+        matched something but no iterate ever consumed the tail
+        (structurally impossible under normal composition, but the
+        check costs nothing and keeps the invariant explicit).
 
         The raise includes the full saved path (root → leaf) so ops
         triage can correlate the ancestor chain with the current
@@ -804,13 +806,48 @@ class Flow:
             return
         target_id = replay.remaining_path[-1] if replay.remaining_path else "<empty>"
         label = self._name or "<anonymous>"
-        path_repr = " → ".join(replay.remaining_path) if replay.remaining_path else "<empty>"
+        path_repr = " → ".join(replay.full_path) if replay.full_path else "<empty>"
         raise RuntimeError(
             f"Flow {label!r}: resume checkpoint's save-point iterate "
             f"id {target_id!r} was not found in the composition graph "
             f"during the run — the graph has structurally changed "
             f"since the checkpoint was written. "
             f"Saved path (root→leaf): {path_repr}"
+        )
+
+    def _compute_chain_ids(self, env: _RunEnv) -> tuple[str, ...]:
+        """Content-addressed node id for every step in this Flow's chain."""
+        return tuple(_compute_node_id(env.chain_context, n, i) for i, n in enumerate(self._nodes))
+
+    def _assert_replay_reachable(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> None:
+        """Fail-fast: raise if the replay's remaining head is unreachable at this Flow level.
+
+        Called at the top of every chain walk. If a resume replay is
+        threaded and its ``remaining_path[0]`` does not match any of
+        this level's ``chain_ids``, the composition graph has changed
+        since the checkpoint was written and there is no descent from
+        this level that could reach the save-point. Raising here
+        prevents unrelated chain steps and iterates from running fresh
+        under a doomed replay — the whole point of the head-pop
+        redesign. No-op when there is no replay, the path is empty,
+        or the leaf has already been consumed.
+        """
+        replay = env.replay
+        if replay is None or not replay.remaining_path:
+            return
+        if env.runtime._replay_consumed:
+            return
+        head = replay.remaining_path[0]
+        if head in chain_ids:
+            return
+        label = self._name or "<anonymous>"
+        ids_repr = ", ".join(chain_ids) if chain_ids else "<empty>"
+        full_repr = " → ".join(replay.full_path) if replay.full_path else "<empty>"
+        raise RuntimeError(
+            f"Flow {label!r}: resume path head {head!r} not found in this level's "
+            f"chain step ids [{ids_repr}] — the composition graph has "
+            f"structurally changed since the checkpoint was written. "
+            f"Saved path (root→leaf): {full_repr}"
         )
 
     async def _run_as_subflow(
@@ -872,9 +909,11 @@ class Flow:
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
+        chain_ids = self._compute_chain_ids(env)
+        self._assert_replay_reachable(env, chain_ids)
         result: Any = UNSET
         for index, node in enumerate(self._nodes):
-            node_id = _compute_node_id(env.chain_context, node, index)
+            node_id = chain_ids[index]
             node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             ctx = _build_ctx(node.target, env)
             result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
@@ -977,19 +1016,27 @@ class Flow:
             hydrated = raw
         else:
             hydrated = self._state_type.from_dict(raw if isinstance(raw, dict) else {})
+        return State(data=hydrated), self._build_resume_replay(metadata_json, state_json)
+
+    def _build_resume_replay(
+        self, metadata_json: dict[str, Any], state_json: dict[str, Any]
+    ) -> _ResumeReplay | None:
+        """Construct a :class:`_ResumeReplay` from a loaded checkpoint's metadata.
+
+        Returns ``None`` when the checkpoint carries no ``path`` — the
+        pre-PR-3 shape, where hydration alone is enough and no descent
+        replay is scheduled.
+        """
         raw_path = metadata_json.get("path", [])
-        iteration = int(metadata_json.get("iteration", 0))
-        child_state_data = _extract_innermost_child(state_json)
-        replay: _ResumeReplay | None
-        if raw_path:
-            replay = _ResumeReplay(
-                remaining_path=tuple(raw_path),
-                iteration=iteration,
-                child_state_data=child_state_data,
-            )
-        else:
-            replay = None
-        return State(data=hydrated), replay
+        if not raw_path:
+            return None
+        path_tuple = tuple(raw_path)
+        return _ResumeReplay(
+            remaining_path=path_tuple,
+            full_path=path_tuple,
+            iteration=int(metadata_json.get("iteration", 0)),
+            child_state_data=_extract_innermost_child(state_json),
+        )
 
     # -------------------------------------------------------------------------
     # Internals
