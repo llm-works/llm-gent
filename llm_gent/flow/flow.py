@@ -55,6 +55,7 @@ Buildable materializer :func:`_materialize`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 from typing import Any
 
@@ -83,6 +84,7 @@ from .nodes import (
     _Iterate,
     _Map,
     _Node,
+    _ResumeReplay,
     _RunEnv,
 )
 from .role import Role
@@ -159,6 +161,7 @@ class Flow:
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
+        self._replay_consumed: bool = False
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -669,6 +672,24 @@ class Flow:
         automatically; calling ``.with_checkpointer`` on a subflow
         overrides both for that subtree.
 
+        Resume semantics on the wired iterate:
+
+        - **State** hydrates from ``state_json['data']`` (via
+          ``state_type.from_dict`` if a ``state_type`` is bound, else
+          passthrough for plain dicts).
+        - **Iteration counter** is restored: ``max_iters`` is a
+          cumulative bound across resumes — saving at iteration N and
+          resuming with ``max_iters=M`` runs ``max(0, M - N)`` further
+          passes. A counter that already meets the bound exits without
+          re-running the body.
+        - **Ambients** (halt, budget, saia, traits, logger,
+          checkpointer itself) are never serialized — they reattach
+          from the current runtime, so a resumed run gets fresh
+          handles under whichever ``.with_halt`` / ``.with_budget`` /
+          ``.with_traits`` were wired at resume time.
+        - **Deadline** is not restored — the wall clock starts fresh
+          each run.
+
         Returns ``self`` for chaining.
         """
         self._checkpointer = store
@@ -748,9 +769,14 @@ class Flow:
                 f"checkpointer — call .with_checkpointer(store, client_flow_id) first"
             )
         active_state = self._wrap_top_state(state)
+        replay: _ResumeReplay | None = None
         if resume:
-            active_state = self._hydrate_resume_state(active_state)
-        result = await self._run_as_subflow(*args, state=active_state, runtime=self, **kwargs)
+            active_state, replay = self._hydrate_resume_state(active_state)
+        self._replay_consumed = False
+        result = await self._run_as_subflow(
+            *args, state=active_state, runtime=self, parent_replay=replay, **kwargs
+        )
+        self._assert_replay_consumed(replay)
         # Preserve checkpoint on halt-triggered exit per delete policy
         if (
             self._checkpointer is not None
@@ -759,6 +785,33 @@ class Flow:
         ):
             self._checkpointer.delete_checkpoint(self._client_flow_id)
         return result
+
+    def _assert_replay_consumed(self, replay: _ResumeReplay | None) -> None:
+        """Raise if a resume request never found its save-point iterate.
+
+        Called after :meth:`_run_as_subflow` returns. When ``replay`` was
+        threaded in but :attr:`_replay_consumed` is still ``False``, no
+        iterate anywhere in the composition tree matched the saved leaf
+        id — the graph has structurally changed since the checkpoint,
+        and finishing silently would either lose the resume request or
+        (worse) re-run work the checkpoint expected to skip.
+
+        The raise includes the full saved path (root → leaf) so ops
+        triage can correlate the ancestor chain with the current
+        composition tree and locate the layer where the graph diverged.
+        """
+        if replay is None or self._replay_consumed:
+            return
+        target_id = replay.remaining_path[-1] if replay.remaining_path else "<empty>"
+        label = self._name or "<anonymous>"
+        path_repr = " → ".join(replay.remaining_path) if replay.remaining_path else "<empty>"
+        raise RuntimeError(
+            f"Flow {label!r}: resume checkpoint's save-point iterate "
+            f"id {target_id!r} was not found in the composition graph "
+            f"during the run — the graph has structurally changed "
+            f"since the checkpoint was written. "
+            f"Saved path (root→leaf): {path_repr}"
+        )
 
     async def _run_as_subflow(
         self,
@@ -769,6 +822,9 @@ class Flow:
         parent_budget: Tracker | None = None,
         parent_checkpointer: CheckpointStore | None = None,
         parent_client_flow_id: str | None = None,
+        parent_chain_context: str = "",
+        parent_ancestor_chain: tuple[str, ...] = (),
+        parent_replay: _ResumeReplay | None = None,
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -787,6 +843,15 @@ class Flow:
         arbitrarily deep nesting. ``parent_client_flow_id`` pairs with
         ``parent_checkpointer``; either both are inherited or a local
         override supplies both.
+
+        ``parent_chain_context`` is the hash the executor uses to compute
+        this Flow's chain-step node IDs (empty at run root; extended by
+        :func:`_descend_context` at each subflow / arm / body boundary).
+        ``parent_ancestor_chain`` is the tuple of ancestor ``_Node`` IDs
+        from root down to the ``_Node`` whose descent entered this Flow;
+        it grows by one on every recursion. ``parent_replay`` carries a
+        pending checkpoint replay when :meth:`run` was invoked with
+        ``resume=True``; ``None`` for a fresh run.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
@@ -797,6 +862,9 @@ class Flow:
             parent_budget=parent_budget,
             parent_checkpointer=parent_checkpointer,
             parent_client_flow_id=parent_client_flow_id,
+            parent_chain_context=parent_chain_context,
+            parent_ancestor_chain=parent_ancestor_chain,
+            parent_replay=parent_replay,
         )
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
@@ -806,9 +874,10 @@ class Flow:
         )
         result: Any = UNSET
         for index, node in enumerate(self._nodes):
+            node_id = _compute_node_id(env.chain_context, node, index)
             node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             ctx = _build_ctx(node.target, env)
-            result = await _execute_node(node, ctx, env, node_args, node_kwargs)
+            result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
@@ -821,6 +890,9 @@ class Flow:
         parent_budget: Tracker | None,
         parent_checkpointer: CheckpointStore | None,
         parent_client_flow_id: str | None,
+        parent_chain_context: str = "",
+        parent_ancestor_chain: tuple[str, ...] = (),
+        parent_replay: _ResumeReplay | None = None,
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
@@ -828,6 +900,11 @@ class Flow:
         wins over the caller's parent ambients; unset locals fall back to
         the parent so an intermediate layer's ambient survives arbitrarily
         deep nesting. Checkpointer + ``client_flow_id`` inherit as a pair.
+
+        ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
+        verbatim: the descent sites in :mod:`._executor` are the ones
+        that extend them when recursing into a subflow / arm / body.
+        ``parent_replay`` is the pending resume context, if any.
         """
         halt = self._halt_event if self._halt_event is not None else parent_halt
         budget = self._budget_tracker if self._budget_tracker is not None else parent_budget
@@ -847,6 +924,9 @@ class Flow:
             budget=budget,
             checkpointer=checkpointer,
             client_flow_id=client_flow_id,
+            chain_context=parent_chain_context,
+            ancestor_chain=parent_ancestor_chain,
+            replay=parent_replay,
         )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:
@@ -861,16 +941,25 @@ class Flow:
         payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
         return payload if isinstance(payload, State) else State(data=payload)
 
-    def _hydrate_resume_state(self, fallback: State[Any]) -> State[Any]:
-        """Load the latest checkpoint and reconstruct ``ctx.state.data``.
+    def _hydrate_resume_state(
+        self, fallback: State[Any]
+    ) -> tuple[State[Any], _ResumeReplay | None]:
+        """Load the latest checkpoint and reconstruct state + a replay context.
 
         Called only when :meth:`run` was invoked with ``resume=True``.
         Consults :attr:`_checkpointer` for a checkpoint under
-        :attr:`_client_flow_id`; if absent, returns ``fallback`` unchanged so
+        :attr:`_client_flow_id`; if absent, returns ``(fallback, None)`` so
         the run proceeds with the caller's ``state=`` (or the flow's
-        construction state). When a checkpoint exists, deserializes
-        ``state_json['data']`` via ``state_type.from_dict`` (or passes it
-        through when ``state_type`` is ``None`` — the plain-dict contract).
+        construction state) and no replay work.
+
+        On hit: deserializes ``state_json['data']`` via
+        ``state_type.from_dict`` (or passes it through when ``state_type``
+        is ``None`` — the plain-dict contract) and constructs a
+        :class:`_ResumeReplay` carrying the path + iteration read out of
+        ``metadata_json``. The empty-path branch is what a pre-PR-3
+        checkpoint hits: no ``path`` key → nothing to replay, iteration
+        counter stays at 0, and the run proceeds from the hydrated state
+        as a normal (non-resume) execution.
         """
         assert self._checkpointer is not None
         if self._client_flow_id is None:
@@ -881,14 +970,26 @@ class Flow:
             )
         loaded = self._checkpointer.load_checkpoint(self._client_flow_id)
         if loaded is None:
-            return fallback
-        state_json, _metadata_json = loaded
+            return fallback, None
+        state_json, metadata_json = loaded
         raw = state_json.get("data")
         if self._state_type is None:
             hydrated = raw
         else:
             hydrated = self._state_type.from_dict(raw if isinstance(raw, dict) else {})
-        return State(data=hydrated)
+        raw_path = metadata_json.get("path", [])
+        iteration = int(metadata_json.get("iteration", 0))
+        child_state_data = _extract_innermost_child(state_json)
+        replay: _ResumeReplay | None
+        if raw_path:
+            replay = _ResumeReplay(
+                remaining_path=tuple(raw_path),
+                iteration=iteration,
+                child_state_data=child_state_data,
+            )
+        else:
+            replay = None
+        return State(data=hydrated), replay
 
     # -------------------------------------------------------------------------
     # Internals
@@ -1007,3 +1108,105 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
     fresh = Flow(lg=lg, name=name)
     buildable(fresh)
     return fresh
+
+
+def _extract_innermost_child(state_json: dict[str, Any]) -> Any:
+    """Walk the state tree to find the innermost child's data.
+
+    The checkpoint tree is ``{data, children}`` where ``children`` is a list
+    (currently always 0 or 1 element). Returns the ``data`` of the deepest
+    nested child, or ``None`` if there are no children (root-only state).
+    """
+    node = state_json
+    while True:
+        children = node.get("children", [])
+        if not children:
+            # We're at the innermost scope; return None if this is root
+            if node is state_json:
+                return None
+            return node.get("data")
+        node = children[0]
+
+
+_NODE_ID_DIGEST_SIZE = 8
+"""Byte length of the blake2b digest for node IDs — 64 bits, 16 hex chars.
+
+Sized for headroom: a composition tree of a few thousand nodes has
+essentially zero birthday-collision risk at 2^32, which is the design
+guarantee behind treating node IDs as globally unique in the graph.
+Bumping to 16 (128 bits) would leave zero doubt but doubles envelope
+size; 8 is the deliberate default.
+"""
+
+
+def _target_qualname(target: Any) -> str:
+    """Stable identity string for a node target — feeds :func:`_compute_node_id`.
+
+    Verb / plain callable → ``verb:<__module__>.<__qualname__>`` (module
+    prefix prevents cross-module collisions between two functions with
+    the same qualname). :class:`Flow` subflow → ``flow:<name>`` (or
+    ``flow:<anonymous>`` when unnamed). Composition primitives
+    (:class:`_Branch`, :class:`_Iterate`, :class:`_Map`) → the
+    primitive's kind string; the primitive's identity flows from the
+    outer :class:`_Node`'s chain position and its enclosing
+    ``chain_context``, not from any label on the primitive itself.
+    """
+    if isinstance(target, Flow):
+        return f"flow:{target.name or '<anonymous>'}"
+    if isinstance(target, _Branch):
+        return "branch"
+    if isinstance(target, _Iterate):
+        return "iterate"
+    if isinstance(target, _Map):
+        return "map"
+    module = getattr(target, "__module__", "?")
+    qualname = getattr(target, "__qualname__", type(target).__name__)
+    return f"verb:{module}.{qualname}"
+
+
+def _node_kind(node: _Node) -> str:
+    """Chain-step kind for the composition tree hash: ``call`` / ``branch`` / ``iterate`` / ``map``."""
+    target = node.target
+    if isinstance(target, _Branch):
+        return "branch"
+    if isinstance(target, _Iterate):
+        return "iterate"
+    if isinstance(target, _Map):
+        return "map"
+    return "call"
+
+
+def _compute_node_id(chain_context: str, node: _Node, position: int) -> str:
+    """Runtime content-addressed node ID for the chain step at ``position``.
+
+    Composes the enclosing Flow's ``chain_context`` with this node's
+    local key ``(kind, position, target_qualname)``. The chain_context
+    is itself a hash chain from the run's root down through every
+    subflow / branch-arm / iterate-body descent above this Flow (see
+    :func:`_descend_context`), so the resulting node ID is globally
+    unique across the entire composition tree — a shared subflow used
+    at two call sites produces two distinct IDs for the same underlying
+    ``_Node`` because their ``chain_context`` values differ.
+
+    Deterministic: identical composition graphs produce identical IDs
+    across processes / Python versions (blake2b is stable and every
+    input is a Unicode-canonical string). Collision-free at the design
+    level for any well-formed graph — see :data:`_NODE_ID_DIGEST_SIZE`
+    for the birthday-collision margin.
+    """
+    payload = f"{chain_context}|{_node_kind(node)}|{position}|{_target_qualname(node.target)}"
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=_NODE_ID_DIGEST_SIZE).hexdigest()
+
+
+def _descend_context(parent_node_id: str, boundary: str) -> str:
+    """Chain context for a Flow entered from ``parent_node_id`` via ``boundary``.
+
+    ``boundary`` names the slot of the parent node this Flow fills:
+    ``"body"`` (an :class:`_Iterate` body), ``"then"`` / ``"else"``
+    (arms of a :class:`_Branch`), or ``"call"`` (a subflow reached from
+    :meth:`Flow.call`). Baking the boundary into the descended context
+    keeps the two arms of a branch and the body of an iterate at
+    identity-distinct positions even when they share a target.
+    """
+    payload = f"{parent_node_id}|{boundary}"
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=_NODE_ID_DIGEST_SIZE).hexdigest()
