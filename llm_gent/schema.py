@@ -29,6 +29,7 @@ Public entry points:
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -272,7 +273,10 @@ class SchemaManager:
         ``LOCAL`` to scope to.
         """
         if wait:
-            conn.execute(text(f"SET statement_timeout = '{int(timeout_seconds * 1000)}ms'"))
+            if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+                raise ValueError("timeout_seconds must be positive and finite")
+            timeout_ms = math.ceil(timeout_seconds * 1000)
+            conn.execute(text(f"SET statement_timeout = '{timeout_ms}ms'"))
             try:
                 conn.execute(text(f"SELECT pg_advisory_lock({_ADVISORY_LOCK_KEY})"))
                 return True
