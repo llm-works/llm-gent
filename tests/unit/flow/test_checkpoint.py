@@ -237,8 +237,8 @@ class TestSaveAtIterateBoundary:
         assert store.saves[-1][0] == "traj-1"
         assert store.saves[-1][2] == {"data": {"n": 3}, "children": []}
 
-    async def test_saves_carry_metadata_schema_version(self) -> None:
-        """Every save's ``metadata_json`` carries ``schema_version=1``, ``path``, ``iteration``."""
+    async def test_saves_carry_metadata_path_and_iteration(self) -> None:
+        """Every save's ``metadata_json`` carries ``path`` and ``iteration``."""
 
         @verb(role=ROLE_A)
         async def noop(ctx: Context[Any], _prev: Any = None) -> None:
@@ -250,7 +250,6 @@ class TestSaveAtIterateBoundary:
         )
         await flow.run()
         meta = store.saves[0][3]
-        assert meta["schema_version"] == 1
         assert len(meta["path"]) == 1
         assert isinstance(meta["path"][0], str)
         assert meta["iteration"] == 1
@@ -328,7 +327,7 @@ class TestResumeHydration:
         async def peek(ctx: Context[Any]) -> None:
             seen.append(ctx.state.data)
 
-        store = _RecordingStore(preload=({"data": {"n": 42}}, {"schema_version": 1}))
+        store = _RecordingStore(preload=({"data": {"n": 42}}, {}))
         flow = make_ff().create().with_checkpointer(store, "traj-1").call(peek)
         await flow.run(state={"n": 0}, resume=True)
         assert seen == [{"n": 42}]
@@ -342,7 +341,7 @@ class TestResumeHydration:
         async def peek(ctx: Context[Counter]) -> None:
             seen.append(ctx.state.data)
 
-        store = _RecordingStore(preload=({"data": {"n": 7}}, {"schema_version": 1}))
+        store = _RecordingStore(preload=({"data": {"n": 7}}, {}))
         flow = (
             Flow(make_test_logger(), state_type=Counter)
             .with_checkpointer(store, "traj-1")
@@ -613,7 +612,7 @@ class TestRecursiveSnapshotEnvelope:
             return ctx.state.data["n"]
 
         # Old-shape preload: no `path`, no `iteration`.
-        store = _RecordingStore(preload=({"data": {"n": 10}}, {"schema_version": 1}))
+        store = _RecordingStore(preload=({"data": {"n": 10}}, {}))
         flow = (
             make_ff()
             .create(state={"n": 0})
@@ -695,7 +694,7 @@ class TestResumePositionReplay:
         store = _RecordingStore(
             preload=(
                 {"data": {}, "children": []},
-                {"schema_version": 1, "path": stale_path, "iteration": 2},
+                {"path": stale_path, "iteration": 2},
             )
         )
         flow = (
@@ -739,7 +738,7 @@ class TestResumePositionReplay:
         store = _RecordingStore(
             preload=(
                 {"data": {}, "children": []},
-                {"schema_version": 1, "path": stale_path, "iteration": 2},
+                {"path": stale_path, "iteration": 2},
             )
         )
         flow = (
@@ -789,7 +788,6 @@ class TestResumePositionReplay:
         preload = (
             {"data": {}, "children": []},
             {
-                "schema_version": 1,
                 "path": [saved_path[0], stale_inner],
                 "iteration": 1,
             },

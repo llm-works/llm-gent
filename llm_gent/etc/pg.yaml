@@ -1,10 +1,14 @@
 # PostgreSQL configuration for llm-gent
 
 pgserver:
+  version: 18                  # PostgreSQL major version (required by appinfra's pg tooling)
   name: llm-works-pg           # Shared canonical name — one local container across llm-works packages
   port: 25432                  # Shared canonical port — override with INFRA_PGSERVER_PORT
+  # Fully qualified so podman resolves without unqualified-search-registries config
+  # (docker accepts the qualified form transparently).
+  image: docker.io/pgvector/pgvector:pg18
   user: postgres
-  pass: ''
+  pass: ''                     # RECOMMENDED: use env var in real deployments
 
 dbs:
   main:
@@ -14,3 +18,9 @@ dbs:
     pool_pre_ping: true
     extensions:
       - vector
+
+  unittest:
+    url: "postgresql://${pgserver.user}:${pgserver.pass}@127.0.0.1:${pgserver.port}/gent_test"
+    create_db: true
+    readonly: false
+    pool_pre_ping: true

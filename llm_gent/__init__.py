@@ -62,6 +62,14 @@ from .core.traits import (
     Trait,
 )
 from .core.traits.factory import TraitFactory
+from .schema import (
+    SchemaManager,
+    SchemaMode,
+    SchemaState,
+    SchemaStatus,
+    SchemaVersionError,
+    ensure_schema,
+)
 
 
 try:
@@ -134,4 +142,11 @@ __all__ = [
     "TaskStatus",
     # Tools trait
     "ToolsTrait",
+    # Schema management
+    "SchemaManager",
+    "SchemaMode",
+    "SchemaState",
+    "SchemaStatus",
+    "SchemaVersionError",
+    "ensure_schema",
 ]

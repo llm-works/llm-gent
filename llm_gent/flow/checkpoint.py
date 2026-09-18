@@ -18,8 +18,9 @@ Save writes two JSON-compatible dicts per iteration:
   contract is that on resume the framework reads it back and, if the flow
   was constructed with ``state_type=T``, calls ``T.from_dict(state_json['data'])``
   to reconstruct the user payload. Plain-``dict`` payloads round-trip as-is.
-- ``metadata_json`` — checkpointer-owned metadata (a
-  ``schema_version`` key for future discrimination). Also JSON-compatible.
+- ``metadata_json`` — framework-owned bookkeeping (``path``,
+  ``iteration``) that the resume path consults to locate the
+  save-point iterate in the composition graph. Also JSON-compatible.
 
 Both are handed to :meth:`save_checkpoint` inline on the event loop — an
 implementation performing disk or database I/O should avoid blocking
@@ -41,13 +42,33 @@ does not leak past its own completion. Cancellation, halt-triggered exit,
 and unhandled exceptions preserve the checkpoint so a later ``resume=True``
 run can pick up.
 
-Resume limitations
-------------------
-The checkpoint stores ``state.data`` only — the iteration counter is not
-persisted. On resume, ``.iterate`` restarts from iteration 0, so
-``max_iters`` bounds per-run iterations, not total iterations across
-resumes. For absolute bounds, track iteration count in ``state.data``
-and use ``until=`` for termination.
+Resume semantics
+----------------
+On :meth:`Flow.run` ``resume=True``:
+
+- ``state.data`` hydrates from ``state_json``'s root ``data`` slot (via
+  ``state_type.from_dict`` when a ``state_type`` is bound, else
+  passthrough for plain dicts).
+- The iteration counter is restored from ``metadata_json['iteration']``,
+  so ``max_iters`` is an absolute cumulative bound across resumes — a
+  save at iteration N with ``max_iters=M`` runs at most ``max(0, M - N)``
+  further passes, and a counter that already meets the bound exits
+  without re-running the body.
+- Deadline is not restored — the wall clock starts fresh each run.
+- Ambients (halt, budget, saia, traits, logger, checkpointer itself)
+  are never serialized; they reattach from the current runtime.
+
+Schema evolution
+----------------
+Framework changes to the on-disk shape of ``state_json`` /
+``metadata_json`` land as additive extensions wherever possible so
+prior-shape checkpoints keep resuming under a newer framework (PR 3
+did this when the flat payload became a ``{data, children}`` tree).
+When a non-additive change is unavoidable, it ships as an alembic
+data migration on the Postgres backend
+(:mod:`llm_gent.migrations`); the JSON-file backend is a dev/local
+tool and old checkpoints there are expected to be discarded across a
+non-additive change.
 """
 
 from __future__ import annotations
