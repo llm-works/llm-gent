@@ -147,6 +147,11 @@ class StructuredStubSAIA:
                 f"StructuredStubSAIA[{self.role_name}] scripted "
                 f"{scripted_schema.__name__} but verb asked for {schema.__name__}"
             )
+        if not isinstance(value, schema):
+            raise RuntimeError(
+                f"StructuredStubSAIA[{self.role_name}] scripted "
+                f"{type(value).__name__} for {schema.__name__}"
+            )
         return VerbResult(value=value)
 
 

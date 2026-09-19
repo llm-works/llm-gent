@@ -50,7 +50,7 @@ from enum import StrEnum
 from typing import Any
 
 from appinfra.log import quick_console_logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
 from llm_gent.flow import Context, FlowFactory, Role, StateDataclass, verb
@@ -80,6 +80,8 @@ class Severity(StrEnum):
 class Classification(BaseModel):
     """Structured classifier output — what :func:`classify` returns."""
 
+    model_config = ConfigDict(extra="forbid")
+
     category: Category
     severity: Severity
     summary: str
@@ -87,6 +89,8 @@ class Classification(BaseModel):
 
 class TriageResponse(BaseModel):
     """Structured triage output — the flow's final return."""
+
+    model_config = ConfigDict(extra="forbid")
 
     owner_team: str
     first_reply: str
