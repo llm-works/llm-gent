@@ -10,7 +10,7 @@ for the older ``AgentFactory`` + ``LLMTrait`` surface.
 
 Modules:
 
-- :mod:`resume` — kill-and-resume demo on a counter loop. Pure-Python
+- :mod:`resume` — halt-and-resume demo on a counter loop. Pure-Python
   verbs; exercises checkpoint mechanics without needing an LLM backend.
 - :mod:`verifier` — multi-model consensus loop. Primary LLM answers a
   query, self-reviews, verifier LLM reviews, third LLM judges semantic

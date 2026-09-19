@@ -5,12 +5,12 @@
 
 # ci-run:
 
-"""Kill-and-resume demo on a counter loop.
+"""Halt-and-resume demo on a counter loop.
 
 Exercises the Flow-level checkpointer end-to-end without touching an LLM:
 
 1. **Run 1** — a verb increments a typed-state counter each iteration and
-   sets ``ctx.halt`` when ``count == HALT_AFTER`` to simulate a crash.
+   sets ``ctx.halt`` when ``count == HALT_AFTER`` to request a cooperative halt.
    The framework saves at every iterate boundary, preserves the checkpoint
    on halt exit, and returns.
 2. **Run 2** — a fresh :class:`~llm_gent.flow.Flow` (new halt event, same
