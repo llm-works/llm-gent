@@ -127,6 +127,11 @@ class StructuredStubSAIA:
     checks that the schema the verb asks for matches the schema the
     script was written against — drift surfaces at the call site
     instead of later as a validation failure on unrelated data.
+
+    A scripted ``value`` that is a :class:`BaseException` instance is
+    raised instead of returned, so examples that need to demonstrate
+    rescue / :class:`~llm_gent.flow.Failure` paths can script a per-call
+    failure without patching internals.
     """
 
     role_name: str
@@ -147,6 +152,8 @@ class StructuredStubSAIA:
                 f"StructuredStubSAIA[{self.role_name}] scripted "
                 f"{scripted_schema.__name__} but verb asked for {schema.__name__}"
             )
+        if isinstance(value, BaseException):
+            raise value
         if not isinstance(value, schema):
             raise RuntimeError(
                 f"StructuredStubSAIA[{self.role_name}] scripted "
