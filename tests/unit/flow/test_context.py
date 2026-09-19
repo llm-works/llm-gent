@@ -11,7 +11,7 @@ import pytest
 
 from llm_gent.flow import Context, Flow, State, verb
 
-from .conftest import ROLE_A, StubFactory, make_test_logger
+from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
 
 
 class TestCtxLg:
@@ -86,3 +86,65 @@ class TestContextGeneric:
         flow.register(bump)
         assert await flow.dispatch("bump") == 1
         assert payload.turn == 1
+
+
+class TestPureVerbCtx:
+    """A pure-Python verb (``@verb`` without a role) runs with ``ctx.saia is None``."""
+
+    @pytest.mark.asyncio
+    async def test_pure_verb_dispatch_has_no_saia(self) -> None:
+        """Dispatch of a role-less verb builds a Context whose ``saia`` is ``None``."""
+        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+
+        @verb
+        async def tick(ctx: Context) -> object:
+            """Return ``ctx.saia`` for identity inspection."""
+            return ctx.saia
+
+        flow.register(tick)
+        assert (await flow.dispatch("tick")) is None
+
+    @pytest.mark.asyncio
+    async def test_pure_verb_in_chain(self) -> None:
+        """A pure-Python verb runs as a chain step (no role, no ``ctx.saia`` access)."""
+        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+
+        @verb
+        async def head(ctx: Context, n: int) -> int:
+            """Return the input verbatim; no LLM."""
+            return n + 1
+
+        flow.call(head)
+        assert await flow.run(4) == 5
+
+
+class TestSaiaAs:
+    """``ctx.saia_as(cls)`` is a typing helper — runtime returns ``ctx.saia``."""
+
+    @pytest.mark.asyncio
+    async def test_saia_as_returns_saia(self) -> None:
+        """The helper returns the same object as ``ctx.saia`` when a role is bound."""
+        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+
+        @verb(role=ROLE_A)
+        async def probe(ctx: Context) -> tuple[object, object]:
+            """Return (saia, saia_as) for identity comparison."""
+            return ctx.saia, ctx.saia_as(StubSAIA)
+
+        flow.register(probe)
+        s, s_as = await flow.dispatch("probe")
+        assert s is s_as
+        assert isinstance(s, StubSAIA)
+
+    @pytest.mark.asyncio
+    async def test_saia_as_on_roleless_returns_none(self) -> None:
+        """Without a role, ``ctx.saia_as(cls)`` returns ``None`` (no saia to bind)."""
+        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+
+        @verb
+        async def probe(ctx: Context) -> object:
+            """Return the typed saia — expected ``None`` when role is unbound."""
+            return ctx.saia_as(StubSAIA)
+
+        flow.register(probe)
+        assert (await flow.dispatch("probe")) is None

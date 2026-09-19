@@ -152,6 +152,8 @@ class FlowFactory:
         *,
         state: Any = UNSET,
         client_flow_id: str | None = None,
+        halt: asyncio.Event | None = None,
+        checkpointer: tuple[CheckpointStore, str] | None = None,
     ) -> Flow:
         """Return a :class:`Flow` using this factory's captured environment.
 
@@ -170,7 +172,23 @@ class FlowFactory:
                 ``(store, client_flow_id)`` only when both this argument
                 is supplied AND the factory carries a checkpointer.
                 ``None`` (default) leaves the built Flow unwired even
-                when the factory carries a store.
+                when the factory carries a store. Ignored when
+                ``checkpointer=`` is passed (that argument carries its
+                own id).
+            halt: Per-Flow halt event override. Wires
+                :meth:`Flow.with_halt` on the built flow. ``None``
+                (default) falls back to the factory's captured
+                ``halt=``; passing an event here supersedes it. Use to
+                give each concurrent flow instance its own halt handle
+                while keeping one shared factory.
+            checkpointer: Per-Flow ``(store, client_flow_id)`` pair —
+                atomically binds both via :meth:`Flow.with_checkpointer`.
+                Supersedes the factory's captured ``checkpointer`` and
+                the ``client_flow_id`` argument above; use when the
+                store differs from the factory's default or when a
+                shared factory hands each flow its own trajectory id.
+                ``None`` (default) inherits the factory's store paired
+                with ``client_flow_id``.
         """
         from .flow import Flow
 
@@ -183,11 +201,15 @@ class FlowFactory:
             traits=self._traits,
             state_type=self._state_type,
         )
-        if self._halt is not None:
-            flow.with_halt(self._halt)
+        effective_halt = halt if halt is not None else self._halt
+        if effective_halt is not None:
+            flow.with_halt(effective_halt)
         if self._budget is not None:
             flow.with_budget(self._budget)
-        if self._checkpointer is not None and client_flow_id is not None:
+        if checkpointer is not None:
+            store, flow_id = checkpointer
+            flow.with_checkpointer(store, flow_id)
+        elif self._checkpointer is not None and client_flow_id is not None:
             flow.with_checkpointer(self._checkpointer, client_flow_id)
         return flow
 

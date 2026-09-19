@@ -43,6 +43,9 @@ from .state import State
 T = TypeVar("T")
 """Payload type — threads to ``ctx.state.data``. See module docstring."""
 
+S = TypeVar("S")
+"""SAIA type — narrows :meth:`Context.saia_as` return."""
+
 
 @dataclass(frozen=True)
 class Context(Generic[T]):
@@ -54,11 +57,11 @@ class Context(Generic[T]):
     """
 
     role: Role | None
-    """The role the current verb declared, or ``None`` for a subflow-node ctx.
+    """The role the current verb declared, or ``None`` for composition hooks and pure-Python verbs.
 
-    ``None`` only appears on the ambient ctx passed to ``rescue`` / ``after``
-    hooks attached to a subflow node — those hooks fire at the composition
-    layer, above any single role. Verb-level contexts always carry a role.
+    ``None`` appears on composition hook contexts (``rescue`` / ``after``
+    attached to a subflow node) and on pure-Python verb contexts created
+    from ``@verb`` without ``role=``.
     """
 
     state: State[T]
@@ -125,8 +128,9 @@ class Context(Generic[T]):
         SAIAFactory. The flow caches per role, so repeated reads on the
         same or sibling contexts hit the same instance.
 
-        Returns ``None`` when :attr:`role` is ``None`` — subflow-node ctx
-        and hook ctx have no single role, so no saia to bind.
+        Returns ``None`` when :attr:`role` is ``None`` — subflow-node ctx,
+        hook ctx, and pure-Python verbs (``@verb`` with no ``role=``)
+        have no role to bind against, so there is no saia to build.
 
         Raises :class:`RuntimeError` if the flow was constructed with no
         SAIAFactory and this ctx has a role. The error surfaces at access,
@@ -137,6 +141,29 @@ class Context(Generic[T]):
         if self.role is None:
             return None
         return self.flow._saia_for(self.role)
+
+    def saia_as(self, cls: type[S]) -> S | None:
+        """Return :attr:`saia` typed as ``cls`` — cast helper for verb authors.
+
+        :attr:`saia` is typed :data:`Any` because the framework has no
+        static knowledge of the concrete class an application's
+        :class:`SAIAFactory` returns. Verbs that know the type write::
+
+            saia = ctx.saia_as(MySAIA)
+            answer = await saia.complete_structured(prompt, schema)
+
+        Runtime returns exactly what :attr:`saia` returns; ``cls`` is
+        used only for type inference, not for a runtime instance check.
+        The framework's ``S`` TypeVar carries the annotation through so
+        IDEs and mypy narrow the return type at the call site.
+
+        Best suited to concrete SAIA classes. mypy's ``type-abstract``
+        check rejects passing a :class:`typing.Protocol` here — for a
+        protocol-typed handle, use the annotation form instead::
+
+            saia: MyProto = ctx.saia
+        """
+        return self.saia  # type: ignore[no-any-return]
 
     @property
     def lg(self) -> Logger:

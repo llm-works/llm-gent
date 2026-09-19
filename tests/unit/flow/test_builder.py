@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import Any
 
 import pytest
@@ -210,6 +211,89 @@ class TestExecutionShape:
         assert await flow.run(42, tag="v") == len("v=42")
 
     @pytest.mark.asyncio
+    async def test_chain_verb_can_omit_prev_positional(self) -> None:
+        """A non-head verb that declares only ``ctx`` runs without a placeholder positional.
+
+        The framework matches the target's signature — the previous
+        node's result is dropped rather than raising ``TypeError``, so
+        pure-Python verbs don't need a ``_prev: Any`` parameter just to
+        satisfy the dispatch shape.
+        """
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, x: int) -> int:
+            """Return the input verbatim."""
+            return x
+
+        @verb(role=ROLE_A)
+        async def tail(ctx: Context) -> str:
+            """No positional; ignores upstream chain value."""
+            return "done"
+
+        flow.call(head).then(tail)
+        assert await flow.run(7) == "done"
+
+    @pytest.mark.asyncio
+    async def test_head_verb_ignores_run_kwargs_it_does_not_declare(self) -> None:
+        """Extra run kwargs are dropped for a head verb whose signature omits them."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, x: int) -> int:
+            """Accepts one positional, no kwargs."""
+            return x
+
+        flow.call(head)
+        assert await flow.run(3, extra="ignored") == 3
+
+    @pytest.mark.asyncio
+    async def test_var_positional_receives_all_args(self) -> None:
+        """A verb declaring ``*args`` receives node_args unchanged."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, *args: Any) -> tuple[Any, ...]:
+            """Return the args tuple."""
+            return args
+
+        flow.call(head)
+        assert await flow.run(1, 2, 3) == (1, 2, 3)
+
+    @pytest.mark.asyncio
+    async def test_var_keyword_receives_all_kwargs(self) -> None:
+        """A verb declaring ``**kwargs`` receives node_kwargs unchanged."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, **kwargs: Any) -> dict[str, Any]:
+            """Return the kwargs dict."""
+            return kwargs
+
+        flow.call(head)
+        assert await flow.run(a=1, b=2) == {"a": 1, "b": 2}
+
+    @pytest.mark.asyncio
+    async def test_state_kwarg_and_positional_are_distinct(self) -> None:
+        """``run(state=..., positional)`` binds state and positional independently.
+
+        The head verb reads ``ctx.state.data`` for state fields and its
+        positional parameter for the chain's first input — no need to
+        pass the same value through both slots.
+        """
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, kick: int) -> tuple[str, int]:
+            """Return (state-owned label, positional kick) so both surfaces show up."""
+            label: str = ctx.state.data["label"]
+            return label, kick
+
+        flow.call(head)
+        result = await flow.run(7, state={"label": "run-A"})
+        assert result == ("run-A", 7)
+
+    @pytest.mark.asyncio
     async def test_verb_ctx_has_role_and_saia(self) -> None:
         """Each verb receives a Context bound to its own role's saia."""
         flow = make_ff().create()
@@ -229,6 +313,80 @@ class TestExecutionShape:
         assert role_b is ROLE_B
         assert isinstance(saia_b, StubSAIA)
         assert saia_b.role is ROLE_B
+
+    @pytest.mark.asyncio
+    async def test_functools_partial_verb_dispatch(self) -> None:
+        """A functools.partial-wrapped verb dispatches correctly.
+
+        The signature introspection handles partials — remaining params
+        after the partial application are correctly identified.
+        """
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def configurable(ctx: Context, x: int, multiplier: int) -> int:
+            """Multiply x by a configurable factor."""
+            return x * multiplier
+
+        doubled = functools.partial(configurable, multiplier=2)
+        doubled.role = ROLE_A  # type: ignore[attr-defined]
+
+        flow.call(doubled)
+        assert await flow.run(5) == 10
+
+    @pytest.mark.asyncio
+    async def test_class_based_verb_dispatch(self) -> None:
+        """A class-based verb (object with __call__) dispatches correctly."""
+        flow = make_ff().create()
+
+        class Adder:
+            """Callable class that adds a fixed offset."""
+
+            role = ROLE_A
+
+            def __init__(self, offset: int) -> None:
+                self.offset = offset
+
+            async def __call__(self, ctx: Context, x: int) -> int:
+                return x + self.offset
+
+        add_ten = Adder(10)
+        flow.call(add_ten)
+        assert await flow.run(7) == 17
+
+    @pytest.mark.asyncio
+    async def test_introspection_fallback_forwards_all_args(self) -> None:
+        """When signature introspection fails, all args/kwargs are forwarded.
+
+        This tests the fallback path for exotic callables. We simulate
+        introspection failure by using a callable with __call__ that
+        accepts *args/**kwargs, ensuring the full inputs reach it.
+        """
+        flow = make_ff().create()
+
+        class VarArgsVerb:
+            """Verb that accepts variable args to test fallback forwarding.
+
+            The ``__signature__`` property raises to force introspection failure,
+            exercising the ``introspection_failed=True`` fallback path.
+            """
+
+            role = ROLE_A
+
+            @property
+            def __signature__(self) -> None:
+                raise TypeError("uninspectable")
+
+            async def __call__(
+                self, ctx: Context, *args: Any, **kwargs: Any
+            ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+                return args, kwargs
+
+        verb_instance = VarArgsVerb()
+        flow.call(verb_instance)
+        args, kwargs = await flow.run(1, 2, 3, a="x", b="y")
+        assert args == (1, 2, 3)
+        assert kwargs == {"a": "x", "b": "y"}
 
 
 # -----------------------------------------------------------------------------

@@ -189,7 +189,9 @@ class Flow:
     def register(self, verb: Any, name: str | None = None) -> None:
         """Register a verb under a name (default: the verb's ``__name__``).
 
-        The verb must carry a ``role`` attribute of type :class:`Role`.
+        The verb must carry a ``.role`` attribute; its value is either a
+        :class:`Role` (role-bound verb) or ``None`` (pure-Python verb —
+        ``ctx.saia`` stays ``None`` on dispatch).
         """
         if not callable(verb):
             raise TypeError(f"verb must be callable; got {type(verb).__name__}")
@@ -197,8 +199,10 @@ class Flow:
             raise TypeError(
                 f"verb must carry a .role attribute; got {type(verb).__name__} without one"
             )
-        if not isinstance(verb.role, Role):
-            raise TypeError(f"verb.role must be a Role instance; got {type(verb.role).__name__}")
+        if verb.role is not None and not isinstance(verb.role, Role):
+            raise TypeError(
+                f"verb.role must be a Role instance or None; got {type(verb.role).__name__}"
+            )
         resolved_name = name or getattr(verb, "__name__", None)
         if not resolved_name:
             raise TypeError("verb has no __name__ and no explicit name was provided")
@@ -242,7 +246,8 @@ class Flow:
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
         verb = self._verbs[name]
-        self._lg.debug("dispatching verb", extra={"verb": name, "role": verb.role.name})
+        role_name = verb.role.name if verb.role is not None else None
+        self._lg.debug("dispatching verb", extra={"verb": name, "role": role_name})
         payload = self._state if self._state is not UNSET else {}
         effective_halt = self._halt_event if halt is UNSET else halt
         effective_budget = self._budget_tracker if budget is UNSET else budget
@@ -1064,7 +1069,12 @@ class Flow:
 
 
 def _validate_target(target: Any) -> None:
-    """Reject anything that isn't a verb (callable with a Role) or a Flow."""
+    """Reject anything that isn't a verb (callable with .role) or a Flow.
+
+    ``.role`` may be ``None`` — the pure-Python-verb form produced by
+    ``@verb`` without a role. The framework still dispatches such verbs;
+    they just cannot read ``ctx.saia`` (which stays ``None``).
+    """
     if isinstance(target, Flow):
         return
     if not callable(target):
@@ -1073,9 +1083,9 @@ def _validate_target(target: Any) -> None:
         )
     if not hasattr(target, "role"):
         raise TypeError(f"verb target must carry a .role attribute; got {type(target).__name__}")
-    if not isinstance(target.role, Role):
+    if target.role is not None and not isinstance(target.role, Role):
         raise TypeError(
-            f"verb target .role must be a Role instance; got {type(target.role).__name__}"
+            f"verb target .role must be a Role instance or None; got {type(target.role).__name__}"
         )
     _reject_reserved_kwarg(target, "state")
     _reject_reserved_kwarg(target, "runtime")
@@ -1148,7 +1158,15 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
             f"expected a Flow or a lambda f: f.call(...) callback for {name!r}; "
             f"got {type(buildable).__name__}"
         )
-    if isinstance(getattr(buildable, "role", None), Role):
+    if hasattr(buildable, "role"):
+        # A verb — role attribute may be a Role (role-bound) or None
+        # (pure-Python verb). Either way, wrap as a single-node subflow.
+        # Defense-in-depth: validate role here (also checked in fresh.call).
+        role = buildable.role
+        if role is not None and not isinstance(role, Role):
+            raise TypeError(
+                f"verb target .role must be a Role instance or None; got {type(role).__name__}"
+            )
         fresh = Flow(lg=lg, name=name)
         fresh.call(buildable)
         return fresh
