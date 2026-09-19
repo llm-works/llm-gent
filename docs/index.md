@@ -142,13 +142,15 @@ other than a single-hop hand-off:
 - Loop and branch predicates. `until=` and `when=` receive `ctx` and
   read `ctx.data.<field>` when the deciding signal isn't in the just-
   returned value.
-- Checkpoint / resume. Only `ctx.state.data` (the payload the flow was
-  constructed with, `state_type=` on the factory) is serialized;
-  return values are transient and don't survive resume.
+- Checkpoint / resume. Only `ctx.state.data` is serialized; return
+  values are transient and don't survive resume. The state type is
+  declared via `state_type=` on the factory; the initial payload comes
+  from construction or from `run(state=...)` override.
 - Aggregation across concurrent items. Under `.map(state=proj, merge=fn)`
   each item projects an isolated child payload and folds back through
   `merge` — cross-item accumulation lives in state, not in the returned
-  list.
+  list. Items run concurrently; `merge` fires in completion order, not
+  input order. For input-ordered folding, use `aggregate=` instead.
 
 **"Return AND mutate" is idiomatic when a value has two consumers.**
 Verifier's `judge` returns the verdict (so the chain can carry it) and

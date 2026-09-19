@@ -191,6 +191,9 @@ class Context(Generic[T]):
             @verb(role=R)
             async def do_thing(ctx: Context[MyState], prev: X) -> Y:
                 return await _saia(ctx).complete_structured(...)
+
+        The helper assumes the flow was configured with a SAIAFactory;
+        role-bound verbs (``@verb(role=...)``) require one.
         """
         return self.saia  # type: ignore[no-any-return]
 
