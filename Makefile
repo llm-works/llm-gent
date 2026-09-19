@@ -15,6 +15,9 @@ INFRA_DEV_CQ_STRICT := true
 # SPDX header enforcement
 INFRA_DEV_CQ_SPDX := true
 
+# Run every example script as a `make check` subcheck (mirrors `make examples.check`)
+INFRA_DEV_CHECK_EXAMPLES := true
+
 # PyTest and Docstring coverage thresholds
 INFRA_PYTEST_COVERAGE_THRESHOLD := 70
 INFRA_DEV_DOCSTRING_THRESHOLD := 95
