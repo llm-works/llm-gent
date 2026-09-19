@@ -41,11 +41,10 @@ import asyncio
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any
 
 from appinfra.log import quick_console_logger
 
-from llm_gent.flow import Context, Flow, FlowFactory, verb
+from llm_gent.flow import Context, Flow, FlowFactory, StateDataclass, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 
@@ -61,27 +60,18 @@ MAX_ITERS = 5
 
 
 @dataclass
-class Counter:
+class Counter(StateDataclass):
     """Typed state payload — a running count and its per-iteration trace.
 
-    Satisfies :class:`~llm_gent.flow.StateData` via ``to_dict`` /
-    ``from_dict``. Bound as ``state_type=Counter`` on the
-    :class:`~llm_gent.flow.FlowFactory` so the framework calls
-    :meth:`from_dict` on ``run(resume=True)`` to reconstruct an instance
-    from the checkpoint payload.
+    Inherits :class:`~llm_gent.flow.StateDataclass` for ``to_dict`` /
+    ``from_dict`` — flat dataclass, no override needed. Bound as
+    ``state_type=Counter`` on the :class:`~llm_gent.flow.FlowFactory` so
+    the framework calls :meth:`from_dict` on ``run(resume=True)`` to
+    reconstruct an instance from the checkpoint payload.
     """
 
     count: int = 0
     log: list[int] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-compatible dict."""
-        return {"count": self.count, "log": list(self.log)}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Counter:
-        """Reconstruct from a serialized dict."""
-        return cls(count=int(data["count"]), log=list(data["log"]))
 
 
 @verb

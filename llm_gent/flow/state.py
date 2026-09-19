@@ -30,7 +30,7 @@ the enclosing flow. Consumers who never checkpoint don't need to conform.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Generic, Protocol, Self, TypeVar, cast, runtime_checkable
 
 
@@ -70,6 +70,53 @@ class StateData(Protocol):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self: ...
+
+
+class StateDataclass:
+    """Mixin that satisfies :class:`StateData` for flat dataclasses.
+
+    Opt-in convenience for the common case: a dataclass whose fields are
+    JSON-native scalars, lists, or dicts. Inheriting this mixin provides
+    :meth:`to_dict` via :func:`dataclasses.asdict` and
+    :meth:`from_dict` via ``cls(**data)`` — no per-field boilerplate.
+
+    Usage::
+
+        @dataclass
+        class Counter(StateDataclass):
+            count: int = 0
+            log: list[int] = field(default_factory=list)
+
+    Limitations
+    -----------
+    :func:`dataclasses.asdict` recurses into nested dataclasses and
+    produces plain dicts for them; the naive :meth:`from_dict` does
+    **not** recurse — nested-dataclass fields land as dicts, not
+    reconstructed instances. Consumers with nested dataclass state
+    override :meth:`from_dict` (or both) with a shape-aware version.
+
+    Type coercion is likewise absent: fields are assigned as-is from the
+    input dict. Sources that may deliver values with drifted types
+    (e.g., ints as strings) must override :meth:`from_dict` to coerce.
+    """
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize via :func:`dataclasses.asdict`.
+
+        Requires the subclass to be a dataclass. Recurses into nested
+        dataclass fields — see the class docstring on the asymmetric
+        :meth:`from_dict` behavior.
+        """
+        return asdict(cast(Any, self))
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Reconstruct via ``cls(**data)``.
+
+        Flat-dataclass path only; nested-dataclass fields are NOT
+        reconstructed — see the class docstring.
+        """
+        return cls(**data)
 
 
 @dataclass(frozen=True)

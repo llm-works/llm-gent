@@ -14,6 +14,8 @@ Public surface:
   outermost scope)
 - :class:`StateData` — serialization contract for ``state.data`` payloads
   that need to round-trip through a checkpoint (``to_dict`` + ``from_dict``)
+- :class:`StateDataclass` — opt-in mixin satisfying :class:`StateData` for
+  flat dataclasses via :func:`dataclasses.asdict` and ``cls(**data)``
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
 - :class:`FlowFactory` — app-scoped :class:`Flow` builder (captures ``lg``
   and one :class:`SAIAFactory`); preferred entry point at the application
@@ -54,7 +56,7 @@ from .loop import Loop, LoopCheckpointStore, LoopFactory
 from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
 from .role import Role
-from .state import State, StateData
+from .state import State, StateData, StateDataclass
 from .verb import verb
 
 
@@ -74,6 +76,7 @@ __all__ = [
     "Skipped",
     "State",
     "StateData",
+    "StateDataclass",
     "Unset",
     "extractor",
     "grader",

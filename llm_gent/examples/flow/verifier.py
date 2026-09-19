@@ -42,12 +42,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
 
 from appinfra.log import quick_console_logger
 
 from llm_gent.examples.flow._infra import ExampleSAIA, StubSAIAFactory
-from llm_gent.flow import Context, FlowFactory, Role, verb
+from llm_gent.flow import Context, FlowFactory, Role, StateDataclass, verb
 
 
 MAX_ROUNDS = 5
@@ -64,10 +63,11 @@ JUDGE = Role(name="judge", backend="stub", model="judge-model")
 
 
 @dataclass
-class VerifierState:
+class VerifierState(StateDataclass):
     """Typed state for the verifier flow.
 
-    Serialization via ``to_dict`` / ``from_dict`` — bound as
+    Inherits :class:`~llm_gent.flow.StateDataclass` for ``to_dict`` /
+    ``from_dict`` — flat dataclass, no override needed. Bound as
     ``state_type=VerifierState`` so the flow can be checkpointed and
     resumed alongside the mechanics :mod:`resume` demonstrates. Not
     exercised in this example's ``main`` (no checkpointer wired), but
@@ -80,29 +80,6 @@ class VerifierState:
     external_review: str = ""
     reviews_agree: bool = False
     round: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-compatible dict."""
-        return {
-            "query": self.query,
-            "answer": self.answer,
-            "self_review": self.self_review,
-            "external_review": self.external_review,
-            "reviews_agree": self.reviews_agree,
-            "round": self.round,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> VerifierState:
-        """Reconstruct from a serialized dict."""
-        return cls(
-            query=str(data["query"]),
-            answer=str(data["answer"]),
-            self_review=str(data["self_review"]),
-            external_review=str(data["external_review"]),
-            reviews_agree=bool(data["reviews_agree"]),
-            round=int(data["round"]),
-        )
 
 
 @verb(role=PRIMARY)
