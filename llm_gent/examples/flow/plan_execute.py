@@ -258,7 +258,7 @@ async def calc_tool(_ctx: Context[PlanExecuteState], step: ToolCall) -> StepResu
     else:
         try:
             output = str(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307
-        except (SyntaxError, ZeroDivisionError, ValueError) as e:
+        except (SyntaxError, ZeroDivisionError, ValueError, OverflowError) as e:
             output = f"Evaluation of {expr!r} failed: {type(e).__name__}: {e}"
     print(f"[calc] {expr} = {output}")
     return StepResult(tool=ToolName.CALCULATE, args=step.args, output=output)

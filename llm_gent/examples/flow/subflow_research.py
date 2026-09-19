@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from appinfra.log import quick_console_logger
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
 from llm_gent.flow import (
@@ -91,7 +91,7 @@ class TopicList(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    topics: list[str]
+    topics: list[str] = Field(min_length=2, max_length=4)
 
 
 class Snippet(BaseModel):
