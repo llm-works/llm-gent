@@ -106,17 +106,22 @@ class VerifierState:
 
 
 @verb(role=PRIMARY)
-async def answer_query(ctx: Context[VerifierState], query: str) -> str:
-    """Primary produces the initial answer for ``query``."""
+async def answer_query(ctx: Context[VerifierState]) -> str:
+    """Primary produces the initial answer.
+
+    Reads the query from ``ctx.state.data.query`` — the same value the
+    :class:`VerifierState` was constructed with — so ``.run()`` does
+    not need to also pass it as a positional argument.
+    """
     saia: ExampleSAIA = ctx.saia
-    prompt = f"Answer this question concisely:\n{query}"
+    prompt = f"Answer this question concisely:\n{ctx.state.data.query}"
     ctx.state.data.answer = saia.answer(prompt)
     print(f"[primary/answer] {ctx.state.data.answer}")
     return ctx.state.data.answer
 
 
 @verb(role=PRIMARY)
-async def self_review(ctx: Context[VerifierState], _prev: Any) -> str:
+async def self_review(ctx: Context[VerifierState]) -> str:
     """Primary reviews its own current answer."""
     ctx.state.data.round += 1
     print(f"\n--- round {ctx.state.data.round} ---")
@@ -131,7 +136,7 @@ async def self_review(ctx: Context[VerifierState], _prev: Any) -> str:
 
 
 @verb(role=VERIFIER)
-async def external_review(ctx: Context[VerifierState], _prev: Any) -> str:
+async def external_review(ctx: Context[VerifierState]) -> str:
     """Verifier (a different model) reviews the same answer independently."""
     saia: ExampleSAIA = ctx.saia
     prompt = (
@@ -144,7 +149,7 @@ async def external_review(ctx: Context[VerifierState], _prev: Any) -> str:
 
 
 @verb(role=JUDGE)
-async def judge(ctx: Context[VerifierState], _prev: Any) -> bool:
+async def judge(ctx: Context[VerifierState]) -> bool:
     """Judge decides whether the two reviews semantically agree.
 
     Expects the scripted judge response to start with ``AGREE`` or
@@ -166,7 +171,7 @@ async def judge(ctx: Context[VerifierState], _prev: Any) -> bool:
 
 
 @verb(role=PRIMARY)
-async def maybe_correct(ctx: Context[VerifierState], _prev: Any) -> str:
+async def maybe_correct(ctx: Context[VerifierState]) -> str:
     """Primary corrects its answer iff reviewers disagreed; else passes through.
 
     Short-circuits on consensus so a converged round does not consume
@@ -234,7 +239,7 @@ async def main() -> int:
     )
 
     print(f"Query: {query}\n")
-    final = await flow.run(query)
+    final = await flow.run()
     print("\n=== converged ===")
     print(f"final answer: {final}")
     print(f"rounds run:   {len(saia_f.instance('judge').call_log)}")

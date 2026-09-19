@@ -45,7 +45,7 @@ from typing import Any
 
 from appinfra.log import quick_console_logger
 
-from llm_gent.flow import Context, Flow, FlowFactory, Role, verb
+from llm_gent.flow import Context, Flow, FlowFactory, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 
@@ -58,9 +58,6 @@ which starts at ``count = HALT_AFTER`` after resume — never re-triggers.
 
 MAX_ITERS = 5
 """Cumulative iterate bound across resumes. Run 1 stops at HALT_AFTER; run 2 runs the rest."""
-
-WORKER = Role(name="worker", backend="none", model="none")
-"""Role for :func:`tick`. Pure-Python verb — backend / model are unused."""
 
 
 @dataclass
@@ -87,13 +84,18 @@ class Counter:
         return cls(count=int(data["count"]), log=list(data["log"]))
 
 
-@verb(role=WORKER)
-async def tick(ctx: Context[Counter], _prev: Any) -> int:
+@verb
+async def tick(ctx: Context[Counter]) -> int:
     """Increment the counter and simulate a crash via ``ctx.halt``.
 
-    Mutates ``ctx.state.data`` in place (typed as :class:`Counter` via the
-    :class:`Context` parameterization) and returns the new count so the
-    :meth:`Flow.iterate` loop threads it as the next iteration's input.
+    Pure-Python verb (``@verb`` bare form) — no :class:`Role`, no
+    ``ctx.saia`` access. The framework's signature-aware dispatch
+    drops the iterate chain's previous value rather than requiring a
+    placeholder ``_prev`` parameter. Mutates ``ctx.state.data`` in
+    place (typed as :class:`Counter` via the :class:`Context`
+    parameterization) and returns the new count so the
+    :meth:`Flow.iterate` loop threads it as the next iteration's
+    input.
     """
     ctx.state.data.count += 1
     ctx.state.data.log.append(ctx.state.data.count)
@@ -113,10 +115,16 @@ def _build_flow(
 
     Each call returns a fresh :class:`~llm_gent.flow.Flow`, so the two
     demo runs can operate on independent halt events while pointing at
-    the same checkpoint trajectory.
+    the same checkpoint trajectory. The halt and checkpointer bindings
+    ride on :meth:`FlowFactory.create` kwargs so this reads as a single
+    construction step rather than a chain of ``.with_*`` setters.
     """
-    flow = ff.create("resume-demo", state=Counter())
-    flow.with_halt(asyncio.Event()).with_checkpointer(store, client_flow_id)
+    flow = ff.create(
+        "resume-demo",
+        state=Counter(),
+        halt=asyncio.Event(),
+        checkpointer=(store, client_flow_id),
+    )
     flow.iterate(lambda body: body.call(tick), max_iters=MAX_ITERS)
     return flow
 
@@ -132,13 +140,13 @@ async def main() -> int:
 
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
         flow1 = _build_flow(ff, store, client_flow_id)
-        result1 = await flow1.run(None)
+        result1 = await flow1.run()
         print(f"run 1 returned: count={result1}")
         print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
 
         print(f"\n--- Run 2: resume=True (cumulative max_iters={MAX_ITERS}) ---")
         flow2 = _build_flow(ff, store, client_flow_id)
-        result2 = await flow2.run(None, resume=True)
+        result2 = await flow2.run(resume=True)
         print(f"run 2 returned: count={result2}")
         print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
         print("(empty after run 2 because natural completion deletes the checkpoint)")

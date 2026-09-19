@@ -118,6 +118,67 @@ class TestFlowFactory:
         assert derived.create().state is state
 
 
+class TestCreateHaltAndCheckpointer:
+    """FlowFactory.create() accepts halt= and checkpointer= for per-flow wiring."""
+
+    def test_create_halt_kwarg_binds_flow_halt(self) -> None:
+        """A ``halt=`` on create() supersedes the factory's captured halt."""
+        import asyncio
+
+        from llm_gent.flow import FlowFactory
+
+        factory_halt = asyncio.Event()
+        create_halt = asyncio.Event()
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), halt=factory_halt)
+        flow = ff.create("named", halt=create_halt)
+        assert flow._halt_event is create_halt
+
+    def test_create_halt_kwarg_supplies_when_factory_has_none(self) -> None:
+        """A ``halt=`` on create() applies even when the factory has none."""
+        import asyncio
+
+        from llm_gent.flow import FlowFactory
+
+        create_halt = asyncio.Event()
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory())
+        flow = ff.create(halt=create_halt)
+        assert flow._halt_event is create_halt
+
+    def test_create_halt_absent_inherits_factory(self) -> None:
+        """Without ``halt=``, the factory's captured halt reaches the flow."""
+        import asyncio
+
+        from llm_gent.flow import FlowFactory
+
+        factory_halt = asyncio.Event()
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), halt=factory_halt)
+        flow = ff.create()
+        assert flow._halt_event is factory_halt
+
+    def test_create_checkpointer_pair_binds_flow(self, tmp_path: Any) -> None:
+        """``checkpointer=(store, id)`` wires the pair via .with_checkpointer."""
+        from llm_gent.flow import FlowFactory
+        from llm_gent.flow.stores import JsonFileCheckpointStore
+
+        store = JsonFileCheckpointStore(make_test_logger(), tmp_path)
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory())
+        flow = ff.create(checkpointer=(store, "flow-1"))
+        assert flow._checkpointer is store
+        assert flow._client_flow_id == "flow-1"
+
+    def test_create_checkpointer_supersedes_factory_pair(self, tmp_path: Any) -> None:
+        """``checkpointer=`` wins over the factory-level store + client_flow_id."""
+        from llm_gent.flow import FlowFactory
+        from llm_gent.flow.stores import JsonFileCheckpointStore
+
+        factory_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "a")
+        create_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "b")
+        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), checkpointer=factory_store)
+        flow = ff.create(client_flow_id="ignored", checkpointer=(create_store, "flow-override"))
+        assert flow._checkpointer is create_store
+        assert flow._client_flow_id == "flow-override"
+
+
 class TestPricingProviderSwap:
     """A stub PricingProvider injected via FlowFactory.with_budget reaches ctx.budget.track."""
 

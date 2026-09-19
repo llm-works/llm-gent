@@ -31,7 +31,7 @@ def _archetype(role: Role, name: str) -> Callable[[VerbCallable], VerbCallable]:
     """Return a decorator that applies ``@verb(role)`` and tags with ``name``."""
 
     def decorator(func: VerbCallable) -> VerbCallable:
-        wrapped = verb(role)(func)
+        wrapped = verb(role=role)(func)
         wrapped.archetype = name  # type: ignore[attr-defined]
         return wrapped
 

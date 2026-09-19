@@ -210,6 +210,89 @@ class TestExecutionShape:
         assert await flow.run(42, tag="v") == len("v=42")
 
     @pytest.mark.asyncio
+    async def test_chain_verb_can_omit_prev_positional(self) -> None:
+        """A non-head verb that declares only ``ctx`` runs without a placeholder positional.
+
+        The framework matches the target's signature — the previous
+        node's result is dropped rather than raising ``TypeError``, so
+        pure-Python verbs don't need a ``_prev: Any`` parameter just to
+        satisfy the dispatch shape.
+        """
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, x: int) -> int:
+            """Return the input verbatim."""
+            return x
+
+        @verb(role=ROLE_A)
+        async def tail(ctx: Context) -> str:
+            """No positional; ignores upstream chain value."""
+            return "done"
+
+        flow.call(head).then(tail)
+        assert await flow.run(7) == "done"
+
+    @pytest.mark.asyncio
+    async def test_head_verb_ignores_run_kwargs_it_does_not_declare(self) -> None:
+        """Extra run kwargs are dropped for a head verb whose signature omits them."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, x: int) -> int:
+            """Accepts one positional, no kwargs."""
+            return x
+
+        flow.call(head)
+        assert await flow.run(3, extra="ignored") == 3
+
+    @pytest.mark.asyncio
+    async def test_var_positional_receives_all_args(self) -> None:
+        """A verb declaring ``*args`` receives node_args unchanged."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, *args: Any) -> tuple[Any, ...]:
+            """Return the args tuple."""
+            return args
+
+        flow.call(head)
+        assert await flow.run(1, 2, 3) == (1, 2, 3)
+
+    @pytest.mark.asyncio
+    async def test_var_keyword_receives_all_kwargs(self) -> None:
+        """A verb declaring ``**kwargs`` receives node_kwargs unchanged."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, **kwargs: Any) -> dict[str, Any]:
+            """Return the kwargs dict."""
+            return kwargs
+
+        flow.call(head)
+        assert await flow.run(a=1, b=2) == {"a": 1, "b": 2}
+
+    @pytest.mark.asyncio
+    async def test_state_kwarg_and_positional_are_distinct(self) -> None:
+        """``run(state=..., positional)`` binds state and positional independently.
+
+        The head verb reads ``ctx.state.data`` for state fields and its
+        positional parameter for the chain's first input — no need to
+        pass the same value through both slots.
+        """
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def head(ctx: Context, kick: int) -> tuple[str, int]:
+            """Return (state-owned label, positional kick) so both surfaces show up."""
+            label: str = ctx.state.data["label"]
+            return label, kick
+
+        flow.call(head)
+        result = await flow.run(7, state={"label": "run-A"})
+        assert result == ("run-A", 7)
+
+    @pytest.mark.asyncio
     async def test_verb_ctx_has_role_and_saia(self) -> None:
         """Each verb receives a Context bound to its own role's saia."""
         flow = make_ff().create()

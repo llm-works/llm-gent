@@ -19,6 +19,7 @@ circular dependency between the executor and the class it operates on.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import inspect
 import time
@@ -138,7 +139,108 @@ async def _invoke_target(
         return await _run_iterate(target, ctx, env, node_args, node_id)
     if isinstance(target, _Map):
         return await _run_map(target, ctx, env, node_args, node_id)
-    return await target(ctx, *node_args, **node_kwargs)
+    passed_args, passed_kwargs = _filter_verb_args(target, node_args, node_kwargs)
+    return await target(ctx, *passed_args, **passed_kwargs)
+
+
+@dataclasses.dataclass(frozen=True)
+class _VerbArity:
+    """Cached signature shape of a verb callable, minus the ``ctx`` slot.
+
+    ``var_positional`` — verb declares ``*args``. ``var_keyword`` — verb
+    declares ``**kwargs``. ``positional_slots`` — count of fixed positional
+    parameters after ``ctx`` (POSITIONAL_ONLY + POSITIONAL_OR_KEYWORD).
+    ``keyword_names`` — names of parameters reachable by keyword
+    (POSITIONAL_OR_KEYWORD + KEYWORD_ONLY). ``introspection_failed`` —
+    the callable's signature could not be inspected (C callables, some
+    partials); the caller then forwards args verbatim so behavior matches
+    pre-filter dispatch.
+    """
+
+    var_positional: bool
+    var_keyword: bool
+    positional_slots: int
+    keyword_names: frozenset[str]
+    introspection_failed: bool = False
+
+
+_VERB_ARITY_ATTR = "_llm_gent_verb_arity"
+"""Attribute name used to memoize :class:`_VerbArity` on the verb itself.
+
+Attaching to the callable ties the cache lifetime to the target — a
+locally-defined verb GC'd at the end of a test cannot leak into a later
+test that happens to allocate a different signature at the same id
+slot. Falls back to a fresh analysis when ``setattr`` is rejected
+(``__slots__``, some C-level callables, class instances forbidding
+attribute assignment).
+"""
+
+
+def _verb_arity(target: Any) -> _VerbArity:
+    """Return the arity of ``target`` (skipping ``ctx``); memoize on the target itself."""
+    cached = getattr(target, _VERB_ARITY_ATTR, None)
+    if isinstance(cached, _VerbArity):
+        return cached
+    computed = _compute_verb_arity(target)
+    with contextlib.suppress(AttributeError, TypeError):
+        setattr(target, _VERB_ARITY_ATTR, computed)
+    return computed
+
+
+def _compute_verb_arity(target: Any) -> _VerbArity:
+    """Inspect ``target``'s signature and derive its :class:`_VerbArity`."""
+    try:
+        sig = inspect.signature(target)
+    except (TypeError, ValueError):
+        return _VerbArity(
+            var_positional=True,
+            var_keyword=True,
+            positional_slots=0,
+            keyword_names=frozenset(),
+            introspection_failed=True,
+        )
+    params = list(sig.parameters.values())[1:]
+    return _VerbArity(
+        var_positional=any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params),
+        var_keyword=any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params),
+        positional_slots=sum(
+            1
+            for p in params
+            if p.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ),
+        keyword_names=frozenset(
+            p.name
+            for p in params
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        ),
+    )
+
+
+def _filter_verb_args(
+    target: Any,
+    node_args: tuple[Any, ...],
+    node_kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Trim ``node_args``/``node_kwargs`` to what ``target``'s signature accepts.
+
+    Verbs may declare ``(ctx)`` only and still sit at any chain position —
+    the previous node's result is dropped rather than raising, so
+    pure-Python verbs don't need a placeholder ``_prev`` parameter. Verbs
+    declaring ``*args`` / ``**kwargs`` see the full inputs unchanged.
+    Introspection failures fall through with all args forwarded so C-level
+    callables and exotic partials keep working.
+    """
+    arity = _verb_arity(target)
+    if arity.introspection_failed:
+        return node_args, node_kwargs
+    passed_args = node_args if arity.var_positional else node_args[: arity.positional_slots]
+    passed_kwargs = (
+        node_kwargs
+        if arity.var_keyword
+        else {k: v for k, v in node_kwargs.items() if k in arity.keyword_names}
+    )
+    return passed_args, passed_kwargs
 
 
 async def _run_subflow(

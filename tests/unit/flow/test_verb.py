@@ -65,3 +65,34 @@ class TestVerbDecorator:
             """Do nothing."""
 
         assert scoped.role is role  # type: ignore[attr-defined]
+
+
+class TestPureVerb:
+    """@verb without a role produces a pure-Python verb (``role`` is ``None``)."""
+
+    def test_bare_decorator_leaves_role_none(self) -> None:
+        """``@verb`` used with no parens sets ``role`` to ``None``."""
+
+        @verb
+        async def tick(ctx: Any) -> None:
+            """No role attached."""
+
+        assert tick.role is None  # type: ignore[attr-defined]
+
+    def test_empty_call_form_leaves_role_none(self) -> None:
+        """``@verb()`` is equivalent to the bare form."""
+
+        @verb()
+        async def tick(ctx: Any) -> None:
+            """No role attached."""
+
+        assert tick.role is None  # type: ignore[attr-defined]
+
+    def test_role_bound_form_still_works(self) -> None:
+        """``@verb(role=R)`` continues to attach the role."""
+
+        @verb(role=ROLE)
+        async def bio(ctx: Any) -> None:
+            """Role-bound verb."""
+
+        assert bio.role is ROLE  # type: ignore[attr-defined]
