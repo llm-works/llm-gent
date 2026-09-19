@@ -1161,6 +1161,12 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
     if hasattr(buildable, "role"):
         # A verb — role attribute may be a Role (role-bound) or None
         # (pure-Python verb). Either way, wrap as a single-node subflow.
+        # Defense-in-depth: validate role here (also checked in fresh.call).
+        role = buildable.role
+        if role is not None and not isinstance(role, Role):
+            raise TypeError(
+                f"verb target .role must be a Role instance or None; got {type(role).__name__}"
+            )
         fresh = Flow(lg=lg, name=name)
         fresh.call(buildable)
         return fresh

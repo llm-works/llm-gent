@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import Any
 
 import pytest
@@ -312,6 +313,72 @@ class TestExecutionShape:
         assert role_b is ROLE_B
         assert isinstance(saia_b, StubSAIA)
         assert saia_b.role is ROLE_B
+
+    @pytest.mark.asyncio
+    async def test_functools_partial_verb_dispatch(self) -> None:
+        """A functools.partial-wrapped verb dispatches correctly.
+
+        The signature introspection handles partials — remaining params
+        after the partial application are correctly identified.
+        """
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def configurable(ctx: Context, x: int, multiplier: int) -> int:
+            """Multiply x by a configurable factor."""
+            return x * multiplier
+
+        doubled = functools.partial(configurable, multiplier=2)
+        doubled.role = ROLE_A  # type: ignore[attr-defined]
+
+        flow.call(doubled)
+        assert await flow.run(5) == 10
+
+    @pytest.mark.asyncio
+    async def test_class_based_verb_dispatch(self) -> None:
+        """A class-based verb (object with __call__) dispatches correctly."""
+        flow = make_ff().create()
+
+        class Adder:
+            """Callable class that adds a fixed offset."""
+
+            role = ROLE_A
+
+            def __init__(self, offset: int) -> None:
+                self.offset = offset
+
+            async def __call__(self, ctx: Context, x: int) -> int:
+                return x + self.offset
+
+        add_ten = Adder(10)
+        flow.call(add_ten)
+        assert await flow.run(7) == 17
+
+    @pytest.mark.asyncio
+    async def test_introspection_fallback_forwards_all_args(self) -> None:
+        """When signature introspection fails, all args/kwargs are forwarded.
+
+        This tests the fallback path for exotic callables. We simulate
+        introspection failure by using a callable with __call__ that
+        accepts *args/**kwargs, ensuring the full inputs reach it.
+        """
+        flow = make_ff().create()
+
+        class VarArgsVerb:
+            """Verb that accepts variable args to test fallback forwarding."""
+
+            role = ROLE_A
+
+            async def __call__(
+                self, ctx: Context, *args: Any, **kwargs: Any
+            ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+                return args, kwargs
+
+        verb_instance = VarArgsVerb()
+        flow.call(verb_instance)
+        args, kwargs = await flow.run(1, 2, 3, a="x", b="y")
+        assert args == (1, 2, 3)
+        assert kwargs == {"a": "x", "b": "y"}
 
 
 # -----------------------------------------------------------------------------
