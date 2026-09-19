@@ -11,12 +11,12 @@ against the runtime-checkable Protocol.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Self
 
 from pydantic import BaseModel
 
-from llm_gent.flow import StateData
+from llm_gent.flow import StateData, StateDataclass
 
 
 class TestPydanticConformance:
@@ -145,3 +145,92 @@ class TestNonConformance:
         without requiring them to satisfy :class:`StateData`.
         """
         assert not isinstance({"any": "thing"}, StateData)
+
+
+class TestStateDataclassMixin:
+    """The :class:`StateDataclass` mixin — asdict / cls(**data) convenience."""
+
+    def test_mixin_satisfies_state_data(self) -> None:
+        """A flat dataclass inheriting the mixin satisfies :class:`StateData`."""
+
+        @dataclass
+        class Counter(StateDataclass):
+            count: int = 0
+            log: list[int] = field(default_factory=list)
+
+        assert isinstance(Counter(), StateData)
+
+    def test_flat_round_trip(self) -> None:
+        """Scalars, lists, and dict fields round-trip through the mixin."""
+
+        @dataclass
+        class Payload(StateDataclass):
+            name: str
+            count: int = 0
+            log: list[int] = field(default_factory=list)
+            meta: dict[str, int] = field(default_factory=dict)
+
+        original = Payload(name="foo", count=3, log=[1, 2], meta={"k": 9})
+        loaded = Payload.from_dict(original.to_dict())
+        assert loaded == original
+
+    def test_to_dict_recurses_into_nested_dataclass(self) -> None:
+        """:func:`dataclasses.asdict` recurses — nested fields land as dicts.
+
+        Documents the asymmetry with :meth:`from_dict`, which does NOT
+        reconstruct nested instances (see the next test).
+        """
+
+        @dataclass
+        class Inner:
+            x: int
+
+        @dataclass
+        class Outer(StateDataclass):
+            inner: Inner
+            n: int = 0
+
+        original = Outer(inner=Inner(x=7), n=1)
+        payload = original.to_dict()
+        assert payload == {"inner": {"x": 7}, "n": 1}
+
+    def test_from_dict_does_not_reconstruct_nested_dataclass(self) -> None:
+        """Nested-dataclass limit: :meth:`from_dict` leaves the field as dict.
+
+        Consumers with nested state override :meth:`from_dict`. This test
+        pins the naive behavior so a future implementation swap surfaces
+        the change deliberately.
+        """
+
+        @dataclass
+        class Inner:
+            x: int
+
+        @dataclass
+        class Outer(StateDataclass):
+            inner: Inner
+            n: int = 0
+
+        loaded = Outer.from_dict({"inner": {"x": 7}, "n": 1})
+        assert loaded.inner == {"x": 7}
+        assert not isinstance(loaded.inner, Inner)
+
+    def test_subclass_can_override_from_dict_for_nested(self) -> None:
+        """Consumers with nested state can override :meth:`from_dict`."""
+
+        @dataclass
+        class Inner:
+            x: int
+
+        @dataclass
+        class Outer(StateDataclass):
+            inner: Inner
+            n: int = 0
+
+            @classmethod
+            def from_dict(cls, data: dict[str, Any]) -> Self:
+                return cls(inner=Inner(**data["inner"]), n=int(data["n"]))
+
+        original = Outer(inner=Inner(x=7), n=1)
+        loaded = Outer.from_dict(original.to_dict())
+        assert loaded == original

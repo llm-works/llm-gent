@@ -88,6 +88,57 @@ class TestContextGeneric:
         assert payload.turn == 1
 
 
+class TestCtxData:
+    """``ctx.data`` is a shortcut alias for ``ctx.state.data`` typed as :data:`T`."""
+
+    @pytest.mark.asyncio
+    async def test_ctx_data_returns_payload(self) -> None:
+        """``ctx.data`` returns the same object as ``ctx.state.data``."""
+        payload = _Payload(turn=7)
+        flow = Flow(lg=make_test_logger(), saia_f=StubFactory(), state=payload)
+
+        @verb(role=ROLE_A)
+        async def probe(ctx: Context[_Payload]) -> tuple[object, object]:
+            """Return (state.data, data) for identity comparison."""
+            return ctx.state.data, ctx.data
+
+        flow.register(probe)
+        via_state, via_alias = await flow.dispatch("probe")
+        assert via_state is via_alias is payload
+
+    @pytest.mark.asyncio
+    async def test_ctx_data_mutation_is_visible(self) -> None:
+        """Mutating through ``ctx.data`` is visible on ``ctx.state.data``."""
+        payload = _Payload(turn=0)
+        flow = Flow(lg=make_test_logger(), saia_f=StubFactory(), state=payload)
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[_Payload]) -> int:
+            """Mutate via the shortcut; the underlying payload advances."""
+            ctx.data.turn += 1
+            return ctx.state.data.turn
+
+        flow.register(bump)
+        assert await flow.dispatch("bump") == 1
+        assert payload.turn == 1
+
+    def test_ctx_data_reaches_scope_not_root(self) -> None:
+        """``ctx.data`` is the local scope's payload — not the root's.
+
+        Pins the documented behavior: the shortcut aliases
+        ``ctx.state.data``, not ``ctx.state.root().data``. A subflow's
+        verb sees the child scope's payload; run-wide state stays behind
+        the explicit ``ctx.state.root().data`` traversal.
+        """
+        root_payload = {"root": True}
+        child_payload = _Payload(turn=99)
+        root_state: State[dict[str, bool]] = State(data=root_payload)
+        child_state: State[_Payload] = State(data=child_payload, _parent=root_state)
+        ctx: Context[_Payload] = Context(role=None, state=child_state, flow=None)
+        assert ctx.data is child_payload
+        assert ctx.state.root().data is root_payload
+
+
 class TestPureVerbCtx:
     """A pure-Python verb (``@verb`` without a role) runs with ``ctx.saia is None``."""
 
