@@ -131,10 +131,14 @@ class Submission:
 class BatchGradingState(StateDataclass):
     """Batch input plus the final aggregate summary.
 
-    Overrides :meth:`to_dict` / :meth:`from_dict` because
-    :attr:`submissions` is a list of plain dataclasses and
-    :attr:`final_summary` may hold Pydantic-serialized results; a
-    ``dataclasses.asdict`` round-trip is not enough on its own.
+    Overrides :meth:`to_dict` / :meth:`from_dict` — the mixin's
+    auto-recursion handles ``list[Submission]`` (plain dataclass) but
+    ``final_summary: dict[str, Any]`` holds a mix of
+    :class:`Grade` / :class:`Failure` / :class:`Skipped`, and
+    :class:`Failure` wraps a raw :class:`BaseException`. Neither the
+    heterogeneous ``dict[str, Any]`` reconstruction nor the exception
+    field is auto-decodable — this is the escalation path the mixin's
+    :class:`TypeError` documents.
     """
 
     submissions: list[Submission]

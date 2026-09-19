@@ -19,12 +19,10 @@ hand-parses. Two verbs run in sequence:
    (owner_team, first_reply, needs_escalation) and pins it into
    ``ctx.data.final_triage``. The triage return is the flow's final value.
 
-Also demonstrates the :class:`~llm_gent.flow.StateDataclass` override
-slot: ``TriageResponse`` is a Pydantic model, and
-:func:`dataclasses.asdict` does not recurse into Pydantic. The state
-class overrides :meth:`to_dict` / :meth:`from_dict` to call
-``model_dump`` / ``model_validate``, which is the pattern any nested
-state consumer will need.
+:class:`BugReportState` inherits :class:`~llm_gent.flow.StateDataclass`
+with no override — the mixin recurses into the ``TriageResponse |
+None`` Pydantic field automatically, so the state class stays a
+straight dataclass declaration.
 
 The example uses :class:`~._infra.StructuredStubSAIAFactory`, which
 scripts ``(schema, value)`` pairs and validates that the verb asks for
@@ -111,37 +109,15 @@ TRIAGER = Role(name="triager", backend="stub", model="triager-model")
 class BugReportState(StateDataclass):
     """Raw input + final triage — the two values that persist across resume.
 
-    Overrides :meth:`to_dict` / :meth:`from_dict` because
-    :attr:`final_triage` is a Pydantic model and
-    :func:`dataclasses.asdict` does not recurse into
-    :class:`~pydantic.BaseModel`. Any state class with nested Pydantic
-    (or otherwise non-dataclass) fields needs the same pattern.
-
-    The intermediate :class:`Classification` produced by
-    :func:`classify` is threaded to :func:`triage` via the previous
-    node's return value, so it never needs a state slot.
+    The intermediate :class:`Classification` produced by :func:`classify`
+    is threaded to :func:`triage` via the previous node's return value,
+    so it never needs a state slot. :class:`StateDataclass` auto-recurses
+    into the ``TriageResponse | None`` field, so no ``to_dict`` /
+    ``from_dict`` override is needed.
     """
 
     report: str
     final_triage: TriageResponse | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "report": self.report,
-            "final_triage": (
-                self.final_triage.model_dump(mode="json") if self.final_triage is not None else None
-            ),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> BugReportState:
-        triage_data = data.get("final_triage")
-        return cls(
-            report=data["report"],
-            final_triage=(
-                TriageResponse.model_validate(triage_data) if triage_data is not None else None
-            ),
-        )
 
 
 # ── verbs ────────────────────────────────────────────────────────────
