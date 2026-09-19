@@ -66,6 +66,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import asyncio
 from dataclasses import dataclass, field
 from enum import StrEnum
+from collections.abc import Callable
 from typing import Any
 
 from appinfra.log import quick_console_logger
@@ -295,7 +296,7 @@ async def record_result(
 # ── predicates ───────────────────────────────────────────────────────
 
 
-def _tool_is(name: ToolName):
+def _tool_is(name: ToolName) -> Callable[[ToolCall, Context[PlanExecuteState]], bool]:
     """Return a :meth:`.branch` predicate that matches ``step.tool == name``."""
 
     def when(step: ToolCall, _ctx: Context[PlanExecuteState]) -> bool:
