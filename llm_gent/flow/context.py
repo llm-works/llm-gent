@@ -10,7 +10,8 @@ as the first argument to every verb. It exposes:
   on first access
 - ``role`` — the :class:`Role` under which this verb is running
 - ``state`` — the enclosing scope's :class:`State` wrapper (user-owned payload
-  reached via ``ctx.state.data``; run-wide payload via ``ctx.state.root().data``)
+  reached via ``ctx.state.data`` or the shorter alias ``ctx.data``; run-wide
+  payload via ``ctx.state.root().data``)
 - ``flow`` — back-reference to the dispatching flow (enables inner verb calls
   from composition helpers like :class:`Panel`)
 - ``lg`` — the dispatching flow's :class:`~appinfra.log.Logger`, so verbs
@@ -119,6 +120,22 @@ class Context(Generic[T]):
     Subflows inherit the outer runtime's budget unless they declare their
     own via :meth:`Flow.with_budget`.
     """
+
+    @property
+    def data(self) -> T:
+        """Shortcut for ``ctx.state.data`` typed as :data:`T`.
+
+        Every verb that reads or mutates the scope's payload does so
+        through ``ctx.state.data``; this alias returns the same object at
+        the shorter spelling. Reads (``ctx.data.field``) and mutations
+        (``ctx.data.field = ...``) both work — the alias returns the
+        payload, not a copy.
+
+        Reaches the local scope's payload, not the root. Verbs that need
+        run-wide state stay on ``ctx.state.root().data`` — the alias does
+        not shortcut that traversal.
+        """
+        return self.state.data
 
     @property
     def saia(self) -> Any:

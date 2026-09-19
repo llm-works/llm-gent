@@ -81,19 +81,19 @@ async def tick(ctx: Context[Counter]) -> int:
     Pure-Python verb (``@verb`` bare form) — no :class:`Role`, no
     ``ctx.saia`` access. The framework's signature-aware dispatch
     drops the iterate chain's previous value rather than requiring a
-    placeholder ``_prev`` parameter. Mutates ``ctx.state.data`` in
+    placeholder ``_prev`` parameter. Mutates ``ctx.data`` in
     place (typed as :class:`Counter` via the :class:`Context`
     parameterization) and returns the new count so the
     :meth:`Flow.iterate` loop threads it as the next iteration's
     input.
     """
-    ctx.state.data.count += 1
-    ctx.state.data.log.append(ctx.state.data.count)
-    print(f"  tick: count={ctx.state.data.count} log={ctx.state.data.log}")
-    if ctx.state.data.count == HALT_AFTER and ctx.halt is not None:
+    ctx.data.count += 1
+    ctx.data.log.append(ctx.data.count)
+    print(f"  tick: count={ctx.data.count} log={ctx.data.log}")
+    if ctx.data.count == HALT_AFTER and ctx.halt is not None:
         print(f"  halt fired at count={HALT_AFTER}")
         ctx.halt.set()
-    return ctx.state.data.count
+    return ctx.data.count
 
 
 def _build_flow(

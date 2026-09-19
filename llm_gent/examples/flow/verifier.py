@@ -10,7 +10,7 @@
 Shape:
 
 1. **Answer** — the primary LLM answers a user query. The answer lands in
-   ``ctx.state.data.answer``.
+   ``ctx.data.answer``.
 2. **Verify loop** (bounded to ``MAX_ROUNDS``, exits on consensus):
 
    a. Primary self-reviews its current answer.
@@ -86,30 +86,30 @@ class VerifierState(StateDataclass):
 async def answer_query(ctx: Context[VerifierState]) -> str:
     """Primary produces the initial answer.
 
-    Reads the query from ``ctx.state.data.query`` — the same value the
+    Reads the query from ``ctx.data.query`` — the same value the
     :class:`VerifierState` was constructed with — so ``.run()`` does
     not need to also pass it as a positional argument.
     """
     saia: ExampleSAIA = ctx.saia
-    prompt = f"Answer this question concisely:\n{ctx.state.data.query}"
-    ctx.state.data.answer = saia.answer(prompt)
-    print(f"[primary/answer] {ctx.state.data.answer}")
-    return ctx.state.data.answer
+    prompt = f"Answer this question concisely:\n{ctx.data.query}"
+    ctx.data.answer = saia.answer(prompt)
+    print(f"[primary/answer] {ctx.data.answer}")
+    return ctx.data.answer
 
 
 @verb(role=PRIMARY)
 async def self_review(ctx: Context[VerifierState]) -> str:
     """Primary reviews its own current answer."""
-    ctx.state.data.round += 1
-    print(f"\n--- round {ctx.state.data.round} ---")
+    ctx.data.round += 1
+    print(f"\n--- round {ctx.data.round} ---")
     saia: ExampleSAIA = ctx.saia
     prompt = (
-        f"Review this answer for correctness. Query: {ctx.state.data.query!r}. "
-        f"Answer: {ctx.state.data.answer!r}."
+        f"Review this answer for correctness. Query: {ctx.data.query!r}. "
+        f"Answer: {ctx.data.answer!r}."
     )
-    ctx.state.data.self_review = saia.answer(prompt)
-    print(f"[primary/self-review] {ctx.state.data.self_review}")
-    return ctx.state.data.self_review
+    ctx.data.self_review = saia.answer(prompt)
+    print(f"[primary/self-review] {ctx.data.self_review}")
+    return ctx.data.self_review
 
 
 @verb(role=VERIFIER)
@@ -117,12 +117,11 @@ async def external_review(ctx: Context[VerifierState]) -> str:
     """Verifier (a different model) reviews the same answer independently."""
     saia: ExampleSAIA = ctx.saia
     prompt = (
-        f"Independently review this answer. Query: {ctx.state.data.query!r}. "
-        f"Answer: {ctx.state.data.answer!r}."
+        f"Independently review this answer. Query: {ctx.data.query!r}. Answer: {ctx.data.answer!r}."
     )
-    ctx.state.data.external_review = saia.answer(prompt)
-    print(f"[verifier/external-review] {ctx.state.data.external_review}")
-    return ctx.state.data.external_review
+    ctx.data.external_review = saia.answer(prompt)
+    print(f"[verifier/external-review] {ctx.data.external_review}")
+    return ctx.data.external_review
 
 
 @verb(role=JUDGE)
@@ -137,14 +136,14 @@ async def judge(ctx: Context[VerifierState]) -> bool:
     saia: ExampleSAIA = ctx.saia
     prompt = (
         f"Do these two reviews semantically agree? "
-        f"Review A: {ctx.state.data.self_review!r}. "
-        f"Review B: {ctx.state.data.external_review!r}. "
+        f"Review A: {ctx.data.self_review!r}. "
+        f"Review B: {ctx.data.external_review!r}. "
         f"Answer with AGREE or DISAGREE plus a one-sentence rationale."
     )
     verdict = saia.answer(prompt)
-    ctx.state.data.reviews_agree = verdict.strip().upper().startswith("AGREE")
-    print(f"[judge] {verdict} (agree={ctx.state.data.reviews_agree})")
-    return ctx.state.data.reviews_agree
+    ctx.data.reviews_agree = verdict.strip().upper().startswith("AGREE")
+    print(f"[judge] {verdict} (agree={ctx.data.reviews_agree})")
+    return ctx.data.reviews_agree
 
 
 @verb(role=PRIMARY)
@@ -154,18 +153,18 @@ async def maybe_correct(ctx: Context[VerifierState]) -> str:
     Short-circuits on consensus so a converged round does not consume
     another scripted response from the primary's queue.
     """
-    if ctx.state.data.reviews_agree:
-        return ctx.state.data.answer
+    if ctx.data.reviews_agree:
+        return ctx.data.answer
     saia: ExampleSAIA = ctx.saia
     prompt = (
         f"Reviewers disagreed about your answer. "
-        f"Your review: {ctx.state.data.self_review!r}. "
-        f"Independent review: {ctx.state.data.external_review!r}. "
-        f"Emit a corrected answer to: {ctx.state.data.query!r}."
+        f"Your review: {ctx.data.self_review!r}. "
+        f"Independent review: {ctx.data.external_review!r}. "
+        f"Emit a corrected answer to: {ctx.data.query!r}."
     )
-    ctx.state.data.answer = saia.answer(prompt)
-    print(f"[primary/correct] {ctx.state.data.answer}")
-    return ctx.state.data.answer
+    ctx.data.answer = saia.answer(prompt)
+    print(f"[primary/correct] {ctx.data.answer}")
+    return ctx.data.answer
 
 
 def _demo_scripts() -> dict[str, list[str]]:
@@ -212,7 +211,7 @@ async def main() -> int:
     flow.call(answer_query).iterate(
         lambda body: body.call(self_review).call(external_review).call(judge).call(maybe_correct),
         max_iters=MAX_ROUNDS,
-        until=lambda _result, ctx: ctx.state.data.reviews_agree,
+        until=lambda _result, ctx: ctx.data.reviews_agree,
     )
 
     print(f"Query: {query}\n")
