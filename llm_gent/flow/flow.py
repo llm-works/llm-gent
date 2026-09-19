@@ -285,6 +285,14 @@ class Flow:
         has no effect on the first node — there is no previous result to
         transform.
 
+        Threading of the previous result is opt-in at the verb signature:
+        ``async def v(ctx)`` drops the value, ``async def v(ctx, prev)``
+        (or ``*args``) consumes it. State (``ctx.state.data``) is the
+        channel for multi-hop handoffs, loop / branch predicates, and any
+        value that must survive checkpoint / resume. Both channels may be
+        used together when the returned value has more than one consumer
+        (see "Return values vs state" in ``docs/index.md``).
+
         Hooks may be attached inline (kwargs) or via chained
         :meth:`rescue` / :meth:`after` calls — the two forms are equivalent.
 

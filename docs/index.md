@@ -111,6 +111,62 @@ assert await flow.run("ship it") == 3
 `ctx.state.data`. Adding a third downstream verb that also needs `target` is
 free — the state is already there.
 
+### Return values vs state
+
+A verb has two output channels — its return value and `ctx.state.data`.
+Each feeds a different consumer, and the framework never treats them as
+alternatives; a verb may use either or both.
+
+**Return values** thread single-hop to the next node:
+
+- `.call(a).call(b)` — `b` receives `a`'s return as its sole positional,
+  bound by signature-aware dispatch. A `b` declared as `async def b(ctx)`
+  drops the value; `async def b(ctx, prev)` (or `*args`) consumes it. The
+  verb signature is the opt-in — there is no separate builder-level marker.
+- `.map(body)` — each per-item result is collected into the result list
+  (order preserved). `aggregate=` folds the list; omitted, the list is the
+  map node's own return.
+- `.branch(when=...)` — the predicate receives the previous node's return
+  as `prev_result`; the chosen arm's return is the branch node's own return.
+- `.iterate(body, until=...)` — each body return becomes the next
+  iteration's input; the last iteration's return is the iterate node's
+  own return. `until=(result, ctx) -> bool` sees that return as
+  `result`.
+
+**State** persists for the whole run and is the channel for anything
+other than a single-hop hand-off:
+
+- Multi-hop handoffs. Two verbs that both need a value produced three
+  steps earlier read it from `ctx.data.<field>`; the intermediate steps
+  don't need to know it exists.
+- Loop and branch predicates. `until=` and `when=` receive `ctx` and
+  read `ctx.data.<field>` when the deciding signal isn't in the just-
+  returned value.
+- Checkpoint / resume. Only `ctx.state.data` (the payload the flow was
+  constructed with, `state_type=` on the factory) is serialized;
+  return values are transient and don't survive resume.
+- Aggregation across concurrent items. Under `.map(state=proj, merge=fn)`
+  each item projects an isolated child payload and folds back through
+  `merge` — cross-item accumulation lives in state, not in the returned
+  list.
+
+**"Return AND mutate" is idiomatic when a value has two consumers.**
+Verifier's `judge` returns the verdict (so the chain can carry it) and
+also writes `ctx.data.reviews_agree` because the enclosing
+`.iterate(until=lambda _r, ctx: ctx.data.reviews_agree, ...)` reads state,
+not the return. Structured-agent's `triage` returns the `TriageResponse`
+(so `.run()` yields it as the flow's final value) and also writes
+`ctx.data.final_triage` because the state slot is what the checkpoint
+carries across resume. Neither pattern is redundant — each channel has a
+different consumer.
+
+Rubric for picking a channel when only one consumer needs the value:
+
+- Next verb is the only consumer → return; skip the state slot.
+- The consumer is >1 step downstream, is a loop/branch predicate, or the
+  value must survive resume → state.
+- Two consumers of different kinds → both.
+
 ## Related Projects
 
 - [llm-infer](https://github.com/llm-works/llm-infer) - LLM inference server and client
