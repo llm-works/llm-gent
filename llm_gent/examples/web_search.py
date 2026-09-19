@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
+# ci-run: "python asyncio tutorial"
+
 """Demo: web search with pluggable backend.
 
 Demonstrates the WebSearchTool with a stub backend. Real backends (Brave,

@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
+# ci-run: --smoke
+
 """Quickstart for llm-gent.
 
 Tutorial-shape agent construction:
