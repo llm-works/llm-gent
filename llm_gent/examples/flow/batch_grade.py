@@ -141,16 +141,51 @@ class BatchGradingState(StateDataclass):
     final_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        def _serialize_result(r: Grade | Failure | Skipped) -> dict[str, Any]:
+            if isinstance(r, Grade):
+                return {"_t": "Grade", **r.model_dump()}
+            if isinstance(r, Failure):
+                return {
+                    "_t": "Failure",
+                    "exc_type": type(r.exception).__name__,
+                    "exc_msg": str(r.exception),
+                    "item": asdict(r.item) if hasattr(r.item, "__dataclass_fields__") else r.item,
+                }
+            return {
+                "_t": "Skipped",
+                "item": asdict(r.item) if hasattr(r.item, "__dataclass_fields__") else r.item,
+            }
+
+        summary = dict(self.final_summary)
+        if "grades" in summary:
+            summary["grades"] = [_serialize_result(r) for r in summary["grades"]]
         return {
             "submissions": [asdict(s) for s in self.submissions],
-            "final_summary": dict(self.final_summary),
+            "final_summary": summary,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BatchGradingState:
+        def _deserialize_result(d: dict[str, Any]) -> Grade | Failure | Skipped:
+            t = d.get("_t")
+            if t == "Grade":
+                return Grade(score=d["score"], rationale=d["rationale"])
+            if t == "Failure":
+                return Failure(
+                    exception=RuntimeError(f"{d['exc_type']}: {d['exc_msg']}"),
+                    item=Submission(**d["item"]) if isinstance(d["item"], dict) else d["item"],
+                )
+            return Skipped(
+                item=Submission(**d["item"]) if isinstance(d["item"], dict) else d["item"],
+            )
+
+        raw_summary = data.get("final_summary", {})
+        summary: dict[str, Any] = dict(raw_summary)
+        if "grades" in summary:
+            summary["grades"] = [_deserialize_result(r) for r in summary["grades"]]
         return cls(
             submissions=[Submission(**s) for s in data["submissions"]],
-            final_summary=dict(data.get("final_summary", {})),
+            final_summary=summary,
         )
 
 
