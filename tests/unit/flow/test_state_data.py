@@ -209,6 +209,11 @@ class _FlatPayload(StateDataclass):
 
 
 @dataclass
+class _TuplePayload(StateDataclass):
+    items: tuple[int, ...] = field(default_factory=tuple)
+
+
+@dataclass
 class _PlainNestedOuter(StateDataclass):
     inner: _PlainInner
     n: int = 0
@@ -231,6 +236,13 @@ class TestStateDataclassMixin:
         original = _FlatPayload(name="foo", count=3, log=[1, 2], meta={"k": 9})
         loaded = _FlatPayload.from_dict(original.to_dict())
         assert loaded == original
+
+    def test_tuple_round_trip(self) -> None:
+        """Tuple fields decode as tuples, not lists."""
+        original = _TuplePayload(items=(1, 2, 3))
+        loaded = _TuplePayload.from_dict(original.to_dict())
+        assert loaded == original
+        assert isinstance(loaded.items, tuple)
 
     def test_nested_plain_dataclass_round_trip(self) -> None:
         """Plain nested dataclass encodes AND decodes — annotation-driven."""

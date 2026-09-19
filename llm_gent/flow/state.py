@@ -225,10 +225,14 @@ def _decode_value(raw: Any, annotation: Any) -> Any:
         return _decode_union(raw, annotation)
     if annotation is Any:
         return raw
-    if origin in (list, tuple):
+    if origin is list:
         args = get_args(annotation)
         item_t: Any = args[0] if args else Any
         return [_decode_value(v, item_t) for v in raw]
+    if origin is tuple:
+        args = get_args(annotation)
+        item_t = args[0] if args else Any
+        return tuple(_decode_value(v, item_t) for v in raw)
     if origin is dict:
         args = get_args(annotation)
         val_t: Any = args[1] if len(args) == 2 else Any
