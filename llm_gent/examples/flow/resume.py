@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
+# ci-run:
+
 """Kill-and-resume demo on a counter loop.
 
 Exercises the Flow-level checkpointer end-to-end without touching an LLM:
