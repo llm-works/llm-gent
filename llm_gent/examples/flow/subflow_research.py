@@ -156,37 +156,14 @@ class ResearchState(StateDataclass):
 
     :attr:`topic_summaries` is filled by :func:`merge_topic` as each map
     item completes; :attr:`final_report` is set by :func:`synthesize`.
+    :class:`StateDataclass` auto-recurses into ``dict[str, TopicSummary]``
+    and ``Report | None``, so no serializer override is needed.
     """
 
     question: str
     topics: list[str] = field(default_factory=list)
     topic_summaries: dict[str, TopicSummary] = field(default_factory=dict)
     final_report: Report | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "question": self.question,
-            "topics": list(self.topics),
-            "topic_summaries": {
-                k: v.model_dump(mode="json") for k, v in self.topic_summaries.items()
-            },
-            "final_report": self.final_report.model_dump(mode="json")
-            if self.final_report
-            else None,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ResearchState:
-        report_data = data.get("final_report")
-        return cls(
-            question=data["question"],
-            topics=list(data.get("topics", [])),
-            topic_summaries={
-                k: TopicSummary.model_validate(v)
-                for k, v in (data.get("topic_summaries") or {}).items()
-            },
-            final_report=Report.model_validate(report_data) if report_data else None,
-        )
 
 
 @dataclass
@@ -197,28 +174,13 @@ class TopicState(StateDataclass):
     only ``parent_state`` — the item (topic name) is threaded through
     the body's positional arg, not the projection. :func:`gather`
     stamps :attr:`topic` on entry so :func:`merge_topic` knows which
-    key to fold under.
+    key to fold under. :class:`StateDataclass` auto-recurses into the
+    Pydantic-backed fields; no serializer override is needed.
     """
 
     topic: str = ""
     snippets: list[Snippet] = field(default_factory=list)
     summary: TopicSummary | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "topic": self.topic,
-            "snippets": [s.model_dump(mode="json") for s in self.snippets],
-            "summary": self.summary.model_dump(mode="json") if self.summary else None,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TopicState:
-        summary_data = data.get("summary")
-        return cls(
-            topic=data.get("topic", ""),
-            snippets=[Snippet.model_validate(s) for s in data.get("snippets", [])],
-            summary=TopicSummary.model_validate(summary_data) if summary_data else None,
-        )
 
 
 # ── outer-state cast helper ─────────────────────────────────────────

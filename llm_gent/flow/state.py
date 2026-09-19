@@ -30,8 +30,25 @@ the enclosing flow. Consumers who never checkpoint don't need to conform.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any, Generic, Protocol, Self, TypeVar, cast, runtime_checkable
+import dataclasses
+import types
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import (
+    Any,
+    Generic,
+    Protocol,
+    Self,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+    runtime_checkable,
+)
+
+from pydantic import BaseModel
 
 
 T = TypeVar("T")
@@ -73,12 +90,26 @@ class StateData(Protocol):
 
 
 class StateDataclass:
-    """Mixin that satisfies :class:`StateData` for flat dataclasses.
+    """Mixin that satisfies :class:`StateData` for dataclass state payloads.
 
-    Opt-in convenience for the common case: a dataclass whose fields are
-    JSON-native scalars, lists, or dicts. Inheriting this mixin provides
-    :meth:`to_dict` via :func:`dataclasses.asdict` and
-    :meth:`from_dict` via ``cls(**data)`` — no per-field boilerplate.
+    :meth:`to_dict` walks the dataclass fields and encodes each value;
+    :meth:`from_dict` walks the resolved type hints and reconstructs each
+    field. Both recurse into the shapes that appear naturally in state
+    payloads:
+
+    - :class:`~pydantic.BaseModel` — ``model_dump(mode="json")`` /
+      ``model_validate(...)``, including nested BaseModels which pydantic
+      handles internally.
+    - Nested :class:`StateDataclass` — delegates to the inner mixin.
+    - Plain nested dataclass — recurses field-by-field.
+    - ``T | None`` / :class:`typing.Optional` — unwrap None and decode ``T``.
+    - ``list[T]`` / ``tuple[T, ...]`` — element-wise recursion.
+    - ``dict[K, V]`` — recurses over values (keys pass through; they must
+      be JSON-native).
+    - :class:`~enum.Enum` — ``.value`` / ``Enum(value)``.
+    - :class:`~typing.Any` — pass-through on both sides; the caller owns
+      the runtime shape.
+    - JSON primitives — passed through.
 
     Usage::
 
@@ -87,36 +118,166 @@ class StateDataclass:
             count: int = 0
             log: list[int] = field(default_factory=list)
 
-    Limitations
-    -----------
-    :func:`dataclasses.asdict` recurses into nested dataclasses and
-    produces plain dicts for them; the naive :meth:`from_dict` does
-    **not** recurse — nested-dataclass fields land as dicts, not
-    reconstructed instances. Consumers with nested dataclass state
-    override :meth:`from_dict` (or both) with a shape-aware version.
+    Escalation
+    ----------
+    A field whose value (on encode) or annotation (on decode) does not
+    match any of the recognized shapes raises :class:`TypeError` with the
+    field name and the offending type. The subclass then overrides
+    :meth:`to_dict` and/or :meth:`from_dict` with hand-written logic.
+    This is the deliberate escape hatch — Union of multiple non-None arms,
+    ``dict[str, Any]`` whose values need discriminated reconstruction, and
+    fields wrapping non-JSON-native objects (exceptions, custom sentinels)
+    all land here. Overrides always win: the mixin never intercepts a
+    method the subclass provides.
 
-    Type coercion is likewise absent: fields are assigned as-is from the
-    input dict. Sources that may deliver values with drifted types
-    (e.g., ints as strings) must override :meth:`from_dict` to coerce.
+    Ambiguous unions specifically: ``A | B`` where both are non-None
+    types cannot be reconstructed without a discriminator, so the mixin
+    raises rather than guessing. ``T | None`` is fine — the None arm is
+    trivially discriminated by value.
     """
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize via :func:`dataclasses.asdict`.
+        """Encode the dataclass fields to a JSON-native dict.
 
-        Requires the subclass to be a dataclass. Recurses into nested
-        dataclass fields — see the class docstring on the asymmetric
-        :meth:`from_dict` behavior.
+        Iterates ``dataclasses.fields(self)`` and encodes each value via
+        the recursive rules described in the class docstring. Fields
+        whose value cannot be auto-encoded raise :class:`TypeError` with
+        the field name attached — see the class docstring's Escalation
+        section for the override path.
         """
-        return asdict(cast(Any, self))
+        result: dict[str, Any] = {}
+        for f in dataclasses.fields(cast(Any, self)):
+            value = getattr(self, f.name)
+            try:
+                result[f.name] = _encode_value(value)
+            except TypeError as e:
+                raise TypeError(
+                    f"{type(self).__name__}.to_dict(): field {f.name!r} "
+                    f"(value type {type(value).__name__!r}) is not "
+                    f"auto-serializable — override to_dict()/from_dict(). "
+                    f"Cause: {e}"
+                ) from e
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
-        """Reconstruct via ``cls(**data)``.
+        """Reconstruct the dataclass from a JSON-native dict.
 
-        Flat-dataclass path only; nested-dataclass fields are NOT
-        reconstructed — see the class docstring.
+        Iterates ``dataclasses.fields(cls)`` and decodes each field's raw
+        value against its resolved type hint. Missing keys fall back to
+        the dataclass field default (or default_factory) — the mixin
+        never overrides a default with ``None``. Fields whose annotation
+        cannot be auto-decoded raise :class:`TypeError` with the field
+        name attached — see the class docstring's Escalation section.
         """
-        return cls(**data)
+        hints = get_type_hints(cls)
+        kwargs: dict[str, Any] = {}
+        for f in dataclasses.fields(cast(Any, cls)):
+            if f.name not in data:
+                continue
+            raw = data[f.name]
+            annotation = hints.get(f.name, Any)
+            try:
+                kwargs[f.name] = _decode_value(raw, annotation)
+            except TypeError as e:
+                raise TypeError(
+                    f"{cls.__name__}.from_dict(): field {f.name!r} "
+                    f"(annotation {annotation!r}) is not "
+                    f"auto-reconstructable — override from_dict(). "
+                    f"Cause: {e}"
+                ) from e
+        return cls(**kwargs)
+
+
+def _encode_value(value: Any) -> Any:
+    """Recursively encode a :class:`StateDataclass` field value.
+
+    Contract lives on :class:`StateDataclass`; this helper implements the
+    dispatch. Unrecognized value types raise a bare :class:`TypeError`
+    that the caller reraises with the field name attached.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, StateDataclass):
+        return value.to_dict()
+    if isinstance(value, (list, tuple)):
+        return [_encode_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _encode_value(v) for k, v in value.items()}
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _encode_value(getattr(value, f.name)) for f in dataclasses.fields(value)}
+    raise TypeError(f"cannot auto-encode value of type {type(value).__name__!r}")
+
+
+def _decode_value(raw: Any, annotation: Any) -> Any:
+    """Recursively decode a JSON-native ``raw`` value under ``annotation``.
+
+    Contract lives on :class:`StateDataclass`; this helper implements the
+    dispatch. Unrecognized annotations raise a bare :class:`TypeError`
+    that the caller reraises with the field name attached.
+    """
+    origin = get_origin(annotation)
+    if origin is types.UnionType or origin is Union:
+        return _decode_union(raw, annotation)
+    if annotation is Any:
+        return raw
+    if origin in (list, tuple):
+        args = get_args(annotation)
+        item_t: Any = args[0] if args else Any
+        return [_decode_value(v, item_t) for v in raw]
+    if origin is dict:
+        args = get_args(annotation)
+        val_t: Any = args[1] if len(args) == 2 else Any
+        return {k: _decode_value(v, val_t) for k, v in raw.items()}
+    if isinstance(annotation, type):
+        if annotation in (str, int, float, bool):
+            return raw
+        if issubclass(annotation, BaseModel):
+            return annotation.model_validate(raw)
+        if issubclass(annotation, StateDataclass):
+            return annotation.from_dict(raw)
+        if issubclass(annotation, Enum):
+            return annotation(raw)
+        if dataclasses.is_dataclass(annotation):
+            return _decode_plain_dataclass(annotation, raw)
+    raise TypeError(f"cannot auto-decode annotation {annotation!r}")
+
+
+def _decode_union(raw: Any, annotation: Any) -> Any:
+    """Decode a Union / ``T | None`` annotation.
+
+    Only ``T | None`` (exactly one non-None arm) is auto-decodable —
+    multi-arm unions need a discriminator the mixin cannot invent. Split
+    from :func:`_decode_value` to keep that dispatcher small.
+    """
+    non_none = tuple(a for a in get_args(annotation) if a is not type(None))
+    if len(non_none) != 1:
+        raise TypeError(
+            f"cannot decode union {annotation!r} — more than one non-None "
+            f"arm; use a discriminated union or override from_dict()"
+        )
+    return None if raw is None else _decode_value(raw, non_none[0])
+
+
+def _decode_plain_dataclass(cls: type, raw: dict[str, Any]) -> Any:
+    """Reconstruct a plain dataclass (not a :class:`StateDataclass`) from ``raw``.
+
+    Split from :func:`_decode_value` to keep that dispatcher small.
+    Resolves the nested class's own type hints once, then decodes each
+    field against them. Missing keys fall back to the field default.
+    """
+    nested_hints = get_type_hints(cls)
+    return cls(
+        **{
+            f.name: _decode_value(raw[f.name], nested_hints.get(f.name, Any))
+            for f in dataclasses.fields(cls)
+            if f.name in raw
+        }
+    )
 
 
 @dataclass(frozen=True)

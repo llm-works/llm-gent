@@ -45,10 +45,10 @@ Shape of the canonical ReAct-flavored agent:
    is a hard bound in case both signals somehow fail to trip.
 
 State serialization: :class:`Plan`, :class:`ToolCall`, and
-:class:`StepResult` are :class:`~pydantic.BaseModel` subclasses, so
-:class:`PlanExecuteState` overrides :meth:`to_dict` / :meth:`from_dict`
-to recurse through them — same pattern as
-:class:`~llm_gent.examples.flow.structured_agent.BugReportState`.
+:class:`StepResult` are :class:`~pydantic.BaseModel` subclasses;
+:class:`~llm_gent.flow.StateDataclass` auto-recurses into ``T | None``
+and ``list[T]`` of BaseModels, so :class:`PlanExecuteState` needs no
+``to_dict`` / ``from_dict`` override.
 
 Run standalone::
 
@@ -148,10 +148,9 @@ EXTRACTOR = Role(name="extractor", backend="stub", model="extractor-model")
 class PlanExecuteState(StateDataclass):
     """Question in, plan + step trace out.
 
-    :attr:`plan`, :attr:`step_results`, and the ``ToolCall`` values
-    inside them are Pydantic models; :func:`dataclasses.asdict` does not
-    recurse through those, so :meth:`to_dict` / :meth:`from_dict`
-    override the default StateDataclass serialization.
+    :class:`StateDataclass` auto-recurses into ``Plan | None`` and
+    ``list[StepResult]`` (both Pydantic-backed) so no serializer
+    override is needed.
     """
 
     question: str
@@ -159,26 +158,6 @@ class PlanExecuteState(StateDataclass):
     step_index: int = 0
     step_results: list[StepResult] = field(default_factory=list)
     final_answer: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "question": self.question,
-            "plan": self.plan.model_dump(mode="json") if self.plan is not None else None,
-            "step_index": self.step_index,
-            "step_results": [r.model_dump(mode="json") for r in self.step_results],
-            "final_answer": self.final_answer,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> PlanExecuteState:
-        plan_data = data.get("plan")
-        return cls(
-            question=data["question"],
-            plan=Plan.model_validate(plan_data) if plan_data is not None else None,
-            step_index=data.get("step_index", 0),
-            step_results=[StepResult.model_validate(r) for r in data.get("step_results", [])],
-            final_answer=data.get("final_answer"),
-        )
 
 
 # ── verbs ────────────────────────────────────────────────────────────
