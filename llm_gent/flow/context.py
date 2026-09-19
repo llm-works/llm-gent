@@ -179,6 +179,18 @@ class Context(Generic[T]):
         protocol-typed handle, use the annotation form instead::
 
             saia: MyProto = ctx.saia
+
+        When several verbs in a file need the same Protocol-typed
+        handle, keep the annotation in one file-scoped helper rather
+        than repeating it per verb::
+
+            def _saia(ctx: Context[MyState]) -> MyProto:
+                saia: MyProto = ctx.saia
+                return saia
+
+            @verb(role=R)
+            async def do_thing(ctx: Context[MyState], prev: X) -> Y:
+                return await _saia(ctx).complete_structured(...)
         """
         return self.saia  # type: ignore[no-any-return]
 
