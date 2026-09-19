@@ -53,15 +53,13 @@ def verb(
 ) -> VerbCallable | Callable[[VerbCallable], VerbCallable]:
     """Mark an async function as a verb, optionally role-bound.
 
-    Three call shapes:
+    Two call shapes:
 
-    - ``@verb`` — bare decorator; the verb has no role. ``ctx.saia``
-      returns ``None`` on such a dispatch, so the verb must not touch
-      it. Use for pure-Python steps (counters, tick loops, plain data
-      transforms) that share the flow's dispatch machinery without
-      needing a backend.
-    - ``@verb()`` — same as bare; the empty-call form exists for
-      readers who reach for parentheses reflexively.
+    - ``@verb`` or ``@verb()`` — bare decorator; the verb has no role.
+      ``ctx.saia`` returns ``None`` on such a dispatch, so the verb
+      must not touch it. Use for pure-Python steps (counters, tick
+      loops, plain data transforms) that share the flow's dispatch
+      machinery without needing a backend.
     - ``@verb(role=R)`` — role-bound verb; the framework builds
       ``ctx.saia`` for role ``R`` via the flow's :class:`SAIAFactory`.
 

@@ -57,11 +57,11 @@ class Context(Generic[T]):
     """
 
     role: Role | None
-    """The role the current verb declared, or ``None`` for a subflow-node ctx.
+    """The role the current verb declared, or ``None`` for composition hooks and pure-Python verbs.
 
-    ``None`` only appears on the ambient ctx passed to ``rescue`` / ``after``
-    hooks attached to a subflow node — those hooks fire at the composition
-    layer, above any single role. Verb-level contexts always carry a role.
+    ``None`` appears on composition hook contexts (``rescue`` / ``after``
+    attached to a subflow node) and on pure-Python verb contexts created
+    from ``@verb`` without ``role=``.
     """
 
     state: State[T]
@@ -142,7 +142,7 @@ class Context(Generic[T]):
             return None
         return self.flow._saia_for(self.role)
 
-    def saia_as(self, cls: type[S]) -> S:
+    def saia_as(self, cls: type[S]) -> S | None:
         """Return :attr:`saia` typed as ``cls`` — cast helper for verb authors.
 
         :attr:`saia` is typed :data:`Any` because the framework has no

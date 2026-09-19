@@ -365,9 +365,17 @@ class TestExecutionShape:
         flow = make_ff().create()
 
         class VarArgsVerb:
-            """Verb that accepts variable args to test fallback forwarding."""
+            """Verb that accepts variable args to test fallback forwarding.
+
+            The ``__signature__`` property raises to force introspection failure,
+            exercising the ``introspection_failed=True`` fallback path.
+            """
 
             role = ROLE_A
+
+            @property
+            def __signature__(self) -> None:
+                raise TypeError("uninspectable")
 
             async def __call__(
                 self, ctx: Context, *args: Any, **kwargs: Any

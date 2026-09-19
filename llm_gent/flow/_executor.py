@@ -199,16 +199,15 @@ def _compute_verb_arity(target: Any) -> _VerbArity:
             keyword_names=frozenset(),
             introspection_failed=True,
         )
-    params = list(sig.parameters.values())[1:]
+    params = list(sig.parameters.values())
+    # Skip ctx if it's a fixed positional (not *args).
+    fixed_pos = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    if params and params[0].kind in fixed_pos:
+        params = params[1:]
     return _VerbArity(
         var_positional=any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params),
         var_keyword=any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params),
-        positional_slots=sum(
-            1
-            for p in params
-            if p.kind
-            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        ),
+        positional_slots=sum(1 for p in params if p.kind in fixed_pos),
         keyword_names=frozenset(
             p.name
             for p in params
