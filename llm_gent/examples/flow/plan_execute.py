@@ -69,7 +69,7 @@ from enum import StrEnum
 from typing import Any
 
 from appinfra.log import quick_console_logger
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
 from llm_gent.flow import (
@@ -120,7 +120,7 @@ class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reasoning: str
-    steps: list[str]
+    steps: list[str] = Field(min_length=1)
 
 
 class StepResult(BaseModel):
@@ -252,6 +252,8 @@ async def calc_tool(_ctx: Context[PlanExecuteState], step: ToolCall) -> StepResu
     allowed = set("0123456789+-*/(). ")
     if not expr or set(expr) - allowed:
         output = f"Cannot evaluate expression {expr!r}: unsupported characters."
+    elif "**" in expr:
+        output = f"Cannot evaluate expression {expr!r}: exponentiation not allowed."
     else:
         try:
             output = str(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307
