@@ -94,7 +94,7 @@ def _build_state_converter() -> Converter:
         lambda cls: lambda raw, _: cls.model_validate(raw),
     )
     # UUID, Decimal, and pathlib types are not in the JSON preconf's
-    # default hooks in cattrs 26.x. Encode as strings; decode via the
+    # default hooks (verified through cattrs 26.x). Encode as strings; decode via the
     # class constructor. Decimal round-trips through str exactly (float
     # would lose precision).
     conv.register_unstructure_hook(UUID, str)
