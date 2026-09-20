@@ -31,7 +31,7 @@ from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from .context import Context
-from .state import State, StateData
+from .state import State, StateFactory
 
 
 if TYPE_CHECKING:
@@ -258,7 +258,7 @@ class _Iterate:
     deadline: float | None
     state_fn: StateProject | None = None
     merge_fn: StateMerge | None = None
-    state_type: type[StateData] | None = None
+    state_factory: StateFactory[Any] | None = None
 
 
 @dataclass
@@ -274,7 +274,7 @@ class _Map:
     guard: GuardFn | None = None
     on_error: OnErrorFn | None = None
     max_concurrency: int | None = None
-    state_type: type[StateData] | None = None
+    state_factory: StateFactory[Any] | None = None
 
 
 @dataclass
@@ -296,4 +296,4 @@ class _Node:
     after: AfterHook | None = None
     state_fn: StateProject | None = None
     merge_fn: StateMerge | None = None
-    state_type: type[StateData] | None = None
+    state_factory: StateFactory[Any] | None = None

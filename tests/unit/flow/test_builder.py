@@ -676,8 +676,8 @@ class TestChainedVsKwargsHooks:
             """Raise."""
             raise ValueError
 
-        chained = make_ff(saia_f=saia).create().call(fail).rescue(lambda _e, _prev, _c: "R")
-        kwargs = make_ff(saia_f=saia).create().call(fail, rescue=lambda _e, _prev, _c: "R")
+        chained = make_ff(saia_factory=saia).create().call(fail).rescue(lambda _e, _prev, _c: "R")
+        kwargs = make_ff(saia_factory=saia).create().call(fail, rescue=lambda _e, _prev, _c: "R")
 
         assert await chained.run() == await kwargs.run() == "R"
 
@@ -693,9 +693,16 @@ class TestChainedVsKwargsHooks:
             return 42
 
         chained = (
-            make_ff(saia_f=saia).create().call(make).after(lambda r, _c: seen.append(("c", r)))
+            make_ff(saia_factory=saia)
+            .create()
+            .call(make)
+            .after(lambda r, _c: seen.append(("c", r)))
         )
-        kwargs = make_ff(saia_f=saia).create().call(make, after=lambda r, _c: seen.append(("k", r)))
+        kwargs = (
+            make_ff(saia_factory=saia)
+            .create()
+            .call(make, after=lambda r, _c: seen.append(("k", r)))
+        )
 
         await chained.run()
         await kwargs.run()
@@ -731,7 +738,7 @@ class TestSubflow:
             return f"n={x}"
 
         sub = make_ff().create("inner").call(add_one).then(times_two)  # no saia
-        main = make_ff(saia_f=saia).create("outer").call(sub).then(stringify)
+        main = make_ff(saia_factory=saia).create("outer").call(sub).then(stringify)
 
         assert await main.run(5) == "n=12"  # ((5+1)*2)
 
@@ -751,14 +758,14 @@ class TestSubflow:
             return ctx.saia is prev
 
         sub = make_ff().create("inner").call(inner_verb)
-        main = make_ff(saia_f=saia).create().call(outer_verb).then(sub)
+        main = make_ff(saia_factory=saia).create().call(outer_verb).then(sub)
 
         assert await main.run() is True
         assert saia.built_for == [ROLE_A]
 
     @pytest.mark.asyncio
     async def test_subflow_hooks_receive_ambient_ctx(self) -> None:
-        """Rescue/after on a subflow node get a ctx with role=None, saia_f=None."""
+        """Rescue/after on a subflow node get a ctx with role=None, saia_factory=None."""
         saia = StubFactory()
 
         @verb(role=ROLE_A)
@@ -776,7 +783,7 @@ class TestSubflow:
             seen["flow"] = ctx.flow
             return "handled"
 
-        main = make_ff(saia_f=saia).create("outer").call(sub, rescue=policy)
+        main = make_ff(saia_factory=saia).create("outer").call(sub, rescue=policy)
         assert await main.run(None) == "handled"
         assert seen["role"] is None
         assert seen["saia"] is None
@@ -793,7 +800,7 @@ class TestSubflow:
             return ctx.state.data
 
         sub = make_ff().create("inner").call(read_state)
-        main = make_ff(saia_f=saia).create(state={"default": True}).call(sub)
+        main = make_ff(saia_factory=saia).create(state={"default": True}).call(sub)
 
         assert await main.run(None) == {"default": True}
         assert await main.run(None, state={"overridden": True}) == {"overridden": True}
@@ -883,7 +890,7 @@ class TestCancellation:
             return "swallowed"
 
         sub = make_ff().create("inner").call(inner_cancel)
-        main = make_ff(saia_f=saia).create("outer").call(sub, rescue=parent_rescue)
+        main = make_ff(saia_factory=saia).create("outer").call(sub, rescue=parent_rescue)
 
         with pytest.raises(asyncio.CancelledError):
             await main.run(None)
@@ -901,7 +908,7 @@ class TestCancellation:
             started.set()
             await asyncio.sleep(3600)
 
-        flow = make_ff(saia_f=saia).create().call(slow)
+        flow = make_ff(saia_factory=saia).create().call(slow)
         task = asyncio.create_task(flow.run())
         await started.wait()
         task.cancel()

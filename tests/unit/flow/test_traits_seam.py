@@ -64,7 +64,7 @@ class TestContextField:
         async def peek(ctx: Any) -> None:
             captured["traits"] = ctx.traits
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory()).call(peek)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory()).call(peek)
         asyncio.run(flow.run())
         assert captured["traits"] is None
 
@@ -79,7 +79,9 @@ class TestContextField:
             trait.record(item)
             return item
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory(), traits=registry).call(write_fact)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry).call(
+            write_fact
+        )
         asyncio.run(flow.run("first"))
         asyncio.run(flow.run("second"))
         assert memory.writes == ["first", "second"]
@@ -93,7 +95,7 @@ class TestContextField:
         async def read(ctx: Any) -> _MemoryStub:
             return ctx.traits.require(_MemoryStub)
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory(), traits=registry).call(read)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry).call(read)
         result = asyncio.run(flow.run())
         assert result is memory
 
@@ -107,7 +109,7 @@ class TestContextField:
         async def peek(ctx: Any) -> tuple[Any, Any]:
             return ctx.traits.get(_MemoryStub), ctx.traits.get(_StorageStub)
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory(), traits=registry).call(peek)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry).call(peek)
         m, s = asyncio.run(flow.run())
         assert m is mem
         assert s is stg
@@ -119,12 +121,12 @@ class TestFlowConstructor:
     def test_traits_kwarg_stored(self) -> None:
         """The registry passed at construction is retrievable via the property."""
         registry = _fresh_registry()
-        flow = Flow(make_test_logger(), saia_f=StubFactory(), traits=registry)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry)
         assert flow.traits is registry
 
     def test_traits_default_none(self) -> None:
         """Without the kwarg the property returns None."""
-        flow = Flow(make_test_logger(), saia_f=StubFactory())
+        flow = Flow(make_test_logger(), saia_factory=StubFactory())
         assert flow.traits is None
 
 
@@ -134,14 +136,14 @@ class TestFlowFactoryPropagation:
     def test_factory_traits_reaches_flow(self) -> None:
         """A FlowFactory-built flow surfaces the captured registry."""
         registry = _fresh_registry()
-        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), traits=registry)
+        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
         assert ff.create().traits is registry
 
     def test_factory_traits_reaches_verb(self) -> None:
         """A verb dispatched through a FlowFactory-built flow reads ctx.traits."""
         memory = _MemoryStub(agent=object())
         registry = _fresh_registry(memory)
-        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), traits=registry)
+        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
 
         captured: dict[str, Any] = {}
 
@@ -155,24 +157,24 @@ class TestFlowFactoryPropagation:
 
     def test_factory_default_traits_none(self) -> None:
         """Without traits= on the factory, built flows carry None."""
-        ff = FlowFactory(make_test_logger(), saia_f=StubFactory())
+        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory())
         assert ff.create().traits is None
 
 
 class TestFactoryDerivers:
-    """with_saia_f and with_traits preserve unrelated fields."""
+    """with_saia_factory and with_traits preserve unrelated fields."""
 
-    def test_with_saia_f_preserves_traits(self) -> None:
+    def test_with_saia_factory_preserves_traits(self) -> None:
         """Swapping the SAIA factory keeps the trait registry intact."""
         registry = _fresh_registry()
-        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), traits=registry)
-        derived = ff.with_saia_f(StubFactory())
+        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
+        derived = ff.with_saia_factory(StubFactory())
         assert derived.create().traits is registry
 
     def test_with_traits_returns_new_factory(self) -> None:
         """with_traits() derives a new factory (immutable-style swap)."""
         first, second = _fresh_registry(), _fresh_registry()
-        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), traits=first)
+        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=first)
         derived = ff.with_traits(second)
         assert derived is not ff
         assert derived.create().traits is second
@@ -180,24 +182,24 @@ class TestFactoryDerivers:
         assert ff.create().traits is first
 
     def test_with_traits_preserves_saia_f_and_state(self) -> None:
-        """with_traits() carries saia_f, state, and lg forward."""
+        """with_traits() carries saia_factory, state, and lg forward."""
         sf = StubFactory()
         state = {"scope": "shared"}
-        ff = FlowFactory(make_test_logger(), saia_f=sf, state=state, traits=_fresh_registry())
+        ff = FlowFactory(make_test_logger(), saia_factory=sf, state=state, traits=_fresh_registry())
         derived = ff.with_traits(_fresh_registry())
         built = derived.create()
-        assert built._saia_f is sf
+        assert built._saia_factory is sf
         assert built.state is state
 
     def test_with_traits_none_clears_registry(self) -> None:
         """with_traits(None) derives a factory whose flows have no registry."""
-        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), traits=_fresh_registry())
+        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=_fresh_registry())
         derived = ff.with_traits(None)
         assert derived.create().traits is None
 
 
 class TestSubflowInheritance:
-    """Subflows borrow the outer runtime's traits (matches saia_f behavior)."""
+    """Subflows borrow the outer runtime's traits (matches saia_factory behavior)."""
 
     def test_lambda_subflow_sees_parent_traits(self) -> None:
         """A lambda-form (Buildable) subflow reads the parent's registered traits.
@@ -219,7 +221,7 @@ class TestSubflowInheritance:
             return "done"
 
         flow = (
-            Flow(make_test_logger(), saia_f=StubFactory(), traits=registry)
+            Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry)
             .call(outer)
             .branch(when=lambda prev, _ctx: prev, then=lambda f: f.call(inner))
         )
@@ -238,7 +240,9 @@ class TestSubflowInheritance:
         # Child constructed with NO traits — should still see the parent's registry
         # when run as a subflow under the parent runtime.
         child = Flow(make_test_logger(), name="child").call(inner)
-        parent = Flow(make_test_logger(), saia_f=StubFactory(), traits=parent_registry).call(child)
+        parent = Flow(make_test_logger(), saia_factory=StubFactory(), traits=parent_registry).call(
+            child
+        )
         result = asyncio.run(parent.run())
         assert result is memory
 
@@ -254,7 +258,7 @@ class TestBackwardCompatibility:
             assert ctx.traits is None
             return value
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory()).call(echo)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory()).call(echo)
         assert asyncio.run(flow.run("hello")) == "hello"
 
     def test_missing_trait_via_require_raises(self) -> None:
@@ -265,6 +269,6 @@ class TestBackwardCompatibility:
         async def demand(ctx: Any) -> None:
             ctx.traits.require(_MemoryStub)
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory(), traits=registry).call(demand)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry).call(demand)
         with pytest.raises(TraitNotFoundError, match="_MemoryStub"):
             asyncio.run(flow.run())

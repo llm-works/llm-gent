@@ -59,6 +59,14 @@ and treats the payload as :data:`Any`.
 """
 
 
+T_co = TypeVar("T_co", covariant=True)
+"""Covariant payload variant used where the type only appears in return
+position — notably :class:`StateFactory`, whose sole method produces a
+``T`` but never consumes one. A ``StateFactory[Subclass]`` naturally
+satisfies ``StateFactory[Parent]``.
+"""
+
+
 def _is_basemodel_class(cls: Any) -> bool:
     """Predicate for the cattrs BaseModel hook factory.
 
@@ -278,3 +286,56 @@ class State(Generic[T]):
         while node._parent is not None:
             node = node._parent
         return node
+
+
+class StateFactory(Protocol[T_co]):
+    """Framework-facing state construction on the checkpoint restore path.
+
+    The framework calls :meth:`restore` at ``.with_checkpointer(...)``
+    resume time to rebuild state from the serialized dict. Runtime
+    handles that cannot be serialized (Logger, storage backends,
+    connections) are captured at factory construction and threaded
+    through :meth:`restore`; the framework passes no runtime context of
+    its own.
+
+    Fresh construction is user-owned — the protocol declares no method
+    for it. Implementations typically ship a ``new(**kwargs)`` alongside
+    for centralized construction (see :class:`TypeStateFactory`), but
+    the framework never calls it.
+
+    ``StateFactory[T]`` narrows the payload type; :meth:`restore` returns
+    ``T`` so the restore path in :class:`~llm_gent.flow.flow.Flow` is
+    statically typed against the caller's state class. ``T`` is
+    covariant here because it only appears in return position.
+    """
+
+    def restore(self, data: dict[str, Any]) -> T_co: ...
+
+
+class TypeStateFactory(Generic[T]):
+    """:class:`StateFactory` adapter for stateless state types.
+
+    Wraps a bare class satisfying :class:`StateData` in the factory shape
+    for the common case where state carries no runtime handles. The
+    framework calls :meth:`restore` on resume, which delegates to
+    ``state_type.from_dict(data)``; :meth:`new` forwards kwargs to the
+    type constructor for the fresh path.
+
+    Usage::
+
+        ff = FlowFactory(lg, state_factory=TypeStateFactory(Counter))
+
+    State that needs runtime bindings should implement
+    :class:`StateFactory` directly and inject handles in :meth:`restore`.
+    """
+
+    def __init__(self, state_type: type[T]) -> None:
+        self._state_type = state_type
+
+    def new(self, **kwargs: Any) -> T:
+        """Construct a fresh instance by forwarding kwargs to the type."""
+        return self._state_type(**kwargs)
+
+    def restore(self, data: dict[str, Any]) -> T:
+        """Restore an instance via ``state_type.from_dict(data)``."""
+        return cast(T, self._state_type.from_dict(data))  # type: ignore[attr-defined]

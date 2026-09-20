@@ -88,7 +88,7 @@ from .nodes import (
     _RunEnv,
 )
 from .role import Role
-from .state import State, StateData
+from .state import State, StateFactory
 
 
 class Flow:
@@ -105,10 +105,10 @@ class Flow:
         lg: Logger,
         name: str = "",
         *,
-        saia_f: SAIAFactory | None = None,
+        saia_factory: SAIAFactory | None = None,
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
-        state_type: type[StateData] | None = None,
+        state_factory: StateFactory[Any] | None = None,
     ) -> None:
         """Initialize a flow.
 
@@ -123,14 +123,11 @@ class Flow:
             lg: Logger instance for tracing execution.
             name: Optional identifier — used in error messages and traces.
                 Also lets a flow serve as a named node inside a parent chain.
-            saia_f: A :class:`SAIAFactory` that builds role-bound saia
-                instances. The ``_f`` suffix carries the framework-wide
-                policy: any ``saia_f=`` kwarg takes a factory, never a
-                saia instance. Required only when role-bound code
-                accesses ``ctx.saia`` — verbs that route LLM calls
-                through their own configuration can run without one.
-                A subflow borrows the factory from the runtime it
-                executes under.
+            saia_factory: A :class:`SAIAFactory` that builds role-bound saia
+                instances. Required only when role-bound code accesses
+                ``ctx.saia`` — verbs that route LLM calls through their own
+                configuration can run without one. A subflow borrows the
+                factory from the runtime it executes under.
             state: User-owned shared state object. Verbs read and (typically)
                 mutate it in place. Opaque to the flow; may be overridden per
                 :meth:`run` invocation.
@@ -140,20 +137,23 @@ class Flow:
                 runtime's registry (like the saia cache) via the same
                 internal handoff, so mounting on the top-level flow is
                 enough to reach every nested dispatch.
-            state_type: Payload class satisfying :class:`StateData` — the
-                framework calls ``state_type.from_dict(...)`` on
-                :meth:`run` ``resume=True`` to reconstruct
-                ``ctx.state.data`` from the loaded checkpoint. Only
-                consulted when :meth:`with_checkpointer` is wired. ``None``
-                (default) treats ``ctx.state.data`` as a plain dict that
-                round-trips through the checkpointer as-is.
+            state_factory: A :class:`StateFactory` the framework calls on
+                :meth:`run` ``resume=True`` to reconstruct ``ctx.state.data``
+                from the loaded checkpoint: ``state_factory.restore(...)``.
+                For state that carries no runtime handles wrap the type in
+                :class:`TypeStateFactory`; for state that binds a Logger /
+                storage / connection at restore, implement
+                :class:`StateFactory` directly. Only consulted when
+                :meth:`with_checkpointer` is wired. ``None`` (default)
+                treats ``ctx.state.data`` as a plain dict that round-trips
+                through the checkpointer as-is.
         """
         self._lg = lg
         self._name = name
-        self._saia_f = saia_f
+        self._saia_factory = saia_factory
         self._state = state
         self._traits = traits
-        self._state_type = state_type
+        self._state_factory = state_factory
         self._halt_event: asyncio.Event | None = None
         self._budget_tracker: Tracker | None = None
         self._checkpointer: CheckpointStore | None = None
@@ -274,7 +274,7 @@ class Flow:
         after: AfterHook | None = None,
         state: StateProject | None = None,
         merge: StateMerge | None = None,
-        state_type: type[StateData] | None = None,
+        state_factory: StateFactory[Any] | None = None,
     ) -> Flow:
         """Append a node to the composition chain.
 
@@ -324,7 +324,7 @@ class Flow:
                 after=after,
                 state_fn=state,
                 merge_fn=merge,
-                state_type=state_type,
+                state_factory=state_factory,
             )
         )
         return self
@@ -338,7 +338,7 @@ class Flow:
         after: AfterHook | None = None,
         state: StateProject | None = None,
         merge: StateMerge | None = None,
-        state_type: type[StateData] | None = None,
+        state_factory: StateFactory[Any] | None = None,
     ) -> Flow:
         """Append a chained node — semantic alias for :meth:`call`.
 
@@ -353,7 +353,7 @@ class Flow:
             after=after,
             state=state,
             merge=merge,
-            state_type=state_type,
+            state_factory=state_factory,
         )
 
     def rescue(self, policy: RescuePolicy) -> Flow:
@@ -432,7 +432,7 @@ class Flow:
         after: AfterHook | None = None,
         state: StateProject | None = None,
         merge: StateMerge | None = None,
-        state_type: type[StateData] | None = None,
+        state_factory: StateFactory[Any] | None = None,
     ) -> Flow:
         """Append a bounded iteration: run ``body`` until a stop condition holds.
 
@@ -487,7 +487,7 @@ class Flow:
                 deadline=deadline,
                 state_fn=state,
                 merge_fn=merge,
-                state_type=state_type,
+                state_factory=state_factory,
             ),
             rescue=rescue,
             after=after,
@@ -507,7 +507,7 @@ class Flow:
         after: AfterHook | None = None,
         state: StateProject | None = None,
         merge: StateMerge | None = None,
-        state_type: type[StateData] | None = None,
+        state_factory: StateFactory[Any] | None = None,
     ) -> Flow:
         """Append a parallel fan-out: run ``body`` per item concurrently.
 
@@ -570,7 +570,7 @@ class Flow:
                 state_fn=state,
                 merge_fn=merge,
                 max_concurrency=max_concurrency,
-                state_type=state_type,
+                state_factory=state_factory,
             ),
             rescue=rescue,
             after=after,
@@ -688,7 +688,7 @@ class Flow:
         Resume semantics on the wired iterate:
 
         - **State** hydrates from ``state_json['data']`` (via
-          ``state_type.from_dict`` if a ``state_type`` is bound, else
+          ``state_factory.restore`` if a ``state_factory`` is bound, else
           passthrough for plain dicts).
         - **Iteration counter** is restored: ``max_iters`` is a
           cumulative bound across resumes — saving at iteration N and
@@ -757,10 +757,10 @@ class Flow:
                 the framework calls
                 :meth:`CheckpointStore.load_checkpoint` at start and, if a
                 checkpoint exists, replaces ``state`` with the hydrated
-                payload. A flow with ``state_type=T`` reconstructs the
-                payload via ``T.from_dict(state_json['data'])``; a flow
-                without ``state_type`` treats the stored payload as a
-                plain dict. Absent-checkpoint resume is a no-op — the run
+                payload. A flow with a bound ``state_factory=`` reconstructs
+                the payload via ``state_factory.restore(state_json['data'])``;
+                a flow without ``state_factory`` treats the stored payload
+                as a plain dict. Absent-checkpoint resume is a no-op — the run
                 proceeds with ``state`` as given. On fully successful
                 completion the checkpoint is deleted. Requires
                 :meth:`with_checkpointer` to be wired; raises otherwise.
@@ -1005,13 +1005,13 @@ class Flow:
         construction state) and no replay work.
 
         On hit: deserializes ``state_json['data']`` via
-        ``state_type.from_dict`` (or passes it through when ``state_type``
-        is ``None`` — the plain-dict contract) and constructs a
-        :class:`_ResumeReplay` carrying the path + iteration read out of
-        ``metadata_json``. The empty-path branch is what a pre-PR-3
-        checkpoint hits: no ``path`` key → nothing to replay, iteration
-        counter stays at 0, and the run proceeds from the hydrated state
-        as a normal (non-resume) execution.
+        ``state_factory.restore`` (or passes it through when
+        ``state_factory`` is ``None`` — the plain-dict contract) and
+        constructs a :class:`_ResumeReplay` carrying the path + iteration
+        read out of ``metadata_json``. The empty-path branch is what a
+        pre-PR-3 checkpoint hits: no ``path`` key → nothing to replay,
+        iteration counter stays at 0, and the run proceeds from the
+        hydrated state as a normal (non-resume) execution.
         """
         assert self._checkpointer is not None
         if self._client_flow_id is None:
@@ -1025,10 +1025,10 @@ class Flow:
             return fallback, None
         state_json, metadata_json = loaded
         raw = state_json.get("data")
-        if self._state_type is None:
+        if self._state_factory is None:
             hydrated = raw
         else:
-            hydrated = self._state_type.from_dict(raw if isinstance(raw, dict) else {})
+            hydrated = self._state_factory.restore(raw if isinstance(raw, dict) else {})
         return State(data=hydrated), self._build_resume_replay(metadata_json, state_json)
 
     def _build_resume_replay(
@@ -1060,13 +1060,13 @@ class Flow:
         cached = self._saia_by_role.get(role)
         if cached is not None:
             return cached
-        if self._saia_f is None:
+        if self._saia_factory is None:
             label = self._name or "<anonymous>"
             raise RuntimeError(
-                f"Flow {label!r} has no SAIAFactory — saia_f= was not supplied at "
+                f"Flow {label!r} has no SAIAFactory — saia_factory= was not supplied at "
                 f"construction (needed to build saia for role {role.name!r})"
             )
-        built = self._saia_f.build(role)
+        built = self._saia_factory.build(role)
         self._saia_by_role[role] = built
         return built
 

@@ -36,7 +36,7 @@ class TestContextBudgetPropagation:
             captured["budget"] = ctx.budget
             return "ok"
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory()).call(peek).with_budget(tracker)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory()).call(peek).with_budget(tracker)
         await flow.run()
         assert captured["budget"] is tracker
 
@@ -49,7 +49,7 @@ class TestContextBudgetPropagation:
             captured["budget"] = ctx.budget
             return "ok"
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory()).call(peek)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory()).call(peek)
         await flow.run()
         assert captured["budget"] is None
 
@@ -63,7 +63,7 @@ class TestContextBudgetPropagation:
             captured["budget"] = ctx.budget
             return "ok"
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory()).with_budget(tracker)
+        flow = Flow(make_test_logger(), saia_factory=StubFactory()).with_budget(tracker)
         flow.register(peek)
         await flow.dispatch("peek")
         assert captured["budget"] is tracker
@@ -82,9 +82,9 @@ class TestSubflowInheritance:
             captured["budget"] = ctx.budget
             return "ok"
 
-        inner = Flow(make_test_logger(), saia_f=StubFactory(), name="inner").call(peek)
+        inner = Flow(make_test_logger(), saia_factory=StubFactory(), name="inner").call(peek)
         outer = (
-            Flow(make_test_logger(), saia_f=StubFactory(), name="outer")
+            Flow(make_test_logger(), saia_factory=StubFactory(), name="outer")
             .call(inner)
             .with_budget(outer_tracker)
         )
@@ -103,12 +103,12 @@ class TestSubflowInheritance:
             return "ok"
 
         inner = (
-            Flow(make_test_logger(), saia_f=StubFactory(), name="inner")
+            Flow(make_test_logger(), saia_factory=StubFactory(), name="inner")
             .call(peek)
             .with_budget(inner_tracker)
         )
         outer = (
-            Flow(make_test_logger(), saia_f=StubFactory(), name="outer")
+            Flow(make_test_logger(), saia_factory=StubFactory(), name="outer")
             .call(inner)
             .with_budget(outer_tracker)
         )
@@ -130,9 +130,9 @@ class TestEndToEndHalt:
             ctx.budget.track("web_search", count=3)
             iterations.append(len(iterations) + 1)
 
-        body = Flow(make_test_logger(), saia_f=StubFactory(), name="body").call(burn)
+        body = Flow(make_test_logger(), saia_factory=StubFactory(), name="body").call(burn)
         flow = (
-            Flow(make_test_logger(), saia_f=StubFactory())
+            Flow(make_test_logger(), saia_factory=StubFactory())
             .iterate(body, max_iters=10)
             .with_halt(halt)
             .with_budget(tracker)
@@ -153,7 +153,9 @@ class TestEndToEndHalt:
             scope = ctx.budget.child(budget=0.002, halt=scope_halt)
             scope.track("web_search", count=3)
 
-        flow = Flow(make_test_logger(), saia_f=StubFactory()).call(scoped_work).with_budget(root)
+        flow = (
+            Flow(make_test_logger(), saia_factory=StubFactory()).call(scoped_work).with_budget(root)
+        )
         await flow.run()
         assert scope_halt.is_set()
         assert not halt.is_set()

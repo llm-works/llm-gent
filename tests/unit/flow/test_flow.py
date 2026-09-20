@@ -36,7 +36,7 @@ class TestRegistration:
 
     def test_register_decorated_function(self) -> None:
         """A @verb-decorated function registers under its __name__."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def do_thing(ctx: Context) -> None:
@@ -47,7 +47,7 @@ class TestRegistration:
 
     def test_register_with_explicit_name(self) -> None:
         """An explicit name overrides the function's __name__."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def do_thing(ctx: Context) -> None:
@@ -59,7 +59,7 @@ class TestRegistration:
 
     def test_register_rejects_missing_role_attr(self) -> None:
         """Registration rejects callables without a .role attribute."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         async def not_a_verb(ctx: Context) -> None:
             """No role attribute attached."""
@@ -69,7 +69,7 @@ class TestRegistration:
 
     def test_register_rejects_non_role_role_attr(self) -> None:
         """Registration rejects a .role attribute that isn't a Role."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         async def bogus(ctx: Context) -> None:
             """Has a role attr but it's the wrong type."""
@@ -81,7 +81,7 @@ class TestRegistration:
 
     def test_register_class_instance(self) -> None:
         """A class instance with .role and async __call__ registers cleanly."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         class MyVerb:
             """Test class-based verb."""
@@ -104,7 +104,7 @@ class TestDispatch:
     async def test_dispatch_invokes_verb_with_context(self) -> None:
         """The verb receives a Context whose saia is bound to its role."""
         saia = StubFactory()
-        flow = Flow(lg=make_test_logger(), saia_f=saia)
+        flow = Flow(lg=make_test_logger(), saia_factory=saia)
 
         @verb(role=ROLE_A)
         async def check(ctx: Context, value: int) -> tuple[Any, int]:
@@ -122,7 +122,7 @@ class TestDispatch:
     async def test_dispatch_passes_state_through(self) -> None:
         """ctx.state exposes whatever the flow was constructed with."""
         user_state = {"counter": 0}
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory(), state=user_state)
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory(), state=user_state)
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context) -> int:
@@ -138,7 +138,7 @@ class TestDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_reports_ctx_role(self) -> None:
         """ctx.role reflects the role attached to the dispatched verb."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_B)
         async def report(ctx: Context) -> Role:
@@ -151,7 +151,7 @@ class TestDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_unknown_name_raises(self) -> None:
         """Dispatching an unregistered name raises KeyError with the name."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
         with pytest.raises(KeyError, match="no verb"):
             await flow.dispatch("missing")
 
@@ -163,7 +163,7 @@ class TestSAIACaching:
     async def test_saia_built_once_per_role(self) -> None:
         """Repeated dispatch of the same role reuses the cached saia."""
         saia = StubFactory()
-        flow = Flow(lg=make_test_logger(), saia_f=saia)
+        flow = Flow(lg=make_test_logger(), saia_factory=saia)
 
         @verb(role=ROLE_A)
         async def a1(ctx: Context) -> Any:
@@ -189,7 +189,7 @@ class TestSAIACaching:
     async def test_saia_built_per_distinct_role(self) -> None:
         """Distinct roles get distinct saia instances."""
         saia = StubFactory()
-        flow = Flow(lg=make_test_logger(), saia_f=saia)
+        flow = Flow(lg=make_test_logger(), saia_factory=saia)
 
         @verb(role=ROLE_A)
         async def alpha(ctx: Context) -> Any:

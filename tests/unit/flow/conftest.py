@@ -40,11 +40,11 @@ class StubFactory:
         return StubSAIA(role)
 
 
-def make_ff(saia_f: SAIAFactory | None = None) -> FlowFactory:
+def make_ff(saia_factory: SAIAFactory | None = None) -> FlowFactory:
     """Return a fresh :class:`FlowFactory` with a test logger + SAIAFactory.
 
     Defaults to a fresh :class:`StubFactory` per call so tests that
-    introspect the factory get an isolated instance. Pass ``saia_f=`` when
-    the test needs to keep a reference to inspect after the run.
+    introspect the factory get an isolated instance. Pass ``saia_factory=``
+    when the test needs to keep a reference to inspect after the run.
     """
-    return FlowFactory(make_test_logger(), saia_f=saia_f or StubFactory())
+    return FlowFactory(make_test_logger(), saia_factory=saia_factory or StubFactory())

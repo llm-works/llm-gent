@@ -118,7 +118,7 @@ class TestStateWrapper:
 
         from .conftest import StubFactory, make_test_logger
 
-        ff = FlowFactory(make_test_logger(), saia_f=StubFactory(), state=None)
+        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), state=None)
         flow = ff.create().call(check)
         await flow.run()
 

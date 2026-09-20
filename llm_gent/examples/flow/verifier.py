@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from appinfra.log import quick_console_logger
 
 from llm_gent.examples.flow._infra import ExampleSAIA, StubSAIAFactory
-from llm_gent.flow import Context, FlowFactory, Role, StateDataclass, verb
+from llm_gent.flow import Context, FlowFactory, Role, StateDataclass, TypeStateFactory, verb
 
 
 MAX_ROUNDS = 5
@@ -68,7 +68,7 @@ class VerifierState(StateDataclass):
 
     Inherits :class:`~llm_gent.flow.StateDataclass` for ``to_dict`` /
     ``from_dict`` — flat dataclass, no override needed. Bound as
-    ``state_type=VerifierState`` so the flow can be checkpointed and
+    ``state_factory=TypeStateFactory(VerifierState)`` so the flow can be checkpointed and
     resumed alongside the mechanics :mod:`resume` demonstrates. Not
     exercised in this example's ``main`` (no checkpointer wired), but
     the shape carries the resume-ready surface.
@@ -203,8 +203,8 @@ def _demo_scripts() -> dict[str, list[str]]:
 async def main() -> int:
     """Run the verifier flow on a canned query."""
     lg = quick_console_logger("verifier-example", config={"level": "warning"})
-    saia_f = StubSAIAFactory(_demo_scripts())
-    ff = FlowFactory(lg, saia_f=saia_f, state_type=VerifierState)
+    saia_factory = StubSAIAFactory(_demo_scripts())
+    ff = FlowFactory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(VerifierState))
 
     query = "What is the capital of France?"
     flow = ff.create("verifier", state=VerifierState(query=query))
@@ -218,7 +218,7 @@ async def main() -> int:
     final = await flow.run()
     print("\n=== converged ===")
     print(f"final answer: {final}")
-    print(f"rounds run:   {len(saia_f.instance('judge').call_log)}")
+    print(f"rounds run:   {len(saia_factory.instance('judge').call_log)}")
     return 0
 
 

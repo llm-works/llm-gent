@@ -79,6 +79,7 @@ from llm_gent.flow import (
     Role,
     Skipped,
     StateDataclass,
+    TypeStateFactory,
     verb,
 )
 from llm_gent.flow.panel import majority
@@ -434,8 +435,10 @@ def _print_summary(summary: dict[str, Any]) -> None:
 async def main() -> int:
     """Grade the demo batch end-to-end."""
     lg = quick_console_logger("batch-grade-example", config={"level": "warning"})
-    saia_f = StructuredStubSAIAFactory(_demo_scripts())
-    ff = FlowFactory(lg, saia_f=saia_f, state_type=BatchGradingState)
+    saia_factory = StructuredStubSAIAFactory(_demo_scripts())
+    ff = FlowFactory(
+        lg, saia_factory=saia_factory, state_factory=TypeStateFactory(BatchGradingState)
+    )
 
     submissions = _demo_submissions()
     flow = ff.create("batch-grade", state=BatchGradingState(submissions=submissions))

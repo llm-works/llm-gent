@@ -21,7 +21,7 @@ class TestCtxLg:
     async def test_ctx_lg_is_flow_lg(self) -> None:
         """A module-level verb reads the ambient logger via ``ctx.lg``."""
         lg = make_test_logger()
-        flow = Flow(lg=lg, saia_f=StubFactory())
+        flow = Flow(lg=lg, saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def read_lg(ctx: Context) -> object:
@@ -35,7 +35,7 @@ class TestCtxLg:
     async def test_ctx_lg_survives_dispatch(self) -> None:
         """Repeated dispatches surface the same logger reference."""
         lg = make_test_logger()
-        flow = Flow(lg=lg, saia_f=StubFactory())
+        flow = Flow(lg=lg, saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def read_lg(ctx: Context) -> object:
@@ -75,7 +75,7 @@ class TestContextGeneric:
     async def test_context_generic_dispatch(self) -> None:
         """A verb annotated as ``Context[_Payload]`` runs without error."""
         payload = _Payload(turn=0)
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory(), state=payload)
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory(), state=payload)
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context[_Payload]) -> int:
@@ -95,7 +95,7 @@ class TestCtxData:
     async def test_ctx_data_returns_payload(self) -> None:
         """``ctx.data`` returns the same object as ``ctx.state.data``."""
         payload = _Payload(turn=7)
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory(), state=payload)
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory(), state=payload)
 
         @verb(role=ROLE_A)
         async def probe(ctx: Context[_Payload]) -> tuple[object, object]:
@@ -110,7 +110,7 @@ class TestCtxData:
     async def test_ctx_data_mutation_is_visible(self) -> None:
         """Mutating through ``ctx.data`` is visible on ``ctx.state.data``."""
         payload = _Payload(turn=0)
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory(), state=payload)
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory(), state=payload)
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context[_Payload]) -> int:
@@ -145,7 +145,7 @@ class TestPureVerbCtx:
     @pytest.mark.asyncio
     async def test_pure_verb_dispatch_has_no_saia(self) -> None:
         """Dispatch of a role-less verb builds a Context whose ``saia`` is ``None``."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb
         async def tick(ctx: Context) -> object:
@@ -158,7 +158,7 @@ class TestPureVerbCtx:
     @pytest.mark.asyncio
     async def test_pure_verb_in_chain(self) -> None:
         """A pure-Python verb runs as a chain step (no role, no ``ctx.saia`` access)."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb
         async def head(ctx: Context, n: int) -> int:
@@ -175,7 +175,7 @@ class TestSaiaAs:
     @pytest.mark.asyncio
     async def test_saia_as_returns_saia(self) -> None:
         """The helper returns the same object as ``ctx.saia`` when a role is bound."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def probe(ctx: Context) -> tuple[object, object]:
@@ -190,7 +190,7 @@ class TestSaiaAs:
     @pytest.mark.asyncio
     async def test_saia_as_on_roleless_returns_none(self) -> None:
         """Without a role, ``ctx.saia_as(cls)`` returns ``None`` (no saia to bind)."""
-        flow = Flow(lg=make_test_logger(), saia_f=StubFactory())
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb
         async def probe(ctx: Context) -> object:
