@@ -267,6 +267,17 @@ class State(Generic[T]):
     :attr:`is_root`. Nothing else needs raw parent access today.
     """
 
+    _factory: StateFactory[Any] | None = field(default=None, repr=False)
+    """Factory that created this state's payload, for checkpoint restore.
+
+    When a scoped child state is restored from a checkpoint, the framework
+    calls ``_factory.restore(data)`` to reconstruct the typed payload.
+    Threading: passthrough projection inherits the parent's factory;
+    explicit projection attaches the node's factory (or inherits if none).
+    ``None`` at the root unless the top-level :class:`Flow` was constructed
+    with ``state_factory=``.
+    """
+
     @property
     def is_root(self) -> bool:
         """True when this state has no parent — the outermost scope of a run."""

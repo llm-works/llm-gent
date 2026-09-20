@@ -475,6 +475,59 @@ class TestEndToEndRoundTrip:
         result = await flow_b.run(resume=True)
         assert result == 3
 
+    async def test_iterate_inherits_call_scope_state_factory(self) -> None:
+        """Iterate inheriting call-scope state restores through the call's factory.
+
+        Scenario: `.call(subflow, state=..., state_factory=F)` creates typed
+        state; the subflow's iterate has no factory of its own but inherits
+        via ``State._factory``. On resume, the iterate uses the inherited
+        factory to restore.
+        """
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[Counter], _prev: Any = None) -> int:
+            ctx.data.n += 1
+            return ctx.data.n
+
+        store = _RecordingStore()
+
+        # Subflow with iterate — no state_factory on the iterate itself.
+        inner = make_ff().create("inner").iterate(bump, max_iters=3)
+
+        # Outer flow calls the subflow with typed state + factory.
+        outer_a = (
+            make_ff()
+            .create(state={})
+            .call(
+                inner,
+                state=lambda _p: Counter(),
+                state_factory=TypeStateFactory(Counter),
+            )
+            .with_checkpointer(store, "traj-inherit")
+        )
+        await outer_a.run()
+
+        # Simulate crash after iteration 2.
+        second_state, second_meta = store.saves[1][2], store.saves[1][3]
+        assert second_meta["iteration"] == 2
+        store.preload = (second_state, second_meta)
+        store.saves.clear()
+
+        # Resume: the iterate should restore typed state via inherited factory.
+        outer_b = (
+            make_ff()
+            .create(state={})
+            .call(
+                inner,
+                state=lambda _p: Counter(),
+                state_factory=TypeStateFactory(Counter),
+            )
+            .with_checkpointer(store, "traj-inherit")
+        )
+        result = await outer_b.run(resume=True)
+        # Iteration 3 runs: n goes 2 → 3.
+        assert result == 3
+
 
 # -----------------------------------------------------------------------------
 # Recursive snapshot envelope — path (ancestor IDs) + state tree

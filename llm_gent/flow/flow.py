@@ -251,9 +251,14 @@ class Flow:
         payload = self._state if self._state is not UNSET else {}
         effective_halt = self._halt_event if halt is UNSET else halt
         effective_budget = self._budget_tracker if budget is UNSET else budget
+        state = (
+            payload
+            if isinstance(payload, State)
+            else State(data=payload, _factory=self._state_factory)
+        )
         ctx = Context(
             role=verb.role,
-            state=payload if isinstance(payload, State) else State(data=payload),
+            state=state,
             flow=self,
             traits=self._traits,
             halt=effective_halt,
@@ -991,7 +996,9 @@ class Flow:
         thread a run-wide state instance across multiple :meth:`run` calls.
         """
         payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
-        return payload if isinstance(payload, State) else State(data=payload)
+        if isinstance(payload, State):
+            return payload
+        return State(data=payload, _factory=self._state_factory)
 
     def _hydrate_resume_state(
         self, fallback: State[Any]
@@ -1029,7 +1036,10 @@ class Flow:
             hydrated = raw
         else:
             hydrated = self._state_factory.restore(raw if isinstance(raw, dict) else {})
-        return State(data=hydrated), self._build_resume_replay(metadata_json, state_json)
+        return (
+            State(data=hydrated, _factory=self._state_factory),
+            self._build_resume_replay(metadata_json, state_json),
+        )
 
     def _build_resume_replay(
         self, metadata_json: dict[str, Any], state_json: dict[str, Any]
