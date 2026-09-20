@@ -17,10 +17,15 @@ production shape.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any, Self
+from uuid import UUID
 
 import pytest
+from cattrs.errors import StructureHandlerNotFoundError
 from pydantic import BaseModel
 
 from llm_gent.flow import StateData, StateDataclass
@@ -379,12 +384,67 @@ class TestStateDataclassOtherRecursion:
         )
 
 
+# ── StateDataclass mixin: JSON preconf shapes ────────────────────────
+
+
+@dataclass
+class _WithDatetime(StateDataclass):
+    at: datetime
+
+
+@dataclass
+class _WithUUID(StateDataclass):
+    key: UUID
+
+
+@dataclass
+class _WithDecimal(StateDataclass):
+    amount: Decimal
+
+
+@dataclass
+class _WithPath(StateDataclass):
+    where: PurePosixPath
+
+
+class TestStateDataclassJSONPreconf:
+    """Types the JSON preconf converter handles natively — datetime, UUID, Decimal, Path."""
+
+    def test_datetime_round_trip(self) -> None:
+        """Timezone-aware ``datetime`` fields serialize to ISO 8601 and decode back."""
+        original = _WithDatetime(at=datetime(2026, 9, 19, 12, 0, tzinfo=UTC))
+        loaded = _WithDatetime.from_dict(original.to_dict())
+        assert loaded == original
+        assert isinstance(loaded.at, datetime)
+
+    def test_uuid_round_trip(self) -> None:
+        """UUID fields serialize as strings and decode back to :class:`UUID`."""
+        original = _WithUUID(key=UUID("12345678-1234-5678-1234-567812345678"))
+        loaded = _WithUUID.from_dict(original.to_dict())
+        assert loaded == original
+        assert isinstance(loaded.key, UUID)
+
+    def test_decimal_round_trip(self) -> None:
+        """Decimal fields round-trip without float precision loss."""
+        original = _WithDecimal(amount=Decimal("3.14159265358979323846"))
+        loaded = _WithDecimal.from_dict(original.to_dict())
+        assert loaded == original
+        assert isinstance(loaded.amount, Decimal)
+
+    def test_path_round_trip(self) -> None:
+        """``PurePosixPath`` fields round-trip via string form."""
+        original = _WithPath(where=PurePosixPath("/etc/agents/foo.yaml"))
+        loaded = _WithPath.from_dict(original.to_dict())
+        assert loaded == original
+        assert isinstance(loaded.where, PurePosixPath)
+
+
 # ── StateDataclass mixin: escalation ─────────────────────────────────
 
 
 @dataclass
-class _BadEncode(StateDataclass):
-    error: Any = None
+class _AnyField(StateDataclass):
+    payload: Any = None
 
 
 @dataclass
@@ -393,15 +453,29 @@ class _AmbiguousUnion(StateDataclass):
 
 
 class TestStateDataclassEscalation:
-    """Unsupported shapes raise :class:`TypeError` naming the field."""
+    """Shapes the converter cannot auto-decode — pass-through or explicit failure."""
 
-    def test_unsupported_value_type_raises(self) -> None:
-        """A field holding a non-JSON-native object (an exception) raises."""
-        with pytest.raises(TypeError, match="field 'error'"):
-            _BadEncode(error=RuntimeError("boom")).to_dict()
+    def test_any_field_is_pass_through(self) -> None:
+        """``Any``-typed fields hand the value through both ways.
+
+        The mixin makes no attempt to inspect what's in an ``Any`` field —
+        the caller owns the runtime shape. JSON serialization downstream
+        is what rejects non-JSON-native values; the framework does not.
+        """
+        boom = RuntimeError("boom")
+        encoded = _AnyField(payload=boom).to_dict()
+        assert encoded == {"payload": boom}
+
+        decoded = _AnyField.from_dict({"payload": {"raw": 1}})
+        assert decoded.payload == {"raw": 1}
 
     def test_ambiguous_union_raises(self) -> None:
-        """``A | B`` with two non-None types cannot be reconstructed."""
+        """``A | B`` with two non-None types has no default cattrs handler.
+
+        Consumers configure a tagged-union strategy on
+        :data:`state_converter`, or override :meth:`from_dict` on the
+        state class.
+        """
         payload = _AmbiguousUnion(payload=_BMLeft(k="foo")).to_dict()
-        with pytest.raises(TypeError, match="field 'payload'"):
+        with pytest.raises(StructureHandlerNotFoundError):
             _AmbiguousUnion.from_dict(payload)

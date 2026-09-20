@@ -30,24 +30,22 @@ the enclosing flow. Consumers who never checkpoint don't need to conform.
 
 from __future__ import annotations
 
-import dataclasses
-import types
 from dataclasses import dataclass, field
-from enum import Enum
+from decimal import Decimal
+from pathlib import PurePath
 from typing import (
     Any,
     Generic,
     Protocol,
     Self,
     TypeVar,
-    Union,
     cast,
-    get_args,
-    get_origin,
-    get_type_hints,
     runtime_checkable,
 )
+from uuid import UUID
 
+from cattrs import Converter
+from cattrs.preconf.json import make_converter as _make_json_converter
 from pydantic import BaseModel
 
 
@@ -58,6 +56,88 @@ Consumers who want typed payload access annotate the enclosing
 :class:`~llm_gent.flow.context.Context` as ``Context[MyState]``; the parameter
 threads through to ``ctx.state.data``. Unparameterized usage remains valid
 and treats the payload as :data:`Any`.
+"""
+
+
+def _is_basemodel_class(cls: Any) -> bool:
+    """Predicate for the cattrs BaseModel hook factory.
+
+    Guards against non-class arguments (generic aliases, TypeVars) that
+    ``issubclass`` would reject with :class:`TypeError`.
+    """
+    try:
+        return isinstance(cls, type) and issubclass(cls, BaseModel)
+    except TypeError:
+        return False
+
+
+def _build_state_converter() -> Converter:
+    """Build the module-level converter with the pydantic hook wired.
+
+    Starts from :func:`cattrs.preconf.json.make_converter`, which is the
+    JSON-compatible preset — dataclass / Enum / Optional / list / tuple /
+    dict / TypedDict / NamedTuple / datetime / :class:`~uuid.UUID` /
+    :class:`~decimal.Decimal` / :class:`~pathlib.Path` / set / frozenset
+    all have JSON-native round-trip hooks registered.
+
+    :class:`~pydantic.BaseModel` is not one of the preconf hooks, so a
+    factory dispatches every BaseModel subclass to
+    ``model_dump(mode="json")`` / ``model_validate(...)``.
+    """
+    conv = _make_json_converter()
+    conv.register_unstructure_hook_factory(
+        _is_basemodel_class,
+        lambda _cls: lambda inst: inst.model_dump(mode="json"),
+    )
+    conv.register_structure_hook_factory(
+        _is_basemodel_class,
+        lambda cls: lambda raw, _: cls.model_validate(raw),
+    )
+    # UUID, Decimal, and pathlib types are not in the JSON preconf's
+    # default hooks (verified through cattrs 26.x). Encode as strings; decode via the
+    # class constructor. Decimal round-trips through str exactly (float
+    # would lose precision).
+    conv.register_unstructure_hook(UUID, str)
+    conv.register_structure_hook(UUID, lambda raw, _: UUID(raw))
+    conv.register_unstructure_hook(Decimal, str)
+    conv.register_structure_hook(Decimal, lambda raw, _: Decimal(raw))
+    conv.register_unstructure_hook_factory(
+        lambda cls: isinstance(cls, type) and issubclass(cls, PurePath),
+        lambda _cls: str,
+    )
+    conv.register_structure_hook_factory(
+        lambda cls: isinstance(cls, type) and issubclass(cls, PurePath),
+        lambda cls: lambda raw, _: cls(raw),
+    )
+    return conv
+
+
+state_converter: Converter = _build_state_converter()
+"""Module-level :class:`cattrs.Converter` backing :class:`StateDataclass`.
+
+Built from :func:`cattrs.preconf.json.make_converter` so JSON-native
+round-trip is the default — dataclass / Enum / Optional / list / tuple /
+dict / TypedDict / NamedTuple / :class:`~datetime.datetime` /
+:class:`~uuid.UUID` / :class:`~decimal.Decimal` / :class:`~pathlib.Path` /
+set / frozenset all round-trip. :class:`~pydantic.BaseModel` is bridged
+via a hook factory registered at import time.
+
+Consumers whose state shape lands outside the converter's built-ins
+(heterogeneous ``dict[str, Any]`` with discriminated values, exception
+fields, custom sentinels) extend it in two ways:
+
+1. Register a hook on the converter, local to the module that owns the
+   shape::
+
+       from llm_gent.flow.state import state_converter
+
+       state_converter.register_unstructure_hook(MyType, _to_dict)
+       state_converter.register_structure_hook(MyType, _from_dict)
+
+2. Override :meth:`StateDataclass.to_dict` / :meth:`StateDataclass.from_dict`
+   on the state class. Overrides always win — the mixin never intercepts a
+   method the subclass provides. Prefer this when the shape is specific to
+   one class and doesn't compose across the codebase.
 """
 
 
@@ -92,24 +172,25 @@ class StateData(Protocol):
 class StateDataclass:
     """Mixin that satisfies :class:`StateData` for dataclass state payloads.
 
-    :meth:`to_dict` walks the dataclass fields and encodes each value;
-    :meth:`from_dict` walks the resolved type hints and reconstructs each
-    field. Both recurse into the shapes that appear naturally in state
-    payloads:
+    Both methods delegate to :data:`state_converter`, a module-level
+    :class:`cattrs.Converter` built from the JSON preconf preset. Out of
+    the box the converter walks:
 
     - :class:`~pydantic.BaseModel` — ``model_dump(mode="json")`` /
-      ``model_validate(...)``, including nested BaseModels which pydantic
-      handles internally.
-    - Nested :class:`StateDataclass` — delegates to the inner mixin.
+      ``model_validate(...)`` registered as a hook factory; every
+      BaseModel subclass is handled without per-class setup.
+    - Nested :class:`StateDataclass` — as an ordinary dataclass; cattrs
+      recurses uniformly.
     - Plain nested dataclass — recurses field-by-field.
-    - ``T | None`` / :class:`typing.Optional` — unwrap None and decode ``T``.
-    - ``list[T]`` / ``tuple[T, ...]`` — element-wise recursion.
-    - ``dict[K, V]`` — recurses over values (keys pass through; they must
-      be JSON-native).
-    - :class:`~enum.Enum` — ``.value`` / ``Enum(value)``.
-    - :class:`~typing.Any` — pass-through on both sides; the caller owns
-      the runtime shape.
-    - JSON primitives — passed through.
+    - ``T | None`` / :class:`typing.Optional` — unwrap None, decode ``T``.
+    - ``list[T]`` / ``tuple[T, ...]`` — element-wise recursion; tuple
+      type preserved on decode.
+    - ``dict[K, V]`` — recurses over values (JSON-native keys only).
+    - :class:`~enum.Enum` — ``.value`` / ``EnumType(value)``.
+    - :class:`~datetime.datetime`, :class:`~uuid.UUID`,
+      :class:`~decimal.Decimal`, :class:`~pathlib.Path`, ``set`` /
+      ``frozenset`` — via the JSON preconf hooks.
+    - :class:`~typing.Any` — pass-through; the caller owns the runtime shape.
 
     Usage::
 
@@ -120,168 +201,28 @@ class StateDataclass:
 
     Escalation
     ----------
-    A field whose value (on encode) or annotation (on decode) does not
-    match any of the recognized shapes raises :class:`TypeError` with the
-    field name and the offending type. The subclass then overrides
-    :meth:`to_dict` and/or :meth:`from_dict` with hand-written logic.
-    This is the deliberate escape hatch — Union of multiple non-None arms,
-    ``dict[str, Any]`` whose values need discriminated reconstruction, and
-    fields wrapping non-JSON-native objects (exceptions, custom sentinels)
-    all land here. Overrides always win: the mixin never intercepts a
-    method the subclass provides.
+    Handled fields with unsupported nested values raise
+    :class:`cattrs.errors.ClassValidationError` with the full field path;
+    types without a registered structure handler (e.g., ambiguous unions)
+    raise :class:`cattrs.errors.StructureHandlerNotFoundError` directly.
+    Two escape hatches:
 
-    Ambiguous unions specifically: ``A | B`` where both are non-None
-    types cannot be reconstructed without a discriminator, so the mixin
-    raises rather than guessing. ``T | None`` is fine — the None arm is
-    trivially discriminated by value.
+    1. Register a hook on :data:`state_converter` — framework-wide,
+       covers every state class carrying the type.
+    2. Override :meth:`to_dict` / :meth:`from_dict` on the state class.
+       Overrides always win. Prefer this when the shape is class-local.
+
+    Ambiguous unions ``A | B`` (two non-None arms) need
+    :func:`cattrs.strategies.configure_tagged_union` on the converter, or
+    an override on the state class.
     """
 
     def to_dict(self) -> dict[str, Any]:
-        """Encode the dataclass fields to a JSON-native dict.
-
-        Iterates ``dataclasses.fields(self)`` and encodes each value via
-        the recursive rules described in the class docstring. Fields
-        whose value cannot be auto-encoded raise :class:`TypeError` with
-        the field name attached — see the class docstring's Escalation
-        section for the override path.
-        """
-        result: dict[str, Any] = {}
-        for f in dataclasses.fields(cast(Any, self)):
-            value = getattr(self, f.name)
-            try:
-                result[f.name] = _encode_value(value)
-            except TypeError as e:
-                raise TypeError(
-                    f"{type(self).__name__}.to_dict(): field {f.name!r} "
-                    f"(value type {type(value).__name__!r}) is not "
-                    f"auto-serializable — override to_dict()/from_dict(). "
-                    f"Cause: {e}"
-                ) from e
-        return result
+        return cast(dict[str, Any], state_converter.unstructure(self))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
-        """Reconstruct the dataclass from a JSON-native dict.
-
-        Iterates ``dataclasses.fields(cls)`` and decodes each field's raw
-        value against its resolved type hint. Missing keys fall back to
-        the dataclass field default (or default_factory) — the mixin
-        never overrides a default with ``None``. Fields whose annotation
-        cannot be auto-decoded raise :class:`TypeError` with the field
-        name attached — see the class docstring's Escalation section.
-        """
-        hints = get_type_hints(cls)
-        kwargs: dict[str, Any] = {}
-        for f in dataclasses.fields(cast(Any, cls)):
-            if f.name not in data:
-                continue
-            raw = data[f.name]
-            annotation = hints.get(f.name, Any)
-            try:
-                kwargs[f.name] = _decode_value(raw, annotation)
-            except TypeError as e:
-                raise TypeError(
-                    f"{cls.__name__}.from_dict(): field {f.name!r} "
-                    f"(annotation {annotation!r}) is not "
-                    f"auto-reconstructable — override from_dict(). "
-                    f"Cause: {e}"
-                ) from e
-        return cls(**kwargs)
-
-
-def _encode_value(value: Any) -> Any:
-    """Recursively encode a :class:`StateDataclass` field value.
-
-    Contract lives on :class:`StateDataclass`; this helper implements the
-    dispatch. Unrecognized value types raise a bare :class:`TypeError`
-    that the caller reraises with the field name attached.
-    """
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, BaseModel):
-        return value.model_dump(mode="json")
-    if isinstance(value, StateDataclass):
-        return value.to_dict()
-    if isinstance(value, (list, tuple)):
-        return [_encode_value(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _encode_value(v) for k, v in value.items()}
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {f.name: _encode_value(getattr(value, f.name)) for f in dataclasses.fields(value)}
-    raise TypeError(f"cannot auto-encode value of type {type(value).__name__!r}")
-
-
-def _decode_value(raw: Any, annotation: Any) -> Any:
-    """Recursively decode a JSON-native ``raw`` value under ``annotation``.
-
-    Contract lives on :class:`StateDataclass`; this helper implements the
-    dispatch. Unrecognized annotations raise a bare :class:`TypeError`
-    that the caller reraises with the field name attached.
-    """
-    origin = get_origin(annotation)
-    if origin is types.UnionType or origin is Union:
-        return _decode_union(raw, annotation)
-    if annotation is Any:
-        return raw
-    if origin is list:
-        args = get_args(annotation)
-        item_t: Any = args[0] if args else Any
-        return [_decode_value(v, item_t) for v in raw]
-    if origin is tuple:
-        args = get_args(annotation)
-        item_t = args[0] if args else Any
-        return tuple(_decode_value(v, item_t) for v in raw)
-    if origin is dict:
-        args = get_args(annotation)
-        val_t: Any = args[1] if len(args) == 2 else Any
-        return {k: _decode_value(v, val_t) for k, v in raw.items()}
-    if isinstance(annotation, type):
-        if annotation in (str, int, float, bool):
-            return raw
-        if issubclass(annotation, BaseModel):
-            return annotation.model_validate(raw)
-        if issubclass(annotation, StateDataclass):
-            return annotation.from_dict(raw)
-        if issubclass(annotation, Enum):
-            return annotation(raw)
-        if dataclasses.is_dataclass(annotation):
-            return _decode_plain_dataclass(annotation, raw)
-    raise TypeError(f"cannot auto-decode annotation {annotation!r}")
-
-
-def _decode_union(raw: Any, annotation: Any) -> Any:
-    """Decode a Union / ``T | None`` annotation.
-
-    Only ``T | None`` (exactly one non-None arm) is auto-decodable —
-    multi-arm unions need a discriminator the mixin cannot invent. Split
-    from :func:`_decode_value` to keep that dispatcher small.
-    """
-    non_none = tuple(a for a in get_args(annotation) if a is not type(None))
-    if len(non_none) != 1:
-        raise TypeError(
-            f"cannot decode union {annotation!r} — more than one non-None "
-            f"arm; use a discriminated union or override from_dict()"
-        )
-    return None if raw is None else _decode_value(raw, non_none[0])
-
-
-def _decode_plain_dataclass(cls: type, raw: dict[str, Any]) -> Any:
-    """Reconstruct a plain dataclass (not a :class:`StateDataclass`) from ``raw``.
-
-    Split from :func:`_decode_value` to keep that dispatcher small.
-    Resolves the nested class's own type hints once, then decodes each
-    field against them. Missing keys fall back to the field default.
-    """
-    nested_hints = get_type_hints(cls)
-    return cls(
-        **{
-            f.name: _decode_value(raw[f.name], nested_hints.get(f.name, Any))
-            for f in dataclasses.fields(cls)
-            if f.name in raw
-        }
-    )
+        return state_converter.structure(data, cls)
 
 
 @dataclass(frozen=True)

@@ -132,13 +132,13 @@ class BatchGradingState(StateDataclass):
     """Batch input plus the final aggregate summary.
 
     Overrides :meth:`to_dict` / :meth:`from_dict` — the mixin's
-    auto-recursion handles ``list[Submission]`` (plain dataclass) but
-    ``final_summary: dict[str, Any]`` holds a mix of
+    cattrs-backed converter handles ``list[Submission]`` (plain
+    dataclass) but ``final_summary: dict[str, Any]`` holds a mix of
     :class:`Grade` / :class:`Failure` / :class:`Skipped`, and
     :class:`Failure` wraps a raw :class:`BaseException`. Neither the
     heterogeneous ``dict[str, Any]`` reconstruction nor the exception
-    field is auto-decodable — this is the escalation path the mixin's
-    :class:`TypeError` documents.
+    field is auto-decodable — this is the class-local escape hatch the
+    mixin's escalation section documents.
     """
 
     submissions: list[Submission]
