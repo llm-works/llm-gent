@@ -16,8 +16,9 @@ Save writes two JSON-compatible dicts per iteration:
 - ``state_json`` — the framework-owned payload snapshot. Its shape is
   internal to :mod:`llm_gent.flow`; consumers do not construct it. Its
   contract is that on resume the framework reads it back and, if the flow
-  was constructed with ``state_type=T``, calls ``T.from_dict(state_json['data'])``
-  to reconstruct the user payload. Plain-``dict`` payloads round-trip as-is.
+  was constructed with a ``state_factory=``, calls
+  ``state_factory.restore(state_json['data'])`` to reconstruct the user
+  payload. Plain-``dict`` payloads round-trip as-is.
 - ``metadata_json`` — framework-owned bookkeeping (``path``,
   ``iteration``) that the resume path consults to locate the
   save-point iterate in the composition graph. Also JSON-compatible.
@@ -47,7 +48,7 @@ Resume semantics
 On :meth:`Flow.run` ``resume=True``:
 
 - ``state.data`` hydrates from ``state_json``'s root ``data`` slot (via
-  ``state_type.from_dict`` when a ``state_type`` is bound, else
+  ``state_factory.restore`` when a ``state_factory`` is bound, else
   passthrough for plain dicts).
 - The iteration counter is restored from ``metadata_json['iteration']``,
   so ``max_iters`` is an absolute cumulative bound across resumes — a

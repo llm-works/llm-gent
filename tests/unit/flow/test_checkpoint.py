@@ -7,9 +7,9 @@ Exercises:
 
 - Protocol conformance for the new Flow-level store.
 - :meth:`Flow.with_checkpointer` + :meth:`FlowFactory.with_checkpointer`.
-- ``state_type=`` plumbing on Flow / FlowFactory / .call / .iterate / .map.
+- ``state_factory=`` plumbing on Flow / FlowFactory / .call / .iterate / .map.
 - Save-at-``.iterate``-boundary end-to-end.
-- Framework-owned ``state_type.from_dict`` dispatch on ``run(resume=True)``.
+- Framework-owned ``state_factory.restore`` dispatch on ``run(resume=True)``.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from llm_gent.flow import (
     Context,
     Flow,
     FlowFactory,
+    TypeStateFactory,
     verb,
 )
 from llm_gent.flow.nodes import _Iterate, _Map
@@ -154,26 +155,28 @@ class TestFactoryWithCheckpointer:
 
 
 # -----------------------------------------------------------------------------
-# state_type plumbing
+# state_factory plumbing
 # -----------------------------------------------------------------------------
 
 
-class TestStateTypePlumbing:
-    """``state_type=`` reaches Flow / FlowFactory and every scoped composition site."""
+class TestStateFactoryPlumbing:
+    """``state_factory=`` reaches Flow / FlowFactory and every scoped composition site."""
 
-    def test_flow_init_captures_state_type(self) -> None:
-        """``Flow(..., state_type=T)`` stores it on the flow."""
-        flow = Flow(make_test_logger(), state_type=Counter)
-        assert flow._state_type is Counter
+    def test_flow_init_captures_state_factory(self) -> None:
+        """``Flow(..., state_factory=F)`` stores it on the flow."""
+        sf = TypeStateFactory(Counter)
+        flow = Flow(make_test_logger(), state_factory=sf)
+        assert flow._state_factory is sf
 
     def test_factory_captures_and_threads(self) -> None:
-        """``FlowFactory(state_type=T)`` threads into ``create()``."""
-        ff = FlowFactory(make_test_logger(), state_type=Counter)
+        """``FlowFactory(state_factory=F)`` threads into ``create()``."""
+        sf = TypeStateFactory(Counter)
+        ff = FlowFactory(make_test_logger(), state_factory=sf)
         flow = ff.create()
-        assert flow._state_type is Counter
+        assert flow._state_factory is sf
 
-    def test_call_records_state_type(self) -> None:
-        """``.call(state_type=T)`` stores it on the node."""
+    def test_call_records_state_factory(self) -> None:
+        """``.call(state_factory=F)`` stores it on the node."""
 
         @verb(role=ROLE_A)
         async def step(ctx: Context[Any], x: int) -> int:
@@ -181,32 +184,35 @@ class TestStateTypePlumbing:
 
         subflow = make_ff().create()
         subflow.call(step)
-        parent = make_ff().create().call(subflow, state=lambda _p: {}, state_type=Counter)
-        assert parent._nodes[-1].state_type is Counter
+        sf = TypeStateFactory(Counter)
+        parent = make_ff().create().call(subflow, state=lambda _p: {}, state_factory=sf)
+        assert parent._nodes[-1].state_factory is sf
 
-    def test_iterate_records_state_type(self) -> None:
-        """``.iterate(state_type=T)`` stores it on the iterate node."""
+    def test_iterate_records_state_factory(self) -> None:
+        """``.iterate(state_factory=F)`` stores it on the iterate node."""
 
         @verb(role=ROLE_A)
         async def step(ctx: Context[Any], _: Any = None) -> int:
             return 0
 
-        flow = make_ff().create().iterate(step, max_iters=1, state_type=Counter)
+        sf = TypeStateFactory(Counter)
+        flow = make_ff().create().iterate(step, max_iters=1, state_factory=sf)
         node = flow._nodes[-1].target
         assert isinstance(node, _Iterate)
-        assert node.state_type is Counter
+        assert node.state_factory is sf
 
-    def test_map_records_state_type(self) -> None:
-        """``.map(state_type=T)`` stores it on the map node."""
+    def test_map_records_state_factory(self) -> None:
+        """``.map(state_factory=F)`` stores it on the map node."""
 
         @verb(role=ROLE_A)
         async def step(ctx: Context[Any], item: Any) -> Any:
             return item
 
-        flow = make_ff().create().map(step, items=lambda _p, _c: [1], state_type=Counter)
+        sf = TypeStateFactory(Counter)
+        flow = make_ff().create().map(step, items=lambda _p, _c: [1], state_factory=sf)
         node = flow._nodes[-1].target
         assert isinstance(node, _Map)
-        assert node.state_type is Counter
+        assert node.state_factory is sf
 
 
 # -----------------------------------------------------------------------------
@@ -276,7 +282,7 @@ class TestSaveAtIterateBoundary:
 
         store = _RecordingStore()
         flow = (
-            Flow(make_test_logger(), state=Counter(), state_type=Counter)
+            Flow(make_test_logger(), state=Counter(), state_factory=TypeStateFactory(Counter))
             .with_checkpointer(store, "traj-1")
             .iterate(bump, max_iters=2)
         )
@@ -290,7 +296,7 @@ class TestSaveAtIterateBoundary:
 
 
 class TestResumeHydration:
-    """``run(resume=True)`` loads the checkpoint and hydrates via ``from_dict``."""
+    """``run(resume=True)`` loads the checkpoint and hydrates via ``state_factory.restore``."""
 
     async def test_resume_without_checkpointer_raises(self) -> None:
         """``resume=True`` without a wired checkpointer is a build-time error."""
@@ -332,8 +338,8 @@ class TestResumeHydration:
         await flow.run(state={"n": 0}, resume=True)
         assert seen == [{"n": 42}]
 
-    async def test_resume_typed_payload_calls_from_dict(self) -> None:
-        """When ``state_type=T`` is set, framework calls ``T.from_dict``."""
+    async def test_resume_typed_payload_calls_restore(self) -> None:
+        """When ``state_factory=F`` is set, framework calls ``F.restore``."""
 
         seen: list[Any] = []
 
@@ -343,7 +349,7 @@ class TestResumeHydration:
 
         store = _RecordingStore(preload=({"data": {"n": 7}}, {}))
         flow = (
-            Flow(make_test_logger(), state_type=Counter)
+            Flow(make_test_logger(), state_factory=TypeStateFactory(Counter))
             .with_checkpointer(store, "traj-1")
             .call(peek)
         )
@@ -437,7 +443,7 @@ class TestEndToEndRoundTrip:
         assert seen == [4, 5]
 
     async def test_iterate_round_trip_typed_payload(self) -> None:
-        """Same round-trip with a :class:`StateData` payload via ``state_type=``."""
+        """Same round-trip with a :class:`StateData` payload via ``state_factory=``."""
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context[Counter], _prev: Any = None) -> int:
@@ -448,7 +454,7 @@ class TestEndToEndRoundTrip:
 
         # First run: 2 iterations save; leave the checkpoint at iteration=2.
         flow_a = (
-            Flow(make_test_logger(), state=Counter(), state_type=Counter)
+            Flow(make_test_logger(), state=Counter(), state_factory=TypeStateFactory(Counter))
             .with_checkpointer(store, "traj-1")
             .iterate(bump, max_iters=3)
         )
@@ -462,11 +468,64 @@ class TestEndToEndRoundTrip:
         # Second run: resume starts the counter at 2, so only iteration 3
         # runs — n goes 2 → 3 under cumulative max_iters=3.
         flow_b = (
-            Flow(make_test_logger(), state=Counter(), state_type=Counter)
+            Flow(make_test_logger(), state=Counter(), state_factory=TypeStateFactory(Counter))
             .with_checkpointer(store, "traj-1")
             .iterate(bump, max_iters=3)
         )
         result = await flow_b.run(resume=True)
+        assert result == 3
+
+    async def test_iterate_inherits_call_scope_state_factory(self) -> None:
+        """Iterate inheriting call-scope state restores through the call's factory.
+
+        Scenario: `.call(subflow, state=..., state_factory=F)` creates typed
+        state; the subflow's iterate has no factory of its own but inherits
+        via ``State._factory``. On resume, the iterate uses the inherited
+        factory to restore.
+        """
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[Counter], _prev: Any = None) -> int:
+            ctx.data.n += 1
+            return ctx.data.n
+
+        store = _RecordingStore()
+
+        # Subflow with iterate — no state_factory on the iterate itself.
+        inner = make_ff().create("inner").iterate(bump, max_iters=3)
+
+        # Outer flow calls the subflow with typed state + factory.
+        outer_a = (
+            make_ff()
+            .create(state={})
+            .call(
+                inner,
+                state=lambda _p: Counter(),
+                state_factory=TypeStateFactory(Counter),
+            )
+            .with_checkpointer(store, "traj-inherit")
+        )
+        await outer_a.run()
+
+        # Simulate crash after iteration 2.
+        second_state, second_meta = store.saves[1][2], store.saves[1][3]
+        assert second_meta["iteration"] == 2
+        store.preload = (second_state, second_meta)
+        store.saves.clear()
+
+        # Resume: the iterate should restore typed state via inherited factory.
+        outer_b = (
+            make_ff()
+            .create(state={})
+            .call(
+                inner,
+                state=lambda _p: Counter(),
+                state_factory=TypeStateFactory(Counter),
+            )
+            .with_checkpointer(store, "traj-inherit")
+        )
+        result = await outer_b.run(resume=True)
+        # Iteration 3 runs: n goes 2 → 3.
         assert result == 3
 
 

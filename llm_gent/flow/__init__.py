@@ -16,6 +16,13 @@ Public surface:
   that need to round-trip through a checkpoint (``to_dict`` + ``from_dict``)
 - :class:`StateDataclass` — opt-in mixin satisfying :class:`StateData` for
   flat dataclasses via :func:`dataclasses.asdict` and ``cls(**data)``
+- :class:`StateFactory` — protocol the framework calls at checkpoint
+  restore to reconstruct ``ctx.state.data``; captures runtime handles
+  (Logger, storage) at construction and threads them into the restored
+  state
+- :class:`TypeStateFactory` — :class:`StateFactory` adapter for stateless
+  state types (wraps a :class:`StateData` class so the framework's restore
+  call routes through ``state_type.from_dict``)
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
 - :class:`FlowFactory` — app-scoped :class:`Flow` builder (captures ``lg``
   and one :class:`SAIAFactory`); preferred entry point at the application
@@ -56,7 +63,7 @@ from .loop import Loop, LoopCheckpointStore, LoopFactory
 from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
 from .role import Role
-from .state import State, StateData, StateDataclass
+from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
 from .verb import verb
 
 
@@ -77,6 +84,8 @@ __all__ = [
     "State",
     "StateData",
     "StateDataclass",
+    "StateFactory",
+    "TypeStateFactory",
     "Unset",
     "extractor",
     "grader",

@@ -42,7 +42,7 @@ from .nodes import (
     _ResumeReplay,
     _RunEnv,
 )
-from .state import State
+from .state import State, StateFactory
 
 
 if TYPE_CHECKING:
@@ -131,7 +131,14 @@ async def _invoke_target(
     target = node.target
     if isinstance(target, Flow):
         return await _run_subflow(
-            target, env, node.state_fn, node.merge_fn, node_args, node_kwargs, node_id
+            target,
+            env,
+            node.state_fn,
+            node.merge_fn,
+            node.state_factory,
+            node_args,
+            node_kwargs,
+            node_id,
         )
     if isinstance(target, _Branch):
         return await _run_branch(target, ctx, env, node_args, node_id)
@@ -247,6 +254,7 @@ async def _run_subflow(
     env: _RunEnv,
     state_fn: StateProject | None,
     merge_fn: StateMerge | None,
+    state_factory: StateFactory[Any] | None,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
     node_id: str,
@@ -261,7 +269,7 @@ async def _run_subflow(
     """
     from .flow import _descend_context
 
-    child_state = await _project_state(state_fn, env.state)
+    child_state = await _project_state(state_fn, env.state, state_factory)
     result = await body._run_as_subflow(
         *node_args,
         state=child_state,
@@ -279,21 +287,30 @@ async def _run_subflow(
     return result
 
 
-async def _project_state(state_fn: StateProject | None, parent: State[Any]) -> State[Any]:
+async def _project_state(
+    state_fn: StateProject | None,
+    parent: State[Any],
+    factory: StateFactory[Any] | None = None,
+) -> State[Any]:
     """Build the child :class:`State` for a scoped block; pass-through when unset.
 
     With no projection, the subflow sees the parent's :class:`State` object
-    directly — same reference, shared payload, ``is_root`` echoes the parent.
+    directly — same reference, shared payload, ``is_root`` echoes the parent,
+    and ``_factory`` is inherited.
+
     With a projection, ``state_fn(parent.data)`` produces the child payload,
-    which the framework wraps as ``State(data=child_payload, _parent=parent)``
-    so the child's :meth:`State.root` still walks back to the outermost scope.
+    which the framework wraps as ``State(data=child_payload, _parent=parent,
+    _factory=...)`` so the child's :meth:`State.root` still walks back to
+    the outermost scope. The factory attached is ``factory`` if provided,
+    else inherited from ``parent._factory``.
     """
     if state_fn is None:
         return parent
     child_payload = state_fn(parent.data)
     if inspect.isawaitable(child_payload):
         child_payload = await child_payload
-    return State(data=child_payload, _parent=parent)
+    effective_factory = factory if factory is not None else parent._factory
+    return State(data=child_payload, _parent=parent, _factory=effective_factory)
 
 
 async def _merge_state(merge_fn: StateMerge | None, parent: State[Any], child: State[Any]) -> None:
@@ -427,10 +444,15 @@ async def _run_iterate(
     occurred before the checkpoint was saved.
     """
     iteration, restored_child = _resume_iteration_for(env, node_id)
+    effective_factory = it.state_factory if it.state_factory is not None else env.state._factory
     if restored_child is not None:
-        child_state = State(data=restored_child, _parent=env.state)
+        if effective_factory is not None:
+            restored_data = effective_factory.restore(restored_child)
+        else:
+            restored_data = restored_child
+        child_state = State(data=restored_data, _parent=env.state, _factory=effective_factory)
     else:
-        child_state = await _project_state(it.state_fn, env.state)
+        child_state = await _project_state(it.state_fn, env.state, it.state_factory)
     result: Any = node_args[0] if node_args else None
     started = time.monotonic()
     while True:
@@ -770,7 +792,7 @@ async def _run_map_item_strict(
         return Skipped(item=item)
     item_ctx = _map_item_ctx(env, env.state)
     try:
-        child_state = await _project_state(mp.state_fn, env.state)
+        child_state = await _project_state(mp.state_fn, env.state, mp.state_factory)
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)
@@ -806,7 +828,7 @@ async def _run_map_item(
         return Skipped(item=item)
     item_ctx = _map_item_ctx(env, env.state)
     try:
-        child_state = await _project_state(mp.state_fn, env.state)
+        child_state = await _project_state(mp.state_fn, env.state, mp.state_factory)
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             return Skipped(item=item)

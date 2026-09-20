@@ -14,7 +14,7 @@ Shape:
    TopicList)`, and returns the list of topic names. Also pins
    ``ctx.data.topics`` so a resumed run can inspect what was planned.
 
-2. **.map(body, state=, merge=, state_type=)** — fan out one sub-flow
+2. **.map(body, state=, merge=, state_factory=)** — fan out one sub-flow
    per topic. Each item's body sees its own projected
    :class:`TopicState` on ``ctx.state``, so concurrent per-topic
    scratch spaces (snippets, working summary) don't collide.
@@ -29,7 +29,7 @@ Shape:
      :class:`TopicSummary` into ``parent.topic_summaries`` keyed by the
      topic name the body stamped.
 
-   - ``state_type=TopicState`` — makes the framework hydrate child
+   - ``state_factory=TypeStateFactory(TopicState)`` — makes the framework hydrate child
      state as :class:`TopicState` on any future checkpoint resume;
      harmless without a checkpointer.
 
@@ -77,6 +77,7 @@ from llm_gent.flow import (
     FlowFactory,
     Role,
     StateDataclass,
+    TypeStateFactory,
     planner,
     synthesizer,
     verb,
@@ -431,8 +432,8 @@ def _print_report(state: ResearchState) -> None:
 async def main() -> int:
     """Run the multi-topic research flow on the canned question."""
     lg = quick_console_logger("subflow-research-example", config={"level": "warning"})
-    saia_f = StructuredStubSAIAFactory(_demo_scripts())
-    ff = FlowFactory(lg, saia_f=saia_f, state_type=ResearchState)
+    saia_factory = StructuredStubSAIAFactory(_demo_scripts())
+    ff = FlowFactory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(ResearchState))
 
     flow = ff.create("subflow-research", state=ResearchState(question=_DEMO_QUESTION))
     (
@@ -441,7 +442,7 @@ async def main() -> int:
             lambda body: body.call(gather).call(summarize),
             state=lambda _parent: TopicState(),
             merge=merge_topic,
-            state_type=TopicState,
+            state_factory=TypeStateFactory(TopicState),
         )
         .call(synthesize)
     )

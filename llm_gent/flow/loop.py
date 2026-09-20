@@ -453,23 +453,23 @@ class LoopFactory:
     Bundles the ambient logger, :class:`SAIAFactory`, checkpointer, and
     halt event so consumers wire once at the application boundary and
     ``.create(role, **hooks)`` many Loops. Mirrors :class:`FlowFactory`'s
-    ``with_saia_f`` / ``with_halt`` shape so a shared event threads
+    ``with_saia_factory`` / ``with_halt`` shape so a shared event threads
     uniformly across a mixed Loop-and-Flow tree::
 
-        loop_f = LoopFactory(lg, saia_f=saia_f).with_halt(shared_event)
-        flow_f = FlowFactory(lg, saia_f=saia_f).with_halt(shared_event)
+        loop_f = LoopFactory(lg, saia_factory=sf).with_halt(shared_event)
+        flow_f = FlowFactory(lg, saia_factory=sf).with_halt(shared_event)
 
     The ``SAIAFactory`` on this factory is held for future
     standalone-Loop use (not required today — Flow-body Loops read
     ``ctx.saia`` from the enclosing flow's factory). Consumers are free
-    to pass ``saia_f=None`` when they only wire Loops into Flows.
+    to pass ``saia_factory=None`` when they only wire Loops into Flows.
     """
 
     def __init__(
         self,
         lg: Logger,
         *,
-        saia_f: SAIAFactory | None = None,
+        saia_factory: SAIAFactory | None = None,
         checkpointer: LoopCheckpointStore | None = None,
         halt: asyncio.Event | None = None,
     ) -> None:
@@ -479,7 +479,7 @@ class LoopFactory:
             lg: Logger threaded to consumers via this factory's
                 :attr:`lg` accessor; also carried forward on the
                 ``with_*`` derivations.
-            saia_f: Optional :class:`SAIAFactory`. Reserved for
+            saia_factory: Optional :class:`SAIAFactory`. Reserved for
                 standalone-Loop use; Flow-body Loops read ``ctx.saia``
                 from the enclosing Flow's factory.
             checkpointer: Optional :class:`LoopCheckpointStore`. Every
@@ -490,7 +490,7 @@ class LoopFactory:
                 win (same explicit-wins rule the Loop itself uses).
         """
         self._lg = lg
-        self._saia_f = saia_f
+        self._saia_factory = saia_factory
         self._checkpointer = checkpointer
         self._halt = halt
 
@@ -500,9 +500,9 @@ class LoopFactory:
         return self._lg
 
     @property
-    def saia_f(self) -> SAIAFactory | None:
+    def saia_factory(self) -> SAIAFactory | None:
         """The SAIAFactory captured at construction, or ``None``."""
-        return self._saia_f
+        return self._saia_factory
 
     @property
     def checkpointer(self) -> LoopCheckpointStore | None:
@@ -557,11 +557,11 @@ class LoopFactory:
             on_cost=on_cost,
         )
 
-    def with_saia_f(self, saia_f: SAIAFactory) -> LoopFactory:
+    def with_saia_factory(self, saia_factory: SAIAFactory) -> LoopFactory:
         """Return a new :class:`LoopFactory` whose SAIAFactory is swapped."""
         return LoopFactory(
             self._lg,
-            saia_f=saia_f,
+            saia_factory=saia_factory,
             checkpointer=self._checkpointer,
             halt=self._halt,
         )
@@ -570,7 +570,7 @@ class LoopFactory:
         """Return a new :class:`LoopFactory` whose checkpointer is swapped."""
         return LoopFactory(
             self._lg,
-            saia_f=self._saia_f,
+            saia_factory=self._saia_factory,
             checkpointer=checkpointer,
             halt=self._halt,
         )
@@ -587,7 +587,7 @@ class LoopFactory:
         """
         return LoopFactory(
             self._lg,
-            saia_f=self._saia_f,
+            saia_factory=self._saia_factory,
             checkpointer=self._checkpointer,
             halt=event,
         )

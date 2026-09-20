@@ -1175,10 +1175,10 @@ class TestBuildable:
         saia = StubFactory()
 
         named = make_ff().create("then").call(_double)
-        flow_named = make_ff(saia_f=saia).create()
+        flow_named = make_ff(saia_factory=saia).create()
         flow_named.call(_identity).branch(when=lambda _p, _c: True, then=named)
 
-        flow_cb = make_ff(saia_f=saia).create()
+        flow_cb = make_ff(saia_factory=saia).create()
         flow_cb.call(_identity).branch(when=lambda _p, _c: True, then=lambda f: f.call(_double))
 
         assert await flow_named.run(4) == await flow_cb.run(4) == 8

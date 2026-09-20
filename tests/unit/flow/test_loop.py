@@ -185,7 +185,7 @@ class TestFlowBodyIntegration:
     async def test_call_forwards_task_to_saia_complete(self) -> None:
         """The chain's positional reaches ``saia.complete(task, ...)``."""
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).create().call(Loop(ROLE_A))
+        flow = make_ff(saia_factory=factory).create().call(Loop(ROLE_A))
         result = await flow.run("hello")
         assert isinstance(result, _StubResult)
         assert factory.built[0].calls == [
@@ -231,7 +231,7 @@ class TestSAIAResolution:
         explicit = _CompleteSAIA(ROLE_A)
         factory = _CompleteFactory()
         loop = Loop(ROLE_A, saia=explicit)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert explicit.calls[0]["task"] == "t"
         assert factory.built == []  # factory never consulted
@@ -250,7 +250,7 @@ class TestSAIAResolution:
         """Without ``Loop(saia=)``, ctx.saia (from the flow's SAIAFactory) is used."""
         factory = _CompleteFactory()
         loop = Loop(ROLE_A)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert factory.built and factory.built[0].calls[0]["task"] == "t"
 
@@ -270,7 +270,7 @@ class TestHaltResolution:
         """``Loop(halt=X)`` forwards ``X`` to ``saia.complete(abort_signal=)``."""
         explicit = asyncio.Event()
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).create().call(Loop(ROLE_A, halt=explicit))
+        flow = make_ff(saia_factory=factory).create().call(Loop(ROLE_A, halt=explicit))
         await flow.run("t")
         assert factory.built[0].calls[0]["abort_signal"] is explicit
 
@@ -279,7 +279,7 @@ class TestHaltResolution:
         """Without ``Loop(halt=)``, ``ctx.halt`` (from ``Flow.with_halt``) is used."""
         ambient = asyncio.Event()
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).with_halt(ambient).create().call(Loop(ROLE_A))
+        flow = make_ff(saia_factory=factory).with_halt(ambient).create().call(Loop(ROLE_A))
         await flow.run("t")
         assert factory.built[0].calls[0]["abort_signal"] is ambient
 
@@ -289,7 +289,12 @@ class TestHaltResolution:
         explicit = asyncio.Event()
         ambient = asyncio.Event()
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).with_halt(ambient).create().call(Loop(ROLE_A, halt=explicit))
+        flow = (
+            make_ff(saia_factory=factory)
+            .with_halt(ambient)
+            .create()
+            .call(Loop(ROLE_A, halt=explicit))
+        )
         await flow.run("t")
         assert factory.built[0].calls[0]["abort_signal"] is explicit
 
@@ -318,7 +323,7 @@ class TestLifecycleHooks:
             events.append("cost")
 
         loop = Loop(ROLE_A, on_start=on_start, on_complete=on_complete, on_cost=on_cost)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert events == ["start", "cost", "complete"]
 
@@ -335,7 +340,7 @@ class TestLifecycleHooks:
             events.append("start")
 
         loop = Loop(ROLE_A, on_executor_ready=on_ready, on_start=on_start)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         # on_executor_ready fires before on_start
         assert events == ["ready:_CompleteSAIA", "start"]
@@ -351,7 +356,7 @@ class TestLifecycleHooks:
             assert ctx.role is ROLE_A
 
         loop = Loop(ROLE_A, on_iteration=on_iter)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert turns == [(0, "turn-0"), (1, "turn-1"), (2, "turn-2")]
 
@@ -368,7 +373,7 @@ class TestLifecycleHooks:
             events.append("cost")
 
         loop = Loop(ROLE_A, on_complete=on_complete, on_cost=on_cost)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert events == ["cost"]
 
@@ -383,7 +388,7 @@ class TestLifecycleHooks:
             events.append("start")
 
         loop = Loop(ROLE_A, on_start=on_start)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert events == ["start"]
 
@@ -425,7 +430,7 @@ class TestPausedAndCompleteReturn:
             events.append(f"paused:{result.reason}")
 
         loop = Loop(ROLE_A, on_complete=on_complete, on_paused=on_paused)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert events == ["paused:tool"]
 
@@ -438,7 +443,7 @@ class TestPausedAndCompleteReturn:
             return {"wrapped": result}
 
         loop = Loop(ROLE_A, on_complete=on_complete)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         got = await flow.run("t")
         assert isinstance(got, dict)
         assert isinstance(got["wrapped"], _StubResult)
@@ -452,7 +457,7 @@ class TestPausedAndCompleteReturn:
             return None
 
         loop = Loop(ROLE_A, on_complete=on_complete)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         got = await flow.run("t")
         assert isinstance(got, _StubResult)
 
@@ -465,7 +470,7 @@ class TestPausedAndCompleteReturn:
             return f"paused-token:{result.reason}"
 
         loop = Loop(ROLE_A, on_paused=on_paused)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         got = await flow.run("t")
         assert got == "paused-token:halt"
 
@@ -494,7 +499,7 @@ class TestExceptionalPaths:
             on_failed=on_failed,
             on_finally=on_finally,
         )
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         with pytest.raises(asyncio.CancelledError):
             await flow.run("t")
         assert events == ["cancelled", "finally"]
@@ -521,7 +526,7 @@ class TestExceptionalPaths:
             on_failed=on_failed,
             on_finally=on_finally,
         )
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         with pytest.raises(RuntimeError, match="boom"):
             await flow.run("t")
         assert events == [("failed", boom), "finally"]
@@ -539,7 +544,7 @@ class TestExceptionalPaths:
             events.append("finally")
 
         loop = Loop(ROLE_A, on_complete=on_complete, on_finally=on_finally)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert events == ["complete", "finally"]
 
@@ -556,7 +561,7 @@ class TestExceptionalPaths:
             events.append("finally")
 
         loop = Loop(ROLE_A, on_paused=on_paused, on_finally=on_finally)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert events == ["paused", "finally"]
 
@@ -566,7 +571,7 @@ class TestExceptionalPaths:
         store = _RecordingStore()
         factory = _RaisingFactory(asyncio.CancelledError())
         loop = Loop(ROLE_A, checkpointer=store)
-        flow = make_ff(saia_f=factory).create()
+        flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
         with pytest.raises(asyncio.CancelledError):
             await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
@@ -578,7 +583,7 @@ class TestExceptionalPaths:
         store = _RecordingStore()
         factory = _RaisingFactory(RuntimeError("boom"))
         loop = Loop(ROLE_A, checkpointer=store)
-        flow = make_ff(saia_f=factory).create()
+        flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
         with pytest.raises(RuntimeError):
             await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
@@ -594,7 +599,7 @@ class TestExceptionalPaths:
             called.append("failed")
 
         loop = Loop(ROLE_A, on_failed=on_failed)
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         with pytest.raises(asyncio.CancelledError):
             await flow.run("t")
         assert called == []
@@ -622,7 +627,7 @@ class TestCheckpointer:
 
         loop = Loop(ROLE_A, checkpointer=store, on_start=on_start, on_resume=on_resume)
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).create()
+        flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
         await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
         assert events == ["start"]
@@ -643,7 +648,7 @@ class TestCheckpointer:
 
         loop = Loop(ROLE_A, checkpointer=store, on_start=on_start, on_resume=on_resume)
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).create()
+        flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
         await flow.dispatch("loop", "t", scope_id="s1", run_id=2)
         assert events == [("resume", preload)]
@@ -655,7 +660,7 @@ class TestCheckpointer:
         store = _RecordingStore()
         loop = Loop(ROLE_A, checkpointer=store)
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).create()
+        flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
         await flow.dispatch("loop", "t", scope_id="s9", run_id=7)
         assert store.deletes == [("s9", 7)]
@@ -666,7 +671,7 @@ class TestCheckpointer:
         store = _RecordingStore()
         loop = Loop(ROLE_A, checkpointer=store)
         factory = _CompleteFactory(result=_StubResult(paused=True))
-        flow = make_ff(saia_f=factory).create()
+        flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
         await flow.dispatch("loop", "t", scope_id="s9", run_id=7)
         assert store.deletes == []
@@ -677,7 +682,7 @@ class TestCheckpointer:
         store = _RecordingStore(preload={"anything": True})
         loop = Loop(ROLE_A, checkpointer=store)
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")  # no scope_id → no load, no delete
         assert store.loads == []
         assert store.deletes == []
@@ -710,7 +715,7 @@ class TestLoopFactory:
         assert loop._halt is override
 
     def test_with_halt_derivation_preserves_other_slots(self) -> None:
-        """``with_halt`` swaps only halt; saia_f + checkpointer + lg carry over."""
+        """``with_halt`` swaps only halt; saia_factory + checkpointer + lg carry over."""
         store = _RecordingStore()
         first = LoopFactory(make_test_logger(), checkpointer=store)
         new_event = asyncio.Event()
@@ -729,8 +734,8 @@ class TestLoopFactory:
         assert second.checkpointer is new_store
         assert second.halt is halt
 
-    def test_with_saia_f_preserves_halt_and_checkpointer(self) -> None:
-        """``with_saia_f`` swaps only saia_f; halt + checkpointer carry over."""
+    def test_with_saia_factory_preserves_halt_and_checkpointer(self) -> None:
+        """``with_saia_factory`` swaps only saia_factory; halt + checkpointer carry over."""
         halt = asyncio.Event()
         store = _RecordingStore()
         first = LoopFactory(make_test_logger(), checkpointer=store, halt=halt)
@@ -740,9 +745,9 @@ class TestLoopFactory:
                 return _CompleteSAIA(role)
 
         replacement = _F()
-        second = first.with_saia_f(replacement)
-        assert second.saia_f is replacement
-        assert first.saia_f is None
+        second = first.with_saia_factory(replacement)
+        assert second.saia_factory is replacement
+        assert first.saia_factory is None
         assert second.halt is halt
         assert second.checkpointer is store
 
@@ -753,7 +758,7 @@ class TestLoopFactory:
         lf = LoopFactory(make_test_logger()).with_halt(halt)
         loop = lf.create(ROLE_A)
         factory = _CompleteFactory()
-        flow = make_ff(saia_f=factory).create().call(loop)
+        flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert factory.built[0].calls[0]["abort_signal"] is halt
 
@@ -797,6 +802,6 @@ class TestChainedUse:
         """``.call(verb).then(loop)`` pipes the verb's return into Loop's task."""
         factory = _CompleteFactory()
         loop = Loop(ROLE_A)
-        flow = make_ff(saia_f=factory).create().call(_extract_task).then(loop)
+        flow = make_ff(saia_factory=factory).create().call(_extract_task).then(loop)
         await flow.run({"task": "extract-me"})
         assert factory.built[0].calls[0]["task"] == "extract-me"

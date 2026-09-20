@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 
 from appinfra.log import quick_console_logger
 
-from llm_gent.flow import Context, Flow, FlowFactory, StateDataclass, verb
+from llm_gent.flow import Context, Flow, FlowFactory, StateDataclass, TypeStateFactory, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 
@@ -65,7 +65,7 @@ class Counter(StateDataclass):
 
     Inherits :class:`~llm_gent.flow.StateDataclass` for ``to_dict`` /
     ``from_dict`` — flat dataclass, no override needed. Bound as
-    ``state_type=Counter`` on the :class:`~llm_gent.flow.FlowFactory` so
+    ``state_factory=TypeStateFactory(Counter)`` on the :class:`~llm_gent.flow.FlowFactory` so
     the framework calls :meth:`from_dict` on ``run(resume=True)`` to
     reconstruct an instance from the checkpoint payload.
     """
@@ -126,7 +126,7 @@ async def main() -> int:
     try:
         store = JsonFileCheckpointStore(lg, tmp_root)
         client_flow_id = "resume-demo"
-        ff = FlowFactory(lg, state_type=Counter)
+        ff = FlowFactory(lg, state_factory=TypeStateFactory(Counter))
 
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
         flow1 = _build_flow(ff, store, client_flow_id)

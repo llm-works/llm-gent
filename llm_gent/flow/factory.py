@@ -12,12 +12,8 @@ Two factories live here, at different scopes:
 - :class:`FlowFactory` — app-scoped bundle of the ambient ``lg`` and (by
   convention) a single ``SAIAFactory``. Provides :meth:`create` for
   building Flows without repeating those two arguments at every
-  construction site, and :meth:`with_saia_f` for deriving a factory that
-  swaps the SAIAFactory (e.g. a plugin subsystem).
-
-Naming policy: any ``saia_f=`` kwarg on the framework's public API takes a
-:class:`SAIAFactory` (never a saia instance). The kwarg is named after
-the concept; the type carries the mechanism.
+  construction site, and :meth:`with_saia_factory` for deriving a
+  factory that swaps the SAIAFactory (e.g. a plugin subsystem).
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ from ..core.traits import Registry as TraitRegistry
 from .checkpoint import CheckpointStore
 from .nodes import UNSET
 from .role import Role
-from .state import StateData
+from .state import StateFactory
 
 
 if TYPE_CHECKING:
@@ -88,29 +84,30 @@ class FlowFactory:
     once so subsystem builders read as ``f.create("grade").call(...)``.
 
     :meth:`create` builds a Flow with the captured defaults;
-    :meth:`with_saia_f` returns a new :class:`FlowFactory` whose SAIAFactory
-    is swapped (for subsystems that need a different saia builder).
+    :meth:`with_saia_factory` returns a new :class:`FlowFactory` whose
+    SAIAFactory is swapped (for subsystems that need a different saia
+    builder).
     """
 
     def __init__(
         self,
         lg: Logger,
         *,
-        saia_f: SAIAFactory | None = None,
+        saia_factory: SAIAFactory | None = None,
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
         halt: asyncio.Event | None = None,
         budget: Tracker | None = None,
-        state_type: type[StateData] | None = None,
+        state_factory: StateFactory[Any] | None = None,
         checkpointer: CheckpointStore | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
         Args:
             lg: Logger threaded into every :class:`Flow` this factory builds.
-            saia_f: A :class:`SAIAFactory`. The ``_f`` suffix carries the
-                framework-wide policy: any ``saia_f=`` kwarg takes a factory,
-                never a saia instance.
+            saia_factory: A :class:`SAIAFactory` that builds role-bound
+                saia instances. Threaded into every :class:`Flow` this
+                factory builds.
             state: Default construction ``state`` for built flows. Per-Flow
                 overrides go through :meth:`create`; per-run overrides go
                 through :meth:`Flow.run`.
@@ -126,10 +123,13 @@ class FlowFactory:
                 :meth:`Flow.with_budget` on every built flow. Wire once at
                 the factory to thread the same cost tracker through an
                 entire agent shape.
-            state_type: Optional :class:`StateData` payload class threaded
-                into every :class:`Flow`'s ``state_type=`` slot. Consumed
-                by :meth:`Flow.run` ``resume=True`` to hydrate
-                ``ctx.state.data`` from a loaded checkpoint. ``None``
+            state_factory: Optional :class:`StateFactory` threaded into
+                every :class:`Flow`'s ``state_factory=`` slot. Consumed by
+                :meth:`Flow.run` ``resume=True`` to reconstruct
+                ``ctx.state.data`` from a loaded checkpoint via
+                ``state_factory.restore(...)``. Wrap a stateless type in
+                :class:`TypeStateFactory`; implement :class:`StateFactory`
+                directly for state that binds runtime handles. ``None``
                 (default) treats the payload as a plain dict.
             checkpointer: Optional :class:`CheckpointStore` captured for
                 subsequent :meth:`create` calls. Only wired onto a built
@@ -138,12 +138,12 @@ class FlowFactory:
                 agent-owned per Flow instance.
         """
         self._lg = lg
-        self._saia_f = saia_f
+        self._saia_factory = saia_factory
         self._state = state
         self._traits = traits
         self._halt = halt
         self._budget = budget
-        self._state_type = state_type
+        self._state_factory = state_factory
         self._checkpointer = checkpointer
 
     def create(
@@ -196,10 +196,10 @@ class FlowFactory:
         flow = Flow(
             self._lg,
             name,
-            saia_f=self._saia_f,
+            saia_factory=self._saia_factory,
             state=resolved_state,
             traits=self._traits,
-            state_type=self._state_type,
+            state_factory=self._state_factory,
         )
         effective_halt = halt if halt is not None else self._halt
         if effective_halt is not None:
@@ -213,39 +213,39 @@ class FlowFactory:
             flow.with_checkpointer(self._checkpointer, client_flow_id)
         return flow
 
-    def with_saia_f(self, saia_f: SAIAFactory) -> FlowFactory:
+    def with_saia_factory(self, saia_factory: SAIAFactory) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
 
         Every other captured slot (``lg``, ``state``, ``traits``, ``halt``,
-        ``budget``, ``state_type``, ``checkpointer``) carries over. Useful
-        for subsystems that share the app's logger but need a different
-        saia builder (e.g. a plugin with its own model wiring).
+        ``budget``, ``state_factory``, ``checkpointer``) carries over.
+        Useful for subsystems that share the app's logger but need a
+        different saia builder (e.g. a plugin with its own model wiring).
         """
         return FlowFactory(
             self._lg,
-            saia_f=saia_f,
+            saia_factory=saia_factory,
             state=self._state,
             traits=self._traits,
             halt=self._halt,
             budget=self._budget,
-            state_type=self._state_type,
+            state_factory=self._state_factory,
             checkpointer=self._checkpointer,
         )
 
     def with_traits(self, traits: TraitRegistry | None) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose trait registry is swapped.
 
-        Every other captured slot carries over. Mirrors :meth:`with_saia_f`
-        for the trait dimension.
+        Every other captured slot carries over. Mirrors
+        :meth:`with_saia_factory` for the trait dimension.
         """
         return FlowFactory(
             self._lg,
-            saia_f=self._saia_f,
+            saia_factory=self._saia_factory,
             state=self._state,
             traits=traits,
             halt=self._halt,
             budget=self._budget,
-            state_type=self._state_type,
+            state_factory=self._state_factory,
             checkpointer=self._checkpointer,
         )
 
@@ -258,12 +258,12 @@ class FlowFactory:
         """
         return FlowFactory(
             self._lg,
-            saia_f=self._saia_f,
+            saia_factory=self._saia_factory,
             state=self._state,
             traits=self._traits,
             halt=event,
             budget=self._budget,
-            state_type=self._state_type,
+            state_factory=self._state_factory,
             checkpointer=self._checkpointer,
         )
 
@@ -276,12 +276,12 @@ class FlowFactory:
         """
         return FlowFactory(
             self._lg,
-            saia_f=self._saia_f,
+            saia_factory=self._saia_factory,
             state=self._state,
             traits=self._traits,
             halt=self._halt,
             budget=tracker,
-            state_type=self._state_type,
+            state_factory=self._state_factory,
             checkpointer=self._checkpointer,
         )
 
@@ -296,11 +296,29 @@ class FlowFactory:
         """
         return FlowFactory(
             self._lg,
-            saia_f=self._saia_f,
+            saia_factory=self._saia_factory,
             state=self._state,
             traits=self._traits,
             halt=self._halt,
             budget=self._budget,
-            state_type=self._state_type,
+            state_factory=self._state_factory,
             checkpointer=store,
+        )
+
+    def with_state_factory(self, state_factory: StateFactory[Any] | None) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose state factory is swapped.
+
+        Every other captured slot carries over. Useful for subsystems that
+        need a different state restore strategy (e.g., a plugin with its
+        own state type).
+        """
+        return FlowFactory(
+            self._lg,
+            saia_factory=self._saia_factory,
+            state=self._state,
+            traits=self._traits,
+            halt=self._halt,
+            budget=self._budget,
+            state_factory=state_factory,
+            checkpointer=self._checkpointer,
         )

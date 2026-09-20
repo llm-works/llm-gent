@@ -78,6 +78,7 @@ from llm_gent.flow import (
     FlowFactory,
     Role,
     StateDataclass,
+    TypeStateFactory,
     extractor,
     planner,
     verb,
@@ -374,8 +375,10 @@ def _print_result(state: PlanExecuteState) -> None:
 async def main() -> int:
     """Run the plan-and-execute flow on the canned question."""
     lg = quick_console_logger("plan-execute-example", config={"level": "warning"})
-    saia_f = StructuredStubSAIAFactory(_demo_scripts())
-    ff = FlowFactory(lg, saia_f=saia_f, state_type=PlanExecuteState)
+    saia_factory = StructuredStubSAIAFactory(_demo_scripts())
+    ff = FlowFactory(
+        lg, saia_factory=saia_factory, state_factory=TypeStateFactory(PlanExecuteState)
+    )
 
     question = "What is twice the population of Tokyo?"
     flow = ff.create("plan-execute", state=PlanExecuteState(question=question))
