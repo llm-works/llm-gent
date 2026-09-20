@@ -181,7 +181,7 @@ class TestFactoryDerivers:
         # Original untouched.
         assert ff.create().traits is first
 
-    def test_with_traits_preserves_saia_f_and_state(self) -> None:
+    def test_with_traits_preserves_saia_factory_and_state(self) -> None:
         """with_traits() carries saia_factory, state, and lg forward."""
         sf = StubFactory()
         state = {"scope": "shared"}

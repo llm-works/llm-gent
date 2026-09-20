@@ -304,3 +304,21 @@ class FlowFactory:
             state_factory=self._state_factory,
             checkpointer=store,
         )
+
+    def with_state_factory(self, state_factory: StateFactory[Any] | None) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose state factory is swapped.
+
+        Every other captured slot carries over. Useful for subsystems that
+        need a different state restore strategy (e.g., a plugin with its
+        own state type).
+        """
+        return FlowFactory(
+            self._lg,
+            saia_factory=self._saia_factory,
+            state=self._state,
+            traits=self._traits,
+            halt=self._halt,
+            budget=self._budget,
+            state_factory=state_factory,
+            checkpointer=self._checkpointer,
+        )

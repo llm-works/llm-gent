@@ -428,7 +428,11 @@ async def _run_iterate(
     """
     iteration, restored_child = _resume_iteration_for(env, node_id)
     if restored_child is not None:
-        child_state = State(data=restored_child, _parent=env.state)
+        if it.state_factory is not None:
+            restored_data = it.state_factory.restore(restored_child)
+        else:
+            restored_data = restored_child
+        child_state = State(data=restored_data, _parent=env.state)
     else:
         child_state = await _project_state(it.state_fn, env.state)
     result: Any = node_args[0] if node_args else None

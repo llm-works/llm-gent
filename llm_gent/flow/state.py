@@ -318,8 +318,11 @@ class TypeStateFactory(Generic[T]):
     Wraps a bare class satisfying :class:`StateData` in the factory shape
     for the common case where state carries no runtime handles. The
     framework calls :meth:`restore` on resume, which delegates to
-    ``state_type.from_dict(data)``; :meth:`new` forwards kwargs to the
-    type constructor for the fresh path.
+    ``state_type.from_dict(data)``.
+
+    :meth:`new` is a user-facing convenience for fresh construction —
+    the framework never calls it. It forwards kwargs to the type
+    constructor, centralizing state construction alongside restore.
 
     Usage::
 
