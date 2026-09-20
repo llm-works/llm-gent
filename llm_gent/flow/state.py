@@ -201,9 +201,11 @@ class StateDataclass:
 
     Escalation
     ----------
-    A field whose annotation or value falls outside the converter's
-    handling raises :class:`cattrs.errors.ClassValidationError` with the
-    full field path attached. Two escape hatches:
+    Handled fields with unsupported nested values raise
+    :class:`cattrs.errors.ClassValidationError` with the full field path;
+    types without a registered structure handler (e.g., ambiguous unions)
+    raise :class:`cattrs.errors.StructureHandlerNotFoundError` directly.
+    Two escape hatches:
 
     1. Register a hook on :data:`state_converter` — framework-wide,
        covers every state class carrying the type.
