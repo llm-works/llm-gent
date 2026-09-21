@@ -287,4 +287,9 @@ def resume_in_subprocess(
         timeout=subprocess_timeout,
         check=True,
     )
-    return dict(json.loads(result.stdout))
+    parsed = json.loads(result.stdout)
+    if not isinstance(parsed, dict):
+        raise TypeError(
+            f"resume_in_subprocess requires the flow to return a dict; got {type(parsed).__name__}"
+        )
+    return dict(parsed)
