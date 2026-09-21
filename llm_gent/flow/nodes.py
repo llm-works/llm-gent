@@ -125,6 +125,23 @@ still propagates after ``on_error`` returns; in ``strict=False`` the item
 is still replaced by a :class:`Failure` sentinel.
 """
 
+OnItemCompleteFn = Callable[[Any, Any, Context[Any]], Any]
+"""Map per-item completion hook: ``(item, outcome, ctx) -> None``. Return value ignored.
+
+Fires exactly once per item after it reaches a terminal state, for
+observability (progress, streaming, adaptive throttling). ``outcome``
+is the value that lands in the map's result list: the body's return
+for successful items, :class:`Failure` for items whose body raised
+(both ``strict`` modes), or :class:`Skipped` for guard- or halt-skipped
+items. Success-path hooks fire after per-item merge, so ``ctx.state``
+reflects the merged parent state.
+
+Does not fire on :class:`asyncio.CancelledError`; cancellation
+propagates unconditionally. A hook exception is logged and swallowed
+so a broken observer never masks the item outcome — mirrors
+:type:`OnErrorFn`.
+"""
+
 StateProject = Callable[[Any], Any]
 """Scoped-state projection: ``(parent_state) -> child_state``. May be async.
 
@@ -273,6 +290,7 @@ class _Map:
     merge_fn: StateMerge | None = None
     guard: GuardFn | None = None
     on_error: OnErrorFn | None = None
+    on_item_complete: OnItemCompleteFn | None = None
     max_concurrency: int | None = None
     state_factory: StateFactory[Any] | None = None
 

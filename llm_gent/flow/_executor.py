@@ -31,6 +31,7 @@ from .nodes import (
     Failure,
     ItemsFn,
     OnErrorFn,
+    OnItemCompleteFn,
     Skipped,
     StateMerge,
     StateProject,
@@ -786,25 +787,37 @@ async def _run_map_item_strict(
 
     Halt is checked first (before projection). Projection, guard, and body
     exceptions all propagate; ``on_error`` fires before the exception
-    escapes.
+    escapes. ``on_item_complete`` fires at every terminal state (success,
+    halt-Skipped, guard-Skipped, or a synthesized :class:`Failure` before
+    re-raise) — cancellation is unconditional and never fires the hook.
     """
     if env.halt is not None and env.halt.is_set():
-        return Skipped(item=item)
+        skipped = Skipped(item=item)
+        await _fire_on_item_complete(
+            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state), env
+        )
+        return skipped
     item_ctx = _map_item_ctx(env, env.state)
     try:
         child_state = await _project_state(mp.state_fn, env.state, mp.state_factory)
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
-            return Skipped(item=item)
+            skipped = Skipped(item=item)
+            await _fire_on_item_complete(mp.on_item_complete, item, skipped, item_ctx, env)
+            return skipped
         result = await _dispatch_map_body(mp, item, child_state, env, node_id, item_index, replay)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         if mp.on_error is not None:
             await _run_on_error(mp.on_error, exc, item, item_ctx, env)
+        await _fire_on_item_complete(
+            mp.on_item_complete, item, Failure(exception=exc, item=item), item_ctx, env
+        )
         raise
     async with merge_lock:
         await _merge_state(mp.merge_fn, env.state, child_state)
+    await _fire_on_item_complete(mp.on_item_complete, item, result, item_ctx, env)
     return result
 
 
@@ -823,29 +836,42 @@ async def _run_map_item(
     exceptions are all wrapped as :class:`Failure` and passed to
     ``on_error``. Merge fires only for items that complete successfully —
     a failed or skipped item's partially-mutated child state is discarded.
+    ``on_item_complete`` fires at every terminal state (success,
+    :class:`Failure`, halt-Skipped, guard-Skipped); cancellation is
+    unconditional and never fires the hook.
     """
     if env.halt is not None and env.halt.is_set():
-        return Skipped(item=item)
+        skipped = Skipped(item=item)
+        await _fire_on_item_complete(
+            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state), env
+        )
+        return skipped
     item_ctx = _map_item_ctx(env, env.state)
     try:
         child_state = await _project_state(mp.state_fn, env.state, mp.state_factory)
         item_ctx = _map_item_ctx(env, child_state)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
-            return Skipped(item=item)
+            skipped = Skipped(item=item)
+            await _fire_on_item_complete(mp.on_item_complete, item, skipped, item_ctx, env)
+            return skipped
         result = await _dispatch_map_body(mp, item, child_state, env, node_id, item_index, replay)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         if mp.on_error is not None:
             await _run_on_error(mp.on_error, exc, item, item_ctx, env)
-        return Failure(exception=exc, item=item)
+        failure = Failure(exception=exc, item=item)
+        await _fire_on_item_complete(mp.on_item_complete, item, failure, item_ctx, env)
+        return failure
     async with merge_lock:
         await _merge_state(mp.merge_fn, env.state, child_state)
+    await _fire_on_item_complete(mp.on_item_complete, item, result, item_ctx, env)
     return result
 
 
 def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
-    """Build the per-item :class:`Context` fed to guard and on_error hooks.
+    """Build the per-item :class:`Context` fed to guard, on_error, and
+    on_item_complete hooks.
 
     These hooks run without a :class:`Role`, so ``ctx.saia`` is ``None``.
     """
@@ -883,6 +909,31 @@ async def _run_on_error(
         env.lg.warning(
             "map on_error hook raised — original exception preserved",
             extra={"exception": hook_exc, "original": exc},
+        )
+
+
+async def _fire_on_item_complete(
+    hook: OnItemCompleteFn | None,
+    item: Any,
+    outcome: Any,
+    ctx: Context[Any],
+    env: _RunEnv,
+) -> None:
+    """Invoke on_item_complete (if attached) and swallow any exception it raises.
+
+    An observer that raises must never mask the outcome that lands in
+    the map's result list. Matches :func:`_run_on_error` semantics.
+    """
+    if hook is None:
+        return
+    try:
+        result = hook(item, outcome, ctx)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as hook_exc:
+        env.lg.warning(
+            "map on_item_complete hook raised — outcome preserved",
+            extra={"exception": hook_exc},
         )
 
 

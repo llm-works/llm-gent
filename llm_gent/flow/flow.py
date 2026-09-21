@@ -74,6 +74,7 @@ from .nodes import (
     GuardFn,
     ItemsFn,
     OnErrorFn,
+    OnItemCompleteFn,
     ProjectFn,
     RescuePolicy,
     StateMerge,
@@ -628,6 +629,39 @@ class Flow:
         if target.on_error is not None:
             raise TypeError(".on_error() already set on the preceding map node")
         target.on_error = fn
+        return self
+
+    def on_item_complete(self, fn: OnItemCompleteFn) -> Flow:
+        """Attach a per-item completion hook to the preceding :meth:`map` node.
+
+        ``fn(item, outcome, ctx) -> None`` (sync or async) fires once per
+        item at its terminal state — for observability (progress bars,
+        streaming, adaptive throttling), not control flow.
+
+        ``outcome`` is the value that lands in the map's result list:
+
+        - the body's return value on success (hook fires after per-item
+          merge, so ``ctx.state`` reflects the merged parent state);
+        - a :class:`Failure` under both ``strict`` modes when the body
+          raises a non-cancellation exception (in ``strict=True`` the
+          hook fires before the exception propagates);
+        - a :class:`Skipped` when the guard predicate returns falsy or
+          when an ambient halt short-circuited the item before its body ran.
+
+        Cancellation is unconditional and does not fire the hook. A hook
+        exception is logged and swallowed so the item's outcome is never
+        masked — matches :meth:`on_error`.
+
+        Only valid on a map node. Chainable form only.
+
+        Raises:
+            TypeError: The preceding node is missing, isn't a map, or
+                already has an ``on_item_complete`` attached.
+        """
+        target = self._require_map_tail(".on_item_complete()")
+        if target.on_item_complete is not None:
+            raise TypeError(".on_item_complete() already set on the preceding map node")
+        target.on_item_complete = fn
         return self
 
     def with_halt(self, event: asyncio.Event) -> Flow:
