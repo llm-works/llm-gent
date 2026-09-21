@@ -784,12 +784,214 @@ class TestMapOnError:
 
 
 # -----------------------------------------------------------------------------
+# .map — .on_item_complete() chained method
+# -----------------------------------------------------------------------------
+
+
+class TestMapOnItemComplete:
+    """.on_item_complete() fires once per item at every terminal state."""
+
+    @pytest.mark.asyncio
+    async def test_fires_on_success_with_result(self) -> None:
+        """Successful items fire the hook with the body's return value."""
+        observed: list[tuple[int, int]] = []
+
+        def hook(item: int, outcome: int, _ctx: Context) -> None:
+            """Record (item, outcome) pairs for successful items."""
+            observed.append((item, outcome))
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).on_item_complete(hook)
+        results = await flow.run([1, 2, 3])
+        assert results == [2, 4, 6]
+        assert sorted(observed) == [(1, 2), (2, 4), (3, 6)]
+
+    @pytest.mark.asyncio
+    async def test_fires_on_failure_strict_before_propagate(self) -> None:
+        """Strict-mode body raise fires the hook with a Failure before re-raising."""
+        observed: list[Any] = []
+
+        @verb(role=ROLE_A)
+        async def blow(_ctx: Context, x: int) -> int:
+            """Raise for x == 2."""
+            if x == 2:
+                raise ValueError(f"bad:{x}")
+            return x
+
+        def hook(_item: int, outcome: Any, _ctx: Context) -> None:
+            """Record every outcome; strict-mode failures should appear as Failure."""
+            observed.append(outcome)
+
+        flow = make_ff().create()
+        flow.call(_identity).map(blow).on_item_complete(hook)
+        with pytest.raises(ValueError, match="bad:2"):
+            await flow.run([1, 2, 3])
+        failures = [o for o in observed if isinstance(o, Failure)]
+        assert len(failures) == 1
+        assert failures[0].item == 2
+        assert isinstance(failures[0].exception, ValueError)
+
+    @pytest.mark.asyncio
+    async def test_fires_on_failure_non_strict(self) -> None:
+        """Non-strict body raise fires the hook with the Failure sentinel."""
+        observed: list[Any] = []
+
+        @verb(role=ROLE_A)
+        async def blow(_ctx: Context, x: int) -> int:
+            """Raise for even items."""
+            if x % 2 == 0:
+                raise ValueError(f"bad:{x}")
+            return x
+
+        async def hook(_item: int, outcome: Any, _ctx: Context) -> None:
+            """Record outcomes; awaited to prove async hooks are supported."""
+            await asyncio.sleep(0)
+            observed.append(outcome)
+
+        flow = make_ff().create()
+        flow.call(_identity).map(blow, strict=False).on_item_complete(hook)
+        results = await flow.run([1, 2, 3, 4])
+        assert results[0] == 1 and results[2] == 3
+        assert isinstance(results[1], Failure) and isinstance(results[3], Failure)
+        assert len(observed) == 4
+        assert sum(isinstance(o, Failure) for o in observed) == 2
+
+    @pytest.mark.asyncio
+    async def test_fires_on_guard_skipped(self) -> None:
+        """Guard-gated items fire the hook with a Skipped sentinel."""
+        observed: list[Any] = []
+
+        def hook(_item: int, outcome: Any, _ctx: Context) -> None:
+            """Record every outcome so guard-gated items show as Skipped."""
+            observed.append(outcome)
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).guard(lambda i, _c: i != 2).on_item_complete(hook)
+        results = await flow.run([1, 2, 3])
+        assert results[0] == 2 and results[2] == 6
+        assert isinstance(results[1], Skipped) and results[1].item == 2
+        skipped = [o for o in observed if isinstance(o, Skipped)]
+        assert len(skipped) == 1 and skipped[0].item == 2
+
+    @pytest.mark.asyncio
+    async def test_fires_on_halt_skipped(self) -> None:
+        """Halt-set-before-run fires the hook with Skipped for every item."""
+        observed: list[Any] = []
+        halt = asyncio.Event()
+        halt.set()
+
+        def hook(_item: int, outcome: Any, _ctx: Context) -> None:
+            """Record outcomes; every item should appear as Skipped."""
+            observed.append(outcome)
+
+        flow = make_ff().create().with_halt(halt)
+        flow.call(_identity).map(_double).on_item_complete(hook)
+        results = await flow.run([1, 2, 3])
+        assert all(isinstance(r, Skipped) for r in results)
+        assert len(observed) == 3 and all(isinstance(o, Skipped) for o in observed)
+
+    @pytest.mark.asyncio
+    async def test_fires_after_merge_on_success(self) -> None:
+        """Success-path hook sees merged parent state via ctx.state."""
+        seen_after_merge: list[int] = []
+
+        def project(_parent: Any) -> dict[str, int]:
+            """Every item gets its own child state slot."""
+            return {"n": 0}
+
+        def merge(parent: dict[str, list[int]], child: dict[str, int]) -> None:
+            """Append the child's payload into the parent's running list."""
+            parent.setdefault("merged", []).append(child["n"])
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context, x: int) -> int:
+            """Stash x on the projected child state, return x."""
+            ctx.state.data["n"] = x
+            return x
+
+        def hook(_item: int, _outcome: int, ctx: Context) -> None:
+            """Read parent state — merge already fired for successful items."""
+            seen_after_merge.append(len(ctx.state.root().data.get("merged", [])))
+
+        flow = make_ff().create(state={})
+        flow.call(_identity).map(bump, state=project, merge=merge).on_item_complete(hook)
+        await flow.run([1, 2, 3])
+        # Each hook call sees at least its own item's merge — post-merge order.
+        assert min(seen_after_merge) >= 1
+
+    @pytest.mark.asyncio
+    async def test_hook_exception_is_swallowed(self) -> None:
+        """A hook that raises must not mask the outcome that lands in results."""
+
+        def hook(_item: int, _outcome: int, _ctx: Context) -> None:
+            """Raise from the hook — result list must still be intact."""
+            raise RuntimeError("observer-blew-up")
+
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).on_item_complete(hook)
+        results = await flow.run([1, 2, 3])
+        assert results == [2, 4, 6]
+
+    @pytest.mark.asyncio
+    async def test_fires_on_merge_failure_strict(self) -> None:
+        """Strict-mode merge failure fires the hook with Failure before re-raising."""
+        observed: list[Any] = []
+
+        def project(_parent: Any) -> dict[str, int]:
+            """Isolate child state for merge."""
+            return {"n": 0}
+
+        def bad_merge(_parent: Any, _child: Any) -> None:
+            """Merge that always raises."""
+            raise ValueError("merge-failed")
+
+        def hook(_item: int, outcome: Any, _ctx: Context) -> None:
+            """Record outcomes; merge failure should appear as Failure."""
+            observed.append(outcome)
+
+        flow = make_ff().create(state={})
+        flow.call(_identity).map(_double, state=project, merge=bad_merge).on_item_complete(hook)
+        with pytest.raises(ValueError, match="merge-failed"):
+            await flow.run([1])
+        assert len(observed) == 1
+        assert isinstance(observed[0], Failure)
+        assert isinstance(observed[0].exception, ValueError)
+
+    @pytest.mark.asyncio
+    async def test_fires_on_merge_failure_non_strict(self) -> None:
+        """Non-strict merge failure fires the hook with Failure and returns it."""
+        observed: list[Any] = []
+
+        def project(_parent: Any) -> dict[str, int]:
+            """Isolate child state for merge."""
+            return {"n": 0}
+
+        def bad_merge(_parent: Any, _child: Any) -> None:
+            """Merge that always raises."""
+            raise ValueError("merge-failed")
+
+        def hook(_item: int, outcome: Any, _ctx: Context) -> None:
+            """Record every outcome."""
+            observed.append(outcome)
+
+        flow = make_ff().create(state={})
+        flow.call(_identity).map(
+            _double, strict=False, state=project, merge=bad_merge
+        ).on_item_complete(hook)
+        results = await flow.run([1, 2])
+        assert len(results) == 2
+        assert all(isinstance(r, Failure) for r in results)
+        assert len(observed) == 2
+        assert all(isinstance(o, Failure) for o in observed)
+
+
+# -----------------------------------------------------------------------------
 # .map — chained-method attachment rules
 # -----------------------------------------------------------------------------
 
 
 class TestMapChainedApi:
-    """.guard() and .on_error() are guarded against wrong-node attachment."""
+    """.guard() / .on_error() / .on_item_complete() are guarded against wrong-node attachment."""
 
     def test_guard_without_preceding_map_raises(self) -> None:
         """Chain with no nodes rejects .guard() with a clear TypeError."""
@@ -810,6 +1012,26 @@ class TestMapChainedApi:
         flow.call(_identity).map(_double).guard(lambda _i, _c: True)
         with pytest.raises(TypeError, match="already set"):
             flow.guard(lambda _i, _c: True)
+
+    def test_on_item_complete_without_preceding_map_raises(self) -> None:
+        """Chain with no nodes rejects .on_item_complete() with a clear TypeError."""
+        flow = make_ff().create()
+        with pytest.raises(TypeError, match=r"\.on_item_complete\(\) requires a preceding .map"):
+            flow.on_item_complete(lambda _i, _o, _c: None)
+
+    def test_on_item_complete_on_non_map_node_raises(self) -> None:
+        """.on_item_complete() after a plain .call node rejects with a clear TypeError."""
+        flow = make_ff().create()
+        flow.call(_identity)
+        with pytest.raises(TypeError, match=r"\.on_item_complete\(\) applies to map nodes"):
+            flow.on_item_complete(lambda _i, _o, _c: None)
+
+    def test_double_on_item_complete_rejected(self) -> None:
+        """Calling .on_item_complete() twice on the same map node is a TypeError."""
+        flow = make_ff().create()
+        flow.call(_identity).map(_double).on_item_complete(lambda _i, _o, _c: None)
+        with pytest.raises(TypeError, match="already set"):
+            flow.on_item_complete(lambda _i, _o, _c: None)
 
 
 # -----------------------------------------------------------------------------
