@@ -119,6 +119,24 @@ class Panel:
 
         Each inner verb must have been registered with the flow referenced by
         ``ctx.flow``. Positional and keyword args are forwarded to every verb.
+
+        Halt semantics — cooperative per verb. Setting ``ctx.halt`` does
+        not raise, so ``asyncio.gather`` awaits all siblings to completion;
+        each dispatched verb receives ``ctx.halt`` and decides on its own
+        whether to poll it. Verbs backed by saia observe halt at call entry
+        (fast abort before hitting the LLM) and mid-stream, so a halted
+        Panel of saia verbs exits in about the longest single in-flight
+        LLM call — not the sum across N. Verbs that don't poll halt run
+        to completion; that's an authoring responsibility, not framework
+        behavior.
+
+        Resume semantics under an enclosing :meth:`Flow.iterate` —
+        the checkpoint boundary is the iterate iteration, not the Panel.
+        Iterate honors halt at its next between-iterations check, and
+        the preserved checkpoint reflects the completion of the
+        iteration containing this Panel. On resume, iterate proceeds at
+        the next iteration and dispatches a fresh Panel there; the
+        halted iteration's Panel is never partially re-dispatched.
         """
         results = await asyncio.gather(
             *[

@@ -6,13 +6,16 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Panel, Role, verb
+from llm_gent.flow import Context, Flow, Panel, Role, verb
 from llm_gent.flow.panel import majority, mean, unanimous, weighted
+from llm_gent.flow.stores.json_file import JsonFileCheckpointStore
 
-from .conftest import ROLE_A, ROLE_B, make_ff
+from .conftest import ROLE_A, ROLE_B, make_ff, make_test_logger
 
 
 class TestAggregators:
@@ -241,3 +244,98 @@ class TestPanel:
         assert set(results) == {"a", "b"}
         # Panel verbs received the middle flow's local_halt, not root_halt.
         assert observed == [local_halt, local_halt]
+
+
+class TestPanelInsideIterateResumeBoundary:
+    """The iterate iteration is the checkpoint boundary around a Panel.
+
+    Panel has no checkpoint boundary of its own. When a halt fires
+    during a Panel's ``asyncio.gather``, siblings are not cancelled —
+    each dispatched verb observes ``ctx.halt`` on its own if it
+    chooses (saia-backed verbs observe halt at call entry and mid-stream,
+    so they abort fast; verbs that don't poll halt run to completion).
+    The gather returns whatever the verbs returned; control goes back
+    to the enclosing iterate, which honors halt at its next
+    between-iterations check.
+
+    The preserved checkpoint reflects the *completion* of the
+    iteration containing the Panel. On resume, iterate proceeds at
+    the next iteration and dispatches a fresh Panel — the halted
+    iteration's Panel is never partially re-dispatched.
+    """
+
+    @pytest.mark.asyncio
+    async def test_halted_iteration_does_not_partially_redispatch_on_resume(
+        self, tmp_path: Path
+    ) -> None:
+        """Halt set from inside one Panel verb: iteration completes; resume proceeds at K+1 with a fresh Panel."""
+        lg = make_test_logger()
+        store = JsonFileCheckpointStore(lg, tmp_path / "cp")
+        halt = asyncio.Event()
+        runs: list[tuple[int, str]] = []
+
+        # Voters receive their iteration number positionally — Flow.dispatch
+        # rebuilds ctx.state from the flow's construction state, not the
+        # in-flight iterate state, so ctx.state.data is not usable here.
+
+        @verb(role=ROLE_A)
+        async def voter_a(ctx: Context[Any], iteration: int) -> int:
+            """Vote; the first invocation at iteration 2 also fires halt."""
+            runs.append((iteration, "a"))
+            if iteration == 2:
+                halt.set()
+            return 1
+
+        @verb(role=ROLE_A)
+        async def voter_b(ctx: Context[Any], iteration: int) -> int:
+            """Vote."""
+            runs.append((iteration, "b"))
+            return 1
+
+        @verb(role=ROLE_A)
+        async def voter_c(ctx: Context[Any], iteration: int) -> int:
+            """Vote."""
+            runs.append((iteration, "c"))
+            return 1
+
+        panel = Panel([voter_a, voter_b, voter_c], aggregate=sum)
+
+        @verb(role=ROLE_A)
+        async def body(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            """Increment the iteration counter, run the Panel with it, return the aggregate."""
+            ctx.state.data["i"] += 1
+            return await panel.run(ctx, ctx.state.data["i"])
+
+        def build(with_halt: bool) -> Flow:
+            # Voters must live on the top-level runtime flow — Panel dispatches
+            # by name via ctx.flow, which resolves to the outer runtime, not
+            # the iterate body's subflow.
+            flow = make_ff().create(state={"i": 0}).with_checkpointer(store, "panel-iter-1")
+            if with_halt:
+                flow.with_halt(halt)
+            for v in (voter_a, voter_b, voter_c):
+                flow.register(v)
+            flow.iterate(body, max_iters=5)
+            return flow
+
+        # First run: halt fires during iteration 2's Panel; iterate exits
+        # at the next between-iterations check.
+        await build(with_halt=True).run()
+
+        iter1 = [r for r in runs if r[0] == 1]
+        iter2 = [r for r in runs if r[0] == 2]
+        past_2 = [r for r in runs if r[0] >= 3]
+        assert sorted(iter1) == [(1, "a"), (1, "b"), (1, "c")]
+        # Iteration 2 completes fully despite halt-set from inside voter_a.
+        assert sorted(iter2) == [(2, "a"), (2, "b"), (2, "c")]
+        assert not past_2, f"iterations past 2 must not run: {past_2}"
+
+        runs.clear()
+
+        # Resume: iterate continues at iteration 3 with a fresh Panel each pass.
+        await build(with_halt=False).run(resume=True)
+
+        seen_iters = sorted({r[0] for r in runs})
+        assert seen_iters == [3, 4, 5], "iteration 2's Panel must not re-dispatch"
+        for i in (3, 4, 5):
+            assert sorted(r for r in runs if r[0] == i) == [(i, "a"), (i, "b"), (i, "c")]

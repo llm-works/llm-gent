@@ -15,6 +15,7 @@ Exercises:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Self
 
 from llm_gent.flow import (
@@ -26,6 +27,12 @@ from llm_gent.flow import (
     verb,
 )
 from llm_gent.flow.nodes import _Iterate, _Map
+from llm_gent.flow.stores.json_file import JsonFileCheckpointStore
+from llm_gent.flow.testing import (
+    assert_resume_determinism,
+    build_canonical_flow,
+    resume_in_subprocess,
+)
 
 from .conftest import ROLE_A, make_ff, make_test_logger
 
@@ -1097,3 +1104,164 @@ class TestResumePositionReplay:
         await flow.run(resume=True)
         # All items should complete: item 0, 1, 2 each run their iterate bodies.
         assert len([c for c in calls if c[0] == "body"]) >= 3
+
+
+# -----------------------------------------------------------------------------
+# Resume determinism — canonical multi-stage flow via the testing harness
+# -----------------------------------------------------------------------------
+
+
+class TestResumeDeterminismSameProcess:
+    """The load-bearing invariant: resume-from-halt equals uninterrupted final state.
+
+    Pinned once here on the canonical flow from
+    :mod:`llm_gent.flow.testing.checkpoint`. Downstream consumers assert
+    the domain-shaped equivalent on their own Flow.
+    """
+
+    async def test_resume_matches_uninterrupted_final_state(self, tmp_path: Path) -> None:
+        """A fresh :class:`Flow` resumed from a mid-run checkpoint reaches byte-identical final state."""
+        lg = make_test_logger()
+        store = JsonFileCheckpointStore(lg, tmp_path / "cp")
+        await assert_resume_determinism(lg, store, trajectory_id="det-1")
+
+
+class TestResumeDeterminismCrossProcess:
+    """Cross-process resume matches uninterrupted final state.
+
+    Same-process resume can silently keep working when a state field
+    holds a live reference to a non-serializable object. A fresh Python
+    subprocess with only the on-disk checkpoint is the production gate.
+    Uses :class:`JsonFileCheckpointStore` — file-based, portable across
+    processes.
+    """
+
+    async def test_cross_process_resume_json_store(self, tmp_path: Path) -> None:
+        """Subprocess resume via ``resume_in_subprocess`` yields byte-identical final state."""
+        import asyncio
+
+        lg = make_test_logger()
+        root = str(tmp_path / "cp")
+        store = JsonFileCheckpointStore(lg, root)
+
+        baseline = await build_canonical_flow(lg, max_iters=5).run()
+
+        halt = asyncio.Event()
+        await build_canonical_flow(
+            lg,
+            max_iters=5,
+            halt=halt,
+            halt_after_iteration=2,
+            store=store,
+            trajectory_id="xp-1",
+        ).run()
+
+        resumed = resume_in_subprocess(
+            store_module="llm_gent.flow.stores.json_file",
+            store_factory="JsonFileCheckpointStore",
+            store_kwargs={"root": root},
+            flow_builder_kwargs={"max_iters": 5},
+            trajectory_id="xp-1",
+        )
+
+        assert resumed == baseline
+
+
+# -----------------------------------------------------------------------------
+# Ambient re-attach — budget + traits
+# -----------------------------------------------------------------------------
+
+
+class TestResumeRebuildsAmbientBudget:
+    """Budget tracker is runtime-bound, not serialized — fresh tracker on resume."""
+
+    async def test_resume_rebuilds_ambient_budget(self) -> None:
+        """A fresh :class:`Tracker` on resume sees only post-resume cost; the interrupt run's spend does not leak."""
+        from llm_gent.core.budget import PricingConfig, Tracker
+
+        lg = make_test_logger()
+
+        @verb
+        async def spend(ctx: Context[Any], _prev: Any = None) -> None:
+            if ctx.budget is not None:
+                ctx.budget.track("op", override_cost=1.0)
+
+        store = _RecordingStore()
+
+        # First run: 2 iterations save; tracker_a records 2.0.
+        tracker_a = Tracker(lg, PricingConfig())
+        flow_a = (
+            FlowFactory(lg)
+            .create(state={})
+            .with_checkpointer(store, "traj-budget")
+            .with_budget(tracker_a)
+            .iterate(spend, max_iters=2)
+        )
+        await flow_a.run()
+        assert tracker_a.spent == 2.0
+        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.saves.clear()
+        store.deletes.clear()
+
+        # Resume: fresh tracker_b, uncapped. Cumulative max_iters=5 leaves 3 to run.
+        tracker_b = Tracker(lg, PricingConfig())
+        flow_b = (
+            FlowFactory(lg)
+            .create(state={})
+            .with_checkpointer(store, "traj-budget")
+            .with_budget(tracker_b)
+            .iterate(spend, max_iters=5)
+        )
+        await flow_b.run(resume=True)
+
+        # tracker_a is untouched by the resume; tracker_b records only the
+        # remaining iterations (3, 4, 5).
+        assert tracker_a.spent == 2.0
+        assert tracker_b.spent == 3.0
+
+
+class TestResumeRebuildsAmbientTraits:
+    """Trait registry is runtime-bound, not serialized — fresh registry on resume."""
+
+    async def test_resume_rebuilds_ambient_traits(self) -> None:
+        """Post-resume verbs see the resume-time :class:`TraitRegistry` (identity), not the interrupt run's."""
+        from llm_gent.core.traits import Registry as TraitRegistry
+
+        lg = make_test_logger()
+        seen: list[TraitRegistry | None] = []
+
+        @verb
+        async def capture(ctx: Context[Any], _prev: Any = None) -> None:
+            seen.append(ctx.traits)
+
+        store = _RecordingStore()
+
+        # First run: traits_a attached, 2 iterations.
+        traits_a = TraitRegistry(lg)
+        flow_a = (
+            FlowFactory(lg, traits=traits_a)
+            .create(state={})
+            .with_checkpointer(store, "traj-traits")
+            .iterate(capture, max_iters=2)
+        )
+        await flow_a.run()
+        assert seen == [traits_a, traits_a]
+        seen.clear()
+        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.saves.clear()
+        store.deletes.clear()
+
+        # Resume: traits_b attached. Remaining iterations see the new registry.
+        traits_b = TraitRegistry(lg)
+        flow_b = (
+            FlowFactory(lg, traits=traits_b)
+            .create(state={})
+            .with_checkpointer(store, "traj-traits")
+            .iterate(capture, max_iters=5)
+        )
+        await flow_b.run(resume=True)
+
+        assert all(t is traits_b for t in seen), (
+            f"expected every post-resume ctx.traits to be traits_b; got {seen}"
+        )
+        assert len(seen) == 3  # iterations 3, 4, 5

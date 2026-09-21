@@ -146,7 +146,13 @@ exclude = ["llm_gent/examples"]
 [tool.coverage.run]
 source = ["llm_gent"]
 branch = true
-omit = ["*/tests/*", "*/__pycache__/*", "*/llm_gent/cli/*", "*/llm_gent/agents/*/cli.py"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/llm_gent/cli/*",
+    "*/llm_gent/agents/*/cli.py",
+    "*/llm_gent/flow/testing/*",
+]
 
 [tool.coverage.report]
 exclude_lines = [
