@@ -28,7 +28,11 @@ from llm_gent.flow import (
 )
 from llm_gent.flow.nodes import _Iterate, _Map
 from llm_gent.flow.stores.json_file import JsonFileCheckpointStore
-from llm_gent.flow.testing import build_canonical_flow, resume_in_subprocess
+from llm_gent.flow.testing import (
+    assert_resume_determinism,
+    build_canonical_flow,
+    resume_in_subprocess,
+)
 
 from .conftest import ROLE_A, make_ff, make_test_logger
 
@@ -1117,31 +1121,9 @@ class TestResumeDeterminismSameProcess:
 
     async def test_resume_matches_uninterrupted_final_state(self, tmp_path: Path) -> None:
         """A fresh :class:`Flow` resumed from a mid-run checkpoint reaches byte-identical final state."""
-        import asyncio
-
         lg = make_test_logger()
         store = JsonFileCheckpointStore(lg, tmp_path / "cp")
-
-        baseline = await build_canonical_flow(lg, max_iters=5).run()
-
-        halt = asyncio.Event()
-        await build_canonical_flow(
-            lg,
-            max_iters=5,
-            halt=halt,
-            halt_after_iteration=2,
-            store=store,
-            trajectory_id="det-1",
-        ).run()
-
-        resumed = await build_canonical_flow(
-            lg,
-            max_iters=5,
-            store=store,
-            trajectory_id="det-1",
-        ).run(resume=True)
-
-        assert resumed == baseline
+        await assert_resume_determinism(lg, store, trajectory_id="det-1")
 
 
 class TestResumeDeterminismCrossProcess:

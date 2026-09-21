@@ -195,6 +195,67 @@ def build_canonical_flow(
 
 
 # -----------------------------------------------------------------------------
+# Same-process determinism assertion
+# -----------------------------------------------------------------------------
+
+
+async def assert_resume_determinism(
+    lg: Logger,
+    store: CheckpointStore,
+    *,
+    halt_after_iteration: int = 2,
+    max_iters: int = 5,
+    trajectory_id: str = "determinism-check",
+) -> dict[str, Any]:
+    """Run baseline, interrupt, resume, assert equality, return final state.
+
+    The load-bearing invariant: a Flow resumed from a mid-run checkpoint
+    reaches the same final state as an uninterrupted run. This helper
+    wraps the three-step pattern (baseline / interrupt / resume) and
+    asserts equality, returning the final state dict on success.
+
+    Uses :func:`build_canonical_flow` internally — deterministic,
+    no I/O, stable composition across interrupt and resume.
+
+    Args:
+        lg: Logger.
+        store: Checkpoint store for the interrupt and resume runs.
+        halt_after_iteration: Iteration at which to fire halt (default 2).
+        max_iters: Total iterations for the flow (default 5).
+        trajectory_id: Checkpoint trajectory identifier.
+
+    Returns:
+        The final state dict (``CanonicalCounter.to_dict()``).
+
+    Raises:
+        AssertionError: If the resumed state differs from baseline.
+    """
+    baseline = await build_canonical_flow(lg, max_iters=max_iters).run()
+
+    halt = asyncio.Event()
+    await build_canonical_flow(
+        lg,
+        max_iters=max_iters,
+        halt=halt,
+        halt_after_iteration=halt_after_iteration,
+        store=store,
+        trajectory_id=trajectory_id,
+    ).run()
+
+    resumed = await build_canonical_flow(
+        lg,
+        max_iters=max_iters,
+        store=store,
+        trajectory_id=trajectory_id,
+    ).run(resume=True)
+
+    assert resumed == baseline, (
+        f"resumed state differs from baseline:\n  baseline={baseline}\n  resumed={resumed}"
+    )
+    return dict(resumed)
+
+
+# -----------------------------------------------------------------------------
 # Cross-process resume helper
 # -----------------------------------------------------------------------------
 

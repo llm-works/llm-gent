@@ -120,13 +120,13 @@ class Panel:
         Each inner verb must have been registered with the flow referenced by
         ``ctx.flow``. Positional and keyword args are forwarded to every verb.
 
-        Halt semantics — cooperative per verb. ``asyncio.gather`` never
-        cancels a sibling on the halt event; each dispatched verb receives
-        ``ctx.halt`` and decides on its own whether to poll it. Verbs
-        backed by saia observe halt at call entry (fast abort before
-        hitting the LLM) and mid-stream (aborts streaming within
-        milliseconds), so a halted Panel of saia verbs exits in about the
-        longest single in-flight LLM call — not the sum across N. Verbs
+        Halt semantics — cooperative per verb. Setting ``ctx.halt`` does
+        not raise, so ``asyncio.gather`` awaits all siblings to completion;
+        each dispatched verb receives ``ctx.halt`` and decides on its own
+        whether to poll it. Verbs backed by saia observe halt at call entry
+        (fast abort before hitting the LLM) and mid-stream (aborts streaming
+        within milliseconds), so a halted Panel of saia verbs exits in about
+        the longest single in-flight LLM call — not the sum across N. Verbs
         that don't poll halt run to completion; that's an authoring
         responsibility, not framework behavior.
 

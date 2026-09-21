@@ -14,6 +14,7 @@ invariants (same-process and cross-process).
 
 from .checkpoint import (
     CanonicalCounter,
+    assert_resume_determinism,
     build_canonical_flow,
     resume_in_subprocess,
 )
@@ -21,6 +22,7 @@ from .checkpoint import (
 
 __all__ = [
     "CanonicalCounter",
+    "assert_resume_determinism",
     "build_canonical_flow",
     "resume_in_subprocess",
 ]
