@@ -1173,7 +1173,7 @@ class TestResumeDeterminismCrossProcess:
 
 
 class TestResumeRebuildsAmbientBudget:
-    """Sub-slice 5 for budget: the tracker is not serialized — fresh tracker on resume."""
+    """Budget tracker is runtime-bound, not serialized — fresh tracker on resume."""
 
     async def test_resume_rebuilds_ambient_budget(self) -> None:
         """A fresh :class:`Tracker` on resume sees only post-resume cost; the interrupt run's spend does not leak."""
@@ -1221,7 +1221,7 @@ class TestResumeRebuildsAmbientBudget:
 
 
 class TestResumeRebuildsAmbientTraits:
-    """Sub-slice 5 for traits: the trait registry is not serialized — fresh registry on resume."""
+    """Trait registry is runtime-bound, not serialized — fresh registry on resume."""
 
     async def test_resume_rebuilds_ambient_traits(self) -> None:
         """Post-resume verbs see the resume-time :class:`TraitRegistry` (identity), not the interrupt run's."""

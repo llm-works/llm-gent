@@ -252,8 +252,8 @@ class TestPanelInsideIterateResumeBoundary:
     Panel has no checkpoint boundary of its own. When a halt fires
     during a Panel's ``asyncio.gather``, siblings are not cancelled —
     each dispatched verb observes ``ctx.halt`` on its own if it
-    chooses (saia does at call entry and mid-stream, so real xray
-    verbs abort fast; verbs that don't poll halt run to completion).
+    chooses (saia-backed verbs observe halt at call entry and mid-stream,
+    so they abort fast; verbs that don't poll halt run to completion).
     The gather returns whatever the verbs returned; control goes back
     to the enclosing iterate, which honors halt at its next
     between-iterations check.
