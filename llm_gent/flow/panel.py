@@ -124,11 +124,11 @@ class Panel:
         not raise, so ``asyncio.gather`` awaits all siblings to completion;
         each dispatched verb receives ``ctx.halt`` and decides on its own
         whether to poll it. Verbs backed by saia observe halt at call entry
-        (fast abort before hitting the LLM) and mid-stream (aborts streaming
-        within milliseconds), so a halted Panel of saia verbs exits in about
-        the longest single in-flight LLM call — not the sum across N. Verbs
-        that don't poll halt run to completion; that's an authoring
-        responsibility, not framework behavior.
+        (fast abort before hitting the LLM) and mid-stream, so a halted
+        Panel of saia verbs exits in about the longest single in-flight
+        LLM call — not the sum across N. Verbs that don't poll halt run
+        to completion; that's an authoring responsibility, not framework
+        behavior.
 
         Resume semantics under an enclosing :meth:`Flow.iterate` —
         the checkpoint boundary is the iterate iteration, not the Panel.

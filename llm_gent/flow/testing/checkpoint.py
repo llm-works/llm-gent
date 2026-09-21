@@ -19,7 +19,7 @@ Both primitives support the same testing recipe — run baseline,
 interrupt-and-save, resume, assert final states equal — either in-process
 (new :class:`Flow` instance for the resume) or cross-process (subprocess
 for the resume). Consumers can substitute their own Flow builder module
-(the second positional to :func:`resume_in_subprocess`) when their state
+(``flow_module=`` in :func:`resume_in_subprocess`) when their state
 comparator needs domain knowledge.
 """
 
@@ -229,7 +229,16 @@ async def assert_resume_determinism(
 
     Raises:
         AssertionError: If the resumed state differs from baseline.
+        ValueError: If a checkpoint already exists for the trajectory_id,
+            or if halt_after_iteration is not in [1, max_iters].
     """
+    if store.load_checkpoint(trajectory_id) is not None:
+        raise ValueError(f"checkpoint already exists for trajectory_id={trajectory_id!r}")
+    if not (1 <= halt_after_iteration <= max_iters):
+        raise ValueError(
+            f"halt_after_iteration must be in [1, {max_iters}]; got {halt_after_iteration}"
+        )
+
     baseline = await build_canonical_flow(lg, max_iters=max_iters).run()
 
     halt = asyncio.Event()
