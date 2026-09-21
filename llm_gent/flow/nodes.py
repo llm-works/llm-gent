@@ -133,8 +133,9 @@ observability (progress, streaming, adaptive throttling). ``outcome``
 is the value that lands in the map's result list: the body's return
 for successful items, :class:`Failure` for items whose body raised
 (both ``strict`` modes), or :class:`Skipped` for guard- or halt-skipped
-items. Success-path hooks fire after per-item merge, so ``ctx.state``
-reflects the merged parent state.
+items. Success-path hooks fire after per-item merge; ``ctx.state``
+is the child state, and the merged parent is reachable via
+``ctx.state.root()`` when projection is used.
 
 Does not fire on :class:`asyncio.CancelledError`; cancellation
 propagates unconditionally. A hook exception is logged and swallowed

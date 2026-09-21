@@ -641,7 +641,8 @@ class Flow:
         ``outcome`` is the value that lands in the map's result list:
 
         - the body's return value on success (hook fires after per-item
-          merge, so ``ctx.state`` reflects the merged parent state);
+          merge; ``ctx.state`` is the child state, and the merged parent
+          is reachable via ``ctx.state.root()`` when projection is used);
         - a :class:`Failure` under both ``strict`` modes when the body
           raises a non-cancellation exception (in ``strict=True`` the
           hook fires before the exception propagates);
@@ -651,6 +652,9 @@ class Flow:
         Cancellation is unconditional and does not fire the hook. A hook
         exception is logged and swallowed so the item's outcome is never
         masked — matches :meth:`on_error`.
+
+        During checkpoint/resume, the hook fires for every item processed
+        in the resumed run, including fresh items not part of the checkpoint.
 
         Only valid on a map node. Chainable form only.
 
