@@ -10,6 +10,7 @@ a real Postgres via appinfra's schema-isolated fixtures. Skips when
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ from sqlalchemy import delete
 
 from llm_gent.flow.stores import PgCheckpointStore
 from llm_gent.flow.stores.postgres import FlowCheckpoint
+from llm_gent.flow.testing import build_canonical_flow, resume_in_subprocess
 
 
 pytestmark = pytest.mark.integration
@@ -123,3 +125,50 @@ class TestPgCheckpointStore:
         mgr = SchemaManager(pg_test_logger, pg_migrated)
         status = mgr.ensure_schema()
         assert status.state == SchemaState.CURRENT
+
+
+class TestPgCheckpointStoreCrossProcessResume:
+    """A fresh Python subprocess resuming from PG matches the uninterrupted final state.
+
+    Same-process resume can silently retain non-serializable references
+    across the round-trip; a subprocess with only the PG-persisted
+    checkpoint is the production gate for network-backed stores.
+    """
+
+    def test_cross_process_resume_pg_store(
+        self,
+        pg_migrated: PG,
+        pg_test_config: dict[str, Any],
+        pg_test_schema: str,
+        pg_test_logger: Logger,
+    ) -> None:
+        """Baseline and subprocess resume against the same PG schema yield identical final state."""
+        store = PgCheckpointStore(pg_test_logger, pg_migrated)
+        trajectory_id = "pg-cross-proc-1"
+
+        baseline = asyncio.run(build_canonical_flow(pg_test_logger, max_iters=5).run())
+
+        halt = asyncio.Event()
+        asyncio.run(
+            build_canonical_flow(
+                pg_test_logger,
+                max_iters=5,
+                halt=halt,
+                halt_after_iteration=2,
+                store=store,
+                trajectory_id=trajectory_id,
+            ).run()
+        )
+
+        resumed = resume_in_subprocess(
+            store_module="llm_gent.flow.testing.checkpoint",
+            store_factory="pg_checkpoint_store_from_config",
+            store_kwargs={
+                "url": str(pg_test_config["url"]),
+                "schema": pg_test_schema,
+            },
+            flow_builder_kwargs={"max_iters": 5},
+            trajectory_id=trajectory_id,
+        )
+
+        assert resumed == baseline
