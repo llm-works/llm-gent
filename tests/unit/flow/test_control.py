@@ -937,6 +937,10 @@ class TestMapOnItemComplete:
         """Strict-mode merge failure fires the hook with Failure before re-raising."""
         observed: list[Any] = []
 
+        def project(_parent: Any) -> dict[str, int]:
+            """Isolate child state for merge."""
+            return {"n": 0}
+
         def bad_merge(_parent: Any, _child: Any) -> None:
             """Merge that always raises."""
             raise ValueError("merge-failed")
@@ -946,7 +950,7 @@ class TestMapOnItemComplete:
             observed.append(outcome)
 
         flow = make_ff().create(state={})
-        flow.call(_identity).map(_double, merge=bad_merge).on_item_complete(hook)
+        flow.call(_identity).map(_double, state=project, merge=bad_merge).on_item_complete(hook)
         with pytest.raises(ValueError, match="merge-failed"):
             await flow.run([1])
         assert len(observed) == 1
@@ -958,8 +962,12 @@ class TestMapOnItemComplete:
         """Non-strict merge failure fires the hook with Failure and returns it."""
         observed: list[Any] = []
 
+        def project(_parent: Any) -> dict[str, int]:
+            """Isolate child state for merge."""
+            return {"n": 0}
+
         def bad_merge(_parent: Any, _child: Any) -> None:
-            """Merge that raises for item 2."""
+            """Merge that always raises."""
             raise ValueError("merge-failed")
 
         def hook(_item: int, outcome: Any, _ctx: Context) -> None:
@@ -967,7 +975,9 @@ class TestMapOnItemComplete:
             observed.append(outcome)
 
         flow = make_ff().create(state={})
-        flow.call(_identity).map(_double, strict=False, merge=bad_merge).on_item_complete(hook)
+        flow.call(_identity).map(
+            _double, strict=False, state=project, merge=bad_merge
+        ).on_item_complete(hook)
         results = await flow.run([1, 2])
         assert len(results) == 2
         assert all(isinstance(r, Failure) for r in results)
