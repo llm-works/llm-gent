@@ -932,6 +932,48 @@ class TestMapOnItemComplete:
         results = await flow.run([1, 2, 3])
         assert results == [2, 4, 6]
 
+    @pytest.mark.asyncio
+    async def test_fires_on_merge_failure_strict(self) -> None:
+        """Strict-mode merge failure fires the hook with Failure before re-raising."""
+        observed: list[Any] = []
+
+        def bad_merge(_parent: Any, _child: Any) -> None:
+            """Merge that always raises."""
+            raise ValueError("merge-failed")
+
+        def hook(_item: int, outcome: Any, _ctx: Context) -> None:
+            """Record outcomes; merge failure should appear as Failure."""
+            observed.append(outcome)
+
+        flow = make_ff().create(state={})
+        flow.call(_identity).map(_double, merge=bad_merge).on_item_complete(hook)
+        with pytest.raises(ValueError, match="merge-failed"):
+            await flow.run([1])
+        assert len(observed) == 1
+        assert isinstance(observed[0], Failure)
+        assert isinstance(observed[0].exception, ValueError)
+
+    @pytest.mark.asyncio
+    async def test_fires_on_merge_failure_non_strict(self) -> None:
+        """Non-strict merge failure fires the hook with Failure and returns it."""
+        observed: list[Any] = []
+
+        def bad_merge(_parent: Any, _child: Any) -> None:
+            """Merge that raises for item 2."""
+            raise ValueError("merge-failed")
+
+        def hook(_item: int, outcome: Any, _ctx: Context) -> None:
+            """Record every outcome."""
+            observed.append(outcome)
+
+        flow = make_ff().create(state={})
+        flow.call(_identity).map(_double, strict=False, merge=bad_merge).on_item_complete(hook)
+        results = await flow.run([1, 2])
+        assert len(results) == 2
+        assert all(isinstance(r, Failure) for r in results)
+        assert len(observed) == 2
+        assert all(isinstance(o, Failure) for o in observed)
+
 
 # -----------------------------------------------------------------------------
 # .map — chained-method attachment rules

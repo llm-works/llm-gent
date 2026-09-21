@@ -815,9 +815,9 @@ async def _run_map_item_strict(
             mp.on_item_complete, item, Failure(exception=exc, item=item), item_ctx, env
         )
         raise
-    async with merge_lock:
-        await _merge_state(mp.merge_fn, env.state, child_state)
-    await _fire_on_item_complete(mp.on_item_complete, item, result, item_ctx, env)
+    failure = await _merge_and_notify(mp, item, result, child_state, item_ctx, env, merge_lock)
+    if failure is not None:
+        raise failure.exception
     return result
 
 
@@ -863,10 +863,10 @@ async def _run_map_item(
         failure = Failure(exception=exc, item=item)
         await _fire_on_item_complete(mp.on_item_complete, item, failure, item_ctx, env)
         return failure
-    async with merge_lock:
-        await _merge_state(mp.merge_fn, env.state, child_state)
-    await _fire_on_item_complete(mp.on_item_complete, item, result, item_ctx, env)
-    return result
+    merge_failure = await _merge_and_notify(
+        mp, item, result, child_state, item_ctx, env, merge_lock
+    )
+    return merge_failure if merge_failure is not None else result
 
 
 def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
@@ -935,6 +935,31 @@ async def _fire_on_item_complete(
             "map on_item_complete hook raised — outcome preserved",
             extra={"exception": hook_exc},
         )
+
+
+async def _merge_and_notify(
+    mp: _Map,
+    item: Any,
+    result: Any,
+    child_state: Any,
+    item_ctx: Context[Any],
+    env: _RunEnv,
+    merge_lock: asyncio.Lock,
+) -> Failure | None:
+    """Merge child state into parent, then fire on_item_complete; return Failure if merge raised."""
+    try:
+        async with merge_lock:
+            await _merge_state(mp.merge_fn, env.state, child_state)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if mp.on_error is not None:
+            await _run_on_error(mp.on_error, exc, item, item_ctx, env)
+        failure = Failure(exception=exc, item=item)
+        await _fire_on_item_complete(mp.on_item_complete, item, failure, item_ctx, env)
+        return failure
+    await _fire_on_item_complete(mp.on_item_complete, item, result, item_ctx, env)
+    return None
 
 
 async def _resolve_items(
