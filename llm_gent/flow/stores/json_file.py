@@ -22,17 +22,21 @@ truncated file the next load would misread. Same
 record still exists on disk but load-by-key returns the newer one
 (highest ``N`` wins on tie).
 
-Intended for local dev / small-scale ops. For a shared-fleet setup use
-:class:`llm_gent.flow.stores.PgCheckpointStore`.
+Concurrent saves to one trajectory are serialized via ``fcntl.flock`` on
+a per-directory lock file; multi-process safety is preserved at the cost
+of blocking. Intended for local dev / small-scale ops. For a shared-fleet
+setup use :class:`llm_gent.flow.stores.PgCheckpointStore`.
 """
 
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
@@ -77,24 +81,25 @@ class JsonFileCheckpointStore:
         """Persist one record as ``save-<N>.json``. Atomic via write-then-replace."""
         traj_dir = self._trajectory_dir(client_flow_id)
         traj_dir.mkdir(parents=True, exist_ok=True)
-        next_seq = self._next_save_seq(traj_dir)
-        target = traj_dir / f"save-{next_seq}.json"
-        payload = {
-            "state": state_json,
-            "metadata": metadata_json,
-            "node_path": node_path,
-            "iteration": iteration,
-        }
-        fd, tmp_path = tempfile.mkstemp(dir=traj_dir, prefix=f"save-{next_seq}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(payload))
-            os.replace(tmp_path, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_path)
-            raise
-        self._prune_superseded(traj_dir, next_seq, node_path, iteration)
+        with self._trajectory_lock(traj_dir):
+            next_seq = self._next_save_seq(traj_dir)
+            target = traj_dir / f"save-{next_seq}.json"
+            payload = {
+                "state": state_json,
+                "metadata": metadata_json,
+                "node_path": node_path,
+                "iteration": iteration,
+            }
+            fd, tmp_path = tempfile.mkstemp(dir=traj_dir, prefix=f"save-{next_seq}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(payload))
+                os.replace(tmp_path, target)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+                raise
+            self._prune_superseded(traj_dir, next_seq, node_path, iteration)
 
     def load_checkpoint(
         self,
@@ -157,6 +162,26 @@ class JsonFileCheckpointStore:
         if root_resolved != candidate_resolved and root_resolved not in candidate_resolved.parents:
             raise ValueError(f"client_flow_id resolves outside store root; got {client_flow_id!r}")
         return candidate
+
+    @contextlib.contextmanager
+    def _trajectory_lock(self, traj_dir: Path) -> Generator[None, None, None]:
+        """Exclusive lock on the trajectory directory for save serialization.
+
+        Uses ``fcntl.flock`` on a ``.lock`` file inside the trajectory
+        directory. The lock serializes sequence allocation, file write,
+        and pruning so concurrent processes cannot race on the same
+        ``save-N.json`` filename.
+        """
+        lock_path = traj_dir / ".lock"
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     def _next_save_seq(self, traj_dir: Path) -> int:
         """Return one plus the highest existing ``save-<N>.json`` in ``traj_dir``.
