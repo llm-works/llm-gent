@@ -92,12 +92,31 @@ non-additive change.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable
 from typing import Any, Protocol
 
 
 LoadResult = tuple[dict[str, Any], dict[str, Any]] | None
 """Return payload of :meth:`CheckpointStore.load_checkpoint`."""
+
+
+async def maybe_await(value: Any) -> Any:
+    """Await ``value`` if awaitable; return it as-is otherwise.
+
+    Use this helper at every checkpoint-store call site so sync and
+    async stores are handled uniformly::
+
+        result = await maybe_await(store.load_checkpoint(...))
+
+    Uses :func:`inspect.isawaitable`, which returns ``True`` only for
+    coroutines and objects with ``__await__``. Generators and async
+    generators return ``False`` and pass through unchanged — they are
+    iterable, not awaitable.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class CheckpointStore(Protocol):

@@ -213,6 +213,86 @@ class TestAsyncStoreRoundTrip:
         # Clean completion: delete must be awaited.
         assert store.inner.deletes == ["traj-async"]
 
+    async def test_rapid_iterations_with_slow_async_store(self) -> None:
+        """Rapid iterations complete correctly even when async saves have latency.
+
+        Stress test: many fast iterations with an async store that adds
+        artificial latency. Verifies checkpoint saves are awaited inline
+        before proceeding to the next iteration — if saves were dropped
+        or raced, resume would restore the wrong iteration count.
+        """
+        import asyncio as _asyncio
+
+        @dataclass
+        class _SlowAsyncStore:
+            """Async store with configurable save latency."""
+
+            inner: _RecordingStore = field(default_factory=_RecordingStore)
+            save_delay: float = 0.01  # 10ms per save
+
+            async def save_checkpoint(
+                self,
+                client_flow_id: str,
+                node_path: str,
+                iteration: int,
+                state_json: dict[str, Any],
+                metadata_json: dict[str, Any],
+            ) -> None:
+                await _asyncio.sleep(self.save_delay)
+                self.inner.save_checkpoint(
+                    client_flow_id, node_path, iteration, state_json, metadata_json
+                )
+
+            async def load_checkpoint(
+                self,
+                client_flow_id: str,
+                node_path: str | None = None,
+                iteration: int | None = None,
+            ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+                await _asyncio.sleep(0)
+                return self.inner.load_checkpoint(client_flow_id, node_path, iteration)
+
+            async def delete_checkpoint(self, client_flow_id: str) -> None:
+                await _asyncio.sleep(0)
+                self.inner.delete_checkpoint(client_flow_id)
+
+        @verb(role=ROLE_A)
+        async def fast_bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            return ctx.state.data["n"]
+
+        store = _SlowAsyncStore()
+        halt = _asyncio.Event()
+
+        @verb(role=ROLE_A)
+        async def bump_then_halt_at_5(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            if ctx.state.data["n"] >= 5:
+                halt.set()
+            return ctx.state.data["n"]
+
+        # Run 5 iterations with slow saves, halt, then resume and complete.
+        halted_flow = (
+            make_ff()
+            .create(state={"n": 0})
+            .with_checkpointer(store, "traj-stress")
+            .iterate(bump_then_halt_at_5, max_iters=10)
+            .with_halt(halt)
+        )
+        await halted_flow.run()
+        # All 5 saves must have completed (awaited) despite latency.
+        assert len(store.inner.saves) == 5
+
+        # Resume: if any save was dropped, this would fail.
+        resumed_flow = (
+            make_ff()
+            .create(state={"n": 0})
+            .with_checkpointer(store, "traj-stress")
+            .iterate(fast_bump, max_iters=10)
+        )
+        result = await resumed_flow.run(resume=True)
+        assert result == 10  # 5 from checkpoint + 5 more = 10
+
 
 # -----------------------------------------------------------------------------
 # with_checkpointer wiring

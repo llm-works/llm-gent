@@ -64,7 +64,7 @@ from appinfra.log import Logger
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._executor import _build_ctx, _execute_node, _step_inputs
-from .checkpoint import CheckpointStore
+from .checkpoint import CheckpointStore, maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -845,9 +845,7 @@ class Flow:
             and self._client_flow_id is not None
             and (self._halt_event is None or not self._halt_event.is_set())
         ):
-            deleted = self._checkpointer.delete_checkpoint(self._client_flow_id)
-            if inspect.isawaitable(deleted):
-                await deleted
+            await maybe_await(self._checkpointer.delete_checkpoint(self._client_flow_id))
         return result
 
     def _assert_replay_consumed(self, replay: _ResumeReplay | None) -> None:
@@ -1131,8 +1129,7 @@ class Flow:
                 f"Flow {label!r} was run with resume=True but has no "
                 f"client_flow_id — call .with_checkpointer(store, client_flow_id) first"
             )
-        raw = self._checkpointer.load_checkpoint(self._client_flow_id)
-        loaded = await raw if inspect.isawaitable(raw) else raw
+        loaded = await maybe_await(self._checkpointer.load_checkpoint(self._client_flow_id))
         if loaded is None:
             return fallback, None
         state_json, metadata_json = loaded

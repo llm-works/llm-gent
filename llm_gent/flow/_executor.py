@@ -25,6 +25,7 @@ import inspect
 import time
 from typing import TYPE_CHECKING, Any
 
+from .checkpoint import maybe_await
 from .context import Context
 from .nodes import (
     UNSET,
@@ -632,11 +633,11 @@ async def _save_iterate_checkpoint(
     path = list(env.ancestor_chain + (node_id,))
     node_path = "/".join(path)
     metadata_json = {"path": path, "iteration": iteration}
-    result = env.checkpointer.save_checkpoint(
-        env.client_flow_id, node_path, iteration, state_json, metadata_json
+    await maybe_await(
+        env.checkpointer.save_checkpoint(
+            env.client_flow_id, node_path, iteration, state_json, metadata_json
+        )
     )
-    if inspect.isawaitable(result):
-        await result
 
 
 def _serialize_state_tree(current: State[Any]) -> dict[str, Any]:
