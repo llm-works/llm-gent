@@ -1040,6 +1040,58 @@ class TestResumePositionReplay:
         result = await flow_b.run(resume=True)
         assert result == 4  # n hydrates to 2, two more passes → n=4
 
+    async def test_nested_iterates_save_and_resume_round_trip(self) -> None:
+        """``outer.iterate(inner.iterate(...))`` — save with distinct node_paths, resume completes.
+
+        Save-side: outer's boundary save carries a length-1 path;
+        the inner iterate's per-iteration saves carry a length-2 path
+        that extends the outer's. Neither collides in the store.
+
+        Resume-side: preloading the latest save (outer's boundary),
+        the framework hydrates state + walks the graph back to the
+        outer iterate and picks up one more outer pass, running the
+        inner body afresh under it.
+        """
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            return ctx.state.data["n"]
+
+        store = _RecordingStore()
+
+        def inner_body(f: Flow) -> None:
+            f.iterate(bump, max_iters=2)
+
+        def mk_flow(outer_max: int) -> Flow:
+            return (
+                make_ff()
+                .create(state={"n": 0})
+                .with_checkpointer(store, "traj-nested-full")
+                .iterate(inner_body, max_iters=outer_max)
+            )
+
+        # First run: outer_max=1 → one outer pass, inner runs twice.
+        # Saves: two inner (path length 2), one outer (path length 1, saved last).
+        await mk_flow(1).run()
+        outer_saves = [s for s in store.saves if len(s[4]["path"]) == 1]
+        inner_saves = [s for s in store.saves if len(s[4]["path"]) == 2]
+        assert len(outer_saves) == 1  # one outer-boundary save
+        assert len(inner_saves) == 2  # two inner iterations
+        assert outer_saves[0][1] != inner_saves[0][1]  # distinct node_paths
+        # Outer's save is the latest (outer boundary saves after inner completes).
+        assert len(store.saves[-1][4]["path"]) == 1
+
+        # Prime resume with the latest save.
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
+        store.saves.clear()
+        store.deletes.clear()
+
+        # Resume with outer_max=2 → one more outer pass (inner runs twice more).
+        # Total body invocations: 2 (pre-resume) + 2 (post-resume) = 4, so n=4.
+        result = await mk_flow(2).run(resume=True)
+        assert result == 4
+
     async def test_resume_through_subflow(self) -> None:
         """Round-trip through ``.call(subflow_with_iterate)`` — path has two ids.
 
@@ -1377,6 +1429,63 @@ class TestResumeSkipsChainPredecessors:
         await mk_flow(3).run(resume=True)
         # Resume-first-iteration: prev is None (f didn't re-run).
         assert first_prev_seen[0] is None
+
+    async def test_chain_of_iterates_round_trips_through_json_store(self, tmp_path: Path) -> None:
+        """Two iterates in one chain against a real ``JsonFileCheckpointStore``.
+
+        Locks in A1 + A2 together against real persistence:
+        - A2: iterate_a and iterate_b save under distinct on-disk
+          filenames scoped by node_path, no collision.
+        - A1: on resume from iterate_b's mid-run checkpoint, iterate_a
+          is skipped — its ``bump_a`` verb never re-invokes.
+        """
+        import asyncio
+
+        from llm_gent.flow.stores import JsonFileCheckpointStore
+
+        a_calls: list[int] = []
+        halt = asyncio.Event()
+
+        @verb(role=ROLE_A)
+        async def bump_a(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            a_calls.append(1)
+            ctx.state.data["a"] += 1
+            return ctx.state.data["a"]
+
+        @verb(role=ROLE_A)
+        async def bump_b(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["b"] += 1
+            if ctx.state.data["b"] >= 2:
+                halt.set()
+            return ctx.state.data["b"]
+
+        store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "ck")
+
+        def mk_flow(halt_event: asyncio.Event | None) -> Flow:
+            flow = (
+                make_ff()
+                .create(state={"a": 0, "b": 0})
+                .with_checkpointer(store, "traj-two-iter")
+                .iterate(bump_a, max_iters=3)
+                .iterate(bump_b, max_iters=5)
+            )
+            if halt_event is not None:
+                flow.with_halt(halt_event)
+            return flow
+
+        # Interrupt run: iterate_a completes (3 passes), iterate_b runs
+        # until halt trips at b=2. Halt-set exit preserves checkpoint.
+        await mk_flow(halt).run()
+        assert len(a_calls) == 3
+        assert store.load_checkpoint("traj-two-iter") is not None
+
+        a_calls.clear()
+
+        # Resume: iterate_a must NOT re-run (A1); iterate_b resumes at
+        # cumulative iteration 3 under its own on-disk node_path (A2).
+        result = await mk_flow(None).run(resume=True)
+        assert a_calls == []  # A1: iterate_a skipped on resume
+        assert result == 5  # iterate_b cumulative: 2 saved + 3 more = 5
 
 
 # -----------------------------------------------------------------------------
