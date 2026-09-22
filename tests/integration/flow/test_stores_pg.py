@@ -54,7 +54,7 @@ class TestPgCheckpointStore:
 
     def test_round_trip_single_iteration(self, store: PgCheckpointStore) -> None:
         """Save one row, load it back verbatim."""
-        store.save_checkpoint("traj-1", 1, _state(42), _meta(1))
+        store.save_checkpoint("traj-1", "node-a", 1, _state(42), _meta(1))
         loaded = store.load_checkpoint("traj-1")
         assert loaded is not None
         state_json, meta_json = loaded
@@ -67,38 +67,38 @@ class TestPgCheckpointStore:
 
     def test_load_specific_iteration(self, store: PgCheckpointStore) -> None:
         """``iteration=N`` fetches exactly that row when it exists."""
-        store.save_checkpoint("traj-1", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-1", 2, _state(2), _meta(2))
+        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
+        store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
         loaded = store.load_checkpoint("traj-1", iteration=1)
         assert loaded is not None
         assert loaded[0] == _state(1)
 
     def test_load_specific_iteration_missing(self, store: PgCheckpointStore) -> None:
         """A non-existent iteration under a live trajectory reads as ``None``."""
-        store.save_checkpoint("traj-1", 1, _state(1), _meta(1))
+        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
         assert store.load_checkpoint("traj-1", iteration=99) is None
 
-    def test_load_latest_picks_highest_iteration(self, store: PgCheckpointStore) -> None:
-        """``iteration=None`` returns the row with the highest ``iteration``."""
-        store.save_checkpoint("traj-1", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-1", 3, _state(3), _meta(3))
-        store.save_checkpoint("traj-1", 2, _state(2), _meta(2))
+    def test_load_latest_picks_last_save(self, store: PgCheckpointStore) -> None:
+        """Both filters ``None`` returns the most recently inserted row (last db_id wins)."""
+        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
+        store.save_checkpoint("traj-1", "node-a", 3, _state(3), _meta(3))
+        store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
         loaded = store.load_checkpoint("traj-1")
         assert loaded is not None
-        assert loaded[1]["iteration"] == 3
+        assert loaded[1]["iteration"] == 2
 
     def test_same_iteration_resave_upserts(self, store: PgCheckpointStore) -> None:
         """A second save at the same iteration replaces the earlier row (ON CONFLICT DO UPDATE)."""
-        store.save_checkpoint("traj-1", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-1", 1, _state(99), _meta(1))
+        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
+        store.save_checkpoint("traj-1", "node-a", 1, _state(99), _meta(1))
         loaded = store.load_checkpoint("traj-1", iteration=1)
         assert loaded is not None
         assert loaded[0] == _state(99)
 
     def test_delete_wipes_trajectory(self, store: PgCheckpointStore) -> None:
         """Every row under the trajectory is gone after delete."""
-        store.save_checkpoint("traj-1", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-1", 2, _state(2), _meta(2))
+        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
+        store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
         store.delete_checkpoint("traj-1")
         assert store.load_checkpoint("traj-1") is None
         assert store.load_checkpoint("traj-1", iteration=1) is None
@@ -110,8 +110,8 @@ class TestPgCheckpointStore:
 
     def test_delete_leaves_other_trajectories(self, store: PgCheckpointStore) -> None:
         """Deleting one trajectory does not affect a sibling under the same schema."""
-        store.save_checkpoint("traj-a", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-b", 1, _state(2), _meta(1))
+        store.save_checkpoint("traj-a", "node-a", 1, _state(1), _meta(1))
+        store.save_checkpoint("traj-b", "node-a", 1, _state(2), _meta(1))
         store.delete_checkpoint("traj-a")
         assert store.load_checkpoint("traj-a") is None
         loaded = store.load_checkpoint("traj-b")

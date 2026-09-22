@@ -250,9 +250,9 @@ class TestSaveAtIterateBoundary:
             .iterate(bump, max_iters=3)
         )
         await flow.run()
-        assert [s[1] for s in store.saves] == [1, 2, 3]
+        assert [s[2] for s in store.saves] == [1, 2, 3]
         assert store.saves[-1][0] == "traj-1"
-        assert store.saves[-1][2] == {"data": {"n": 3}, "children": []}
+        assert store.saves[-1][3] == {"data": {"n": 3}, "children": []}
 
     async def test_saves_carry_metadata_path_and_iteration(self) -> None:
         """Every save's ``metadata_json`` carries ``path`` and ``iteration``."""
@@ -266,7 +266,7 @@ class TestSaveAtIterateBoundary:
             make_ff().create(state={}).with_checkpointer(store, "traj-1").iterate(noop, max_iters=1)
         )
         await flow.run()
-        meta = store.saves[0][3]
+        meta = store.saves[0][4]
         assert len(meta["path"]) == 1
         assert isinstance(meta["path"][0], str)
         assert meta["iteration"] == 1
@@ -298,7 +298,94 @@ class TestSaveAtIterateBoundary:
             .iterate(bump, max_iters=2)
         )
         await flow.run()
-        assert store.saves[-1][2] == {"data": {"n": 2}, "children": []}
+        assert store.saves[-1][3] == {"data": {"n": 2}, "children": []}
+
+
+# -----------------------------------------------------------------------------
+# node_path keyspace isolation — no collision across sibling / nested iterates
+# -----------------------------------------------------------------------------
+
+
+class TestNodePathKeyspaceIsolation:
+    """Each iterate saves under its own ``node_path`` — sibling / nested / map-body iterates never collide.
+
+    Before node_path became a first-class key column, the store keyspace
+    ``(client_flow_id, iteration)`` collapsed every iterate onto one axis:
+    two iterates in a chain, an inner iterate inside an outer one, or an
+    iterate inside a ``.map`` body all upserted onto the same rows and
+    the last save-of-iteration-N replaced the earlier one. These tests
+    lock in the isolation.
+    """
+
+    async def test_two_iterates_in_chain_have_distinct_node_paths(self) -> None:
+        """``.iterate(a).iterate(b)`` — both iterates save, both under distinct node_paths."""
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[Any], _prev: Any = None) -> None:
+            return None
+
+        store = _RecordingStore()
+        flow = (
+            make_ff()
+            .create(state={})
+            .with_checkpointer(store, "traj-1")
+            .iterate(bump, max_iters=2)
+            .iterate(bump, max_iters=2)
+        )
+        await flow.run()
+        node_paths = {s[1] for s in store.saves}
+        # Both iterates saved, and their node_paths differ (no collision).
+        assert len(node_paths) == 2
+        # Every save carried its own node_path — no empty / missing values.
+        assert all(p for p in node_paths)
+
+    async def test_nested_iterates_have_distinct_node_paths(self) -> None:
+        """``outer.iterate(inner.iterate(body))`` — outer and inner save under different node_paths."""
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[Any], _prev: Any = None) -> None:
+            return None
+
+        store = _RecordingStore()
+
+        def inner_body(f: Flow) -> None:
+            f.iterate(bump, max_iters=2)
+
+        flow = (
+            make_ff()
+            .create(state={})
+            .with_checkpointer(store, "traj-1")
+            .iterate(inner_body, max_iters=2)
+        )
+        await flow.run()
+        node_paths = {s[1] for s in store.saves}
+        # Outer and inner iterates each saved; distinct node_paths.
+        assert len(node_paths) == 2
+        # The inner path extends the outer path (nested = longer).
+        outer, inner = sorted(node_paths, key=len)
+        assert inner.startswith(outer + "/")
+
+    async def test_iterate_inside_map_body_has_distinct_per_item_node_paths(self) -> None:
+        """``.map(body=.iterate(...))`` — each map item's inner iterate saves under its own node_path."""
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[Any], item: int) -> int:
+            return item
+
+        store = _RecordingStore()
+        flow = (
+            make_ff()
+            .create(state={})
+            .with_checkpointer(store, "traj-1")
+            .map(
+                lambda f: f.iterate(bump, max_iters=2),
+                items=lambda _p, _c: [10, 20],
+            )
+        )
+        await flow.run()
+        node_paths = {s[1] for s in store.saves}
+        # Two map items × one inner iterate each = two distinct node_paths.
+        assert len(node_paths) == 2
 
 
 # -----------------------------------------------------------------------------
@@ -426,7 +513,7 @@ class TestEndToEndRoundTrip:
             .iterate(bump, max_iters=3)
         )
         await flow_a.run()
-        final_state, final_meta = store.saves[-1][2], store.saves[-1][3]
+        final_state, final_meta = store.saves[-1][3], store.saves[-1][4]
         assert final_meta["iteration"] == 3
         # Simulate a crash by preloading the last save for the next run;
         # the checkpoint is what a real store would still hold.
@@ -471,7 +558,7 @@ class TestEndToEndRoundTrip:
         )
         # Simulate crash after iteration 2 by dropping the third save.
         await flow_a.run()
-        second_state, second_meta = store.saves[1][2], store.saves[1][3]
+        second_state, second_meta = store.saves[1][3], store.saves[1][4]
         assert second_meta["iteration"] == 2
         store.preload = (second_state, second_meta)
         store.saves.clear()
@@ -519,7 +606,7 @@ class TestEndToEndRoundTrip:
         await outer_a.run()
 
         # Simulate crash after iteration 2.
-        second_state, second_meta = store.saves[1][2], store.saves[1][3]
+        second_state, second_meta = store.saves[1][3], store.saves[1][4]
         assert second_meta["iteration"] == 2
         store.preload = (second_state, second_meta)
         store.saves.clear()
@@ -560,8 +647,8 @@ class TestRecursiveSnapshotEnvelope:
             make_ff().create(state={}).with_checkpointer(store, "traj-1").iterate(noop, max_iters=2)
         )
         await flow.run()
-        paths = [s[3]["path"] for s in store.saves]
-        iters = [s[3]["iteration"] for s in store.saves]
+        paths = [s[4]["path"] for s in store.saves]
+        iters = [s[4]["iteration"] for s in store.saves]
         assert len(paths) == 2
         assert iters == [1, 2]
         assert all(len(p) == 1 for p in paths)
@@ -580,7 +667,7 @@ class TestRecursiveSnapshotEnvelope:
         outer = make_ff().create(state={}).with_checkpointer(store, "traj-1").call(subflow)
         await outer.run()
         assert len(store.saves) == 1
-        path = store.saves[0][3]["path"]
+        path = store.saves[0][4]["path"]
         assert len(path) == 2
         assert all(isinstance(p, str) for p in path)
         # The two ids differ — outer call is not the same node as the inner iterate.
@@ -621,7 +708,7 @@ class TestRecursiveSnapshotEnvelope:
             )
         )
         await else_flow.run()
-        assert then_store.saves[0][3]["path"] != else_store.saves[0][3]["path"]
+        assert then_store.saves[0][4]["path"] != else_store.saves[0][4]["path"]
 
     async def test_state_tree_has_no_children_without_scoped_state(self) -> None:
         """Iterate without ``state=`` writes a flat one-level tree — ``children`` is ``[]``."""
@@ -638,7 +725,7 @@ class TestRecursiveSnapshotEnvelope:
             .iterate(noop, max_iters=1)
         )
         await flow.run()
-        assert store.saves[0][2] == {"data": {"n": 5}, "children": []}
+        assert store.saves[0][3] == {"data": {"n": 5}, "children": []}
 
     async def test_state_tree_captures_scoped_child(self) -> None:
         """Iterate with ``state=`` writes a nested tree — root's ``children`` holds the projection."""
@@ -660,7 +747,7 @@ class TestRecursiveSnapshotEnvelope:
             )
         )
         await flow.run()
-        tree = store.saves[0][2]
+        tree = store.saves[0][3]
         assert tree["data"] == {"parent": "root"}
         assert len(tree["children"]) == 1
         assert tree["children"][0]["data"] == {"child": 1}
@@ -723,8 +810,8 @@ class TestResumePositionReplay:
             .iterate(noop, max_iters=4)
         )
         await flow_a.run()
-        assert store.saves[-1][3]["iteration"] == 4
-        preload = (store.saves[-1][2], store.saves[-1][3])
+        assert store.saves[-1][4]["iteration"] == 4
+        preload = (store.saves[-1][3], store.saves[-1][4])
         store.preload = preload
         store.saves.clear()
         store.deletes.clear()
@@ -848,7 +935,7 @@ class TestResumePositionReplay:
         outer = make_ff().create(state={}).with_checkpointer(real_store, "traj-inner").call(inner)
         await outer.run()
         assert real_store.saves, "expected the inner iterate to have saved"
-        saved_path = real_store.saves[-1][3]["path"]
+        saved_path = real_store.saves[-1][4]["path"]
         assert len(saved_path) == 2  # [outer .call id, inner .iterate id]
 
         # Second run: swap the inner id for a stale hash — the root-level
@@ -898,7 +985,7 @@ class TestResumePositionReplay:
             .iterate(noop, max_iters=2)
         )
         await flow_a.run()
-        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
         store.saves.clear()
         store.deletes.clear()
 
@@ -939,8 +1026,8 @@ class TestResumePositionReplay:
             .iterate(bump, max_iters=2)
         )
         await flow_a.run()
-        assert store.saves[-1][3]["iteration"] == 2
-        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        assert store.saves[-1][4]["iteration"] == 2
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
         store.saves.clear()
         store.deletes.clear()
 
@@ -978,9 +1065,9 @@ class TestResumePositionReplay:
 
         # First run: 2 iterations of the inner iterate.
         await _mk_flow(2).run()
-        assert len(store.saves[-1][3]["path"]) == 2
-        assert store.saves[-1][3]["iteration"] == 2
-        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        assert len(store.saves[-1][4]["path"]) == 2
+        assert store.saves[-1][4]["iteration"] == 2
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
         store.saves.clear()
         store.deletes.clear()
 
@@ -1016,8 +1103,8 @@ class TestResumePositionReplay:
             )
 
         await _mk_flow(2).run()
-        assert len(store.saves[-1][3]["path"]) == 2
-        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        assert len(store.saves[-1][4]["path"]) == 2
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
         store.saves.clear()
         store.deletes.clear()
 
@@ -1056,7 +1143,7 @@ class TestResumePositionReplay:
         )
         await flow.run()
         assert "body" in calls
-        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
         store.saves.clear()
 
         # Resume with falsy predicate — no else_ arm, so fail-fast triggers.
@@ -1098,11 +1185,11 @@ class TestResumePositionReplay:
         )
         await flow.run()
         assert store.saves, "expected iterate inside map to save"
-        saved_path = store.saves[-1][3]["path"]
+        saved_path = store.saves[-1][4]["path"]
         assert len(saved_path) == 2  # [map_node_id, iterate_inside_item]
 
         # Resume should route replay to the correct item without error.
-        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
         store.saves.clear()
         calls.clear()
         await flow.run(resume=True)
@@ -1203,7 +1290,7 @@ class TestResumeRebuildsAmbientBudget:
         )
         await flow_a.run()
         assert tracker_a.spent == 2.0
-        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
         store.saves.clear()
         store.deletes.clear()
 
@@ -1251,7 +1338,7 @@ class TestResumeRebuildsAmbientTraits:
         await flow_a.run()
         assert seen == [traits_a, traits_a]
         seen.clear()
-        store.preload = (store.saves[-1][2], store.saves[-1][3])
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
         store.saves.clear()
         store.deletes.clear()
 
