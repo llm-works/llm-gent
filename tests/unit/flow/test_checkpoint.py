@@ -93,16 +93,209 @@ class Counter:
 # -----------------------------------------------------------------------------
 
 
+@dataclass
+class _AsyncRecordingStore:
+    """CheckpointStore stub whose three methods are ``async def``.
+
+    Delegates to a wrapped :class:`_RecordingStore` after an
+    ``await asyncio.sleep(0)`` so the coroutine actually suspends
+    at least once — proves the framework awaits the return value
+    rather than dropping the coroutine.
+    """
+
+    inner: _RecordingStore = field(default_factory=_RecordingStore)
+
+    async def save_checkpoint(
+        self,
+        client_flow_id: str,
+        node_path: str,
+        iteration: int,
+        state_json: dict[str, Any],
+        metadata_json: dict[str, Any],
+    ) -> None:
+        import asyncio
+
+        await asyncio.sleep(0)
+        self.inner.save_checkpoint(client_flow_id, node_path, iteration, state_json, metadata_json)
+        self.inner.preload = (state_json, metadata_json)
+
+    async def load_checkpoint(
+        self,
+        client_flow_id: str,
+        node_path: str | None = None,
+        iteration: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        import asyncio
+
+        await asyncio.sleep(0)
+        return self.inner.load_checkpoint(client_flow_id, node_path, iteration)
+
+    async def delete_checkpoint(self, client_flow_id: str) -> None:
+        import asyncio
+
+        await asyncio.sleep(0)
+        self.inner.delete_checkpoint(client_flow_id)
+        self.inner.preload = None
+
+
 class TestProtocolShape:
-    """The recording stub structurally satisfies the Flow-level Protocol."""
+    """Both sync and async recording stubs structurally satisfy the Protocol."""
 
     def test_recording_store_matches_protocol(self) -> None:
-        """Structural conformance: assignment to Protocol type type-checks."""
+        """Structural conformance: sync store assigns to Protocol type."""
         store = _RecordingStore()
         _: CheckpointStore = store
         assert callable(store.save_checkpoint)
         assert callable(store.load_checkpoint)
         assert callable(store.delete_checkpoint)
+
+    def test_async_recording_store_matches_protocol(self) -> None:
+        """Structural conformance: an ``async def`` store also fits the Protocol."""
+        store = _AsyncRecordingStore()
+        _: CheckpointStore = store
+        assert callable(store.save_checkpoint)
+        assert callable(store.load_checkpoint)
+        assert callable(store.delete_checkpoint)
+
+
+class TestAsyncStoreRoundTrip:
+    """An ``async def`` store round-trips through save + resume + delete.
+
+    The framework must ``await`` the store's return value at every call
+    site — save (per iteration), load (on resume), delete (on successful
+    completion). If any site dropped the coroutine, the assertions below
+    would fail (either saves would be lost, resume would miss the
+    hydrated state, or the deletion after a clean run wouldn't fire).
+    """
+
+    async def test_save_load_delete_awaited_end_to_end(self) -> None:
+        """One flow saves; a second flow resumes off it; delete fires on clean exit."""
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            return ctx.state.data["n"]
+
+        store = _AsyncRecordingStore()
+
+        def mk_flow(cap: int) -> Flow:
+            return (
+                make_ff()
+                .create(state={"n": 0})
+                .with_checkpointer(store, "traj-async")
+                .iterate(bump, max_iters=cap)
+            )
+
+        # Prime saves via a run that halts before completion.
+        import asyncio as _asyncio
+
+        halt = _asyncio.Event()
+
+        @verb(role=ROLE_A)
+        async def bump_and_halt(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            if ctx.state.data["n"] >= 2:
+                halt.set()
+            return ctx.state.data["n"]
+
+        halted_flow = (
+            make_ff()
+            .create(state={"n": 0})
+            .with_checkpointer(store, "traj-async")
+            .iterate(bump_and_halt, max_iters=10)
+            .with_halt(halt)
+        )
+        await halted_flow.run()
+        assert len(store.inner.saves) >= 2  # save was awaited
+        assert store.inner.deletes == []  # halt-set exit preserves the checkpoint
+
+        # Resume: load must be awaited so the counter carries over.
+        result = await mk_flow(4).run(resume=True)
+        assert result == 4  # 2 saved + 2 more = 4
+        # Clean completion: delete must be awaited.
+        assert store.inner.deletes == ["traj-async"]
+
+    async def test_rapid_iterations_with_slow_async_store(self) -> None:
+        """Rapid iterations complete correctly even when async saves have latency.
+
+        Stress test: many fast iterations with an async store that adds
+        artificial latency. Verifies checkpoint saves are awaited inline
+        before proceeding to the next iteration — if saves were dropped
+        or raced, resume would restore the wrong iteration count.
+        """
+        import asyncio as _asyncio
+
+        @dataclass
+        class _SlowAsyncStore:
+            """Async store with configurable save latency."""
+
+            inner: _RecordingStore = field(default_factory=_RecordingStore)
+            save_delay: float = 0.01  # 10ms per save
+
+            async def save_checkpoint(
+                self,
+                client_flow_id: str,
+                node_path: str,
+                iteration: int,
+                state_json: dict[str, Any],
+                metadata_json: dict[str, Any],
+            ) -> None:
+                await _asyncio.sleep(self.save_delay)
+                self.inner.save_checkpoint(
+                    client_flow_id, node_path, iteration, state_json, metadata_json
+                )
+                self.inner.preload = (state_json, metadata_json)
+
+            async def load_checkpoint(
+                self,
+                client_flow_id: str,
+                node_path: str | None = None,
+                iteration: int | None = None,
+            ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+                await _asyncio.sleep(0)
+                return self.inner.load_checkpoint(client_flow_id, node_path, iteration)
+
+            async def delete_checkpoint(self, client_flow_id: str) -> None:
+                await _asyncio.sleep(0)
+                self.inner.delete_checkpoint(client_flow_id)
+                self.inner.preload = None
+
+        @verb(role=ROLE_A)
+        async def fast_bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            return ctx.state.data["n"]
+
+        store = _SlowAsyncStore()
+        halt = _asyncio.Event()
+
+        @verb(role=ROLE_A)
+        async def bump_then_halt_at_5(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            if ctx.state.data["n"] >= 5:
+                halt.set()
+            return ctx.state.data["n"]
+
+        # Run 5 iterations with slow saves, halt, then resume and complete.
+        halted_flow = (
+            make_ff()
+            .create(state={"n": 0})
+            .with_checkpointer(store, "traj-stress")
+            .iterate(bump_then_halt_at_5, max_iters=10)
+            .with_halt(halt)
+        )
+        await halted_flow.run()
+        # All 5 saves must have completed (awaited) despite latency.
+        assert len(store.inner.saves) == 5
+
+        # Resume: if any save was dropped, this would fail.
+        resumed_flow = (
+            make_ff()
+            .create(state={"n": 0})
+            .with_checkpointer(store, "traj-stress")
+            .iterate(fast_bump, max_iters=10)
+        )
+        result = await resumed_flow.run(resume=True)
+        assert result == 10  # 5 from checkpoint + 5 more = 10
 
 
 # -----------------------------------------------------------------------------

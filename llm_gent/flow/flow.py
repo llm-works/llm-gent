@@ -64,7 +64,7 @@ from appinfra.log import Logger
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._executor import _build_ctx, _execute_node, _step_inputs
-from .checkpoint import CheckpointStore
+from .checkpoint import CheckpointStore, maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -226,6 +226,7 @@ class Flow:
         *args: Any,
         halt: Any = UNSET,
         budget: Any = UNSET,
+        scope_state: Any = UNSET,
         **kwargs: Any,
     ) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
@@ -233,11 +234,16 @@ class Flow:
         The verb receives a fresh :class:`Context` as its first argument,
         followed by ``*args`` / ``**kwargs`` from the caller. ``dispatch`` is
         the low-level entrypoint used by :class:`Panel` and by verbs that
-        invoke sibling verbs directly; the ctx here is not built by a
-        composition run, so ``ctx.state`` wraps this flow's construction
-        state (defaulting to a fresh empty ``dict`` when none was supplied).
-        Verbs that need a live run-wide payload from a :meth:`run` invocation
-        must be reached via :meth:`run` rather than dispatched ad hoc.
+        invoke sibling verbs directly.
+
+        ``scope_state=`` wins over the flow's construction state — pass
+        ``scope_state=ctx.state`` from an in-flight verb (or a Panel, which
+        does this automatically) to hand the dispatched sibling the live
+        scope payload, not the flow's construction default. Omitting
+        ``scope_state=`` (or passing ``UNSET``) falls back to ``self._state``,
+        defaulting to a fresh empty ``dict`` when none was supplied at
+        construction. A ``State`` instance passes through as-is; any other
+        value is wrapped with this flow's ``state_factory``.
 
         Pass ``halt=ctx.halt`` and ``budget=ctx.budget`` from an in-flight
         verb to propagate its effective ambients to the dispatched sibling;
@@ -249,17 +255,21 @@ class Flow:
         verb = self._verbs[name]
         role_name = verb.role.name if verb.role is not None else None
         self._lg.debug("dispatching verb", extra={"verb": name, "role": role_name})
-        payload = self._state if self._state is not UNSET else {}
+        payload = (
+            (self._state if self._state is not UNSET else {})
+            if scope_state is UNSET
+            else scope_state
+        )
         effective_halt = self._halt_event if halt is UNSET else halt
         effective_budget = self._budget_tracker if budget is UNSET else budget
-        state = (
+        wrapped_state = (
             payload
             if isinstance(payload, State)
             else State(data=payload, _factory=self._state_factory)
         )
         ctx = Context(
             role=verb.role,
-            state=state,
+            state=wrapped_state,
             flow=self,
             traits=self._traits,
             halt=effective_halt,
@@ -827,7 +837,7 @@ class Flow:
         active_state = self._wrap_top_state(state)
         replay: _ResumeReplay | None = None
         if resume:
-            active_state, replay = self._hydrate_resume_state(active_state)
+            active_state, replay = await self._hydrate_resume_state(active_state)
         self._replay_consumed = False
         result = await self._run_as_subflow(
             *args, state=active_state, runtime=self, parent_replay=replay, **kwargs
@@ -839,7 +849,7 @@ class Flow:
             and self._client_flow_id is not None
             and (self._halt_event is None or not self._halt_event.is_set())
         ):
-            self._checkpointer.delete_checkpoint(self._client_flow_id)
+            await maybe_await(self._checkpointer.delete_checkpoint(self._client_flow_id))
         return result
 
     def _assert_replay_consumed(self, replay: _ResumeReplay | None) -> None:
@@ -1096,7 +1106,7 @@ class Flow:
             return payload
         return State(data=payload, _factory=self._state_factory)
 
-    def _hydrate_resume_state(
+    async def _hydrate_resume_state(
         self, fallback: State[Any]
     ) -> tuple[State[Any], _ResumeReplay | None]:
         """Load the latest checkpoint and reconstruct state + a replay context.
@@ -1123,7 +1133,7 @@ class Flow:
                 f"Flow {label!r} was run with resume=True but has no "
                 f"client_flow_id — call .with_checkpointer(store, client_flow_id) first"
             )
-        loaded = self._checkpointer.load_checkpoint(self._client_flow_id)
+        loaded = await maybe_await(self._checkpointer.load_checkpoint(self._client_flow_id))
         if loaded is None:
             return fallback, None
         state_json, metadata_json = loaded

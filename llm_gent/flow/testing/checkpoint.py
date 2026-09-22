@@ -34,7 +34,7 @@ from typing import Any
 
 from appinfra.log import Logger
 
-from ..checkpoint import CheckpointStore
+from ..checkpoint import CheckpointStore, maybe_await
 from ..context import Context
 from ..factory import FlowFactory
 from ..flow import Flow
@@ -232,7 +232,7 @@ async def assert_resume_determinism(
         ValueError: If a checkpoint already exists for the trajectory_id,
             or if halt_after_iteration is not in [1, max_iters].
     """
-    if store.load_checkpoint(trajectory_id) is not None:
+    if await maybe_await(store.load_checkpoint(trajectory_id)) is not None:
         raise ValueError(f"checkpoint already exists for trajectory_id={trajectory_id!r}")
     if not (1 <= halt_after_iteration <= max_iters):
         raise ValueError(

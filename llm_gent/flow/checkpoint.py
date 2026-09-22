@@ -39,9 +39,12 @@ Save writes two JSON-compatible dicts per iteration:
 Both are handed to :meth:`save_checkpoint` inline on the event loop — an
 implementation performing disk or database I/O should avoid blocking
 (back a non-blocking driver, or run the blocking work off the loop
-thread). Note: the methods declared here are ``def``, so an
-implementation cannot ``await`` from inside them — a store using
-:func:`asyncio.to_thread` internally has no way to wait on the result.
+thread). Every method may be declared ``def`` (returning the result
+directly) or ``async def`` (returning a coroutine). The framework
+awaits the return value when it is awaitable; a synchronous store
+returning ``None`` keeps working unchanged. A store using
+:func:`asyncio.to_thread` internally declares its methods ``async
+def`` and awaits the ``to_thread`` call there.
 
 Save timing
 -----------
@@ -89,22 +92,48 @@ non-additive change.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable
 from typing import Any, Protocol
+
+
+LoadResult = tuple[dict[str, Any], dict[str, Any]] | None
+"""Return payload of :meth:`CheckpointStore.load_checkpoint`."""
+
+
+async def maybe_await(value: Any) -> Any:
+    """Await ``value`` if awaitable; return it as-is otherwise.
+
+    Use this helper at every checkpoint-store call site so sync and
+    async stores are handled uniformly::
+
+        result = await maybe_await(store.load_checkpoint(...))
+
+    Uses :func:`inspect.isawaitable`, which returns ``True`` only for
+    coroutines and objects with ``__await__``. Generators and async
+    generators return ``False`` and pass through unchanged — they are
+    iterable, not awaitable.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class CheckpointStore(Protocol):
     """Flow-level pause/resume Protocol — persists composition-graph state.
 
-    Consumers implement three synchronous methods. Records are keyed by
-    ``(client_flow_id, node_path, iteration)`` — the ``client_flow_id`` is
-    the trajectory identifier supplied at :meth:`Flow.with_checkpointer`
-    time; ``node_path`` scopes the record to one iterate in the
-    composition graph (see module docstring); ``iteration`` is the
-    framework-managed count starting at 1 for that iterate's first
-    saved iteration.
+    Records are keyed by ``(client_flow_id, node_path, iteration)`` —
+    the ``client_flow_id`` is the trajectory identifier supplied at
+    :meth:`Flow.with_checkpointer` time; ``node_path`` scopes the record
+    to one iterate in the composition graph (see module docstring);
+    ``iteration`` is the framework-managed count starting at 1 for that
+    iterate's first saved iteration.
 
-    Methods are called inline from the executor; implementations doing
-    I/O should keep them non-blocking (see module docstring).
+    Each method may be declared ``def`` (returning its value directly)
+    or ``async def`` (returning a coroutine). The framework awaits the
+    return value when it is awaitable — a synchronous store keeps
+    working; an async-native store gains first-class support without
+    blocking the event loop.
     """
 
     def save_checkpoint(
@@ -114,7 +143,7 @@ class CheckpointStore(Protocol):
         iteration: int,
         state_json: dict[str, Any],
         metadata_json: dict[str, Any],
-    ) -> None:
+    ) -> None | Awaitable[None]:
         """Persist one record at ``(client_flow_id, node_path, iteration)``.
 
         Called by the framework once per successful body iteration inside
@@ -122,6 +151,8 @@ class CheckpointStore(Protocol):
         wired. Same ``(client_flow_id, node_path, iteration)`` from a later
         save MUST replace the earlier record (idempotent overwrite —
         an iterate re-saving iteration N under a running trajectory).
+
+        May be declared ``async def``.
         """
         ...
 
@@ -130,7 +161,7 @@ class CheckpointStore(Protocol):
         client_flow_id: str,
         node_path: str | None = None,
         iteration: int | None = None,
-    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    ) -> LoadResult | Awaitable[LoadResult]:
         """Return the ``(state_json, metadata_json)`` pair, or ``None`` if absent.
 
         Argument combinations:
@@ -148,14 +179,18 @@ class CheckpointStore(Protocol):
         "Most recently saved" is by save order (Postgres uses the row's
         autoincrement id; JsonFile uses a monotonic save sequence in the
         filename).
+
+        May be declared ``async def``.
         """
         ...
 
-    def delete_checkpoint(self, client_flow_id: str) -> None:
+    def delete_checkpoint(self, client_flow_id: str) -> None | Awaitable[None]:
         """Remove every record under ``client_flow_id`` (all node_paths).
 
         Called by the framework on fully successful :meth:`Flow.run`
         completion (no exception, no cancellation). Idempotent: absence
         is not an error — stores must not raise when nothing matches.
+
+        May be declared ``async def``.
         """
         ...

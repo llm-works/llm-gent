@@ -200,6 +200,194 @@ class TestPanel:
         assert set(roles) == {ROLE_A, ROLE_B}
 
     @pytest.mark.asyncio
+    async def test_panel_forwards_live_scope_state_to_inner_verbs(self) -> None:
+        """Inner verbs see the caller's live ``ctx.state``, not the runtime construction state.
+
+        Scenario: outer flow's construction state is ``{"outer": True}``;
+        it calls a subflow projected to ``{"scoped": True, "outer": False}``;
+        that subflow runs a verb that fires a Panel. Without state
+        forwarding, the Panel's inner verbs would see the runtime flow's
+        construction state through ``ctx.flow.dispatch``; with it they
+        see the caller's projected scope.
+        """
+        observed: list[dict[str, Any]] = []
+
+        @verb(role=ROLE_A)
+        async def peek_a(ctx: Context) -> str:
+            """Record ``ctx.state.data`` and return a marker."""
+            observed.append(dict(ctx.state.data))
+            return "a"
+
+        @verb(role=ROLE_A)
+        async def peek_b(ctx: Context) -> str:
+            """Record ``ctx.state.data`` and return a marker."""
+            observed.append(dict(ctx.state.data))
+            return "b"
+
+        panel = Panel([peek_a, peek_b], aggregate=list)
+
+        @verb(role=ROLE_A)
+        async def run_panel(ctx: Context, _prev: object) -> list[str]:
+            """Fire the Panel from inside the projected scope."""
+            return await panel.run(ctx)
+
+        inner = make_ff().create().call(run_panel)
+        outer = make_ff().create(state={"outer": True})
+        outer.register(peek_a)
+        outer.register(peek_b)
+        outer.call(inner, state=lambda _p: {"scoped": True, "outer": False})
+
+        await outer.run(())
+        assert observed == [
+            {"scoped": True, "outer": False},
+            {"scoped": True, "outer": False},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_panel_state_forwarding_independent_of_nested_resumable_flow(
+        self, tmp_path: Path
+    ) -> None:
+        """Panel state forwarding doesn't interfere with nested Flow resume.
+
+        Scenario: Panel dispatches a verb that creates and resumes a nested
+        Flow with its own checkpointer. The Panel's forwarded state should
+        reach the inner verb; the nested Flow's resume should hydrate its
+        own checkpoint independently.
+        """
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class _RecordingStore:
+            saves: list[tuple[str, str, int]] = field(default_factory=list)
+            loaded: dict[str, tuple[dict, dict]] = field(default_factory=dict)
+
+            def save_checkpoint(
+                self,
+                client_flow_id: str,
+                node_path: str,
+                iteration: int,
+                state_json: dict[str, Any],
+                metadata_json: dict[str, Any],
+            ) -> None:
+                self.saves.append((client_flow_id, node_path, iteration))
+                self.loaded[client_flow_id] = (state_json, metadata_json)
+
+            def load_checkpoint(
+                self,
+                client_flow_id: str,
+                node_path: str | None = None,
+                iteration: int | None = None,
+            ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+                return self.loaded.get(client_flow_id)
+
+            def delete_checkpoint(self, client_flow_id: str) -> None:
+                self.loaded.pop(client_flow_id, None)
+
+        panel_state_observed: list[dict[str, Any]] = []
+        nested_flow_result: list[int] = []
+        store = _RecordingStore()
+
+        @verb(role=ROLE_A)
+        async def nested_bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["nested_n"] += 1
+            return ctx.state.data["nested_n"]
+
+        @verb(role=ROLE_A)
+        async def run_nested_resumable(ctx: Context, _prev: Any = None) -> str:
+            """Records Panel-forwarded state, then runs a nested resumable Flow."""
+            panel_state_observed.append(dict(ctx.state.data))
+
+            # Create and prime a nested flow with checkpointing.
+            halt = asyncio.Event()
+
+            @verb(role=ROLE_A)
+            async def bump_then_halt(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+                ctx.state.data["nested_n"] += 1
+                if ctx.state.data["nested_n"] >= 2:
+                    halt.set()
+                return ctx.state.data["nested_n"]
+
+            primed = (
+                make_ff()
+                .create(state={"nested_n": 0})
+                .with_checkpointer(store, "nested-traj")
+                .iterate(bump_then_halt, max_iters=5)
+                .with_halt(halt)
+            )
+            await primed.run()  # Runs 2 iterations, saves checkpoint, halts.
+
+            # Resume the nested flow — hydrates its checkpoint independently.
+            resumed = (
+                make_ff()
+                .create(state={"nested_n": 0})
+                .with_checkpointer(store, "nested-traj")
+                .iterate(nested_bump, max_iters=5)
+            )
+            result = await resumed.run(resume=True)
+            nested_flow_result.append(result)
+            return "done"
+
+        panel = Panel([run_nested_resumable], aggregate=lambda x: x[0])
+
+        @verb(role=ROLE_A)
+        async def fire_panel(ctx: Context, _prev: object) -> str:
+            return await panel.run(ctx)
+
+        inner = make_ff().create().call(fire_panel)
+        outer = make_ff().create(state={"outer_marker": "present"})
+        outer.register(run_nested_resumable)
+        outer.call(inner, state=lambda _p: {"panel_scope": "forwarded"})
+
+        await outer.run(())
+
+        # Panel state forwarding worked: inner verb saw the projected scope.
+        assert panel_state_observed == [{"panel_scope": "forwarded"}]
+        # Nested Flow resume worked independently: 2 from checkpoint + 3 more = 5.
+        assert nested_flow_result == [5]
+
+    @pytest.mark.asyncio
+    async def test_panel_inner_verb_mutations_visible_to_caller(self) -> None:
+        """Mutations by inner verbs are visible to the calling verb's state.
+
+        When Panel dispatches with ``scope_state=ctx.state``, inner verbs
+        share the same State object. A mutation by one inner verb should
+        be visible to subsequent inner verbs and to the caller after Panel
+        returns.
+        """
+
+        @verb(role=ROLE_A)
+        async def mutate_a(ctx: Context) -> str:
+            ctx.state.data["a_ran"] = True
+            ctx.state.data["counter"] = ctx.state.data.get("counter", 0) + 1
+            return "a"
+
+        @verb(role=ROLE_A)
+        async def mutate_b(ctx: Context) -> str:
+            ctx.state.data["b_ran"] = True
+            ctx.state.data["counter"] = ctx.state.data.get("counter", 0) + 1
+            return "b"
+
+        panel = Panel([mutate_a, mutate_b], aggregate=list)
+        caller_observed: list[dict[str, Any]] = []
+
+        @verb(role=ROLE_A)
+        async def run_panel_and_observe(ctx: Context, _prev: object) -> list[str]:
+            result = await panel.run(ctx)
+            caller_observed.append(dict(ctx.state.data))
+            return result
+
+        inner = make_ff().create().call(run_panel_and_observe)
+        outer = make_ff().create(state={"initial": True})
+        outer.register(mutate_a)
+        outer.register(mutate_b)
+        outer.call(inner, state=lambda _p: {"counter": 0})
+
+        await outer.run(())
+
+        # Both inner verbs' mutations should be visible after Panel returns.
+        assert caller_observed == [{"counter": 2, "a_ran": True, "b_ran": True}]
+
+    @pytest.mark.asyncio
     async def test_panel_propagates_local_halt_in_subflow(self) -> None:
         """Panel.run passes ctx.halt to dispatched verbs, not the outer flow's halt.
 
