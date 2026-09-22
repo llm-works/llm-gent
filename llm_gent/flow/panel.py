@@ -120,6 +120,15 @@ class Panel:
         Each inner verb must have been registered with the flow referenced by
         ``ctx.flow``. Positional and keyword args are forwarded to every verb.
 
+        Ambient forwarding — each dispatch receives ``state=ctx.state``,
+        ``halt=ctx.halt``, and ``budget=ctx.budget`` so inner verbs see
+        the caller's live scope, not the flow's construction defaults.
+        Inside a ``.map(state=...)`` or ``.call(state=...)`` block this
+        makes ``ctx.data`` on the inner verb the same object the calling
+        verb sees. Without this forwarding an inner verb reading
+        ``ctx.data`` would silently observe the flow's construction
+        state instead.
+
         Halt semantics — cooperative per verb. Setting ``ctx.halt`` does
         not raise, so ``asyncio.gather`` awaits all siblings to completion;
         each dispatched verb receives ``ctx.halt`` and decides on its own
@@ -143,6 +152,7 @@ class Panel:
                 ctx.flow.dispatch(
                     getattr(v, "_registered_name", v.__name__),
                     *args,
+                    state=ctx.state,
                     halt=ctx.halt,
                     budget=ctx.budget,
                     **kwargs,

@@ -200,6 +200,50 @@ class TestPanel:
         assert set(roles) == {ROLE_A, ROLE_B}
 
     @pytest.mark.asyncio
+    async def test_panel_forwards_live_scope_state_to_inner_verbs(self) -> None:
+        """Inner verbs see the caller's live ``ctx.state``, not the runtime construction state.
+
+        Scenario: outer flow's construction state is ``{"outer": True}``;
+        it calls a subflow projected to ``{"scoped": True, "outer": False}``;
+        that subflow runs a verb that fires a Panel. Without state
+        forwarding, the Panel's inner verbs would see the runtime flow's
+        construction state through ``ctx.flow.dispatch``; with it they
+        see the caller's projected scope.
+        """
+        observed: list[dict[str, Any]] = []
+
+        @verb(role=ROLE_A)
+        async def peek_a(ctx: Context) -> str:
+            """Record ``ctx.state.data`` and return a marker."""
+            observed.append(dict(ctx.state.data))
+            return "a"
+
+        @verb(role=ROLE_A)
+        async def peek_b(ctx: Context) -> str:
+            """Record ``ctx.state.data`` and return a marker."""
+            observed.append(dict(ctx.state.data))
+            return "b"
+
+        panel = Panel([peek_a, peek_b], aggregate=list)
+
+        @verb(role=ROLE_A)
+        async def run_panel(ctx: Context, _prev: object) -> list[str]:
+            """Fire the Panel from inside the projected scope."""
+            return await panel.run(ctx)
+
+        inner = make_ff().create().call(run_panel)
+        outer = make_ff().create(state={"outer": True})
+        outer.register(peek_a)
+        outer.register(peek_b)
+        outer.call(inner, state=lambda _p: {"scoped": True, "outer": False})
+
+        await outer.run(())
+        assert observed == [
+            {"scoped": True, "outer": False},
+            {"scoped": True, "outer": False},
+        ]
+
+    @pytest.mark.asyncio
     async def test_panel_propagates_local_halt_in_subflow(self) -> None:
         """Panel.run passes ctx.halt to dispatched verbs, not the outer flow's halt.
 
