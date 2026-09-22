@@ -47,23 +47,27 @@ class _RecordingStore:
     """CheckpointStore stub — records saves/loads/deletes and serves a preload."""
 
     preload: tuple[dict[str, Any], dict[str, Any]] | None = None
-    saves: list[tuple[str, int, dict[str, Any], dict[str, Any]]] = field(default_factory=list)
-    loads: list[tuple[str, int | None]] = field(default_factory=list)
+    saves: list[tuple[str, str, int, dict[str, Any], dict[str, Any]]] = field(default_factory=list)
+    loads: list[tuple[str, str | None, int | None]] = field(default_factory=list)
     deletes: list[str] = field(default_factory=list)
 
     def save_checkpoint(
         self,
         client_flow_id: str,
+        node_path: str,
         iteration: int,
         state_json: dict[str, Any],
         metadata_json: dict[str, Any],
     ) -> None:
-        self.saves.append((client_flow_id, iteration, state_json, metadata_json))
+        self.saves.append((client_flow_id, node_path, iteration, state_json, metadata_json))
 
     def load_checkpoint(
-        self, client_flow_id: str, iteration: int | None = None
+        self,
+        client_flow_id: str,
+        node_path: str | None = None,
+        iteration: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        self.loads.append((client_flow_id, iteration))
+        self.loads.append((client_flow_id, node_path, iteration))
         return self.preload
 
     def delete_checkpoint(self, client_flow_id: str) -> None:

@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Filesystem-backed :class:`CheckpointStore` — one JSON file per iteration.
+"""Filesystem-backed :class:`CheckpointStore` — one JSON file per save.
 
 Layout::
 
-    <root>/<encoded-client-flow-id>/iter-<N>.json
+    <root>/<encoded-client-flow-id>/save-<N>.json
 
 ``client_flow_id`` is URL-quoted for directory-safety (arbitrary caller
-strings survive round-trip). Each per-iteration file contains a single
-JSON object ``{"state": state_json, "metadata": metadata_json}``. Writes
-are atomic within a filesystem (write to ``.tmp`` sibling, then
-``os.replace``); a partial write cannot leave a truncated file the
-next load would misread. Load-latest scans the directory for
-``iter-*.json`` and returns the highest ``N``; concurrent saves at the
-same iteration collapse to whichever ``os.replace`` runs last.
+strings survive round-trip). ``N`` is a monotonically-increasing save
+sequence within the trajectory directory — every save (across every
+``node_path`` under this ``client_flow_id``) gets the next integer. Each
+file contains a single JSON object ``{"state": state_json, "metadata":
+metadata_json, "node_path": <str>, "iteration": <int>}``: ``node_path``
++ ``iteration`` are recorded inside the file so the store can serve
+lookups keyed on either; the ``save-N.json`` filename is the total-order
+signal for load-latest. Writes are atomic within a filesystem (write to
+``.tmp`` sibling, then ``os.replace``); a partial write cannot leave a
+truncated file the next load would misread. Same
+``(node_path, iteration)`` re-save allocates a new ``N`` — the older
+record still exists on disk but load-by-key returns the newer one
+(highest ``N`` wins on tie).
 
 Intended for local dev / small-scale ops. For a shared-fleet setup use
 :class:`llm_gent.flow.stores.PgCheckpointStore`.
@@ -34,7 +40,7 @@ from urllib.parse import quote, unquote
 from appinfra.log import Logger
 
 
-_ITER_RE = re.compile(r"^iter-(\d+)\.json$")
+_SAVE_RE = re.compile(r"^save-(\d+)\.json$")
 
 
 class JsonFileCheckpointStore:
@@ -63,16 +69,23 @@ class JsonFileCheckpointStore:
     def save_checkpoint(
         self,
         client_flow_id: str,
+        node_path: str,
         iteration: int,
         state_json: dict[str, Any],
         metadata_json: dict[str, Any],
     ) -> None:
-        """Persist one iteration record. Atomic via write-then-replace."""
+        """Persist one record as ``save-<N>.json``. Atomic via write-then-replace."""
         traj_dir = self._trajectory_dir(client_flow_id)
         traj_dir.mkdir(parents=True, exist_ok=True)
-        target = traj_dir / f"iter-{iteration}.json"
-        payload = {"state": state_json, "metadata": metadata_json}
-        fd, tmp_path = tempfile.mkstemp(dir=traj_dir, prefix=f"iter-{iteration}.", suffix=".tmp")
+        next_seq = self._next_save_seq(traj_dir)
+        target = traj_dir / f"save-{next_seq}.json"
+        payload = {
+            "state": state_json,
+            "metadata": metadata_json,
+            "node_path": node_path,
+            "iteration": iteration,
+        }
+        fd, tmp_path = tempfile.mkstemp(dir=traj_dir, prefix=f"save-{next_seq}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(json.dumps(payload))
@@ -85,24 +98,27 @@ class JsonFileCheckpointStore:
     def load_checkpoint(
         self,
         client_flow_id: str,
+        node_path: str | None = None,
         iteration: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        """Read one iteration record (or the latest under this trajectory)."""
+        """Read the latest record matching the filter (both ``None`` → latest overall)."""
         traj_dir = self._trajectory_dir(client_flow_id)
         if not traj_dir.is_dir():
             return None
-        if iteration is None:
-            target = self._latest_file(traj_dir)
-            if target is None:
-                return None
-        else:
-            target = traj_dir / f"iter-{iteration}.json"
-            if not target.is_file():
-                return None
-        return self._read_record(target)
+        for seq, path in self._saves_desc(traj_dir):
+            record = self._read_record(path)
+            if record is None:
+                continue
+            state_json, metadata_json, rec_node_path, rec_iteration = record
+            if node_path is not None and rec_node_path != node_path:
+                continue
+            if iteration is not None and rec_iteration != iteration:
+                continue
+            return state_json, metadata_json
+        return None
 
     def delete_checkpoint(self, client_flow_id: str) -> None:
-        """Remove every iteration file under this trajectory. Idempotent."""
+        """Remove every save file under this trajectory. Idempotent."""
         traj_dir = self._trajectory_dir(client_flow_id)
         if not traj_dir.is_dir():
             return
@@ -139,23 +155,50 @@ class JsonFileCheckpointStore:
             raise ValueError(f"client_flow_id resolves outside store root; got {client_flow_id!r}")
         return candidate
 
-    def _latest_file(self, traj_dir: Path) -> Path | None:
-        """Scan for ``iter-N.json`` files; return the highest-N path."""
-        best: tuple[int, Path] | None = None
+    def _next_save_seq(self, traj_dir: Path) -> int:
+        """Return one plus the highest existing ``save-<N>.json`` in ``traj_dir``.
+
+        Starts at ``1`` when the directory has no matching files. Non-
+        matching entries (``.tmp`` residues, foreign files) are ignored.
+        """
+        best = 0
         for entry in traj_dir.iterdir():
-            m = _ITER_RE.match(entry.name)
+            m = _SAVE_RE.match(entry.name)
             if m is None:
                 continue
             n = int(m.group(1))
-            if best is None or n > best[0]:
-                best = (n, entry)
-        return None if best is None else best[1]
+            if n > best:
+                best = n
+        return best + 1
 
-    def _read_record(self, path: Path) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        """Load one on-disk record; warn and skip on parse failure."""
+    def _saves_desc(self, traj_dir: Path) -> list[tuple[int, Path]]:
+        """Return ``(seq, path)`` for every ``save-<N>.json`` in descending ``N`` order."""
+        saves: list[tuple[int, Path]] = []
+        for entry in traj_dir.iterdir():
+            m = _SAVE_RE.match(entry.name)
+            if m is None:
+                continue
+            saves.append((int(m.group(1)), entry))
+        saves.sort(key=lambda pair: pair[0], reverse=True)
+        return saves
+
+    def _read_record(
+        self, path: Path
+    ) -> tuple[dict[str, Any], dict[str, Any], str, int] | None:
+        """Load one on-disk record; warn and skip on parse failure.
+
+        Returns ``(state_json, metadata_json, node_path, iteration)``. The
+        latter two live inside the file so :meth:`load_checkpoint` can
+        filter without a separate index.
+        """
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            return payload["state"], payload["metadata"]
+            return (
+                payload["state"],
+                payload["metadata"],
+                payload["node_path"],
+                payload["iteration"],
+            )
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
             self._lg.warning(
                 "checkpoint file unreadable; treating as absent",
