@@ -118,6 +118,25 @@ class TestPgCheckpointStore:
         assert loaded is not None
         assert loaded[0] == _state(2)
 
+    def test_distinct_node_paths_do_not_collide(self, store: PgCheckpointStore) -> None:
+        """Two iterates' iteration=1 records under one trajectory coexist without overwrite.
+
+        Under the old (client_flow_id, iteration) unique constraint, an
+        inner iterate's iteration=1 upsert would replace an outer's
+        iteration=1 row. With node_path in the key, both rows persist
+        and each is retrievable by its own (node_path, iteration).
+        """
+        store.save_checkpoint("traj-1", "outer", 1, _state(11), _meta(1, ["outer"]))
+        store.save_checkpoint("traj-1", "outer/inner", 1, _state(99), _meta(1, ["outer", "inner"]))
+
+        outer = store.load_checkpoint("traj-1", node_path="outer", iteration=1)
+        assert outer is not None
+        assert outer[0] == _state(11)
+
+        inner = store.load_checkpoint("traj-1", node_path="outer/inner", iteration=1)
+        assert inner is not None
+        assert inner[0] == _state(99)
+
     def test_ensure_schema_idempotent(self, pg_migrated: PG, pg_test_logger: Logger) -> None:
         """Re-running :func:`ensure_schema` on an already-migrated DB is a no-op."""
         from llm_gent.schema import SchemaManager, SchemaState

@@ -135,6 +135,25 @@ class TestJsonFileCheckpointStore:
         target.write_text("{not valid json", encoding="utf-8")
         assert store.load_checkpoint("traj-1", iteration=1) is None
 
+    def test_distinct_node_paths_do_not_collide(self, store: JsonFileCheckpointStore) -> None:
+        """Two iterates' iteration=1 records under one trajectory coexist without overwrite.
+
+        Under the old (client_flow_id, iteration) key, an inner iterate's
+        iteration=1 save would upsert on top of an outer's iteration=1.
+        With node_path in the key, both records live on disk and each
+        is retrievable by its own (node_path, iteration).
+        """
+        store.save_checkpoint("traj-1", "outer", 1, _state(11), _meta(1, ["outer"]))
+        store.save_checkpoint("traj-1", "outer/inner", 1, _state(99), _meta(1, ["outer", "inner"]))
+
+        outer = store.load_checkpoint("traj-1", node_path="outer", iteration=1)
+        assert outer is not None
+        assert outer[0] == _state(11)
+
+        inner = store.load_checkpoint("traj-1", node_path="outer/inner", iteration=1)
+        assert inner is not None
+        assert inner[0] == _state(99)
+
 
 class TestJsonFileCheckpointStoreAdversarialIds:
     """Path-traversal / malformed-id rejection at :meth:`_trajectory_dir`.
