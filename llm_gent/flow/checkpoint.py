@@ -142,6 +142,9 @@ class CheckpointStore(Protocol):
           that specific ``node_path``.
         - Both set — exact record, or ``None``.
 
+        ``iteration`` without ``node_path`` is invalid — stores raise
+        :exc:`ValueError`.
+
         "Most recently saved" is by save order (Postgres uses the row's
         autoincrement id; JsonFile uses a monotonic save sequence in the
         filename).

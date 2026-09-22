@@ -102,6 +102,8 @@ class JsonFileCheckpointStore:
         iteration: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         """Read the latest record matching the filter (both ``None`` → latest overall)."""
+        if node_path is None and iteration is not None:
+            raise ValueError("iteration requires node_path; use both or neither")
         traj_dir = self._trajectory_dir(client_flow_id)
         if not traj_dir.is_dir():
             return None

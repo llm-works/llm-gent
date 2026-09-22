@@ -69,14 +69,14 @@ class TestPgCheckpointStore:
         """``iteration=N`` fetches exactly that row when it exists."""
         store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
         store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
-        loaded = store.load_checkpoint("traj-1", iteration=1)
+        loaded = store.load_checkpoint("traj-1", node_path="node-a", iteration=1)
         assert loaded is not None
         assert loaded[0] == _state(1)
 
     def test_load_specific_iteration_missing(self, store: PgCheckpointStore) -> None:
         """A non-existent iteration under a live trajectory reads as ``None``."""
         store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
-        assert store.load_checkpoint("traj-1", iteration=99) is None
+        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=99) is None
 
     def test_load_latest_picks_last_save(self, store: PgCheckpointStore) -> None:
         """Both filters ``None`` returns the most recently inserted row (last db_id wins)."""
@@ -91,7 +91,7 @@ class TestPgCheckpointStore:
         """A second save at the same iteration replaces the earlier row (ON CONFLICT DO UPDATE)."""
         store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
         store.save_checkpoint("traj-1", "node-a", 1, _state(99), _meta(1))
-        loaded = store.load_checkpoint("traj-1", iteration=1)
+        loaded = store.load_checkpoint("traj-1", node_path="node-a", iteration=1)
         assert loaded is not None
         assert loaded[0] == _state(99)
 
@@ -101,8 +101,8 @@ class TestPgCheckpointStore:
         store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
         store.delete_checkpoint("traj-1")
         assert store.load_checkpoint("traj-1") is None
-        assert store.load_checkpoint("traj-1", iteration=1) is None
-        assert store.load_checkpoint("traj-1", iteration=2) is None
+        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=1) is None
+        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=2) is None
 
     def test_delete_idempotent_when_absent(self, store: PgCheckpointStore) -> None:
         """Deleting an unknown trajectory is a no-op, not an error."""

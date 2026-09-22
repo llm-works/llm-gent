@@ -136,6 +136,8 @@ class PgCheckpointStore:
         it's the total order over saves under this ``client_flow_id``
         regardless of which iterate wrote each row).
         """
+        if node_path is None and iteration is not None:
+            raise ValueError("iteration requires node_path; use both or neither")
         stmt = select(FlowCheckpoint.state_json, FlowCheckpoint.metadata_json).where(
             FlowCheckpoint.client_flow_id == client_flow_id
         )

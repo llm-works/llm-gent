@@ -60,14 +60,14 @@ class TestJsonFileCheckpointStore:
         """``iteration=N`` fetches exactly that record when it exists."""
         store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
         store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
-        loaded = store.load_checkpoint("traj-1", iteration=1)
+        loaded = store.load_checkpoint("traj-1", node_path="node-a", iteration=1)
         assert loaded is not None
         assert loaded[0] == _state(1)
 
     def test_load_specific_iteration_missing(self, store: JsonFileCheckpointStore) -> None:
         """A non-existent iteration under a live trajectory reads as ``None``."""
         store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
-        assert store.load_checkpoint("traj-1", iteration=99) is None
+        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=99) is None
 
     def test_load_latest_picks_last_save(self, store: JsonFileCheckpointStore) -> None:
         """Both filters ``None`` returns the most recently written record (last save wins)."""
@@ -82,7 +82,7 @@ class TestJsonFileCheckpointStore:
         """A second save at the same iteration replaces the earlier record."""
         store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
         store.save_checkpoint("traj-1", "node-a", 1, _state(99), _meta(1))
-        loaded = store.load_checkpoint("traj-1", iteration=1)
+        loaded = store.load_checkpoint("traj-1", node_path="node-a", iteration=1)
         assert loaded is not None
         assert loaded[0] == _state(99)
 
@@ -92,8 +92,8 @@ class TestJsonFileCheckpointStore:
         store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
         store.delete_checkpoint("traj-1")
         assert store.load_checkpoint("traj-1") is None
-        assert store.load_checkpoint("traj-1", iteration=1) is None
-        assert store.load_checkpoint("traj-1", iteration=2) is None
+        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=1) is None
+        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=2) is None
 
     def test_delete_idempotent_when_absent(self, store: JsonFileCheckpointStore) -> None:
         """Deleting an unknown trajectory is a no-op, not an error."""
@@ -133,7 +133,7 @@ class TestJsonFileCheckpointStore:
         # Corrupt the on-disk file.
         target = tmp_path / "checkpoints" / "traj-1" / "save-1.json"
         target.write_text("{not valid json", encoding="utf-8")
-        assert store.load_checkpoint("traj-1", iteration=1) is None
+        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=1) is None
 
     def test_distinct_node_paths_do_not_collide(self, store: JsonFileCheckpointStore) -> None:
         """Two iterates' iteration=1 records under one trajectory coexist without overwrite.
