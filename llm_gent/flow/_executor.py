@@ -630,8 +630,11 @@ def _save_iterate_checkpoint(
         return
     state_json = _serialize_state_tree(current_state)
     path = list(env.ancestor_chain + (node_id,))
+    node_path = "/".join(path)
     metadata_json = {"path": path, "iteration": iteration}
-    env.checkpointer.save_checkpoint(env.client_flow_id, iteration, state_json, metadata_json)
+    env.checkpointer.save_checkpoint(
+        env.client_flow_id, node_path, iteration, state_json, metadata_json
+    )
 
 
 def _serialize_state_tree(current: State[Any]) -> dict[str, Any]:

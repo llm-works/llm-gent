@@ -4,8 +4,11 @@
 """Initial schema — Flow-level checkpoint store table.
 
 Creates ``llm_gent_flow_checkpoint``: one row per
-``(client_flow_id, iteration)``, backing
-:class:`llm_gent.flow.stores.PgCheckpointStore`.
+``(client_flow_id, node_path, iteration)``, backing
+:class:`llm_gent.flow.stores.PgCheckpointStore`. ``node_path`` scopes
+records to one iterate in the composition graph so two iterates in a
+chain, nested iterates, or an iterate inside a ``.map`` body never
+collide in the store keyspace.
 
 Revision ID: 001
 Revises:
@@ -26,11 +29,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Create the checkpoint table + its unique index on ``(client_flow_id, iteration)``."""
+    """Create the checkpoint table + unique index on ``(client_flow_id, node_path, iteration)``."""
     op.create_table(
         "llm_gent_flow_checkpoint",
         sa.Column("db_id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("client_flow_id", sa.String(length=255), nullable=False),
+        sa.Column("node_path", sa.String(length=1024), nullable=False),
         sa.Column("iteration", sa.Integer(), nullable=False),
         sa.Column("state_json", postgresql.JSONB(), nullable=False),
         sa.Column("metadata_json", postgresql.JSONB(), nullable=False),
@@ -43,6 +47,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("db_id"),
         sa.UniqueConstraint(
             "client_flow_id",
+            "node_path",
             "iteration",
             name="uq_flow_checkpoint_trajectory_iter",
         ),
@@ -50,7 +55,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_flow_checkpoint_trajectory_iter",
         "llm_gent_flow_checkpoint",
-        ["client_flow_id", "iteration"],
+        ["client_flow_id", "node_path", "iteration"],
     )
 
 

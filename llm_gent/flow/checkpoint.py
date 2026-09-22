@@ -9,6 +9,19 @@ state inside a single :class:`Loop` dispatch. This Protocol persists the
 composition-graph state at ``.iterate`` boundaries, keyed by an agent-owned
 identifier the consumer supplies via :meth:`Flow.with_checkpointer`.
 
+Record identity
+---------------
+Each save is uniquely identified by ``(client_flow_id, node_path,
+iteration)`` — a record is one iterate's one iteration under one
+trajectory. ``node_path`` is the ``/``-joined content-addressed node id
+chain from the run root down to the saving iterate (e.g.
+``"cafebabe/deadbeef"`` for an inner iterate nested one level). Two
+iterates in one chain, nested iterates, or an iterate inside a
+``.map`` body each have distinct ``node_path`` values and never collide.
+Load-latest returns the most recently saved record across every
+``node_path`` under a ``client_flow_id`` — the resume entry consults
+``metadata_json`` for the exact save-point.
+
 Snapshot shape
 --------------
 Save writes two JSON-compatible dicts per iteration:
@@ -25,15 +38,17 @@ Save writes two JSON-compatible dicts per iteration:
 
 Both are handed to :meth:`save_checkpoint` inline on the event loop — an
 implementation performing disk or database I/O should avoid blocking
-(e.g. wrap disk writes in :func:`asyncio.to_thread` inside the store, or
-back a non-blocking driver).
+(back a non-blocking driver, or run the blocking work off the loop
+thread). Note: the methods declared here are ``def``, so an
+implementation cannot ``await`` from inside them — a store using
+:func:`asyncio.to_thread` internally has no way to wait on the result.
 
 Save timing
 -----------
 The framework saves at :meth:`Flow.iterate` boundaries (once per successful
 body iteration). Iteration numbering starts at 1 for the first saved
-iteration. Consumers do not schedule saves; wiring
-:meth:`Flow.with_checkpointer` is the entire opt-in.
+iteration within one iterate's ``node_path``. Consumers do not schedule
+saves; wiring :meth:`Flow.with_checkpointer` is the entire opt-in.
 
 Delete policy
 -------------
@@ -80,9 +95,13 @@ from typing import Any, Protocol
 class CheckpointStore(Protocol):
     """Flow-level pause/resume Protocol — persists composition-graph state.
 
-    Consumers implement three synchronous methods keyed by an opaque
-    ``client_flow_id`` chosen at :meth:`Flow.with_checkpointer` time.
-    ``iteration`` is the framework-managed save index (see module docstring).
+    Consumers implement three synchronous methods. Records are keyed by
+    ``(client_flow_id, node_path, iteration)`` — the ``client_flow_id`` is
+    the trajectory identifier supplied at :meth:`Flow.with_checkpointer`
+    time; ``node_path`` scopes the record to one iterate in the
+    composition graph (see module docstring); ``iteration`` is the
+    framework-managed count starting at 1 for that iterate's first
+    saved iteration.
 
     Methods are called inline from the executor; implementations doing
     I/O should keep them non-blocking (see module docstring).
@@ -91,37 +110,49 @@ class CheckpointStore(Protocol):
     def save_checkpoint(
         self,
         client_flow_id: str,
+        node_path: str,
         iteration: int,
         state_json: dict[str, Any],
         metadata_json: dict[str, Any],
     ) -> None:
-        """Persist ``state_json`` + ``metadata_json`` at ``iteration`` under ``client_flow_id``.
+        """Persist one record at ``(client_flow_id, node_path, iteration)``.
 
         Called by the framework once per successful body iteration inside
         a ``.iterate`` block on a Flow with :meth:`Flow.with_checkpointer`
-        wired. Same ``(client_flow_id, iteration)`` from a later save MUST
-        replace the earlier record (idempotent overwrite semantics — the
-        framework does not maintain iteration history itself).
+        wired. Same ``(client_flow_id, node_path, iteration)`` from a later
+        save MUST replace the earlier record (idempotent overwrite —
+        an iterate re-saving iteration N under a running trajectory).
         """
         ...
 
     def load_checkpoint(
         self,
         client_flow_id: str,
+        node_path: str | None = None,
         iteration: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         """Return the ``(state_json, metadata_json)`` pair, or ``None`` if absent.
 
-        ``iteration=None`` (default) returns the latest checkpoint under
-        ``client_flow_id`` per the store's convention; a specific
-        ``iteration`` returns exactly that record or ``None``.
+        Argument combinations:
 
-        The framework calls this once at ``Flow.run(resume=True)`` start.
+        - Both ``None`` (default) — return the most recently saved record
+          across every ``node_path`` under ``client_flow_id``. This is what
+          :meth:`Flow.run` ``resume=True`` calls.
+        - ``node_path`` set, ``iteration=None`` — latest iteration under
+          that specific ``node_path``.
+        - Both set — exact record, or ``None``.
+
+        ``iteration`` without ``node_path`` is invalid — stores raise
+        :exc:`ValueError`.
+
+        "Most recently saved" is by save order (Postgres uses the row's
+        autoincrement id; JsonFile uses a monotonic save sequence in the
+        filename).
         """
         ...
 
     def delete_checkpoint(self, client_flow_id: str) -> None:
-        """Remove every checkpoint under ``client_flow_id``.
+        """Remove every record under ``client_flow_id`` (all node_paths).
 
         Called by the framework on fully successful :meth:`Flow.run`
         completion (no exception, no cancellation). Idempotent: absence
