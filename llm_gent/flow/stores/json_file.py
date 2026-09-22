@@ -105,7 +105,7 @@ class JsonFileCheckpointStore:
         traj_dir = self._trajectory_dir(client_flow_id)
         if not traj_dir.is_dir():
             return None
-        for seq, path in self._saves_desc(traj_dir):
+        for _seq, path in self._saves_desc(traj_dir):
             record = self._read_record(path)
             if record is None:
                 continue
@@ -182,9 +182,7 @@ class JsonFileCheckpointStore:
         saves.sort(key=lambda pair: pair[0], reverse=True)
         return saves
 
-    def _read_record(
-        self, path: Path
-    ) -> tuple[dict[str, Any], dict[str, Any], str, int] | None:
+    def _read_record(self, path: Path) -> tuple[dict[str, Any], dict[str, Any], str, int] | None:
         """Load one on-disk record; warn and skip on parse failure.
 
         Returns ``(state_json, metadata_json, node_path, iteration)``. The

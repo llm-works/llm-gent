@@ -72,9 +72,7 @@ class FlowCheckpoint(Base):
             "iteration",
             name="uq_flow_checkpoint_trajectory_iter",
         ),
-        Index(
-            "ix_flow_checkpoint_trajectory_iter", "client_flow_id", "node_path", "iteration"
-        ),
+        Index("ix_flow_checkpoint_trajectory_iter", "client_flow_id", "node_path", "iteration"),
     )
 
 
