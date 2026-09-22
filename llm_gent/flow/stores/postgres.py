@@ -6,11 +6,9 @@
 Flat single-table layout — one row per ``(client_flow_id, node_path,
 iteration)``, JSONB payloads for both the framework snapshot and
 metadata. Latest-load across every ``node_path`` is
-``ORDER BY db_id DESC LIMIT 1`` under the trajectory id (BIGSERIAL is
-monotonic per row, so it's the total-order over saves regardless of
-which iterate produced each one). Save is an upsert
-(``ON CONFLICT (client_flow_id, node_path, iteration) DO UPDATE``) so
-re-saves of the same iterate's iteration collapse per the Protocol's
+``ORDER BY created_at DESC LIMIT 1`` under the trajectory id. Save is
+an upsert (``ON CONFLICT ... DO UPDATE``) that refreshes ``created_at``
+so re-saves move to the head of the total order, per the Protocol's
 idempotent-overwrite contract.
 
 Schema is not managed by the store. Consumers call
@@ -119,6 +117,7 @@ class PgCheckpointStore:
             set_={
                 "state_json": stmt.excluded.state_json,
                 "metadata_json": stmt.excluded.metadata_json,
+                "created_at": datetime.now(UTC),
             },
         )
         with self._pg.session() as session:
@@ -132,9 +131,8 @@ class PgCheckpointStore:
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         """Read one record; latest across all ``node_path`` when both filters are ``None``.
 
-        Latest = highest ``db_id`` (BIGSERIAL is monotonic per insert, so
-        it's the total order over saves under this ``client_flow_id``
-        regardless of which iterate wrote each row).
+        Latest = most recent ``created_at`` (refreshed on every save,
+        including re-saves that upsert an existing row).
         """
         if node_path is None and iteration is not None:
             raise ValueError("iteration requires node_path; use both or neither")
@@ -146,7 +144,7 @@ class PgCheckpointStore:
         if iteration is not None:
             stmt = stmt.where(FlowCheckpoint.iteration == iteration)
         else:
-            stmt = stmt.order_by(FlowCheckpoint.db_id.desc()).limit(1)
+            stmt = stmt.order_by(FlowCheckpoint.created_at.desc()).limit(1)
         with self._pg.session() as session:
             row = session.execute(stmt).first()
         if row is None:

@@ -94,6 +94,7 @@ class JsonFileCheckpointStore:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
             raise
+        self._prune_superseded(traj_dir, next_seq, node_path, iteration)
 
     def load_checkpoint(
         self,
@@ -205,6 +206,30 @@ class JsonFileCheckpointStore:
                 extra={"exception": e, "path": str(path)},
             )
             return None
+
+    def _prune_superseded(
+        self, traj_dir: Path, current_seq: int, node_path: str, iteration: int
+    ) -> None:
+        """Delete older saves for the same ``(node_path, iteration)``.
+
+        Called after a successful save to remove superseded records. Errors
+        are logged and swallowed — pruning is best-effort housekeeping.
+        """
+        for seq, path in self._saves_desc(traj_dir):
+            if seq >= current_seq:
+                continue
+            record = self._read_record(path)
+            if record is None:
+                continue
+            _, _, rec_node_path, rec_iteration = record
+            if rec_node_path == node_path and rec_iteration == iteration:
+                try:
+                    path.unlink()
+                except OSError as e:
+                    self._lg.warning(
+                        "failed to prune superseded checkpoint",
+                        extra={"exception": e, "path": str(path)},
+                    )
 
     @staticmethod
     def _decode_id(dirname: str) -> str:
