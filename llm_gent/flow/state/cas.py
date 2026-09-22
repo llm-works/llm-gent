@@ -138,6 +138,11 @@ class Tree:
         entry set produced in any order hashes the same.
         """
         sorted_entries = tuple(sorted(entries, key=lambda e: e.scope_id))
+        if any(
+            prev.scope_id == curr.scope_id
+            for prev, curr in zip(sorted_entries, sorted_entries[1:], strict=False)
+        ):
+            raise ValueError("Tree entries must have unique scope_id values")
         body: list[list[str]] = [[e.scope_id, e.kind, e.child_hash] for e in sorted_entries]
         return cls(
             content_hash=content_hash(canonical_json(body)),

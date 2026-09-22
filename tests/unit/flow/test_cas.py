@@ -157,6 +157,16 @@ class TestTree:
         t_tree = Tree.from_entries([TreeEntry("a", "tree", "h")])
         assert t_blob.content_hash != t_tree.content_hash
 
+    def test_duplicate_scope_id_rejected(self) -> None:
+        import pytest
+
+        entries = [
+            TreeEntry(scope_id="a", kind="blob", child_hash="h1"),
+            TreeEntry(scope_id="a", kind="blob", child_hash="h2"),
+        ]
+        with pytest.raises(ValueError, match="unique scope_id"):
+            Tree.from_entries(entries)
+
 
 # ---------------------------------------------------------------------------
 # Commit — build + hash + $external/ round-trip + timepoint semantics
