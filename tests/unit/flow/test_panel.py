@@ -349,9 +349,9 @@ class TestPanel:
     async def test_panel_inner_verb_mutations_visible_to_caller(self) -> None:
         """Mutations by inner verbs are visible to the calling verb's state.
 
-        When Panel dispatches with ``state=ctx.state``, inner verbs share
-        the same State object. A mutation by one inner verb should be
-        visible to subsequent inner verbs and to the caller after Panel
+        When Panel dispatches with ``scope_state=ctx.state``, inner verbs
+        share the same State object. A mutation by one inner verb should
+        be visible to subsequent inner verbs and to the caller after Panel
         returns.
         """
 

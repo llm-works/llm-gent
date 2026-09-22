@@ -226,7 +226,7 @@ class Flow:
         *args: Any,
         halt: Any = UNSET,
         budget: Any = UNSET,
-        state: Any = UNSET,
+        scope_state: Any = UNSET,
         **kwargs: Any,
     ) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
@@ -236,14 +236,14 @@ class Flow:
         the low-level entrypoint used by :class:`Panel` and by verbs that
         invoke sibling verbs directly.
 
-        ``state=`` wins over the flow's construction state — pass
-        ``state=ctx.state`` from an in-flight verb (or a Panel, which does
-        this automatically) to hand the dispatched sibling the live scope
-        payload, not the flow's construction default. Omitting ``state=``
-        (or passing ``UNSET``) falls back to ``self._state``, defaulting
-        to a fresh empty ``dict`` when none was supplied at construction.
-        A ``State`` instance passes through as-is; any other value is
-        wrapped with this flow's ``state_factory``.
+        ``scope_state=`` wins over the flow's construction state — pass
+        ``scope_state=ctx.state`` from an in-flight verb (or a Panel, which
+        does this automatically) to hand the dispatched sibling the live
+        scope payload, not the flow's construction default. Omitting
+        ``scope_state=`` (or passing ``UNSET``) falls back to ``self._state``,
+        defaulting to a fresh empty ``dict`` when none was supplied at
+        construction. A ``State`` instance passes through as-is; any other
+        value is wrapped with this flow's ``state_factory``.
 
         Pass ``halt=ctx.halt`` and ``budget=ctx.budget`` from an in-flight
         verb to propagate its effective ambients to the dispatched sibling;
@@ -255,7 +255,11 @@ class Flow:
         verb = self._verbs[name]
         role_name = verb.role.name if verb.role is not None else None
         self._lg.debug("dispatching verb", extra={"verb": name, "role": role_name})
-        payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
+        payload = (
+            (self._state if self._state is not UNSET else {})
+            if scope_state is UNSET
+            else scope_state
+        )
         effective_halt = self._halt_event if halt is UNSET else halt
         effective_budget = self._budget_tracker if budget is UNSET else budget
         wrapped_state = (

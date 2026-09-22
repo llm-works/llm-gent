@@ -117,6 +117,7 @@ class _AsyncRecordingStore:
 
         await asyncio.sleep(0)
         self.inner.save_checkpoint(client_flow_id, node_path, iteration, state_json, metadata_json)
+        self.inner.preload = (state_json, metadata_json)
 
     async def load_checkpoint(
         self,
@@ -134,6 +135,7 @@ class _AsyncRecordingStore:
 
         await asyncio.sleep(0)
         self.inner.delete_checkpoint(client_flow_id)
+        self.inner.preload = None
 
 
 class TestProtocolShape:
@@ -242,6 +244,7 @@ class TestAsyncStoreRoundTrip:
                 self.inner.save_checkpoint(
                     client_flow_id, node_path, iteration, state_json, metadata_json
                 )
+                self.inner.preload = (state_json, metadata_json)
 
             async def load_checkpoint(
                 self,
@@ -255,6 +258,7 @@ class TestAsyncStoreRoundTrip:
             async def delete_checkpoint(self, client_flow_id: str) -> None:
                 await _asyncio.sleep(0)
                 self.inner.delete_checkpoint(client_flow_id)
+                self.inner.preload = None
 
         @verb(role=ROLE_A)
         async def fast_bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:

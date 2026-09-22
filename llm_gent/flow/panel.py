@@ -120,7 +120,7 @@ class Panel:
         Each inner verb must have been registered with the flow referenced by
         ``ctx.flow``. Positional and keyword args are forwarded to every verb.
 
-        Ambient forwarding — each dispatch receives ``state=ctx.state``,
+        Ambient forwarding — each dispatch receives ``scope_state=ctx.state``,
         ``halt=ctx.halt``, and ``budget=ctx.budget`` so inner verbs see
         the caller's live scope, not the flow's construction defaults.
         Inside a ``.map(state=...)`` or ``.call(state=...)`` block this
@@ -152,7 +152,7 @@ class Panel:
                 ctx.flow.dispatch(
                     getattr(v, "_registered_name", v.__name__),
                     *args,
-                    state=ctx.state,
+                    scope_state=ctx.state,
                     halt=ctx.halt,
                     budget=ctx.budget,
                     **kwargs,
