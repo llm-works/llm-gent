@@ -906,6 +906,39 @@ class Flow:
             f"Saved path (root→leaf): {full_repr}"
         )
 
+    def _resume_start_index(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> int:
+        """Return the chain index to start execution from on resume.
+
+        ``0`` on a fresh run (no replay, empty path, or already-consumed
+        leaf). On resume, returns the index of the chain step whose id
+        matches ``env.replay.remaining_path[0]`` — that step is on the
+        save-point ancestor chain (or IS the save-point leaf when
+        ``remaining_path`` has shrunk to one entry); every prior chain
+        step completed BEFORE the checkpoint was written and re-running
+        them would clobber hydrated state (their verbs typically write
+        to ``ctx.state.data`` on the way through).
+
+        :meth:`_assert_replay_reachable` guarantees the head is in
+        ``chain_ids`` before this fires, so the loop is a lookup, not
+        a search.
+
+        Contract on the on-path node when ``start_index > 0``: it runs
+        with no ``prev_result`` — its predecessor didn't re-run, so
+        there is no return value to thread in. Iterate bodies that
+        depend on the outer chain's return value on resume-first-
+        iteration must either be at chain index 0 or read from state.
+        """
+        replay = env.replay
+        if replay is None or not replay.remaining_path:
+            return 0
+        if env.runtime._replay_consumed:
+            return 0
+        head = replay.remaining_path[0]
+        for i, cid in enumerate(chain_ids):
+            if cid == head:
+                return i
+        return 0
+
     async def _run_as_subflow(
         self,
         *args: Any,
@@ -967,13 +1000,38 @@ class Flow:
         )
         chain_ids = self._compute_chain_ids(env)
         self._assert_replay_reachable(env, chain_ids)
+        start_index = self._resume_start_index(env, chain_ids)
+        result = await self._walk_chain(env, chain_ids, start_index, args, kwargs)
+        env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
+        return result
+
+    async def _walk_chain(
+        self,
+        env: _RunEnv,
+        chain_ids: tuple[str, ...],
+        start_index: int,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """Execute chain steps from ``start_index`` onward, threading returns.
+
+        ``start_index > 0`` on resume: predecessors already completed
+        before the checkpoint was written; the on-path step at
+        ``start_index`` runs with no ``prev_result`` (see
+        :meth:`_resume_start_index` for the contract).
+        """
         result: Any = UNSET
-        for index, node in enumerate(self._nodes):
+        for index in range(start_index, len(self._nodes)):
+            node = self._nodes[index]
             node_id = chain_ids[index]
-            node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
+            node_args: tuple[Any, ...]
+            node_kwargs: dict[str, Any]
+            if index == start_index and start_index > 0:
+                node_args, node_kwargs = (), {}
+            else:
+                node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             ctx = _build_ctx(node.target, env)
             result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
-        env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
     def _make_run_env(

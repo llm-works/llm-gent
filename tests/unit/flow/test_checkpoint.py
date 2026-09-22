@@ -1198,6 +1198,188 @@ class TestResumePositionReplay:
 
 
 # -----------------------------------------------------------------------------
+# Resume chain-predecessor skip
+# -----------------------------------------------------------------------------
+
+
+class TestResumeSkipsChainPredecessors:
+    """On resume, chain steps before the save-point node are skipped.
+
+    Without the skip, a shape like ``.call(f).iterate(body)`` re-runs
+    ``f`` on resume — any state ``f`` writes clobbers the hydrated
+    payload the checkpoint just restored. The chain loop in
+    :meth:`_run_as_subflow` starts at
+    :meth:`_resume_start_index`; predecessors don't fire.
+
+    Contract when ``start_index > 0``: the on-path node runs with no
+    ``prev_result``. Iterate bodies that need the outer chain's return
+    value on resume-first-iteration must either be at chain index 0
+    or read from state.
+    """
+
+    async def test_pre_iterate_verb_not_re_invoked_on_resume(self) -> None:
+        """``.call(f).iterate(body)`` — after resume, ``f`` never runs a second time."""
+        f_calls: list[int] = []
+
+        @verb(role=ROLE_A)
+        async def f(ctx: Context[dict[str, int]]) -> int:
+            f_calls.append(1)
+            ctx.state.data["from_f"] = 42
+            return 42
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            return ctx.state.data["n"]
+
+        store = _RecordingStore()
+
+        def mk_flow(max_iters: int) -> Flow:
+            return (
+                make_ff()
+                .create(state={"n": 0})
+                .with_checkpointer(store, "traj-pre-iter")
+                .call(f)
+                .iterate(bump, max_iters=max_iters)
+            )
+
+        # Initial run: f fires once, iterate runs 2 passes.
+        await mk_flow(2).run()
+        assert f_calls == [1]
+        assert store.saves[-1][4]["iteration"] == 2
+
+        # Prime the resume: fresh flow, checkpoint restored.
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
+        store.saves.clear()
+        store.deletes.clear()
+        f_calls.clear()
+
+        result = await mk_flow(4).run(resume=True)
+        assert f_calls == []  # f skipped — the whole point of the skip
+        assert result == 4  # n hydrates to 2, two more passes → 4
+
+    async def test_post_iterate_verb_runs_after_resume(self) -> None:
+        """Chain ``[a, iterate, b]`` — ``a`` skipped, iterate resumes, ``b`` runs fresh."""
+        calls: list[str] = []
+
+        @verb(role=ROLE_A)
+        async def a(ctx: Context[dict[str, int]]) -> None:
+            calls.append("a")
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            calls.append(f"bump-{ctx.state.data['n']}")
+            return ctx.state.data["n"]
+
+        @verb(role=ROLE_A)
+        async def b(ctx: Context[dict[str, int]], prev: int) -> int:
+            calls.append(f"b-{prev}")
+            return prev * 10
+
+        store = _RecordingStore()
+
+        def mk_flow(max_iters: int) -> Flow:
+            return (
+                make_ff()
+                .create(state={"n": 0})
+                .with_checkpointer(store, "traj-abc")
+                .call(a)
+                .iterate(bump, max_iters=max_iters)
+                .call(b)
+            )
+
+        await mk_flow(2).run()
+        assert calls == ["a", "bump-1", "bump-2", "b-2"]
+
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
+        store.saves.clear()
+        store.deletes.clear()
+        calls.clear()
+
+        # Resume with max_iters=3 → one more iterate pass, then b consumes iterate's return.
+        result = await mk_flow(3).run(resume=True)
+        # a skipped; iterate ran one more pass; b saw iterate's return (3) and returned 3 * 10.
+        assert calls == ["bump-3", "b-3"]
+        assert result == 30
+
+    async def test_body_without_prev_signature_works_on_resume(self) -> None:
+        """Iterate body declared as ``(ctx)`` — resume works trivially, no prev threading."""
+
+        @verb(role=ROLE_A)
+        async def f(ctx: Context[dict[str, int]]) -> int:
+            return 999  # only fires on the fresh run; irrelevant on resume
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[dict[str, int]]) -> int:  # ← no prev in signature
+            ctx.state.data["n"] += 1
+            return ctx.state.data["n"]
+
+        store = _RecordingStore()
+
+        def mk_flow(max_iters: int) -> Flow:
+            return (
+                make_ff()
+                .create(state={"n": 0})
+                .with_checkpointer(store, "traj-noprev")
+                .call(f)
+                .iterate(bump, max_iters=max_iters)
+            )
+
+        await mk_flow(2).run()
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
+        store.saves.clear()
+        store.deletes.clear()
+
+        result = await mk_flow(3).run(resume=True)
+        assert result == 3  # n hydrates to 2, one more pass → 3
+
+    async def test_body_with_prev_signature_sees_none_on_resume_first_iteration(self) -> None:
+        """Iterate body declared as ``(ctx, prev)`` — first resumed iteration sees ``prev=None``.
+
+        Contract call-out: predecessors don't re-run, so no return value
+        is available to thread as ``prev`` for the on-path iterate's
+        resume-first pass. The body sees ``None`` and must either
+        handle it or read from state.
+        """
+        first_prev_seen: list[Any] = []
+
+        @verb(role=ROLE_A)
+        async def f(ctx: Context[dict[str, int]]) -> str:
+            return "from-f"
+
+        @verb(role=ROLE_A)
+        async def bump(ctx: Context[dict[str, int]], prev: Any = None) -> int:
+            first_prev_seen.append(prev)
+            ctx.state.data["n"] += 1
+            return ctx.state.data["n"]
+
+        store = _RecordingStore()
+
+        def mk_flow(max_iters: int) -> Flow:
+            return (
+                make_ff()
+                .create(state={"n": 0})
+                .with_checkpointer(store, "traj-prevnone")
+                .call(f)
+                .iterate(bump, max_iters=max_iters)
+            )
+
+        await mk_flow(2).run()
+        # Fresh run: first iteration's prev is "from-f" (f's return).
+        assert first_prev_seen[0] == "from-f"
+
+        store.preload = (store.saves[-1][3], store.saves[-1][4])
+        store.saves.clear()
+        store.deletes.clear()
+        first_prev_seen.clear()
+
+        await mk_flow(3).run(resume=True)
+        # Resume-first-iteration: prev is None (f didn't re-run).
+        assert first_prev_seen[0] is None
+
+
+# -----------------------------------------------------------------------------
 # Resume determinism — canonical multi-stage flow via the testing harness
 # -----------------------------------------------------------------------------
 
