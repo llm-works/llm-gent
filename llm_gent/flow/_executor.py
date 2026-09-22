@@ -465,7 +465,7 @@ async def _run_iterate(
             break
         result = await _dispatch_iterate_body(it, env, child_state, result, node_id)
         iteration += 1
-        _save_iterate_checkpoint(env, iteration, node_id, child_state)
+        await _save_iterate_checkpoint(env, iteration, node_id, child_state)
         if await _check_until(it.until, result, child_state, env):
             break
     await _merge_state(it.merge_fn, env.state, child_state)
@@ -601,7 +601,7 @@ async def _dispatch_iterate_body(
     )
 
 
-def _save_iterate_checkpoint(
+async def _save_iterate_checkpoint(
     env: _RunEnv,
     iteration: int,
     node_id: str,
@@ -632,9 +632,11 @@ def _save_iterate_checkpoint(
     path = list(env.ancestor_chain + (node_id,))
     node_path = "/".join(path)
     metadata_json = {"path": path, "iteration": iteration}
-    env.checkpointer.save_checkpoint(
+    result = env.checkpointer.save_checkpoint(
         env.client_flow_id, node_path, iteration, state_json, metadata_json
     )
+    if inspect.isawaitable(result):
+        await result
 
 
 def _serialize_state_tree(current: State[Any]) -> dict[str, Any]:

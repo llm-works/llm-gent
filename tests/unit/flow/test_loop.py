@@ -783,6 +783,70 @@ class TestLoopCheckpointStoreProtocol:
         Loop(ROLE_A, checkpointer=store)
 
 
+@dataclass
+class _AsyncLoopStore:
+    """LoopCheckpointStore stub whose methods are ``async def``.
+
+    Delegates to a wrapped :class:`_RecordingStore` after
+    ``await asyncio.sleep(0)`` so the coroutine suspends at least once
+    — proves Loop awaits the return value rather than dropping it.
+    """
+
+    inner: _RecordingStore = field(default_factory=_RecordingStore)
+
+    async def save_checkpoint(self, scope_id: str, run_id: int, state: dict[str, Any]) -> None:
+        await asyncio.sleep(0)
+        self.inner.save_checkpoint(scope_id, run_id, state)
+
+    async def load_checkpoint(
+        self, scope_id: str, run_id: int | None = None
+    ) -> dict[str, Any] | None:
+        await asyncio.sleep(0)
+        return self.inner.load_checkpoint(scope_id, run_id)
+
+    async def delete_checkpoint(self, scope_id: str, run_id: int | None = None) -> None:
+        await asyncio.sleep(0)
+        self.inner.delete_checkpoint(scope_id, run_id)
+
+
+class TestAsyncLoopCheckpointStore:
+    """Loop awaits an ``async def`` store at every call site."""
+
+    def test_async_store_matches_protocol(self) -> None:
+        """Structural conformance: an ``async def`` LoopCheckpointStore fits."""
+        store = _AsyncLoopStore()
+        _: LoopCheckpointStore = store
+        Loop(ROLE_A, checkpointer=store)
+
+    @pytest.mark.asyncio
+    async def test_present_checkpoint_awaits_load(self) -> None:
+        """Async ``load_checkpoint`` returning a coroutine still drives on_resume."""
+        events: list[Any] = []
+        preload = {"turn": 5}
+        store = _AsyncLoopStore(inner=_RecordingStore(preload=preload))
+
+        def on_resume(state: Any, ctx: Context) -> None:
+            events.append(("resume", state))
+
+        loop = Loop(ROLE_A, checkpointer=store, on_resume=on_resume)
+        factory = _CompleteFactory()
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
+        assert events == [("resume", preload)]
+
+    @pytest.mark.asyncio
+    async def test_delete_on_completion_is_awaited(self) -> None:
+        """Async ``delete_checkpoint`` on a clean run actually fires."""
+        store = _AsyncLoopStore()
+        loop = Loop(ROLE_A, checkpointer=store)
+        factory = _CompleteFactory()
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t", scope_id="s9", run_id=7)
+        assert store.inner.deletes == [("s9", 7)]
+
+
 # -----------------------------------------------------------------------------
 # Cross-check: Loop as verb in a chain of verbs
 # -----------------------------------------------------------------------------

@@ -827,7 +827,7 @@ class Flow:
         active_state = self._wrap_top_state(state)
         replay: _ResumeReplay | None = None
         if resume:
-            active_state, replay = self._hydrate_resume_state(active_state)
+            active_state, replay = await self._hydrate_resume_state(active_state)
         self._replay_consumed = False
         result = await self._run_as_subflow(
             *args, state=active_state, runtime=self, parent_replay=replay, **kwargs
@@ -839,7 +839,9 @@ class Flow:
             and self._client_flow_id is not None
             and (self._halt_event is None or not self._halt_event.is_set())
         ):
-            self._checkpointer.delete_checkpoint(self._client_flow_id)
+            deleted = self._checkpointer.delete_checkpoint(self._client_flow_id)
+            if inspect.isawaitable(deleted):
+                await deleted
         return result
 
     def _assert_replay_consumed(self, replay: _ResumeReplay | None) -> None:
@@ -1096,7 +1098,7 @@ class Flow:
             return payload
         return State(data=payload, _factory=self._state_factory)
 
-    def _hydrate_resume_state(
+    async def _hydrate_resume_state(
         self, fallback: State[Any]
     ) -> tuple[State[Any], _ResumeReplay | None]:
         """Load the latest checkpoint and reconstruct state + a replay context.
@@ -1123,7 +1125,8 @@ class Flow:
                 f"Flow {label!r} was run with resume=True but has no "
                 f"client_flow_id — call .with_checkpointer(store, client_flow_id) first"
             )
-        loaded = self._checkpointer.load_checkpoint(self._client_flow_id)
+        raw = self._checkpointer.load_checkpoint(self._client_flow_id)
+        loaded = await raw if inspect.isawaitable(raw) else raw
         if loaded is None:
             return fallback, None
         state_json, metadata_json = loaded

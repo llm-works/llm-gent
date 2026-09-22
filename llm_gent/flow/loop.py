@@ -66,25 +66,40 @@ class LoopCheckpointStore(Protocol):
     inside ``on_iteration`` so each turn's state is persisted before the
     next).
 
-    Methods are synchronous and called inline on the event loop.
-    Implementations performing disk or database I/O should avoid blocking
-    (e.g. use ``asyncio.to_thread`` internally or a non-blocking driver).
+    Each method may be declared ``def`` (returning its value directly)
+    or ``async def`` (returning a coroutine). Loop awaits the return
+    value when it is awaitable — a synchronous store keeps working;
+    an async-native store (e.g. one using ``asyncio.to_thread``
+    internally) gains first-class support without blocking the event
+    loop.
     """
 
-    def save_checkpoint(self, scope_id: str, run_id: int, state: dict[str, Any]) -> None:
-        """Persist a snapshot for later resume."""
+    def save_checkpoint(
+        self, scope_id: str, run_id: int, state: dict[str, Any]
+    ) -> None | Awaitable[None]:
+        """Persist a snapshot for later resume.
+
+        May be declared ``async def``.
+        """
         ...
 
-    def load_checkpoint(self, scope_id: str, run_id: int | None = None) -> dict[str, Any] | None:
+    def load_checkpoint(
+        self, scope_id: str, run_id: int | None = None
+    ) -> dict[str, Any] | None | Awaitable[dict[str, Any] | None]:
         """Return the snapshot, or ``None`` if no matching checkpoint exists.
 
         ``run_id=None`` should return the latest checkpoint under
         ``scope_id`` per the consumer's convention.
+
+        May be declared ``async def``.
         """
         ...
 
-    def delete_checkpoint(self, scope_id: str, run_id: int | None = None) -> None:
-        """Delete the snapshot — called after a successful (non-paused) run."""
+    def delete_checkpoint(self, scope_id: str, run_id: int | None = None) -> None | Awaitable[None]:
+        """Delete the snapshot — called after a successful (non-paused) run.
+
+        May be declared ``async def``.
+        """
         ...
 
 
@@ -342,7 +357,7 @@ class Loop:
                 no role or the enclosing flow had no SAIAFactory.
         """
         saia = self._require_saia(ctx)
-        checkpoint = self._load_checkpoint(scope_id, run_id)
+        checkpoint = await self._load_checkpoint(scope_id, run_id)
         try:
             await self._before_run(saia, ctx, checkpoint)
             try:
@@ -387,11 +402,16 @@ class Loop:
         """Explicit ``Loop(halt=X)`` wins over ambient ``ctx.halt``."""
         return self._halt if self._halt is not None else ctx.halt
 
-    def _load_checkpoint(self, scope_id: str | None, run_id: int | None) -> dict[str, Any] | None:
+    async def _load_checkpoint(
+        self, scope_id: str | None, run_id: int | None
+    ) -> dict[str, Any] | None:
         """Return the checkpoint state, or ``None`` when not consulted."""
         if self._checkpointer is None or scope_id is None:
             return None
-        return self._checkpointer.load_checkpoint(scope_id, run_id)
+        loaded: dict[str, Any] | None = await _maybe_await(
+            self._checkpointer.load_checkpoint(scope_id, run_id)
+        )
+        return loaded
 
     async def _before_run(
         self, saia: Any, ctx: Context[Any], checkpoint: dict[str, Any] | None
@@ -436,7 +456,7 @@ class Loop:
                 return await _maybe_await(self._on_paused(result, ctx))
             return None
         if self._checkpointer is not None and scope_id is not None:
-            self._checkpointer.delete_checkpoint(scope_id, run_id)
+            await _maybe_await(self._checkpointer.delete_checkpoint(scope_id, run_id))
         if self._on_complete is not None:
             return await _maybe_await(self._on_complete(result, ctx))
         return None
