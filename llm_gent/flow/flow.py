@@ -65,7 +65,7 @@ from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
-from ._executor import _build_ctx, _execute_node, _step_inputs
+from ._executor import _build_ctx, _execute_node, _save_halt_checkpoint, _step_inputs
 from .checkpoint import CheckpointStore, maybe_await
 from .context import Context
 from .factory import SAIAFactory
@@ -166,6 +166,7 @@ class Flow:
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
         self._replay_consumed: bool = False
+        self._halt_saved: bool = False
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -864,6 +865,7 @@ class Flow:
         if resume:
             active_state, replay = await self._hydrate_resume_state(active_state)
         self._replay_consumed = False
+        self._halt_saved = False
         result = await self._run_as_subflow(
             *args,
             state=active_state,
@@ -888,6 +890,7 @@ class Flow:
         if (
             self._checkpointer is None
             or self._client_flow_id is None
+            or self._halt_saved
             or (self._halt_event is not None and self._halt_event.is_set())
         ):
             return
@@ -1032,6 +1035,16 @@ class Flow:
         head = replay.remaining_path[0]
         for i, cid in enumerate(chain_ids):
             if cid == head:
+                # Single-element remaining path AND target is a plain-verb
+                # or Branch/Map/subflow chain step means the halt-observation
+                # site saved here — mark consumed so :meth:`_assert_replay_consumed`
+                # does not fire. Iterate has its own consumption in
+                # :func:`_resolve_iterate_resume`; Branch/Map/subflow do not
+                # (after pop the path is empty, nothing inside will consume it).
+                if len(replay.remaining_path) == 1 and not isinstance(
+                    self._nodes[i].target, _Iterate
+                ):
+                    env.runtime._replay_consumed = True
                 return i
         return 0
 
@@ -1117,9 +1130,30 @@ class Flow:
         before the checkpoint was written; the on-path step at
         ``start_index`` runs with no ``prev_result`` (see
         :meth:`_resume_start_index` for the contract).
+
+        Halt observation: between chain steps (never at the very first
+        iteration of this walk, so resume runs at least the halted
+        step), if ``env.halt`` is set, stamp a halted commit at the
+        not-yet-run step's position and break. On a subsequent
+        ``run(resume=True)``, that ref resolves to this commit and the
+        walk restarts at the halted step.
         """
         result: Any = UNSET
         for index in range(start_index, len(self._nodes)):
+            # Halt observation: only at the top-level chain (env.runtime is self)
+            # AND only with a checkpointer bound. Nested body chains let halt
+            # propagate to iterate boundaries where iteration state is consistent.
+            # Without a checkpointer, halt-save is meaningless and the step's own
+            # halt-handling (e.g., Map returning Skipped) should run.
+            if (
+                index > start_index
+                and env.runtime is self
+                and env.checkpointer is not None
+                and env.halt is not None
+                and env.halt.is_set()
+            ):
+                await _save_halt_checkpoint(env, 0, chain_ids[index], env.state)
+                break
             node = self._nodes[index]
             node_id = chain_ids[index]
             node_args: tuple[Any, ...]

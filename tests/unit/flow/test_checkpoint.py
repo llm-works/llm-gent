@@ -109,6 +109,325 @@ class TestRetention:
 
 
 # ---------------------------------------------------------------------------
+# Save on halt — halt-observation sites emit a commit at the halt position
+# ---------------------------------------------------------------------------
+
+
+class TestSaveOnHaltChain:
+    """Chain-only halt-observation site writes a commit at the not-yet-run step."""
+
+    async def test_chain_only_halt_saves_commit_and_resume_lands_on_halted_step(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Chain flow with no iterate: halt set by step b → commit at c; resume lands at c."""
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+
+        @verb
+        async def step_a(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            ctx.state.data["a"] = 1
+            return 1
+
+        @verb
+        async def step_b(ctx: Context[dict[str, Any]], prev: int) -> int:
+            ctx.state.data["b"] = prev + 1
+            halt.set()
+            return ctx.state.data["b"]
+
+        @verb
+        async def step_c(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            # Reads from state — the halted resume runs step_c with no prev_result
+            # per _walk_chain's start_index > 0 contract.
+            ctx.state.data["c"] = ctx.state.data["b"] + 1
+            return ctx.state.data["c"]
+
+        ff = FlowFactory(make_test_logger())
+        pre = (
+            ff.create(state={})
+            .with_checkpointer(store, "chain-halt")
+            .with_halt(halt)
+            .call(step_a)
+            .then(step_b)
+            .then(step_c)
+        )
+        await pre.run()
+
+        halted_hash = store.resolve_ref("chain-halt")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("chain-halt", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+        assert commit.meta.iteration == 0
+        # node_path's last segment is the not-yet-run step's chain id — step_c's.
+        # Independent of the exact id, the run must not have executed step_c yet:
+        # the pre-halt state has only a and b, no c.
+
+        halt.clear()
+        resume = (
+            ff.create(state={})
+            .with_checkpointer(store, "chain-halt")
+            .call(step_a)
+            .then(step_b)
+            .then(step_c)
+        )
+        result = await resume.run(resume=True)
+        # step_c ran on resume; a and b restored from the halt commit.
+        assert result == 3
+
+    async def test_halt_without_checkpointer_is_noop(self) -> None:
+        """No checkpointer bound → halt observed → no store activity."""
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        halt = asyncio.Event()
+
+        @verb
+        async def a(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            halt.set()
+
+        @verb
+        async def b(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            pass
+
+        ff = FlowFactory(make_test_logger())
+        flow = ff.create(state={}).with_halt(halt).call(a).then(b)
+        # No .with_checkpointer — halt check fires between chain steps but
+        # _save_halt_checkpoint short-circuits at env.checkpointer is None.
+        # Run should complete without raising.
+        await flow.run()
+
+    async def test_halt_before_branch_with_plain_verb_resumes_at_branch(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Halt before a Branch containing only plain verbs → resume runs the branch."""
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+
+        @verb
+        async def step_a(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            ctx.state.data["a"] = 1
+            halt.set()
+            return 1
+
+        @verb
+        async def branch_verb(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            # On resume, prev is None — read from state instead (same contract as
+            # _walk_chain's start_index > 0 behavior for plain chain steps).
+            ctx.state.data["branch"] = ctx.state.data["a"] + 10
+            return ctx.state.data["branch"]
+
+        @verb
+        async def step_c(ctx: Context[dict[str, Any]], prev: int) -> int:
+            ctx.state.data["c"] = prev + 100
+            return ctx.state.data["c"]
+
+        ff = FlowFactory(make_test_logger())
+        pre = (
+            ff.create(state={})
+            .with_checkpointer(store, "branch-halt")
+            .with_halt(halt)
+            .call(step_a)
+            .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
+            .then(step_c)
+        )
+        await pre.run()
+
+        # Halt fired after step_a, commit saved at the branch position.
+        halted_hash = store.resolve_ref("branch-halt")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("branch-halt", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+
+        # Resume: branch runs (with its plain verb), then step_c.
+        halt.clear()
+        resume = (
+            ff.create(state={})
+            .with_checkpointer(store, "branch-halt")
+            .call(step_a)
+            .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
+            .then(step_c)
+        )
+        result = await resume.run(resume=True)
+        # 1 (from restored a) + 10 (branch_verb) + 100 (step_c) = 111
+        assert result == 111
+
+    async def test_pre_set_halt_with_checkpointer_resumes_at_second_step(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Pre-set halt + checkpointer: checkpoint saved before second step; resume runs it."""
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+        halt.set()  # Pre-set before run
+
+        @verb
+        async def step_a(ctx: Context[dict[str, Any]], items: list[int]) -> list[int]:
+            ctx.state.data["items"] = items
+            return items
+
+        @verb
+        async def step_b(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            # Reads from state — halted resume runs step_b with no prev_result
+            return sum(ctx.state.data["items"])
+
+        ff = FlowFactory(make_test_logger())
+        pre = (
+            ff.create(state={})
+            .with_checkpointer(store, "pre-set-halt")
+            .with_halt(halt)
+            .call(step_a)
+            .then(step_b)
+        )
+        await pre.run([1, 2, 3])
+
+        # Checkpoint saved at step_b (halt observed after step_a)
+        halted_hash = store.resolve_ref("pre-set-halt")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("pre-set-halt", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+
+        # Resume with halt cleared — step_b runs, reads items from state
+        halt.clear()
+        resume = (
+            ff.create(state={}).with_checkpointer(store, "pre-set-halt").call(step_a).then(step_b)
+        )
+        result = await resume.run(resume=True)
+        assert result == 6  # sum([1, 2, 3])
+
+    async def test_nested_flow_halt_does_not_clobber_outer_checkpoint(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Nested flow's halt doesn't emit checkpoint — only outer flow does."""
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+
+        @verb
+        async def outer_a(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            ctx.state.data["outer_a"] = 1
+            return 1
+
+        @verb
+        async def inner_a(ctx: Context[dict[str, Any]], prev: int) -> int:
+            ctx.state.data["inner_a"] = prev + 10
+            halt.set()  # Halt set inside nested flow
+            return ctx.state.data["inner_a"]
+
+        @verb
+        async def inner_b(ctx: Context[dict[str, Any]], prev: int) -> int:
+            ctx.state.data["inner_b"] = prev + 100
+            return ctx.state.data["inner_b"]
+
+        @verb
+        async def outer_b(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            # Reads from state — halted resume runs with no prev_result
+            return ctx.state.data.get("inner_b", 0) + 1000
+
+        ff = FlowFactory(make_test_logger())
+        inner = ff.create().call(inner_a).then(inner_b)
+
+        pre = (
+            ff.create(state={})
+            .with_checkpointer(store, "nested-halt")
+            .with_halt(halt)
+            .call(outer_a)
+            .call(inner)
+            .then(outer_b)
+        )
+        await pre.run()
+
+        # Checkpoint saved at outer_b (halt observed between outer's call(inner) and outer_b)
+        # NOT at inner_b (nested flow's chain-walk skips halt observation)
+        halted_hash = store.resolve_ref("nested-halt")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("nested-halt", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+
+        # Resume — outer_b runs, inner flow doesn't re-run
+        halt.clear()
+        inner_resume = ff.create().call(inner_a).then(inner_b)
+        resume = (
+            ff.create(state={})
+            .with_checkpointer(store, "nested-halt")
+            .call(outer_a)
+            .call(inner_resume)
+            .then(outer_b)
+        )
+        result = await resume.run(resume=True)
+        # inner_b ran before halt (state has inner_b=111), outer_b adds 1000
+        assert result == 1111
+
+
+class TestSaveOnHaltIterate:
+    """Iterate halt-observation site writes a commit at the halted iteration."""
+
+    async def test_halt_before_first_iteration_saves_at_iteration_zero(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Halt already set on entry to the iterate → commit saved at iteration=0."""
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+        halt.set()  # halt observed on the first loop-top check, before any body run.
+        await build_canonical_flow(
+            make_test_logger(),
+            max_iters=5,
+            halt=halt,
+            halt_after_iteration=999,  # internal halt_check never fires; halt is pre-set externally.
+            store=store,
+            trajectory_id="halt-iter-0",
+        ).run()
+
+        halted_hash = store.resolve_ref("halt-iter-0")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("halt-iter-0", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+        assert commit.meta.iteration == 0
+
+        # Resume with halt cleared — completes the full iterate.
+        halt.clear()
+        result = await build_canonical_flow(
+            make_test_logger(), max_iters=5, store=store, trajectory_id="halt-iter-0"
+        ).run(resume=True)
+        assert result["iterations_completed"] == 5
+
+    async def test_halt_between_iterations_overwrites_ok_ref_with_halted_commit(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Halt after body N → halted commit overwrites the ok ref at iteration=N."""
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+        await build_canonical_flow(
+            make_test_logger(),
+            max_iters=5,
+            halt=halt,
+            halt_after_iteration=2,
+            store=store,
+            trajectory_id="halt-iter-mid",
+        ).run()
+
+        halted_hash = store.resolve_ref("halt-iter-mid")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("halt-iter-mid", "commit", halted_hash) or b"")
+        # Halt fired inside body 2's halt_check (iteration counter=2 by the time the loop-top
+        # check observed halt). Post-halt-save iteration matches.
+        assert commit.meta.outcome == "halted"
+        assert commit.meta.iteration == 2
+
+        # Resume completes the remaining iterations.
+        halt.clear()
+        result = await build_canonical_flow(
+            make_test_logger(), max_iters=5, store=store, trajectory_id="halt-iter-mid"
+        ).run(resume=True)
+        assert result["iterations_completed"] == 5
+
+
+# ---------------------------------------------------------------------------
 # Resume determinism — baseline vs interrupt+resume must reach same final state
 # ---------------------------------------------------------------------------
 
