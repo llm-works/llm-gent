@@ -203,6 +203,62 @@ class TestCheckpointPolicyIterate:
         assert next(iter(iterate_paths.values())) == 3
 
 
+class TestCtxCheckpoint:
+    """Explicit ctx.checkpoint() writes a commit regardless of policy."""
+
+    async def test_ctx_checkpoint_from_chain_step(self, store: JsonFileCheckpointStore) -> None:
+        """A verb calling ``ctx.checkpoint()`` writes a commit at that step's node.
+
+        Runs under the default (halt-only) policy so no iterate-
+        boundary save fires; the only non-completion-marker commit
+        that exists is the one the verb explicitly requested.
+        """
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        @verb
+        async def saver(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] = 42
+            await ctx.checkpoint()
+            return 42
+
+        outer = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpointer(store, "ctx-ckpt")
+            .call(saver)
+        )
+        await outer.run()
+
+        # Two commits total: one from the explicit ctx.checkpoint() (verb's
+        # chain-step node) + one $complete marker on clean exit.
+        commits_dir = store._root / "ctx-ckpt" / "objects" / "commit"  # type: ignore[attr-defined]
+        node_paths: list[str] = []
+        for f in commits_dir.iterdir():
+            node_paths.append(Commit.from_bytes(f.read_bytes()).meta.node_path)
+        assert "$complete" in node_paths
+        non_marker = [p for p in node_paths if p != "$complete"]
+        assert len(non_marker) == 1, (
+            f"expected exactly one explicit-checkpoint commit; got {non_marker}"
+        )
+
+    async def test_ctx_checkpoint_noop_without_checkpointer(self) -> None:
+        """``ctx.checkpoint()`` under a flow with no checkpointer is a no-op."""
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        called = 0
+
+        @verb
+        async def saver(ctx: Context) -> None:
+            nonlocal called
+            called += 1
+            await ctx.checkpoint()  # no checkpointer wired — must not raise
+
+        flow = FlowFactory(make_test_logger()).create().call(saver)
+        await flow.run()
+        assert called == 1
+
+
 class TestSaveOnHaltChain:
     """Chain-only halt-observation site writes a commit at the not-yet-run step."""
 

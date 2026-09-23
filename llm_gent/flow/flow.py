@@ -1205,7 +1205,7 @@ class Flow:
                 node_args, node_kwargs = (), {}
             else:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
-            ctx = _build_ctx(node.target, env)
+            ctx = _build_ctx(node.target, env, node_id)
             result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
         return result
 

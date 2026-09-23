@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from .flow import Flow
 
 
-def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
+def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context[Any]:
     """Build the Context passed to the node's verb (and to its hooks).
 
     Verb nodes get a role-bound ctx; ``ctx.saia`` resolves lazily on first
@@ -70,6 +70,12 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
     (branch/iterate/map) get an ambient ctx with ``role=None`` — those nodes
     have no single role, so ``ctx.saia`` returns ``None`` (each inner verb
     builds its own role-bound ctx as it runs).
+
+    ``node_id`` is the composition-graph id of the node the ctx is being
+    built for; threaded onto ``ctx._node_id`` so :meth:`Context.checkpoint`
+    can address the currently-executing position. ``None`` for hook ctxs
+    (until predicates, on_error, on_item_complete) where no verb is
+    running under a single node id.
     """
     from .flow import Flow
 
@@ -83,6 +89,8 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
             halt=env.halt,
             budget=env.budget,
             extra=env.extra,
+            _env=env,
+            _node_id=node_id,
         )
     return Context(
         role=target.role,
@@ -92,6 +100,8 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
         halt=env.halt,
         budget=env.budget,
         extra=env.extra,
+        _env=env,
+        _node_id=node_id,
     )
 
 
@@ -398,6 +408,7 @@ async def _check_until(
     result: Any,
     iterate_state: State[Any],
     env: _RunEnv,
+    node_id: str,
 ) -> bool:
     """Evaluate the iterate node's until predicate with the last body result and scoped state."""
     if until_fn is None:
@@ -410,6 +421,8 @@ async def _check_until(
         halt=env.halt,
         budget=env.budget,
         extra=env.extra,
+        _env=env,
+        _node_id=node_id,
     )
     verdict = until_fn(result, ctx)
     if inspect.isawaitable(verdict):
@@ -528,7 +541,7 @@ async def _run_iterate(
         iteration += 1
         if env.policy.on_iterate:
             await _save_iterate_checkpoint(env, iteration, node_id, child_state)
-        if await _check_until(it.until, result, child_state, env):
+        if await _check_until(it.until, result, child_state, env, node_id):
             break
     await _merge_state(it.merge_fn, env.state, child_state)
     return result
@@ -1080,11 +1093,13 @@ async def _run_map_item(
     return merge_failure if merge_failure is not None else result
 
 
-def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
+def _map_item_ctx(env: _RunEnv, child_state: Any, node_id: str | None = None) -> Context[Any]:
     """Build the per-item :class:`Context` fed to guard, on_error, and
     on_item_complete hooks.
 
     These hooks run without a :class:`Role`, so ``ctx.saia`` is ``None``.
+    ``node_id`` is the :class:`_Map` node's own id — passing it lets a
+    ``ctx.checkpoint()`` from a map hook address the map's position.
     """
     return Context(
         role=None,
@@ -1094,6 +1109,8 @@ def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
         halt=env.halt,
         budget=env.budget,
         extra=env.extra,
+        _env=env,
+        _node_id=node_id,
     )
 
 

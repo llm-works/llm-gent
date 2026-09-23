@@ -141,6 +141,26 @@ class Context(Generic[T]):
     preserved. Default is a fresh empty dict.
     """
 
+    _env: Any = None
+    """Private: the executor's :class:`_RunEnv` for this dispatch.
+
+    Threaded from :func:`_build_ctx` so verbs can invoke framework
+    save primitives (:meth:`checkpoint`). ``None`` on ctx surfaces
+    that do not originate from a live run (e.g. :meth:`Flow.dispatch`
+    used standalone, until predicates before an iterate started).
+    Not part of the verb-facing API — the leading underscore marks it
+    as an executor-only slot.
+    """
+
+    _node_id: str | None = None
+    """Private: the node id under which this ctx was built.
+
+    Threaded from :func:`_build_ctx` so :meth:`checkpoint` can address
+    the currently-executing composition position. ``None`` when the
+    ctx was built outside a chain-walk step (standalone
+    :meth:`Flow.dispatch`, until predicates, on_error hooks).
+    """
+
     @property
     def data(self) -> T:
         """Shortcut for ``ctx.state.data`` typed as :data:`T`.
@@ -228,3 +248,31 @@ class Context(Generic[T]):
         """
         lg: Logger = self.flow._lg
         return lg
+
+    async def checkpoint(self) -> None:
+        """Explicit save trigger — writes a scope commit at the current node.
+
+        Fires regardless of the flow's :class:`CheckpointPolicy`; the
+        policy governs implicit framework-driven saves only. Uses the
+        current scope stack (``ctx.state``) and stamps the commit at
+        the currently executing node's position, iteration ``0`` and
+        ``outcome="ok"``.
+
+        No-op when:
+        - No checkpointer is wired on the enclosing flow.
+        - The ctx has no live executor env (e.g. built by
+          :meth:`Flow.dispatch` used standalone).
+
+        Repeated calls at the same node write distinct commit objects
+        (framework does not dedupe by state hash beyond the CAS layer
+        already doing so) and refresh the ref timestamp.
+        """
+        env = self._env
+        node_id = self._node_id
+        if env is None or node_id is None:
+            return
+        if env.checkpointer is None or env.client_flow_id is None:
+            return
+        from ._executor import _save_scope_commit
+
+        await _save_scope_commit(env, 0, node_id, env.state, "ok")
