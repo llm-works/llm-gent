@@ -81,6 +81,7 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
             traits=traits,
             halt=env.halt,
             budget=env.budget,
+            extra=env.extra,
         )
     return Context(
         role=target.role,
@@ -89,6 +90,7 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
         traits=traits,
         halt=env.halt,
         budget=env.budget,
+        extra=env.extra,
     )
 
 
@@ -404,6 +406,7 @@ async def _check_until(
         traits=env.runtime._traits,
         halt=env.halt,
         budget=env.budget,
+        extra=env.extra,
     )
     verdict = until_fn(result, ctx)
     if inspect.isawaitable(verdict):
@@ -1024,6 +1027,7 @@ def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
         traits=env.runtime._traits,
         halt=env.halt,
         budget=env.budget,
+        extra=env.extra,
     )
 
 

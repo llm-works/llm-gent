@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -137,6 +138,55 @@ class TestCtxData:
         ctx: Context[_Payload] = Context(role=None, state=child_state, flow=None)
         assert ctx.data is child_payload
         assert ctx.state.root().data is root_payload
+
+
+class TestCtxExtra:
+    """``ctx.extra`` surfaces caller-supplied ``Flow.run(extra=)`` at the verb."""
+
+    @pytest.mark.asyncio
+    async def test_ctx_extra_reaches_verb(self) -> None:
+        """A verb reads ``ctx.extra`` values supplied at ``Flow.run(extra=)``."""
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        sentinel = object()
+
+        @verb
+        async def probe(ctx: Context, n: int) -> tuple[object, int]:
+            """Return the extra sentinel + input for identity assertion."""
+            return ctx.extra["handle"], n
+
+        flow.call(probe)
+        got, n = await flow.run(4, extra={"handle": sentinel})
+        assert got is sentinel
+        assert n == 4
+
+    @pytest.mark.asyncio
+    async def test_ctx_extra_defaults_to_empty(self) -> None:
+        """Omitting ``extra=`` yields an empty ``ctx.extra`` dict."""
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+
+        @verb
+        async def probe(ctx: Context) -> dict[str, Any]:
+            """Return ``ctx.extra`` for shape assertion."""
+            return ctx.extra
+
+        flow.call(probe)
+        got = await flow.run()
+        assert got == {}
+
+    @pytest.mark.asyncio
+    async def test_ctx_extra_identity_preserved(self) -> None:
+        """The exact dict handed to ``Flow.run(extra=)`` reaches the verb."""
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        supplied: dict[str, Any] = {"k": 1}
+
+        @verb
+        async def probe(ctx: Context) -> dict[str, Any]:
+            """Return ``ctx.extra`` for identity assertion."""
+            return ctx.extra
+
+        flow.call(probe)
+        got = await flow.run(extra=supplied)
+        assert got is supplied
 
 
 class TestPureVerbCtx:
