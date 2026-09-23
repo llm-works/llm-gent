@@ -352,6 +352,7 @@ class TestCtxExtraResume:
         await build(halt_event=None).run(resume=True, extra={"lock": resume_lock})
         # Every post-resume iteration observed the resume lock, never the
         # pre-halt one (which would prove extra leaked through a blob).
+        assert len(seen) == 5, f"expected 5 iterations total, got {len(seen)}"
         assert all(x is resume_lock for x in seen[2:])
         assert pre_lock not in seen[2:]
 
