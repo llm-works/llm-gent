@@ -205,22 +205,27 @@ Three save triggers govern when the framework writes commits:
   restart.
 - **Explicit `ctx.checkpoint()`** — always available. Verbs invoke
   the async method to force a save at their current node position.
-- **Implicit iterate-boundary save** — off by default. Governed by
-  `CheckpointPolicy.on_iterate`; opt in with
-  `.with_checkpoint_policy(on_iterate=True)` for flows where each
-  iteration boundary should be a resumable anchor.
+- **Implicit multi-execution boundary saves** — off by default.
+  Governed by `CheckpointPolicy`:
+    - `on_iterate: bool` — save after every iterate body iteration.
+    - `on_map_item: bool` — save after every successful map item
+      (body-plus-merge). Failed / skipped / cancelled items never
+      save regardless of this flag.
 
 Rationale: writes are cheap in aggregate but not free. Long chain
 flows with expensive state don't want a commit after every step, and
-iterate bodies with cheap iterations shouldn't pay for a save every
-pass. The default (halt-only + explicit) minimizes writes while
-preserving the pause/resume promise.
+iterate / map bodies with cheap per-item work shouldn't pay for a
+save every pass. The default (halt-only + explicit) minimizes writes
+while preserving the pause/resume promise. Single-execution
+primitives (`.call`, `.branch`, `Panel`) have no natural per-item
+cadence; verbs at those spots use `ctx.checkpoint()` if a save is
+wanted.
 
 ```python
 flow = (
     ff.create(state=...)
     .with_checkpointer(store, "trajectory-42")
-    .with_checkpoint_policy(on_iterate=True)  # opt in per-iteration saves
+    .with_checkpoint_policy(on_iterate=True, on_map_item=True)
     .iterate(body, max_iters=10)
 )
 ```
