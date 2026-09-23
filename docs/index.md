@@ -169,6 +169,26 @@ Rubric for picking a channel when only one consumer needs the value:
   value must survive resume → state.
 - Two consumers of different kinds → both.
 
+### Verb idempotency and resume
+
+Verbs may re-run on `run(resume=True)`. Two paths trigger re-run:
+
+- Iterate resume: iteration N had checkpointed after its body completed.
+  Halt fires, restart resumes at iteration N and re-runs the body.
+- Chain-step halt resume: halt fires between chain steps; the next
+  step's ref is written before exit. Restart resumes at that step
+  from scratch — no `prev_result` is threaded in (the predecessor
+  did not re-run), so the step reads from state instead.
+
+Consequence: **verbs must be idempotent-in-effects.** Reading state,
+mutating state, and returning a value are all safe to repeat. Side
+effects that are not — outbound HTTP writes, message sends, ledger
+appends — must be guarded by the verb itself (idempotency keys, "did
+I already do this" checks against state or an external record).
+
+The framework offers no automatic once-only guarantee. Non-idempotent
+side effects are the verb author's responsibility.
+
 ## Related Projects
 
 - [llm-infer](https://github.com/llm-works/llm-infer) - LLM inference server and client
