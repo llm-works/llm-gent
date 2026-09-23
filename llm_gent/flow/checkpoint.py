@@ -116,6 +116,21 @@ class CheckpointPolicy:
     anchor — the consumer pays the write cost per iteration.
     """
 
+    on_map_item: bool = False
+    """Save a commit after every successful map item body + merge.
+
+    Default ``False``: map items do NOT auto-save. Set ``True`` for
+    long-running maps with expensive per-item bodies where each
+    completed item should be a resumable anchor. Each save writes at
+    ``iteration=item_index`` under the map's node_path, so distinct
+    items land in distinct ref slots. Items complete in parallel;
+    save order is not guaranteed to match item order.
+
+    Failed items (:class:`Failure`), guard-skipped items
+    (:class:`Skipped`), and cancelled items do NOT save regardless of
+    this flag — only successful body-plus-merge triggers the save.
+    """
+
 
 async def maybe_await(value: Any) -> Any:
     """Await ``value`` if awaitable; return it as-is otherwise.

@@ -203,6 +203,81 @@ class TestCheckpointPolicyIterate:
         assert next(iter(iterate_paths.values())) == 3
 
 
+class TestCheckpointPolicyMap:
+    """CheckpointPolicy.on_map_item gates the map per-item auto-save."""
+
+    async def test_default_policy_writes_no_map_item_commits(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Under the default policy a completed map writes only the $complete marker."""
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        @verb
+        async def touch(ctx: Context[dict[str, Any]], item: int) -> int:
+            return item * 2
+
+        body = FlowFactory(make_test_logger()).create()
+        body.call(touch)
+
+        outer = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpointer(store, "map-default")
+            .map(body, items=lambda _p, _c: [1, 2, 3])
+        )
+        await outer.run()
+
+        commits_dir = store._root / "map-default" / "objects" / "commit"  # type: ignore[attr-defined]
+        node_paths: set[str] = set()
+        for f in commits_dir.iterdir():
+            node_paths.add(Commit.from_bytes(f.read_bytes()).meta.node_path)
+        assert node_paths == {"$complete"}, (
+            f"only the $complete marker should exist under default policy; got {node_paths}"
+        )
+
+    async def test_on_map_item_true_writes_per_item_commits(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """CheckpointPolicy(on_map_item=True) saves after each successful item.
+
+        Runs a 3-item map and asserts that three iteration-indexed
+        commits exist under the map's node_path plus the $complete
+        marker. Item order across saves is not asserted (concurrent).
+        """
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        @verb
+        async def touch(ctx: Context[dict[str, Any]], item: int) -> int:
+            return item * 2
+
+        body = FlowFactory(make_test_logger()).create()
+        body.call(touch)
+
+        outer = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpointer(store, "map-on-item")
+            .with_checkpoint_policy(on_map_item=True)
+            .map(body, items=lambda _p, _c: [1, 2, 3])
+        )
+        await outer.run()
+
+        commits_dir = store._root / "map-on-item" / "objects" / "commit"  # type: ignore[attr-defined]
+        iterations_at_map_path: dict[str, list[int]] = {}
+        for f in commits_dir.iterdir():
+            commit = Commit.from_bytes(f.read_bytes())
+            iterations_at_map_path.setdefault(commit.meta.node_path, []).append(
+                commit.meta.iteration
+            )
+        assert "$complete" in iterations_at_map_path
+        non_marker = {p: v for p, v in iterations_at_map_path.items() if p != "$complete"}
+        assert len(non_marker) == 1, f"expected one map node_path; got {list(non_marker)}"
+        iterations = sorted(next(iter(non_marker.values())))
+        assert iterations == [0, 1, 2], f"expected three item slots 0/1/2; got {iterations}"
+
+
 class TestCtxCheckpoint:
     """Explicit ctx.checkpoint() writes a commit regardless of policy."""
 

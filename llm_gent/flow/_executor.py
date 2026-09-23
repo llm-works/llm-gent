@@ -729,6 +729,22 @@ async def _save_iterate_checkpoint(
     await _save_scope_commit(env, iteration, node_id, current_state, "ok")
 
 
+async def _save_map_item_checkpoint(
+    env: _RunEnv,
+    item_index: int,
+    node_id: str,
+    current_state: State[Any],
+) -> None:
+    """Persist an ``outcome="ok"`` commit at a map item boundary.
+
+    Uses ``item_index`` as the iteration slot so each item lands in
+    a distinct ref under the map's node_path. Items complete in
+    parallel; save order is not guaranteed to match item order and
+    saves may interleave with concurrent items' merges.
+    """
+    await _save_scope_commit(env, item_index, node_id, current_state, "ok")
+
+
 async def _save_halt_checkpoint(
     env: _RunEnv,
     iteration: int,
@@ -1039,10 +1055,9 @@ async def _run_map_item_strict(
             mp.on_item_complete, item, Failure(exception=exc, item=item), item_ctx, env
         )
         raise
-    failure = await _merge_and_notify(mp, item, result, child_state, item_ctx, env, merge_lock)
-    if failure is not None:
-        raise failure.exception
-    return result
+    return await _map_item_success(
+        mp, item, result, child_state, item_ctx, env, merge_lock, node_id, item_index, strict=True
+    )
 
 
 async def _run_map_item(
@@ -1087,10 +1102,9 @@ async def _run_map_item(
         failure = Failure(exception=exc, item=item)
         await _fire_on_item_complete(mp.on_item_complete, item, failure, item_ctx, env)
         return failure
-    merge_failure = await _merge_and_notify(
-        mp, item, result, child_state, item_ctx, env, merge_lock
+    return await _map_item_success(
+        mp, item, result, child_state, item_ctx, env, merge_lock, node_id, item_index, strict=False
     )
-    return merge_failure if merge_failure is not None else result
 
 
 def _map_item_ctx(env: _RunEnv, child_state: Any, node_id: str | None = None) -> Context[Any]:
@@ -1189,6 +1203,37 @@ async def _merge_and_notify(
         return failure
     await _fire_on_item_complete(mp.on_item_complete, item, result, item_ctx, env)
     return None
+
+
+async def _map_item_success(
+    mp: _Map,
+    item: Any,
+    result: Any,
+    child_state: State[Any],
+    item_ctx: Context[Any],
+    env: _RunEnv,
+    merge_lock: asyncio.Lock,
+    node_id: str,
+    item_index: int,
+    *,
+    strict: bool,
+) -> Any:
+    """Merge, optionally save (per policy), and return the map item's result.
+
+    Both ``strict`` and non-strict paths converge here after the body
+    returned successfully. Merge-time failures are handled per-mode:
+    strict re-raises the underlying exception; non-strict returns the
+    Failure sentinel. Successful merges save a scope commit when
+    ``env.policy.on_map_item`` is set (see :attr:`CheckpointPolicy`).
+    """
+    failure = await _merge_and_notify(mp, item, result, child_state, item_ctx, env, merge_lock)
+    if failure is not None:
+        if strict:
+            raise failure.exception
+        return failure
+    if env.policy.on_map_item:
+        await _save_map_item_checkpoint(env, item_index, node_id, env.state)
+    return result
 
 
 async def _resolve_items(
