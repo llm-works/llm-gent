@@ -1034,13 +1034,13 @@ async def _run_map_item_strict(
     if env.halt is not None and env.halt.is_set():
         skipped = Skipped(item=item)
         await _fire_on_item_complete(
-            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state), env
+            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state, node_id), env
         )
         return skipped
-    item_ctx = _map_item_ctx(env, env.state)
+    item_ctx = _map_item_ctx(env, env.state, node_id)
     try:
         child_state = await _project_state(mp.state_fn, env.state, mp.state_factory)
-        item_ctx = _map_item_ctx(env, child_state)
+        item_ctx = _map_item_ctx(env, child_state, node_id)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             skipped = Skipped(item=item)
             await _fire_on_item_complete(mp.on_item_complete, item, skipped, item_ctx, env)
@@ -1082,13 +1082,13 @@ async def _run_map_item(
     if env.halt is not None and env.halt.is_set():
         skipped = Skipped(item=item)
         await _fire_on_item_complete(
-            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state), env
+            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state, node_id), env
         )
         return skipped
-    item_ctx = _map_item_ctx(env, env.state)
+    item_ctx = _map_item_ctx(env, env.state, node_id)
     try:
         child_state = await _project_state(mp.state_fn, env.state, mp.state_factory)
-        item_ctx = _map_item_ctx(env, child_state)
+        item_ctx = _map_item_ctx(env, child_state, node_id)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             skipped = Skipped(item=item)
             await _fire_on_item_complete(mp.on_item_complete, item, skipped, item_ctx, env)

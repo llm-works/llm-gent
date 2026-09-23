@@ -275,4 +275,4 @@ class Context(Generic[T]):
             return
         from ._executor import _save_scope_commit
 
-        await _save_scope_commit(env, 0, node_id, env.state, "ok")
+        await _save_scope_commit(env, 0, node_id, self.state, "ok")
