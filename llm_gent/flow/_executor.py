@@ -430,7 +430,7 @@ async def _run_iterate(
 
     Save-at-iterate-boundary: when the runtime carries a checkpointer +
     ``client_flow_id`` (attached via :meth:`Flow.with_checkpointer`), the
-    framework calls :meth:`CheckpointStore.save_checkpoint` after each
+    framework builds a content-addressed commit (Blob→Tree→Commit) after each
     successful iteration with the parent-scope payload (``env.state``,
     which is the outer scope's :class:`State` that persists across
     iterations of this block). Note: when ``state=`` projects a child

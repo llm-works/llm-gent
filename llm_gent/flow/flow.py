@@ -728,9 +728,11 @@ class Flow:
         :meth:`run` ``resume=True``, a load-at-start that hydrates the
         run's payload before the first node dispatches. On fully
         successful :meth:`run` completion the framework calls
-        :meth:`CheckpointStore.delete_checkpoint`; cancellation, halt
-        exits, and unhandled exceptions preserve the checkpoint so a
-        subsequent resume can pick up.
+        :meth:`CheckpointStore.gc_trajectory` when the store's
+        ``retention`` is ``"gc_on_success"``; the default ``"retain"``
+        keeps the trajectory for audit. Cancellation, halt exits, and
+        unhandled exceptions preserve the checkpoint regardless of
+        retention so a subsequent resume can pick up.
 
         Both arguments bind together — the ``client_flow_id`` scopes every
         save/load/delete call and identifies the resumable trajectory. It
@@ -742,7 +744,7 @@ class Flow:
 
         Resume semantics on the wired iterate:
 
-        - **State** hydrates from ``state_json['data']`` (via
+        - **State** hydrates from the commit's root-scope Blob (via
           ``state_factory.restore`` if a ``state_factory`` is bound, else
           passthrough for plain dicts).
         - **Iteration counter** is restored: ``max_iters`` is a
@@ -809,15 +811,16 @@ class Flow:
                 parameter — it is not forwarded to the first node; verbs
                 needing it as a kwarg are rejected at :meth:`call` time.
             resume: When ``True`` and :meth:`with_checkpointer` is wired,
-                the framework calls
-                :meth:`CheckpointStore.load_checkpoint` at start and, if a
-                checkpoint exists, replaces ``state`` with the hydrated
-                payload. A flow with a bound ``state_factory=`` reconstructs
-                the payload via ``state_factory.restore(state_json['data'])``;
-                a flow without ``state_factory`` treats the stored payload
-                as a plain dict. Absent-checkpoint resume is a no-op — the run
-                proceeds with ``state`` as given. On fully successful
-                completion the checkpoint is deleted. Requires
+                the framework resolves the latest commit via
+                :meth:`CheckpointStore.resolve_ref` at start and, if a
+                commit exists, reconstructs the scope tree and replaces
+                ``state`` with the hydrated payload. A flow with a bound
+                ``state_factory=`` reconstructs the payload via
+                ``state_factory.restore``; a flow without ``state_factory``
+                treats the stored payload as a plain dict. Absent-checkpoint
+                resume is a no-op — the run proceeds with ``state`` as given.
+                On fully successful completion the trajectory is gc'd when
+                the store's ``retention`` is ``"gc_on_success"``. Requires
                 :meth:`with_checkpointer` to be wired; raises otherwise.
                 Bound parameter: not forwarded to the first node.
             **kwargs: Keyword inputs to the first node.
@@ -1157,7 +1160,7 @@ class Flow:
         root_raw = scope_data[0] if scope_data else None
         hydrated_root = (
             root_raw
-            if self._state_factory is None
+            if self._state_factory is None or root_raw is None
             else self._state_factory.restore(root_raw if isinstance(root_raw, dict) else {})
         )
         leaf_raw = scope_data[-1] if len(scope_data) > 1 else None
