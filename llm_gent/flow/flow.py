@@ -1157,6 +1157,19 @@ class Flow:
         if loaded is None:
             return fallback, None
         commit, scope_data = loaded
+        return self._replay_from_commit(commit, scope_data)
+
+    def _replay_from_commit(
+        self, commit: Commit, scope_data: list[Any]
+    ) -> tuple[State[Any], _ResumeReplay | None]:
+        """Split root / middle / leaf scope payloads, return State + replay.
+
+        Root scope hydrates the top-level :class:`State`; leaf scope
+        rides on ``_ResumeReplay.child_state_data`` for the save-point
+        iterate; middle scopes ride on ``intermediate_scope_data`` so
+        each scope-creating descent along the path can use the
+        checkpointed payload instead of re-projecting.
+        """
         root_raw = scope_data[0] if scope_data else None
         hydrated_root = (
             root_raw
@@ -1164,6 +1177,7 @@ class Flow:
             else self._state_factory.restore(root_raw if isinstance(root_raw, dict) else {})
         )
         leaf_raw = scope_data[-1] if len(scope_data) > 1 else None
+        intermediate_raw = tuple(scope_data[1:-1]) if len(scope_data) > 2 else ()
         path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
         return (
             State(data=hydrated_root, _factory=self._state_factory),
@@ -1172,6 +1186,7 @@ class Flow:
                 full_path=path_tuple,
                 iteration=commit.meta.iteration,
                 child_state_data=leaf_raw,
+                intermediate_scope_data=intermediate_raw,
             ),
         )
 

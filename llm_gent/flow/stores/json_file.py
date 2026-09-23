@@ -102,6 +102,14 @@ class JsonFileCheckpointStore:
 
         Idempotent — a same-hash re-put of the same bytes is a no-op.
         Atomic via write-to-``.tmp`` + ``os.replace``.
+
+        Concurrency: single-writer per trajectory (see module docstring).
+        No ``fcntl.flock`` — the framework's CheckpointStore contract is
+        single-writer, and content-addressed puts are naturally idempotent
+        under same-hash re-puts. A caller that lets two processes save
+        into the same ``client_flow_id`` is violating the contract; the
+        physical atomic write here prevents torn files but the caller
+        remains responsible for keyspace ordering.
         """
         obj_dir = self._objects_dir(client_flow_id, kind)
         obj_dir.mkdir(parents=True, exist_ok=True)

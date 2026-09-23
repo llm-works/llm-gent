@@ -352,6 +352,122 @@ class TestScopedStateRoundTrip:
         # Trajectory preserved (halt exit — not gc'd regardless of retention).
         assert store.resolve_ref("scoped-1") is not None
 
+    async def test_three_level_nested_scopes_survive_resume(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """3-level nested ``.call(state=)`` chain — intermediate scope restores.
+
+        Composition::
+
+            outer(root scope)
+              .call(mid_flow, state=lambda p: {...})    # depth 1 — middle scope
+                mid_flow.iterate(body, ...)              # depth 2 — leaf iterate
+
+        The middle scope's payload lands as a Blob under scope_id "01"
+        in the commit's tree. Before the fix, ``_hydrate_resume_state``
+        extracted only root ("00") and leaf ("02"); the middle scope
+        was dropped and re-projected via the state factory on resume.
+
+        This test halts mid-run, resumes, and asserts a mutation stored
+        in the middle scope during the pre-halt run persists — proving
+        the intermediate blob is restored rather than re-projected.
+        """
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        # A witness marker written into the middle scope in the pre-halt
+        # run; the resume run must observe the same value in state.data.
+        # If the middle scope is re-projected fresh, this key is missing.
+        WITNESS_KEY = "mid_scope_witness"
+
+        @verb
+        async def mark_middle(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            # Reach the middle scope (parent of the iterate body scope)
+            # via the State._parent chain and mutate WITNESS_KEY on it.
+            middle = ctx.state._parent
+            assert middle is not None
+            middle.data[WITNESS_KEY] = middle.data.get(WITNESS_KEY, 0) + 1
+
+        halt = asyncio.Event()
+
+        @verb
+        async def maybe_halt(ctx: Context[dict[str, Any]], _prev: Any = None) -> Any:
+            middle = ctx.state._parent
+            if middle is not None and middle.data.get(WITNESS_KEY, 0) >= 2:
+                halt.set()
+            return _prev
+
+        ff_inner = FlowFactory(make_test_logger())
+        # Iterate has its own state=lambda so its body runs in a NEW scope
+        # (leaf, depth 2). The middle .call scope sits between root and
+        # the iterate body.
+        mid_flow = ff_inner.create().iterate(
+            lambda body: body.call(mark_middle).then(maybe_halt),
+            state=lambda _p: {"leaf_iter": 0},
+            max_iters=5,
+        )
+
+        ff = FlowFactory(make_test_logger())
+        outer_pre = (
+            ff.create(state={"outer": True})
+            .with_checkpointer(store, "3-level-1")
+            .with_halt(halt)
+            .call(mid_flow, state=lambda _p: {})
+        )
+        await outer_pre.run()
+        assert store.resolve_ref("3-level-1") is not None
+
+        # Load the commit and inspect the middle scope's blob directly —
+        # end-to-end verification that scope_id "01" carries the witness
+        # value. This asserts the SAVE side without needing the fix on
+        # the load side.
+        from llm_gent.flow.state.cas import Commit, Tree
+
+        commit_hash = store.resolve_ref("3-level-1")
+        assert commit_hash is not None
+        commit = Commit.from_bytes(store.get_object("3-level-1", "commit", commit_hash) or b"")
+        tree = Tree.from_bytes(store.get_object("3-level-1", "tree", commit.root_tree_hash) or b"")
+        # Three scope entries: root (00), middle (01), leaf (02).
+        assert [e.scope_id for e in tree.entries] == ["00", "01", "02"]
+        middle_entry = tree.entries[1]
+        import json
+
+        middle_data = json.loads(
+            (store.get_object("3-level-1", "blob", middle_entry.child_hash) or b"").decode()
+        )
+        assert middle_data.get(WITNESS_KEY) == 2, (
+            f"middle scope blob should carry the WITNESS mutation; got {middle_data!r}"
+        )
+
+        # Resume without halt — runs to max_iters=5, so 3 more iterations
+        # under the restored middle scope. If _hydrate_resume_state
+        # restores the middle scope's blob, WITNESS_KEY starts at 2 and
+        # bumps to 5. If the middle scope re-projects from scratch (the
+        # pre-fix behavior), WITNESS_KEY starts at 0 and only reaches 3.
+        outer_resume = (
+            ff.create(state={"outer": True})
+            .with_checkpointer(store, "3-level-1")
+            .call(mid_flow, state=lambda _p: {})
+        )
+        await outer_resume.run(resume=True)
+        # Inspect the FINAL commit's middle-scope blob.
+        final_commit_hash = store.resolve_ref("3-level-1")
+        assert final_commit_hash is not None
+        final_commit = Commit.from_bytes(
+            store.get_object("3-level-1", "commit", final_commit_hash) or b""
+        )
+        final_tree = Tree.from_bytes(
+            store.get_object("3-level-1", "tree", final_commit.root_tree_hash) or b""
+        )
+        final_middle_hash = next(e.child_hash for e in final_tree.entries if e.scope_id == "01")
+        final_middle = json.loads(
+            (store.get_object("3-level-1", "blob", final_middle_hash) or b"").decode()
+        )
+        assert final_middle.get(WITNESS_KEY) == 5, (
+            f"resume should have restored the middle scope (WITNESS=2) and "
+            f"continued for 3 more iterations to WITNESS=5; got {final_middle!r} "
+            f"— re-projected middle would land at 3 instead"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Async-store round-trip — sync-or-async Protocol contract

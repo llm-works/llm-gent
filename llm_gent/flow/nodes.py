@@ -213,12 +213,20 @@ class _ResumeReplay:
     checkpoint tree. When the target iterate is reached, this data is
     used instead of projecting fresh — restoring child mutations that
     occurred before the checkpoint was saved.
+
+    ``intermediate_scope_data`` carries the middle-scope payloads —
+    every scope between root and leaf. Consumed head-first at each
+    scope-creating descent along the replay path: a ``.call(state=)``
+    or ``.iterate(state=)`` on the path pops the first entry and uses
+    it as the child scope, in place of re-projecting via the state
+    factory. Empty when the checkpointed stack was only root + leaf.
     """
 
     remaining_path: tuple[str, ...]
     full_path: tuple[str, ...] = ()
     iteration: int = 0
     child_state_data: Any = None
+    intermediate_scope_data: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
