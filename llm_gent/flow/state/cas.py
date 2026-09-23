@@ -143,10 +143,30 @@ class Tree:
             for prev, curr in zip(sorted_entries, sorted_entries[1:], strict=False)
         ):
             raise ValueError("Tree entries must have unique scope_id values")
-        body: list[list[str]] = [[e.scope_id, e.kind, e.child_hash] for e in sorted_entries]
         return cls(
-            content_hash=content_hash(canonical_json(body)),
+            content_hash=content_hash(canonical_json(_tree_body(sorted_entries))),
             entries=sorted_entries,
+        )
+
+    def to_bytes(self) -> bytes:
+        """Return the canonical byte payload — what a :class:`CheckpointStore`
+        stores at ``kind="tree"``. Round-trips through :meth:`from_bytes`.
+        """
+        return canonical_json(_tree_body(self.entries))
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> Tree:
+        """Reconstruct a Tree from its canonical byte payload.
+
+        Parses the JSON body, rebuilds :class:`TreeEntry` triples, and
+        computes content_hash from the re-canonicalized body — same
+        bytes in → same content_hash out as the writer produced.
+        """
+        body = json.loads(payload.decode("utf-8"))
+        entries = tuple(TreeEntry(scope_id=e[0], kind=e[1], child_hash=e[2]) for e in body)
+        return cls(
+            content_hash=content_hash(canonical_json(_tree_body(entries))),
+            entries=entries,
         )
 
 
@@ -258,6 +278,62 @@ class Commit:
             parent_hashes=parent_hashes,
             meta=meta,
         )
+
+    def to_bytes(self) -> bytes:
+        """Return the canonical byte payload — what a :class:`CheckpointStore`
+        stores at ``kind="commit"``. Round-trips through :meth:`from_bytes`.
+        """
+        return canonical_json(_commit_body(self.root_tree_hash, self.parent_hashes, self.meta))
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> Commit:
+        """Reconstruct a Commit from its canonical byte payload.
+
+        Parses the JSON body, rebuilds :class:`CommitMeta` +
+        :class:`ProducedBy` + :class:`TraceRef`, and computes
+        content_hash from the re-canonicalized body — same bytes in →
+        same content_hash out as the writer produced.
+        """
+        body = json.loads(payload.decode("utf-8"))
+        meta = _parse_commit_meta(body["meta"])
+        root_tree_hash = body["root_tree_hash"]
+        parent_hashes = tuple(body["parent_hashes"])
+        return cls(
+            content_hash=content_hash(
+                canonical_json(_commit_body(root_tree_hash, parent_hashes, meta))
+            ),
+            root_tree_hash=root_tree_hash,
+            parent_hashes=parent_hashes,
+            meta=meta,
+        )
+
+
+def _parse_commit_meta(meta_body: dict[str, Any]) -> CommitMeta:
+    """Rebuild :class:`CommitMeta` from its canonical JSON body."""
+    produced = meta_body["produced_by"]
+    return CommitMeta(
+        client_flow_id=meta_body["client_flow_id"],
+        node_path=meta_body["node_path"],
+        iteration=meta_body["iteration"],
+        produced_by=ProducedBy(
+            node_id=produced["node_id"],
+            verb_name=produced.get("verb_name"),
+            role=produced.get("role"),
+            result_hash=produced.get("result_hash"),
+        ),
+        trace_ref=tuple(
+            TraceRef(kind=r["kind"], id=r["id"]) for r in meta_body.get("trace_ref", [])
+        ),
+        outcome=meta_body["outcome"],
+        flow_root_id=meta_body["flow_root_id"],
+        timestamp_iso=meta_body["timestamp_iso"],
+        framework_version=meta_body["framework_version"],
+    )
+
+
+def _tree_body(entries: tuple[TreeEntry, ...]) -> list[list[str]]:
+    """Canonicalize the entries list for hashing / serialization."""
+    return [[e.scope_id, e.kind, e.child_hash] for e in entries]
 
 
 def _commit_body(

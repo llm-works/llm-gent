@@ -3,15 +3,14 @@
 
 """Integration tests for :class:`llm_gent.flow.stores.PgCheckpointStore`.
 
-Exercises the same Protocol contract as the JSON-file backend but against
-a real Postgres via appinfra's schema-isolated fixtures. Skips when
-``APPINFRA_TEST_PG_URL`` is not set.
+Real Postgres round-trip against the migrated schema (object + ref
+tables). Same surface as :mod:`tests.unit.flow.test_stores_json` — the
+two implementations should behave identically at the Protocol level.
 """
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from collections.abc import Generator
 
 import pytest
 from appinfra.db.pg import PG
@@ -19,21 +18,7 @@ from appinfra.log import Logger
 from sqlalchemy import delete
 
 from llm_gent.flow.stores import PgCheckpointStore
-from llm_gent.flow.stores.postgres import FlowCheckpoint
-from llm_gent.flow.testing import build_canonical_flow, resume_in_subprocess
-
-
-pytestmark = pytest.mark.integration
-
-
-def _state(n: int) -> dict[str, Any]:
-    """Small deterministic ``state_json`` fixture."""
-    return {"data": {"n": n}, "children": []}
-
-
-def _meta(iteration: int, path: list[str] | None = None) -> dict[str, Any]:
-    """Small deterministic ``metadata_json`` fixture."""
-    return {"path": path or ["node-a"], "iteration": iteration}
+from llm_gent.flow.stores.postgres import FlowObject, FlowRef
 
 
 @pytest.fixture
@@ -43,151 +28,136 @@ def store(pg_migrated: PG, pg_test_logger: Logger) -> PgCheckpointStore:
 
 
 @pytest.fixture(autouse=True)
-def _clean_table(pg_migrated: PG) -> None:
-    """Wipe the checkpoint table between tests so cases are independent."""
-    with pg_migrated.session() as session:
-        session.execute(delete(FlowCheckpoint))
+def clean_tables(pg_migrated: PG) -> Generator[None, None, None]:
+    """Wipe the object + ref tables before and after every test.
 
-
-class TestPgCheckpointStore:
-    """Save / load / delete Protocol conformance against Postgres."""
-
-    def test_round_trip_single_iteration(self, store: PgCheckpointStore) -> None:
-        """Save one row, load it back verbatim."""
-        store.save_checkpoint("traj-1", "node-a", 1, _state(42), _meta(1))
-        loaded = store.load_checkpoint("traj-1")
-        assert loaded is not None
-        state_json, meta_json = loaded
-        assert state_json == _state(42)
-        assert meta_json == _meta(1)
-
-    def test_load_returns_none_when_absent(self, store: PgCheckpointStore) -> None:
-        """A never-saved trajectory reads as ``None``."""
-        assert store.load_checkpoint("nobody") is None
-
-    def test_load_specific_iteration(self, store: PgCheckpointStore) -> None:
-        """``iteration=N`` fetches exactly that row when it exists."""
-        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
-        loaded = store.load_checkpoint("traj-1", node_path="node-a", iteration=1)
-        assert loaded is not None
-        assert loaded[0] == _state(1)
-
-    def test_load_specific_iteration_missing(self, store: PgCheckpointStore) -> None:
-        """A non-existent iteration under a live trajectory reads as ``None``."""
-        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
-        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=99) is None
-
-    def test_load_latest_picks_last_save(self, store: PgCheckpointStore) -> None:
-        """Both filters ``None`` returns the most recently inserted row (last db_id wins)."""
-        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-1", "node-a", 3, _state(3), _meta(3))
-        store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
-        loaded = store.load_checkpoint("traj-1")
-        assert loaded is not None
-        assert loaded[1]["iteration"] == 2
-
-    def test_same_iteration_resave_upserts(self, store: PgCheckpointStore) -> None:
-        """A second save at the same iteration replaces the earlier row (ON CONFLICT DO UPDATE)."""
-        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-1", "node-a", 1, _state(99), _meta(1))
-        loaded = store.load_checkpoint("traj-1", node_path="node-a", iteration=1)
-        assert loaded is not None
-        assert loaded[0] == _state(99)
-
-    def test_delete_wipes_trajectory(self, store: PgCheckpointStore) -> None:
-        """Every row under the trajectory is gone after delete."""
-        store.save_checkpoint("traj-1", "node-a", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-1", "node-a", 2, _state(2), _meta(2))
-        store.delete_checkpoint("traj-1")
-        assert store.load_checkpoint("traj-1") is None
-        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=1) is None
-        assert store.load_checkpoint("traj-1", node_path="node-a", iteration=2) is None
-
-    def test_delete_idempotent_when_absent(self, store: PgCheckpointStore) -> None:
-        """Deleting an unknown trajectory is a no-op, not an error."""
-        store.delete_checkpoint("nobody")
-
-    def test_delete_leaves_other_trajectories(self, store: PgCheckpointStore) -> None:
-        """Deleting one trajectory does not affect a sibling under the same schema."""
-        store.save_checkpoint("traj-a", "node-a", 1, _state(1), _meta(1))
-        store.save_checkpoint("traj-b", "node-a", 1, _state(2), _meta(1))
-        store.delete_checkpoint("traj-a")
-        assert store.load_checkpoint("traj-a") is None
-        loaded = store.load_checkpoint("traj-b")
-        assert loaded is not None
-        assert loaded[0] == _state(2)
-
-    def test_distinct_node_paths_do_not_collide(self, store: PgCheckpointStore) -> None:
-        """Two iterates' iteration=1 records under one trajectory coexist without overwrite.
-
-        Under the old (client_flow_id, iteration) unique constraint, an
-        inner iterate's iteration=1 upsert would replace an outer's
-        iteration=1 row. With node_path in the key, both rows persist
-        and each is retrievable by its own (node_path, iteration).
-        """
-        store.save_checkpoint("traj-1", "outer", 1, _state(11), _meta(1, ["outer"]))
-        store.save_checkpoint("traj-1", "outer/inner", 1, _state(99), _meta(1, ["outer", "inner"]))
-
-        outer = store.load_checkpoint("traj-1", node_path="outer", iteration=1)
-        assert outer is not None
-        assert outer[0] == _state(11)
-
-        inner = store.load_checkpoint("traj-1", node_path="outer/inner", iteration=1)
-        assert inner is not None
-        assert inner[0] == _state(99)
-
-    def test_ensure_schema_idempotent(self, pg_migrated: PG, pg_test_logger: Logger) -> None:
-        """Re-running :func:`ensure_schema` on an already-migrated DB is a no-op."""
-        from llm_gent.schema import SchemaManager, SchemaState
-
-        mgr = SchemaManager(pg_test_logger, pg_migrated)
-        status = mgr.ensure_schema()
-        assert status.state == SchemaState.CURRENT
-
-
-class TestPgCheckpointStoreCrossProcessResume:
-    """A fresh Python subprocess resuming from PG matches the uninterrupted final state.
-
-    Same-process resume can silently retain non-serializable references
-    across the round-trip; a subprocess with only the PG-persisted
-    checkpoint is the production gate for network-backed stores.
+    Fixtures run in module scope so state leaks between tests without
+    this. Autouse keeps every test independent.
     """
+    with pg_migrated.session() as session:
+        session.execute(delete(FlowRef))
+        session.execute(delete(FlowObject))
+    yield
+    with pg_migrated.session() as session:
+        session.execute(delete(FlowRef))
+        session.execute(delete(FlowObject))
 
-    def test_cross_process_resume_pg_store(
-        self,
-        pg_migrated: PG,
-        pg_test_config: dict[str, Any],
-        pg_test_schema: str,
-        pg_test_logger: Logger,
-    ) -> None:
-        """Baseline and subprocess resume against the same PG schema yield identical final state."""
-        store = PgCheckpointStore(pg_test_logger, pg_migrated)
-        trajectory_id = "pg-cross-proc-1"
 
-        baseline = asyncio.run(build_canonical_flow(pg_test_logger, max_iters=5).run())
+# ---------------------------------------------------------------------------
+# Object store surface
+# ---------------------------------------------------------------------------
 
-        halt = asyncio.Event()
-        asyncio.run(
-            build_canonical_flow(
-                pg_test_logger,
-                max_iters=5,
-                halt=halt,
-                halt_after_iteration=2,
-                store=store,
-                trajectory_id=trajectory_id,
-            ).run()
-        )
 
-        resumed = resume_in_subprocess(
-            store_module="llm_gent.flow.testing.checkpoint",
-            store_factory="pg_checkpoint_store_from_config",
-            store_kwargs={
-                "url": str(pg_test_config["url"]),
-                "schema": pg_test_schema,
-            },
-            flow_builder_kwargs={"max_iters": 5},
-            trajectory_id=trajectory_id,
-        )
+class TestObjectStore:
+    def test_put_get_round_trip(self, store: PgCheckpointStore) -> None:
+        store.put_object("traj-1", "blob", "hash-a", b"payload-a")
+        assert store.get_object("traj-1", "blob", "hash-a") == b"payload-a"
 
-        assert resumed == baseline
+    def test_get_returns_none_when_absent(self, store: PgCheckpointStore) -> None:
+        assert store.get_object("traj-1", "blob", "missing") is None
+
+    def test_has_object_reflects_presence(self, store: PgCheckpointStore) -> None:
+        assert not store.has_object("traj-1", "blob", "hash-a")
+        store.put_object("traj-1", "blob", "hash-a", b"payload")
+        assert store.has_object("traj-1", "blob", "hash-a")
+
+    def test_put_idempotent_same_hash(self, store: PgCheckpointStore) -> None:
+        """ON CONFLICT DO NOTHING — same PK re-put is a no-op."""
+        store.put_object("traj-1", "blob", "hash-a", b"payload")
+        store.put_object("traj-1", "blob", "hash-a", b"payload")
+        assert store.get_object("traj-1", "blob", "hash-a") == b"payload"
+
+    def test_kinds_do_not_collide(self, store: PgCheckpointStore) -> None:
+        store.put_object("traj-1", "blob", "hash", b"blob-bytes")
+        store.put_object("traj-1", "tree", "hash", b"tree-bytes")
+        store.put_object("traj-1", "commit", "hash", b"commit-bytes")
+        assert store.get_object("traj-1", "blob", "hash") == b"blob-bytes"
+        assert store.get_object("traj-1", "tree", "hash") == b"tree-bytes"
+        assert store.get_object("traj-1", "commit", "hash") == b"commit-bytes"
+
+    def test_trajectories_do_not_collide(self, store: PgCheckpointStore) -> None:
+        store.put_object("traj-a", "blob", "hash", b"a-bytes")
+        store.put_object("traj-b", "blob", "hash", b"b-bytes")
+        assert store.get_object("traj-a", "blob", "hash") == b"a-bytes"
+        assert store.get_object("traj-b", "blob", "hash") == b"b-bytes"
+
+
+# ---------------------------------------------------------------------------
+# Ref store surface
+# ---------------------------------------------------------------------------
+
+
+class TestRefStore:
+    def test_put_resolve_exact_key(self, store: PgCheckpointStore) -> None:
+        store.put_ref("traj-1", "node/x", 5, "commit-hash-5")
+        assert store.resolve_ref("traj-1", "node/x", 5) == "commit-hash-5"
+
+    def test_resolve_returns_none_when_absent(self, store: PgCheckpointStore) -> None:
+        assert store.resolve_ref("traj-1") is None
+
+    def test_resolve_latest_across_node_paths(self, store: PgCheckpointStore) -> None:
+        """resolve_ref with both None → latest by created_at."""
+        store.put_ref("traj-1", "node/a", 1, "hash-1")
+        store.put_ref("traj-1", "node/b", 1, "hash-2")
+        assert store.resolve_ref("traj-1") == "hash-2"
+
+    def test_resolve_latest_under_node_path(self, store: PgCheckpointStore) -> None:
+        store.put_ref("traj-1", "node/x", 1, "hash-1")
+        store.put_ref("traj-1", "node/x", 3, "hash-3")
+        store.put_ref("traj-1", "node/x", 2, "hash-2")
+        assert store.resolve_ref("traj-1", "node/x") == "hash-3"
+
+    def test_resolve_iteration_without_node_path_raises(self, store: PgCheckpointStore) -> None:
+        with pytest.raises(ValueError, match="iteration requires node_path"):
+            store.resolve_ref("traj-1", None, 5)
+
+    def test_put_ref_overwrites_same_key(self, store: PgCheckpointStore) -> None:
+        """ON CONFLICT DO UPDATE — same PK re-put refreshes commit_hash + created_at."""
+        store.put_ref("traj-1", "node/x", 5, "hash-first")
+        store.put_ref("traj-1", "node/x", 5, "hash-second")
+        assert store.resolve_ref("traj-1", "node/x", 5) == "hash-second"
+
+    def test_refs_do_not_leak_across_trajectories(self, store: PgCheckpointStore) -> None:
+        store.put_ref("traj-a", "node/x", 1, "hash-a")
+        store.put_ref("traj-b", "node/x", 1, "hash-b")
+        assert store.resolve_ref("traj-a", "node/x", 1) == "hash-a"
+        assert store.resolve_ref("traj-b", "node/x", 1) == "hash-b"
+
+
+# ---------------------------------------------------------------------------
+# gc_trajectory
+# ---------------------------------------------------------------------------
+
+
+class TestGcTrajectory:
+    def test_removes_all_objects_and_refs(self, store: PgCheckpointStore) -> None:
+        store.put_object("traj-1", "blob", "h1", b"payload")
+        store.put_ref("traj-1", "node/x", 1, "commit-h")
+        store.gc_trajectory("traj-1")
+        assert store.get_object("traj-1", "blob", "h1") is None
+        assert store.resolve_ref("traj-1", "node/x", 1) is None
+
+    def test_idempotent_when_absent(self, store: PgCheckpointStore) -> None:
+        store.gc_trajectory("never-existed")
+
+    def test_leaves_other_trajectories_intact(self, store: PgCheckpointStore) -> None:
+        store.put_object("traj-a", "blob", "h", b"a-bytes")
+        store.put_object("traj-b", "blob", "h", b"b-bytes")
+        store.gc_trajectory("traj-a")
+        assert store.get_object("traj-a", "blob", "h") is None
+        assert store.get_object("traj-b", "blob", "h") == b"b-bytes"
+
+
+# ---------------------------------------------------------------------------
+# Retention policy
+# ---------------------------------------------------------------------------
+
+
+class TestRetention:
+    def test_default_is_retain(self, pg_migrated: PG, pg_test_logger: Logger) -> None:
+        s = PgCheckpointStore(pg_test_logger, pg_migrated)
+        assert s.retention == "retain"
+
+    def test_explicit_gc_on_success(self, pg_migrated: PG, pg_test_logger: Logger) -> None:
+        s = PgCheckpointStore(pg_test_logger, pg_migrated, retention="gc_on_success")
+        assert s.retention == "gc_on_success"
