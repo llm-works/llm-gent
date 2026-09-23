@@ -266,6 +266,15 @@ class Context(Generic[T]):
         Repeated calls at the same node write distinct commit objects
         (framework does not dedupe by state hash beyond the CAS layer
         already doing so) and refresh the ref timestamp.
+
+        **Limitation:** checkpoints inside an iterate body or until
+        predicate always stamp ``iteration=0``. On resume, the iterate
+        restarts from iteration 0 even though state reflects N
+        iterations of progress. This can violate the cumulative
+        ``max_iters`` contract — the loop may run up to ``max_iters``
+        additional passes. Until iteration-aware checkpoints are
+        implemented, avoid calling ``ctx.checkpoint()`` inside iterate
+        bodies where iteration count matters.
         """
         env = self._env
         node_id = self._node_id

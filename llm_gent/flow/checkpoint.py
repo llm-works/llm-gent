@@ -120,11 +120,18 @@ class CheckpointPolicy:
     """Save a commit after every successful map item body + merge.
 
     Default ``False``: map items do NOT auto-save. Set ``True`` for
-    long-running maps with expensive per-item bodies where each
-    completed item should be a resumable anchor. Each save writes at
+    long-running maps with expensive per-item bodies where observing
+    per-item progress is valuable. Each save writes at
     ``iteration=item_index`` under the map's node_path, so distinct
     items land in distinct ref slots. Items complete in parallel;
     save order is not guaranteed to match item order.
+
+    **Limitation:** per-item commits are currently observability-only.
+    Resume does not yet skip completed items — the whole map re-runs,
+    applying each item's merge again. If merge accumulates state
+    (append, increment, dict update), completed items will double-count.
+    Until per-item resume is implemented, callers relying on
+    ``on_map_item`` should ensure their merge function is idempotent.
 
     Failed items (:class:`Failure`), guard-skipped items
     (:class:`Skipped`), and cancelled items do NOT save regardless of
