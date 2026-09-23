@@ -113,6 +113,96 @@ class TestRetention:
 # ---------------------------------------------------------------------------
 
 
+class TestCheckpointPolicyIterate:
+    """CheckpointPolicy.on_iterate gates the iterate-boundary auto-save."""
+
+    async def test_default_policy_writes_only_the_completion_marker(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Default CheckpointPolicy (halt-only) skips per-iteration saves.
+
+        Under the default policy an iterate that runs cleanly to
+        ``max_iters`` should leave the store with exactly one ref:
+        the ``$complete`` completion marker stamped by the clean-exit
+        retention path. No iterate-boundary ref should exist.
+        """
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        @verb
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] = ctx.state.data.get("n", 0) + 1
+            return ctx.state.data["n"]
+
+        body = FlowFactory(make_test_logger()).create()
+        body.call(bump)
+
+        outer = (
+            FlowFactory(make_test_logger())
+            .create(state={"n": 0})
+            .with_checkpointer(store, "policy-halt-only")
+            .iterate(body, max_iters=5)
+        )
+        await outer.run()
+
+        # Every commit written during the run has node_path == "$complete"
+        # (only the clean-exit completion marker fires under the default
+        # policy). Walking the commit objects on disk reveals no iterate-
+        # boundary commits.
+        commits_dir = store._root / "policy-halt-only" / "objects" / "commit"  # type: ignore[attr-defined]
+        node_paths: set[str] = set()
+        for f in commits_dir.iterdir():
+            payload = f.read_bytes()
+            node_paths.add(Commit.from_bytes(payload).meta.node_path)
+        assert node_paths == {"$complete"}, (
+            f"only the $complete completion marker should have been written; got {node_paths}"
+        )
+
+    async def test_on_iterate_true_writes_per_iteration_commits(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """CheckpointPolicy(on_iterate=True) restores per-iteration saves.
+
+        Opting in should produce an iterate-boundary ref alongside the
+        completion marker — the iterate's own node_path directory carries
+        one ref per iteration.
+        """
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        @verb
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] = ctx.state.data.get("n", 0) + 1
+            return ctx.state.data["n"]
+
+        body = FlowFactory(make_test_logger()).create()
+        body.call(bump)
+
+        outer = (
+            FlowFactory(make_test_logger())
+            .create(state={"n": 0})
+            .with_checkpointer(store, "policy-on-iter")
+            .with_checkpoint_policy(on_iterate=True)
+            .iterate(body, max_iters=3)
+        )
+        await outer.run()
+
+        # Under on_iterate=True the iterate boundary emits a commit each
+        # iteration + a $complete marker on clean exit. Group commit
+        # objects by node_path: 3 boundary commits share the iterate's
+        # node_path, plus one $complete marker.
+        commits_dir = store._root / "policy-on-iter" / "objects" / "commit"  # type: ignore[attr-defined]
+        by_node_path: dict[str, int] = {}
+        for f in commits_dir.iterdir():
+            commit = Commit.from_bytes(f.read_bytes())
+            by_node_path[commit.meta.node_path] = by_node_path.get(commit.meta.node_path, 0) + 1
+        assert by_node_path["$complete"] == 1
+        iterate_paths = {p: n for p, n in by_node_path.items() if p != "$complete"}
+        assert len(iterate_paths) == 1, f"expected one iterate node_path; got {list(iterate_paths)}"
+        # 3 iterate-boundary commits (one per iteration).
+        assert next(iter(iterate_paths.values())) == 3
+
+
 class TestSaveOnHaltChain:
     """Chain-only halt-observation site writes a commit at the not-yet-run step."""
 
@@ -789,6 +879,7 @@ class TestScopedStateRoundTrip:
         outer_pre = (
             ff.create(state={"outer": True})
             .with_checkpointer(store, "3-level-1")
+            .with_checkpoint_policy(on_iterate=True)
             .with_halt(halt)
             .call(mid_flow, state=lambda _p: {})
         )
@@ -825,6 +916,7 @@ class TestScopedStateRoundTrip:
         outer_resume = (
             ff.create(state={"outer": True})
             .with_checkpointer(store, "3-level-1")
+            .with_checkpoint_policy(on_iterate=True)
             .call(mid_flow, state=lambda _p: {})
         )
         await outer_resume.run(resume=True)

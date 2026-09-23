@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 
@@ -73,6 +74,47 @@ Retention = Literal["retain", "gc_on_success"]
 
 See the module docstring's retention section for semantics.
 """
+
+
+@dataclass(frozen=True)
+class CheckpointPolicy:
+    """Governs implicit framework saves inside a Flow run.
+
+    Two save triggers are always on and NOT gated by this policy:
+
+    - Halt observation — :func:`_save_halt_checkpoint` fires whenever
+      the executor observes ``env.halt.is_set()`` at an iterate
+      boundary or between chain steps, provided a checkpointer +
+      client_flow_id are wired. This is the durability guarantee
+      that makes ``run(resume=True)`` reach a halted trajectory.
+    - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires
+      regardless of policy; when the verb asks to save, we save.
+
+    What this policy DOES gate is automatic, unconditional save
+    points that would otherwise fire per composition step:
+
+    - :attr:`on_iterate` — save at every successful iterate body
+      boundary. Off by default; halt-only trajectories skip every
+      per-iteration commit and only stamp on halt + on explicit
+      calls.
+
+    Attached to a :class:`Flow` via :meth:`Flow.with_checkpoint_policy`;
+    subflows inherit the outer runtime's policy unless they attach
+    their own. Instances are frozen so a policy value can be shared
+    across flows without accidental mutation.
+
+    Room to grow: additional gates for :meth:`Flow.map` per-item
+    saves, branch-arm saves, or a custom predicate can land as new
+    dataclass fields without changing the type of the parameter.
+    """
+
+    on_iterate: bool = False
+    """Save a commit after every successful iterate body iteration.
+
+    Default ``False``: iterate boundaries do NOT auto-save. Set
+    ``True`` when each iteration boundary should be a resumable
+    anchor — the consumer pays the write cost per iteration.
+    """
 
 
 async def maybe_await(value: Any) -> Any:
