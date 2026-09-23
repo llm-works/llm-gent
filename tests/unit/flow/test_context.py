@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Flow, State, verb
+from llm_gent.flow import Context, Flow, Panel, State, verb
 
 from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
 
@@ -187,6 +187,114 @@ class TestCtxExtra:
         flow.call(probe)
         got = await flow.run(extra=supplied)
         assert got is supplied
+
+
+class TestCtxExtraPropagation:
+    """``ctx.extra`` reaches every dispatch site via env.extra threading."""
+
+    @pytest.mark.asyncio
+    async def test_extra_reaches_subflow_via_call(self) -> None:
+        """A ``.call(subflow)`` descent surfaces the same ``ctx.extra`` at the inner verb."""
+        sentinel = object()
+
+        @verb
+        async def inner(ctx: Context) -> object:
+            """Return the extra handle for identity assertion."""
+            return ctx.extra["h"]
+
+        subflow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        subflow.call(inner)
+
+        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer.call(subflow)
+        got = await outer.run(extra={"h": sentinel})
+        assert got is sentinel
+
+    @pytest.mark.asyncio
+    async def test_extra_reaches_branch_arm(self) -> None:
+        """A ``.branch()`` descent into the ``then`` arm surfaces ``ctx.extra``."""
+        sentinel = object()
+
+        @verb
+        async def arm(ctx: Context, _prev: object) -> object:
+            """Return the extra handle for identity assertion."""
+            return ctx.extra["h"]
+
+        then_flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        then_flow.call(arm)
+
+        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer.branch(when=lambda _p, _c: True, then=then_flow)
+        got = await outer.run(0, extra={"h": sentinel})
+        assert got is sentinel
+
+    @pytest.mark.asyncio
+    async def test_extra_reaches_iterate_body(self) -> None:
+        """A ``.iterate()`` body dispatch surfaces ``ctx.extra`` on every pass."""
+        seen: list[object] = []
+        sentinel = object()
+
+        @verb
+        async def body_step(ctx: Context, prev: int) -> int:
+            """Capture ``ctx.extra["h"]`` and increment the counter."""
+            seen.append(ctx.extra["h"])
+            return prev + 1
+
+        body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        body.call(body_step)
+
+        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer.iterate(body, max_iters=3)
+        await outer.run(0, extra={"h": sentinel})
+        assert seen == [sentinel, sentinel, sentinel]
+
+    @pytest.mark.asyncio
+    async def test_extra_reaches_map_item(self) -> None:
+        """A ``.map()`` per-item descent surfaces ``ctx.extra`` at the item verb."""
+        sentinel = object()
+
+        @verb
+        async def per_item(ctx: Context, item: int) -> tuple[int, object]:
+            """Pair the item with the extra handle for identity assertion."""
+            return item, ctx.extra["h"]
+
+        body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        body.call(per_item)
+
+        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer.map(body, items=lambda _p, _c: [1, 2, 3])
+        got = await outer.run(extra={"h": sentinel})
+        assert got == [(1, sentinel), (2, sentinel), (3, sentinel)]
+
+    @pytest.mark.asyncio
+    async def test_extra_forwarded_through_panel(self) -> None:
+        """``Panel`` forwards ``ctx.extra`` to each inner verb's dispatch."""
+        sentinel = object()
+
+        @verb
+        async def pane_a(ctx: Context) -> object:
+            """Return the extra handle observed inside pane a."""
+            return ctx.extra["h"]
+
+        @verb
+        async def pane_b(ctx: Context) -> object:
+            """Return the extra handle observed inside pane b."""
+            return ctx.extra["h"]
+
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow.register(pane_a)
+        flow.register(pane_b)
+        panel = Panel([pane_a, pane_b], aggregate=list)
+
+        @verb
+        async def outer(ctx: Context) -> list[object]:
+            """Run the panel and return its aggregate."""
+            return await panel.run(ctx)
+
+        flow.register(outer)
+        flow.call(outer)
+        got = await flow.run(extra={"h": sentinel})
+        assert got == [sentinel, sentinel]
 
 
 class TestPureVerbCtx:

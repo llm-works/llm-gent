@@ -230,6 +230,7 @@ class Flow:
         halt: Any = UNSET,
         budget: Any = UNSET,
         scope_state: Any = UNSET,
+        extra: Any = UNSET,
         **kwargs: Any,
     ) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
@@ -252,6 +253,11 @@ class Flow:
         verb to propagate its effective ambients to the dispatched sibling;
         omitting either (or passing ``UNSET``) defaults to this flow's
         ``.with_halt()`` / ``.with_budget()`` binding if any.
+
+        Pass ``extra=ctx.extra`` from an in-flight verb to propagate the
+        caller-supplied opaque dict to the dispatched sibling. Omitting
+        (or passing ``UNSET``) yields a fresh empty dict at the sibling —
+        ``dispatch`` has no flow-level ``.with_extra()`` fallback.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
@@ -265,6 +271,7 @@ class Flow:
         )
         effective_halt = self._halt_event if halt is UNSET else halt
         effective_budget = self._budget_tracker if budget is UNSET else budget
+        effective_extra: dict[str, Any] = {} if extra is UNSET else extra
         wrapped_state = (
             payload
             if isinstance(payload, State)
@@ -277,6 +284,7 @@ class Flow:
             traits=self._traits,
             halt=effective_halt,
             budget=effective_budget,
+            extra=effective_extra,
         )
         return await verb(ctx, *args, **kwargs)
 
