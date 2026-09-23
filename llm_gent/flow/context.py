@@ -18,6 +18,10 @@ as the first argument to every verb. It exposes:
   written as module-level ``async def`` (rather than :class:`Verb` classes
   that capture ``lg`` at ``__init__``) can trace without threading it
   through state
+- ``extra`` — caller-supplied per-invocation opaque dict, escape hatch
+  for handles the framework does not type (tenant IDs, correlation IDs,
+  per-run callbacks); supplied at :meth:`Flow.run` via ``extra=`` and
+  never checkpointed
 
 Verbs read from this and (typically) mutate ``state.data`` in place.
 
@@ -30,7 +34,7 @@ payload as :data:`Any`.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 from appinfra.log import Logger
@@ -119,6 +123,22 @@ class Context(Generic[T]):
     ancestors in the tracker chain do the same on their own caps.
     Subflows inherit the outer runtime's budget unless they declare their
     own via :meth:`Flow.with_budget`.
+    """
+
+    extra: dict[str, Any] = field(default_factory=dict)
+    """Caller-supplied per-invocation opaque data.
+
+    Escape hatch for handles the framework does not type (tenant IDs,
+    correlation IDs, request-scoped audit hooks, per-run callbacks).
+    Supplied at :meth:`Flow.run` via the ``extra=`` kwarg; propagates
+    unchanged to every dispatch inside the run — subflows, iterate
+    bodies, map items, and Panel arms all see the same dict.
+
+    Framework does not inspect the contents, does not type-check the
+    values, and never persists them: ``extra`` never enters a
+    checkpoint Blob, Tree, or node content hash. On resume the caller
+    re-supplies at :meth:`Flow.run`; identity across resume is not
+    preserved. Default is a fresh empty dict.
     """
 
     @property

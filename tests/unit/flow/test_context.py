@@ -5,11 +5,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Flow, State, verb
+from llm_gent.flow import Context, Flow, Panel, State, verb
+from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
 
@@ -137,6 +142,219 @@ class TestCtxData:
         ctx: Context[_Payload] = Context(role=None, state=child_state, flow=None)
         assert ctx.data is child_payload
         assert ctx.state.root().data is root_payload
+
+
+class TestCtxExtra:
+    """``ctx.extra`` surfaces caller-supplied ``Flow.run(extra=)`` at the verb."""
+
+    @pytest.mark.asyncio
+    async def test_ctx_extra_reaches_verb(self) -> None:
+        """A verb reads ``ctx.extra`` values supplied at ``Flow.run(extra=)``."""
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        sentinel = object()
+
+        @verb
+        async def probe(ctx: Context, n: int) -> tuple[object, int]:
+            """Return the extra sentinel + input for identity assertion."""
+            return ctx.extra["handle"], n
+
+        flow.call(probe)
+        got, n = await flow.run(4, extra={"handle": sentinel})
+        assert got is sentinel
+        assert n == 4
+
+    @pytest.mark.asyncio
+    async def test_ctx_extra_defaults_to_empty(self) -> None:
+        """Omitting ``extra=`` yields an empty ``ctx.extra`` dict."""
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+
+        @verb
+        async def probe(ctx: Context) -> dict[str, Any]:
+            """Return ``ctx.extra`` for shape assertion."""
+            return ctx.extra
+
+        flow.call(probe)
+        got = await flow.run()
+        assert got == {}
+
+    @pytest.mark.asyncio
+    async def test_ctx_extra_identity_preserved(self) -> None:
+        """The exact dict handed to ``Flow.run(extra=)`` reaches the verb."""
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        supplied: dict[str, Any] = {"k": 1}
+
+        @verb
+        async def probe(ctx: Context) -> dict[str, Any]:
+            """Return ``ctx.extra`` for identity assertion."""
+            return ctx.extra
+
+        flow.call(probe)
+        got = await flow.run(extra=supplied)
+        assert got is supplied
+
+
+class TestCtxExtraPropagation:
+    """``ctx.extra`` reaches every dispatch site via env.extra threading."""
+
+    @pytest.mark.asyncio
+    async def test_extra_reaches_subflow_via_call(self) -> None:
+        """A ``.call(subflow)`` descent surfaces the same ``ctx.extra`` at the inner verb."""
+        sentinel = object()
+
+        @verb
+        async def inner(ctx: Context) -> object:
+            """Return the extra handle for identity assertion."""
+            return ctx.extra["h"]
+
+        subflow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        subflow.call(inner)
+
+        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer.call(subflow)
+        got = await outer.run(extra={"h": sentinel})
+        assert got is sentinel
+
+    @pytest.mark.asyncio
+    async def test_extra_reaches_branch_arm(self) -> None:
+        """A ``.branch()`` descent into the ``then`` arm surfaces ``ctx.extra``."""
+        sentinel = object()
+
+        @verb
+        async def arm(ctx: Context, _prev: object) -> object:
+            """Return the extra handle for identity assertion."""
+            return ctx.extra["h"]
+
+        then_flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        then_flow.call(arm)
+
+        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer.branch(when=lambda _p, _c: True, then=then_flow)
+        got = await outer.run(0, extra={"h": sentinel})
+        assert got is sentinel
+
+    @pytest.mark.asyncio
+    async def test_extra_reaches_iterate_body(self) -> None:
+        """A ``.iterate()`` body dispatch surfaces ``ctx.extra`` on every pass."""
+        seen: list[object] = []
+        sentinel = object()
+
+        @verb
+        async def body_step(ctx: Context, prev: int) -> int:
+            """Capture ``ctx.extra["h"]`` and increment the counter."""
+            seen.append(ctx.extra["h"])
+            return prev + 1
+
+        body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        body.call(body_step)
+
+        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer.iterate(body, max_iters=3)
+        await outer.run(0, extra={"h": sentinel})
+        assert seen == [sentinel, sentinel, sentinel]
+
+    @pytest.mark.asyncio
+    async def test_extra_reaches_map_item(self) -> None:
+        """A ``.map()`` per-item descent surfaces ``ctx.extra`` at the item verb."""
+        sentinel = object()
+
+        @verb
+        async def per_item(ctx: Context, item: int) -> tuple[int, object]:
+            """Pair the item with the extra handle for identity assertion."""
+            return item, ctx.extra["h"]
+
+        body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        body.call(per_item)
+
+        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer.map(body, items=lambda _p, _c: [1, 2, 3])
+        got = await outer.run(extra={"h": sentinel})
+        assert got == [(1, sentinel), (2, sentinel), (3, sentinel)]
+
+    @pytest.mark.asyncio
+    async def test_extra_forwarded_through_panel(self) -> None:
+        """``Panel`` forwards ``ctx.extra`` to each inner verb's dispatch."""
+        sentinel = object()
+
+        @verb
+        async def pane_a(ctx: Context) -> object:
+            """Return the extra handle observed inside pane a."""
+            return ctx.extra["h"]
+
+        @verb
+        async def pane_b(ctx: Context) -> object:
+            """Return the extra handle observed inside pane b."""
+            return ctx.extra["h"]
+
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow.register(pane_a)
+        flow.register(pane_b)
+        panel = Panel([pane_a, pane_b], aggregate=list)
+
+        @verb
+        async def outer(ctx: Context) -> list[object]:
+            """Run the panel and return its aggregate."""
+            return await panel.run(ctx)
+
+        flow.register(outer)
+        flow.call(outer)
+        got = await flow.run(extra={"h": sentinel})
+        assert got == [sentinel, sentinel]
+
+
+class TestCtxExtraResume:
+    """``ctx.extra`` is not persisted and is re-supplied by the caller on resume."""
+
+    @pytest.mark.asyncio
+    async def test_extra_not_checkpointed_and_re_supplied_on_resume(self, tmp_path: Path) -> None:
+        """Non-picklable extra survives halt+resume; verb sees the fresh dict post-resume.
+
+        Places a :class:`threading.Lock` (non-picklable) in ``extra`` and
+        halts partway through an ``.iterate`` body. If ``extra`` had been
+        serialized into a checkpoint blob, the run would raise. Resume
+        supplies a new Lock; the body verb observes the fresh instance,
+        proving the caller's re-supplied dict wins on the resume path.
+        """
+        store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+        seen: list[object] = []
+        halt = asyncio.Event()
+
+        @verb
+        async def body_step(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            """Capture the extra handle; halt after two iterations."""
+            seen.append(ctx.extra["lock"])
+            ctx.state.data["counter"] += 1
+            if ctx.state.data["counter"] >= 2:
+                halt.set()
+            return ctx.state.data["counter"]
+
+        def build(halt_event: asyncio.Event | None) -> Flow:
+            """Build the outer flow bound to the shared store + optional halt."""
+            body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+            body.call(body_step)
+            outer = Flow(
+                lg=make_test_logger(),
+                saia_factory=StubFactory(),
+                state={"counter": 0},
+            )
+            outer.iterate(body, max_iters=5)
+            outer = outer.with_checkpointer(store, "extra-resume-1")
+            return outer.with_halt(halt_event) if halt_event is not None else outer
+
+        pre_lock = threading.Lock()
+        await build(halt).run(extra={"lock": pre_lock})
+        # Pre-halt: 2 iterations, both observed the pre-halt lock.
+        assert seen == [pre_lock, pre_lock]
+
+        # Resume with a fresh, distinct lock — must survive replay + reach
+        # the post-halt iterations by identity.
+        resume_lock = threading.Lock()
+        assert resume_lock is not pre_lock
+        await build(halt_event=None).run(resume=True, extra={"lock": resume_lock})
+        # Every post-resume iteration observed the resume lock, never the
+        # pre-halt one (which would prove extra leaked through a blob).
+        assert len(seen) == 5, f"expected 5 iterations total, got {len(seen)}"
+        assert all(x is resume_lock for x in seen[2:])
+        assert pre_lock not in seen[2:]
 
 
 class TestPureVerbCtx:

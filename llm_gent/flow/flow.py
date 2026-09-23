@@ -230,6 +230,7 @@ class Flow:
         halt: Any = UNSET,
         budget: Any = UNSET,
         scope_state: Any = UNSET,
+        extra: Any = UNSET,
         **kwargs: Any,
     ) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
@@ -252,6 +253,11 @@ class Flow:
         verb to propagate its effective ambients to the dispatched sibling;
         omitting either (or passing ``UNSET``) defaults to this flow's
         ``.with_halt()`` / ``.with_budget()`` binding if any.
+
+        Pass ``extra=ctx.extra`` from an in-flight verb to propagate the
+        caller-supplied opaque dict to the dispatched sibling. Omitting
+        (or passing ``UNSET``) yields a fresh empty dict at the sibling —
+        ``dispatch`` has no flow-level ``.with_extra()`` fallback.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
@@ -265,6 +271,7 @@ class Flow:
         )
         effective_halt = self._halt_event if halt is UNSET else halt
         effective_budget = self._budget_tracker if budget is UNSET else budget
+        effective_extra: dict[str, Any] = {} if extra is UNSET else extra
         wrapped_state = (
             payload
             if isinstance(payload, State)
@@ -277,6 +284,7 @@ class Flow:
             traits=self._traits,
             halt=effective_halt,
             budget=effective_budget,
+            extra=effective_extra,
         )
         return await verb(ctx, *args, **kwargs)
 
@@ -788,6 +796,7 @@ class Flow:
         *args: Any,
         state: Any = UNSET,
         resume: bool = False,
+        extra: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         """Execute the composition graph as the top-level runtime.
@@ -811,6 +820,16 @@ class Flow:
                 ``None`` and verbs must guard). ``state`` is a bound
                 parameter — it is not forwarded to the first node; verbs
                 needing it as a kwarg are rejected at :meth:`call` time.
+            extra: Caller-supplied per-invocation opaque dict reachable
+                via ``ctx.extra`` on every dispatch inside the run.
+                Escape hatch for handles the framework does not type
+                (tenant IDs, correlation IDs, request-scoped audit hooks,
+                per-run callbacks). Framework does not inspect the
+                contents and never persists them — ``extra`` never enters
+                a checkpoint Blob, Tree, or node content hash. On resume
+                the caller re-supplies at :meth:`run`; identity across
+                resume is not preserved. ``None`` (default) yields a
+                fresh empty dict at the verb.
             resume: When ``True`` and :meth:`with_checkpointer` is wired,
                 the framework resolves the latest commit via
                 :meth:`CheckpointStore.resolve_ref` at start and, if a
@@ -846,7 +865,12 @@ class Flow:
             active_state, replay = await self._hydrate_resume_state(active_state)
         self._replay_consumed = False
         result = await self._run_as_subflow(
-            *args, state=active_state, runtime=self, parent_replay=replay, **kwargs
+            *args,
+            state=active_state,
+            runtime=self,
+            parent_replay=replay,
+            parent_extra=extra,
+            **kwargs,
         )
         self._assert_replay_consumed(replay)
         await self._apply_clean_exit_retention()
@@ -1023,6 +1047,7 @@ class Flow:
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
         parent_replay: _ResumeReplay | None = None,
+        parent_extra: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -1063,6 +1088,7 @@ class Flow:
             parent_chain_context=parent_chain_context,
             parent_ancestor_chain=parent_ancestor_chain,
             parent_replay=parent_replay,
+            parent_extra=parent_extra,
         )
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
@@ -1118,6 +1144,7 @@ class Flow:
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
         parent_replay: _ResumeReplay | None = None,
+        parent_extra: dict[str, Any] | None = None,
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
@@ -1152,6 +1179,7 @@ class Flow:
             chain_context=parent_chain_context,
             ancestor_chain=parent_ancestor_chain,
             replay=parent_replay,
+            extra=parent_extra if parent_extra is not None else {},
         )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:

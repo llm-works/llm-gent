@@ -81,6 +81,7 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
             traits=traits,
             halt=env.halt,
             budget=env.budget,
+            extra=env.extra,
         )
     return Context(
         role=target.role,
@@ -89,6 +90,7 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
         traits=traits,
         halt=env.halt,
         budget=env.budget,
+        extra=env.extra,
     )
 
 
@@ -299,6 +301,7 @@ async def _run_subflow(
         parent_chain_context=_descend_context(node_id, "call"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=child_replay,
+        parent_extra=env.extra,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -404,6 +407,7 @@ async def _check_until(
         traits=env.runtime._traits,
         halt=env.halt,
         budget=env.budget,
+        extra=env.extra,
     )
     verdict = until_fn(result, ctx)
     if inspect.isawaitable(verdict):
@@ -457,6 +461,7 @@ async def _run_branch(
         parent_chain_context=_descend_context(node_id, "then" if verdict else "else"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=_pop_replay_for(env, node_id),
+        parent_extra=env.extra,
     )
 
 
@@ -691,6 +696,7 @@ async def _dispatch_iterate_body(
         parent_chain_context=_descend_context(node_id, "body"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=_pop_replay_for(env, node_id),
+        parent_extra=env.extra,
     )
 
 
@@ -913,6 +919,7 @@ async def _dispatch_map_body(
         parent_chain_context=_descend_context(node_id, f"map:{item_index}"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=replay,
+        parent_extra=env.extra,
     )
 
 
@@ -1024,6 +1031,7 @@ def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
         traits=env.runtime._traits,
         halt=env.halt,
         budget=env.budget,
+        extra=env.extra,
     )
 
 
