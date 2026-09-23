@@ -18,6 +18,10 @@ as the first argument to every verb. It exposes:
   written as module-level ``async def`` (rather than :class:`Verb` classes
   that capture ``lg`` at ``__init__``) can trace without threading it
   through state
+- ``extra`` — caller-supplied per-invocation opaque dict, escape hatch
+  for handles the framework does not type (tenant IDs, correlation IDs,
+  per-run callbacks); supplied at :meth:`Flow.run` via ``extra=`` and
+  never checkpointed
 
 Verbs read from this and (typically) mutate ``state.data`` in place.
 

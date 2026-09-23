@@ -5,12 +5,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from llm_gent.flow import Context, Flow, Panel, State, verb
+from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
 
@@ -295,6 +299,61 @@ class TestCtxExtraPropagation:
         flow.call(outer)
         got = await flow.run(extra={"h": sentinel})
         assert got == [sentinel, sentinel]
+
+
+class TestCtxExtraResume:
+    """``ctx.extra`` is not persisted and is re-supplied by the caller on resume."""
+
+    @pytest.mark.asyncio
+    async def test_extra_not_checkpointed_and_re_supplied_on_resume(self, tmp_path: Path) -> None:
+        """Non-picklable extra survives halt+resume; verb sees the fresh dict post-resume.
+
+        Places a :class:`threading.Lock` (non-picklable) in ``extra`` and
+        halts partway through an ``.iterate`` body. If ``extra`` had been
+        serialized into a checkpoint blob, the run would raise. Resume
+        supplies a new Lock; the body verb observes the fresh instance,
+        proving the caller's re-supplied dict wins on the resume path.
+        """
+        store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+        seen: list[object] = []
+        halt = asyncio.Event()
+
+        @verb
+        async def body_step(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            """Capture the extra handle; halt after two iterations."""
+            seen.append(ctx.extra["lock"])
+            ctx.state.data["counter"] += 1
+            if ctx.state.data["counter"] >= 2:
+                halt.set()
+            return ctx.state.data["counter"]
+
+        def build(halt_event: asyncio.Event | None) -> Flow:
+            """Build the outer flow bound to the shared store + optional halt."""
+            body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+            body.call(body_step)
+            outer = Flow(
+                lg=make_test_logger(),
+                saia_factory=StubFactory(),
+                state={"counter": 0},
+            )
+            outer.iterate(body, max_iters=5)
+            outer = outer.with_checkpointer(store, "extra-resume-1")
+            return outer.with_halt(halt_event) if halt_event is not None else outer
+
+        pre_lock = threading.Lock()
+        await build(halt).run(extra={"lock": pre_lock})
+        # Pre-halt: 2 iterations, both observed the pre-halt lock.
+        assert seen == [pre_lock, pre_lock]
+
+        # Resume with a fresh, distinct lock — must survive replay + reach
+        # the post-halt iterations by identity.
+        resume_lock = threading.Lock()
+        assert resume_lock is not pre_lock
+        await build(halt_event=None).run(resume=True, extra={"lock": resume_lock})
+        # Every post-resume iteration observed the resume lock, never the
+        # pre-halt one (which would prove extra leaked through a blob).
+        assert all(x is resume_lock for x in seen[2:])
+        assert pre_lock not in seen[2:]
 
 
 class TestPureVerbCtx:
