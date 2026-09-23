@@ -109,6 +109,76 @@ class TestRetention:
 
 
 # ---------------------------------------------------------------------------
+# Save on halt — halt-observation sites emit a commit at the halt position
+# ---------------------------------------------------------------------------
+
+
+class TestSaveOnHaltIterate:
+    """Iterate halt-observation site writes a commit at the halted iteration."""
+
+    async def test_halt_before_first_iteration_saves_at_iteration_zero(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Halt already set on entry to the iterate → commit saved at iteration=0."""
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+        halt.set()  # halt observed on the first loop-top check, before any body run.
+        await build_canonical_flow(
+            make_test_logger(),
+            max_iters=5,
+            halt=halt,
+            halt_after_iteration=999,  # internal halt_check never fires; halt is pre-set externally.
+            store=store,
+            trajectory_id="halt-iter-0",
+        ).run()
+
+        halted_hash = store.resolve_ref("halt-iter-0")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("halt-iter-0", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+        assert commit.meta.iteration == 0
+
+        # Resume with halt cleared — completes the full iterate.
+        halt.clear()
+        result = await build_canonical_flow(
+            make_test_logger(), max_iters=5, store=store, trajectory_id="halt-iter-0"
+        ).run(resume=True)
+        assert result["iterations_completed"] == 5
+
+    async def test_halt_between_iterations_overwrites_ok_ref_with_halted_commit(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Halt after body N → halted commit overwrites the ok ref at iteration=N."""
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+        await build_canonical_flow(
+            make_test_logger(),
+            max_iters=5,
+            halt=halt,
+            halt_after_iteration=2,
+            store=store,
+            trajectory_id="halt-iter-mid",
+        ).run()
+
+        halted_hash = store.resolve_ref("halt-iter-mid")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("halt-iter-mid", "commit", halted_hash) or b"")
+        # Halt fired inside body 2's halt_check (iteration counter=2 by the time the loop-top
+        # check observed halt). Post-halt-save iteration matches.
+        assert commit.meta.outcome == "halted"
+        assert commit.meta.iteration == 2
+
+        # Resume completes the remaining iterations.
+        halt.clear()
+        result = await build_canonical_flow(
+            make_test_logger(), max_iters=5, store=store, trajectory_id="halt-iter-mid"
+        ).run(resume=True)
+        assert result["iterations_completed"] == 5
+
+
+# ---------------------------------------------------------------------------
 # Resume determinism — baseline vs interrupt+resume must reach same final state
 # ---------------------------------------------------------------------------
 

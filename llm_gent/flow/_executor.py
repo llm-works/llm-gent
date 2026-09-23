@@ -520,6 +520,7 @@ async def _run_iterate(
         if it.deadline is not None and time.monotonic() - started >= it.deadline:
             break
         if env.halt is not None and env.halt.is_set():
+            await _save_halt_checkpoint(env, iteration, node_id, child_state)
             break
         result = await _dispatch_iterate_body(it, env, child_state, result, node_id)
         iteration += 1
