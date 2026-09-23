@@ -1139,7 +1139,14 @@ class Flow:
         """
         result: Any = UNSET
         for index in range(start_index, len(self._nodes)):
-            if index > start_index and env.halt is not None and env.halt.is_set():
+            # Halt observation: only when a checkpointer is bound (otherwise
+            # halt-save is a no-op and the step's own halt-handling should run).
+            if (
+                index > start_index
+                and env.checkpointer is not None
+                and env.halt is not None
+                and env.halt.is_set()
+            ):
                 await _save_halt_checkpoint(env, 0, chain_ids[index], env.state)
                 break
             node = self._nodes[index]
