@@ -37,7 +37,7 @@ from .state import State, StateFactory
 if TYPE_CHECKING:
     from .flow import Flow
 
-from .checkpoint import CheckpointStore
+from .checkpoint import CheckpointPolicy, CheckpointStore
 
 
 class Unset:
@@ -264,6 +264,7 @@ class _RunEnv:
     ancestor_chain: tuple[str, ...] = ()
     replay: _ResumeReplay | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
 
 
 @dataclass

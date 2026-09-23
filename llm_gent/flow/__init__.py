@@ -55,7 +55,7 @@ mount them via the existing trait system.
 """
 
 from .archetypes import extractor, grader, planner, synthesizer
-from .checkpoint import CheckpointStore
+from .checkpoint import CheckpointPolicy, CheckpointStore
 from .context import Context
 from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
@@ -69,6 +69,7 @@ from .verb import verb
 
 __all__ = [
     "UNSET",
+    "CheckpointPolicy",
     "CheckpointStore",
     "Context",
     "Failure",

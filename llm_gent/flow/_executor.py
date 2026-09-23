@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from .flow import Flow
 
 
-def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
+def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context[Any]:
     """Build the Context passed to the node's verb (and to its hooks).
 
     Verb nodes get a role-bound ctx; ``ctx.saia`` resolves lazily on first
@@ -70,6 +70,12 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
     (branch/iterate/map) get an ambient ctx with ``role=None`` — those nodes
     have no single role, so ``ctx.saia`` returns ``None`` (each inner verb
     builds its own role-bound ctx as it runs).
+
+    ``node_id`` is the composition-graph id of the node the ctx is being
+    built for; threaded onto ``ctx._node_id`` so :meth:`Context.checkpoint`
+    can address the currently-executing position. ``None`` for hook ctxs
+    (until predicates, on_error, on_item_complete) where no verb is
+    running under a single node id.
     """
     from .flow import Flow
 
@@ -83,6 +89,8 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
             halt=env.halt,
             budget=env.budget,
             extra=env.extra,
+            _env=env,
+            _node_id=node_id,
         )
     return Context(
         role=target.role,
@@ -92,6 +100,8 @@ def _build_ctx(target: Any, env: _RunEnv) -> Context[Any]:
         halt=env.halt,
         budget=env.budget,
         extra=env.extra,
+        _env=env,
+        _node_id=node_id,
     )
 
 
@@ -303,6 +313,7 @@ async def _run_subflow(
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=child_replay,
         parent_extra=env.extra,
+        parent_policy=env.policy,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -397,6 +408,7 @@ async def _check_until(
     result: Any,
     iterate_state: State[Any],
     env: _RunEnv,
+    node_id: str,
 ) -> bool:
     """Evaluate the iterate node's until predicate with the last body result and scoped state."""
     if until_fn is None:
@@ -409,6 +421,8 @@ async def _check_until(
         halt=env.halt,
         budget=env.budget,
         extra=env.extra,
+        _env=env,
+        _node_id=node_id,
     )
     verdict = until_fn(result, ctx)
     if inspect.isawaitable(verdict):
@@ -463,6 +477,7 @@ async def _run_branch(
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=_pop_replay_for(env, node_id),
         parent_extra=env.extra,
+        parent_policy=env.policy,
     )
 
 
@@ -524,8 +539,9 @@ async def _run_iterate(
             break
         result = await _dispatch_iterate_body(it, env, child_state, result, node_id)
         iteration += 1
-        await _save_iterate_checkpoint(env, iteration, node_id, child_state)
-        if await _check_until(it.until, result, child_state, env):
+        if env.policy.on_iterate:
+            await _save_iterate_checkpoint(env, iteration, node_id, child_state)
+        if await _check_until(it.until, result, child_state, env, node_id):
             break
     await _merge_state(it.merge_fn, env.state, child_state)
     return result
@@ -699,6 +715,7 @@ async def _dispatch_iterate_body(
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=_pop_replay_for(env, node_id),
         parent_extra=env.extra,
+        parent_policy=env.policy,
     )
 
 
@@ -710,6 +727,22 @@ async def _save_iterate_checkpoint(
 ) -> None:
     """Persist an ``outcome="ok"`` commit at an iterate boundary."""
     await _save_scope_commit(env, iteration, node_id, current_state, "ok")
+
+
+async def _save_map_item_checkpoint(
+    env: _RunEnv,
+    item_index: int,
+    node_id: str,
+    current_state: State[Any],
+) -> None:
+    """Persist an ``outcome="ok"`` commit at a map item boundary.
+
+    Uses ``item_index`` as the iteration slot so each item lands in
+    a distinct ref under the map's node_path. Items complete in
+    parallel; save order is not guaranteed to match item order and
+    saves may interleave with concurrent items' merges.
+    """
+    await _save_scope_commit(env, item_index, node_id, current_state, "ok")
 
 
 async def _save_halt_checkpoint(
@@ -977,6 +1010,7 @@ async def _dispatch_map_body(
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=replay,
         parent_extra=env.extra,
+        parent_policy=env.policy,
     )
 
 
@@ -1000,13 +1034,13 @@ async def _run_map_item_strict(
     if env.halt is not None and env.halt.is_set():
         skipped = Skipped(item=item)
         await _fire_on_item_complete(
-            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state), env
+            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state, node_id), env
         )
         return skipped
-    item_ctx = _map_item_ctx(env, env.state)
+    item_ctx = _map_item_ctx(env, env.state, node_id)
     try:
         child_state = await _project_state(mp.state_fn, env.state, mp.state_factory)
-        item_ctx = _map_item_ctx(env, child_state)
+        item_ctx = _map_item_ctx(env, child_state, node_id)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             skipped = Skipped(item=item)
             await _fire_on_item_complete(mp.on_item_complete, item, skipped, item_ctx, env)
@@ -1021,10 +1055,9 @@ async def _run_map_item_strict(
             mp.on_item_complete, item, Failure(exception=exc, item=item), item_ctx, env
         )
         raise
-    failure = await _merge_and_notify(mp, item, result, child_state, item_ctx, env, merge_lock)
-    if failure is not None:
-        raise failure.exception
-    return result
+    return await _map_item_success(
+        mp, item, result, child_state, item_ctx, env, merge_lock, node_id, item_index, strict=True
+    )
 
 
 async def _run_map_item(
@@ -1049,13 +1082,13 @@ async def _run_map_item(
     if env.halt is not None and env.halt.is_set():
         skipped = Skipped(item=item)
         await _fire_on_item_complete(
-            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state), env
+            mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state, node_id), env
         )
         return skipped
-    item_ctx = _map_item_ctx(env, env.state)
+    item_ctx = _map_item_ctx(env, env.state, node_id)
     try:
         child_state = await _project_state(mp.state_fn, env.state, mp.state_factory)
-        item_ctx = _map_item_ctx(env, child_state)
+        item_ctx = _map_item_ctx(env, child_state, node_id)
         if mp.guard is not None and not await _run_guard(mp.guard, item, item_ctx):
             skipped = Skipped(item=item)
             await _fire_on_item_complete(mp.on_item_complete, item, skipped, item_ctx, env)
@@ -1069,17 +1102,18 @@ async def _run_map_item(
         failure = Failure(exception=exc, item=item)
         await _fire_on_item_complete(mp.on_item_complete, item, failure, item_ctx, env)
         return failure
-    merge_failure = await _merge_and_notify(
-        mp, item, result, child_state, item_ctx, env, merge_lock
+    return await _map_item_success(
+        mp, item, result, child_state, item_ctx, env, merge_lock, node_id, item_index, strict=False
     )
-    return merge_failure if merge_failure is not None else result
 
 
-def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
+def _map_item_ctx(env: _RunEnv, child_state: Any, node_id: str | None = None) -> Context[Any]:
     """Build the per-item :class:`Context` fed to guard, on_error, and
     on_item_complete hooks.
 
     These hooks run without a :class:`Role`, so ``ctx.saia`` is ``None``.
+    ``node_id`` is the :class:`_Map` node's own id — passing it lets a
+    ``ctx.checkpoint()`` from a map hook address the map's position.
     """
     return Context(
         role=None,
@@ -1089,6 +1123,8 @@ def _map_item_ctx(env: _RunEnv, child_state: Any) -> Context[Any]:
         halt=env.halt,
         budget=env.budget,
         extra=env.extra,
+        _env=env,
+        _node_id=node_id,
     )
 
 
@@ -1167,6 +1203,38 @@ async def _merge_and_notify(
         return failure
     await _fire_on_item_complete(mp.on_item_complete, item, result, item_ctx, env)
     return None
+
+
+async def _map_item_success(
+    mp: _Map,
+    item: Any,
+    result: Any,
+    child_state: State[Any],
+    item_ctx: Context[Any],
+    env: _RunEnv,
+    merge_lock: asyncio.Lock,
+    node_id: str,
+    item_index: int,
+    *,
+    strict: bool,
+) -> Any:
+    """Merge, optionally save (per policy), and return the map item's result.
+
+    Both ``strict`` and non-strict paths converge here after the body
+    returned successfully. Merge-time failures are handled per-mode:
+    strict re-raises the underlying exception; non-strict returns the
+    Failure sentinel. Successful merges save a scope commit when
+    ``env.policy.on_map_item`` is set (see :attr:`CheckpointPolicy`).
+    """
+    failure = await _merge_and_notify(mp, item, result, child_state, item_ctx, env, merge_lock)
+    if failure is not None:
+        if strict:
+            raise failure.exception
+        return failure
+    if env.policy.on_map_item:
+        async with merge_lock:
+            await _save_map_item_checkpoint(env, item_index, node_id, env.state)
+    return result
 
 
 async def _resolve_items(

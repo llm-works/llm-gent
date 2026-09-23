@@ -66,7 +66,7 @@ from appinfra.log import Logger
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._executor import _build_ctx, _execute_node, _save_halt_checkpoint, _step_inputs
-from .checkpoint import CheckpointStore, maybe_await
+from .checkpoint import CheckpointPolicy, CheckpointStore, maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -167,6 +167,7 @@ class Flow:
         self._nodes: list[_Node] = []
         self._replay_consumed: bool = False
         self._halt_saved: bool = False
+        self._checkpoint_policy: CheckpointPolicy | None = None
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -776,6 +777,46 @@ class Flow:
         self._client_flow_id = client_flow_id
         return self
 
+    def with_checkpoint_policy(
+        self,
+        policy: CheckpointPolicy | None = None,
+        /,
+        **kwargs: Any,
+    ) -> Flow:
+        """Attach a :class:`CheckpointPolicy` governing implicit saves.
+
+        The policy gates automatic composition-step saves (see
+        :attr:`CheckpointPolicy.on_iterate`). It does NOT affect the
+        halt-observation save (which always fires when a checkpointer
+        is wired) nor the explicit ``ctx.checkpoint()`` trigger (which
+        always fires when a verb invokes it).
+
+        Accepts either a ready-made :class:`CheckpointPolicy` (for
+        sharing across flows) or its constructor kwargs directly::
+
+            flow.with_checkpoint_policy(on_iterate=True)
+            flow.with_checkpoint_policy(CheckpointPolicy(on_iterate=True))
+            flow.with_checkpoint_policy(shared_policy)
+
+        Passing both is a programming error.
+
+        A subflow inherits the outer runtime's policy unless it
+        attaches its own; a local ``.with_checkpoint_policy`` on a
+        subflow overrides the outer policy for that subtree.
+
+        Returns ``self`` for chaining.
+        """
+        if policy is not None:
+            if kwargs:
+                raise ValueError(
+                    "with_checkpoint_policy accepts either a CheckpointPolicy "
+                    "instance or field kwargs, not both"
+                )
+            self._checkpoint_policy = policy
+        else:
+            self._checkpoint_policy = CheckpointPolicy(**kwargs)
+        return self
+
     def _require_map_tail(self, method: str) -> _Map:
         """Return the last node's target if it is a :class:`_Map`, else raise."""
         if not self._nodes:
@@ -1061,6 +1102,7 @@ class Flow:
         parent_ancestor_chain: tuple[str, ...] = (),
         parent_replay: _ResumeReplay | None = None,
         parent_extra: dict[str, Any] | None = None,
+        parent_policy: CheckpointPolicy | None = None,
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -1102,6 +1144,7 @@ class Flow:
             parent_ancestor_chain=parent_ancestor_chain,
             parent_replay=parent_replay,
             parent_extra=parent_extra,
+            parent_policy=parent_policy,
         )
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
@@ -1162,7 +1205,7 @@ class Flow:
                 node_args, node_kwargs = (), {}
             else:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
-            ctx = _build_ctx(node.target, env)
+            ctx = _build_ctx(node.target, env, node_id)
             result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
         return result
 
@@ -1179,6 +1222,7 @@ class Flow:
         parent_ancestor_chain: tuple[str, ...] = (),
         parent_replay: _ResumeReplay | None = None,
         parent_extra: dict[str, Any] | None = None,
+        parent_policy: CheckpointPolicy | None = None,
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
@@ -1194,6 +1238,12 @@ class Flow:
         """
         halt = self._halt_event if self._halt_event is not None else parent_halt
         budget = self._budget_tracker if self._budget_tracker is not None else parent_budget
+        if self._checkpoint_policy is not None:
+            policy = self._checkpoint_policy
+        elif parent_policy is not None:
+            policy = parent_policy
+        else:
+            policy = CheckpointPolicy()
         checkpointer: CheckpointStore | None
         client_flow_id: str | None
         if self._checkpointer is not None:
@@ -1214,6 +1264,7 @@ class Flow:
             ancestor_chain=parent_ancestor_chain,
             replay=parent_replay,
             extra=parent_extra if parent_extra is not None else {},
+            policy=policy,
         )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:

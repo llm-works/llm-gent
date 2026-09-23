@@ -183,6 +183,9 @@ def build_canonical_flow(
     flow = ff.create(state=state if state is not None else CanonicalCounter())
     if store is not None:
         flow.with_checkpointer(store, trajectory_id)
+        # Canonical fixture opts into per-iteration saves: the determinism
+        # assertions and resume tests need each boundary as a resumable anchor.
+        flow.with_checkpoint_policy(on_iterate=True)
     if halt is not None:
         flow.with_halt(halt)
 
