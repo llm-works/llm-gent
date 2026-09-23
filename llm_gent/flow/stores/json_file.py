@@ -362,7 +362,9 @@ class JsonFileCheckpointStore:
         """Return the ``seq`` value stored in a ref file, or ``None`` if absent/unreadable."""
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
             return None
         raw = payload.get("seq")
         if not isinstance(raw, int):
