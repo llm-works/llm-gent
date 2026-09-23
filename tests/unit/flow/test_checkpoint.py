@@ -113,6 +113,90 @@ class TestRetention:
 # ---------------------------------------------------------------------------
 
 
+class TestSaveOnHaltChain:
+    """Chain-only halt-observation site writes a commit at the not-yet-run step."""
+
+    async def test_chain_only_halt_saves_commit_and_resume_lands_on_halted_step(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Chain flow with no iterate: halt set by step b → commit at c; resume lands at c."""
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+
+        @verb
+        async def step_a(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            ctx.state.data["a"] = 1
+            return 1
+
+        @verb
+        async def step_b(ctx: Context[dict[str, Any]], prev: int) -> int:
+            ctx.state.data["b"] = prev + 1
+            halt.set()
+            return ctx.state.data["b"]
+
+        @verb
+        async def step_c(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            # Reads from state — the halted resume runs step_c with no prev_result
+            # per _walk_chain's start_index > 0 contract.
+            ctx.state.data["c"] = ctx.state.data["b"] + 1
+            return ctx.state.data["c"]
+
+        ff = FlowFactory(make_test_logger())
+        pre = (
+            ff.create(state={})
+            .with_checkpointer(store, "chain-halt")
+            .with_halt(halt)
+            .call(step_a)
+            .then(step_b)
+            .then(step_c)
+        )
+        await pre.run()
+
+        halted_hash = store.resolve_ref("chain-halt")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("chain-halt", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+        assert commit.meta.iteration == 0
+        # node_path's last segment is the not-yet-run step's chain id — step_c's.
+        # Independent of the exact id, the run must not have executed step_c yet:
+        # the pre-halt state has only a and b, no c.
+
+        halt.clear()
+        resume = (
+            ff.create(state={})
+            .with_checkpointer(store, "chain-halt")
+            .call(step_a)
+            .then(step_b)
+            .then(step_c)
+        )
+        result = await resume.run(resume=True)
+        # step_c ran on resume; a and b restored from the halt commit.
+        assert result == 3
+
+    async def test_halt_without_checkpointer_is_noop(self) -> None:
+        """No checkpointer bound → halt observed → no store activity."""
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        halt = asyncio.Event()
+
+        @verb
+        async def a(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            halt.set()
+
+        @verb
+        async def b(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            pass
+
+        ff = FlowFactory(make_test_logger())
+        flow = ff.create(state={}).with_halt(halt).call(a).then(b)
+        # No .with_checkpointer — halt check fires between chain steps but
+        # _save_halt_checkpoint short-circuits at env.checkpointer is None.
+        # Run should complete without raising.
+        await flow.run()
+
+
 class TestSaveOnHaltIterate:
     """Iterate halt-observation site writes a commit at the halted iteration."""
 

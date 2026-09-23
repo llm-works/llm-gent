@@ -720,11 +720,17 @@ async def _save_halt_checkpoint(
 ) -> None:
     """Persist an ``outcome="halted"`` commit at a halt observation point.
 
-    Called from the executor's two halt-observation sites — the
-    between-iterations check in :func:`_run_iterate` and the
-    between-chain-steps check in :meth:`Flow._walk_chain` — so a
-    ``run(resume=True)`` after a halted process restart resolves to
-    this commit and re-enters at the halted position.
+    Called from the executor's halt-observation sites — the between-
+    iterations check in :func:`_run_iterate` and the between-chain-
+    steps check in :meth:`Flow._walk_chain` — so a ``run(resume=True)``
+    after a halted process restart resolves to this commit and re-
+    enters at the halted position.
+
+    At most one halt-save fires per run: :attr:`Flow._halt_saved` on
+    the top-level runtime latches after the first save so a halt fires
+    through an inner iterate's boundary check + the outer chain-walk's
+    between-steps check does not double-save (the inner save is the
+    finer-grained resume anchor).
 
     ``iteration`` is the iterate's current counter at halt time (``0``
     for a chain-only halt with no enclosing iterate). ``node_id`` is
@@ -734,7 +740,10 @@ async def _save_halt_checkpoint(
     idempotent-in-effects to survive re-run on resume, the same
     contract that already governs iterate re-run-iteration-N.
     """
+    if env.runtime._halt_saved:
+        return
     await _save_scope_commit(env, iteration, node_id, current_state, "halted")
+    env.runtime._halt_saved = True
 
 
 async def _save_scope_commit(
