@@ -195,6 +195,39 @@ I already do this" checks against state or an external record).
 The framework offers no automatic once-only guarantee. Non-idempotent
 side effects are the verb author's responsibility.
 
+### Checkpoint cadence
+
+Three save triggers govern when the framework writes commits:
+
+- **Halt observation** — always on. Setting the ambient halt event
+  causes the executor to save a `halted` commit before returning.
+  This is the durability guarantee for pause/resume across process
+  restart.
+- **Explicit `ctx.checkpoint()`** — always available. Verbs invoke
+  the async method to force a save at their current node position.
+- **Implicit iterate-boundary save** — off by default. Governed by
+  `CheckpointPolicy.on_iterate`; opt in with
+  `.with_checkpoint_policy(on_iterate=True)` for flows where each
+  iteration boundary should be a resumable anchor.
+
+Rationale: writes are cheap in aggregate but not free. Long chain
+flows with expensive state don't want a commit after every step, and
+iterate bodies with cheap iterations shouldn't pay for a save every
+pass. The default (halt-only + explicit) minimizes writes while
+preserving the pause/resume promise.
+
+```python
+flow = (
+    ff.create(state=...)
+    .with_checkpointer(store, "trajectory-42")
+    .with_checkpoint_policy(on_iterate=True)  # opt in per-iteration saves
+    .iterate(body, max_iters=10)
+)
+```
+
+Halt-save and `ctx.checkpoint()` are unaffected by the policy — the
+policy governs only implicit auto-saves.
+
 ## Related Projects
 
 - [llm-infer](https://github.com/llm-works/llm-infer) - LLM inference server and client
