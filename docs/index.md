@@ -171,14 +171,20 @@ Rubric for picking a channel when only one consumer needs the value:
 
 ### Verb idempotency and resume
 
-Verbs may re-run on `run(resume=True)`. Two paths trigger re-run:
+Verbs may re-run on `run(resume=True)` when the process terminates
+mid-execution. The checkpoint records the last completed boundary
+(iteration or chain step); work after that boundary re-runs on resume:
 
-- Iterate resume: iteration N had checkpointed after its body completed.
-  Halt fires, restart resumes at iteration N and re-runs the body.
-- Chain-step halt resume: halt fires between chain steps; the next
-  step's ref is written before exit. Restart resumes at that step
-  from scratch — no `prev_result` is threaded in (the predecessor
-  did not re-run), so the step reads from state instead.
+- **Mid-body crash**: iteration N's body is running when the process
+  dies. The last checkpoint is at iteration N (post-body-N-1). Resume
+  restarts at iteration N, re-running body N from scratch.
+- **Mid-step crash**: a chain step is running when the process dies.
+  The last checkpoint is at the prior step. Resume re-runs the step.
+
+Clean halts (observed between iterations or chain steps) do not cause
+re-runs — they checkpoint the halt position and resume continues from
+the next boundary. Chain-step resume receives no `prev_result` (the
+predecessor did not re-run), so the step reads from state instead.
 
 Consequence: **verbs must be idempotent-in-effects.** Reading state,
 mutating state, and returning a value are all safe to repeat. Side

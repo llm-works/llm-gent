@@ -890,6 +890,7 @@ class Flow:
         if (
             self._checkpointer is None
             or self._client_flow_id is None
+            or self._halt_saved
             or (self._halt_event is not None and self._halt_event.is_set())
         ):
             return
@@ -1139,10 +1140,14 @@ class Flow:
         """
         result: Any = UNSET
         for index in range(start_index, len(self._nodes)):
-            # Halt observation: only when a checkpointer is bound (otherwise
-            # halt-save is a no-op and the step's own halt-handling should run).
+            # Halt observation: only at the top-level chain (env.runtime is self)
+            # AND only with a checkpointer bound. Nested body chains let halt
+            # propagate to iterate boundaries where iteration state is consistent.
+            # Without a checkpointer, halt-save is meaningless and the step's own
+            # halt-handling (e.g., Map returning Skipped) should run.
             if (
                 index > start_index
+                and env.runtime is self
                 and env.checkpointer is not None
                 and env.halt is not None
                 and env.halt.is_set()
