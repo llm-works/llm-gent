@@ -1232,7 +1232,8 @@ async def _map_item_success(
             raise failure.exception
         return failure
     if env.policy.on_map_item:
-        await _save_map_item_checkpoint(env, item_index, node_id, env.state)
+        async with merge_lock:
+            await _save_map_item_checkpoint(env, item_index, node_id, env.state)
     return result
 
 
