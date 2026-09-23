@@ -165,11 +165,18 @@ class JsonFileCheckpointStore:
         iteration: int,
         commit_hash: str,
     ) -> None:
-        """Write ``refs/{node_path}/{iteration}.json`` with the commit hash."""
+        """Write ``refs/{node_path}/{iteration}.json`` with the commit hash.
+
+        Also stamps a strictly-increasing per-trajectory sequence number
+        (``seq``) into the JSON so :meth:`_latest_across_trajectory` can
+        pick the newest ref deterministically without relying on mtime
+        ties or clock adjustments.
+        """
         ref_dir = self._refs_dir(client_flow_id, node_path)
         ref_dir.mkdir(parents=True, exist_ok=True)
+        seq = self._next_ref_seq(client_flow_id)
         target = ref_dir / f"{iteration}.json"
-        payload = json.dumps({"commit_hash": commit_hash})
+        payload = json.dumps({"commit_hash": commit_hash, "seq": seq})
         fd, tmp_path = tempfile.mkstemp(dir=ref_dir, prefix=f"{iteration}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -179,6 +186,34 @@ class JsonFileCheckpointStore:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
             raise
+
+    def _next_ref_seq(self, client_flow_id: str) -> int:
+        """Return the next per-trajectory ref sequence.
+
+        Single-writer contract per trajectory (see module docstring), so
+        read+increment+write without file locking is safe. The seq
+        counter file lives at ``<traj>/_seq``.
+        """
+        traj_dir = self._trajectory_dir(client_flow_id)
+        traj_dir.mkdir(parents=True, exist_ok=True)
+        seq_file = traj_dir / "_seq"
+        current = 0
+        if seq_file.is_file():
+            try:
+                current = int(seq_file.read_text(encoding="utf-8").strip() or "0")
+            except (OSError, ValueError):
+                current = 0
+        next_seq = current + 1
+        fd, tmp_path = tempfile.mkstemp(dir=traj_dir, prefix="_seq.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(str(next_seq))
+            os.replace(tmp_path, seq_file)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+        return next_seq
 
     def resolve_ref(
         self,
@@ -199,6 +234,10 @@ class JsonFileCheckpointStore:
             return None
 
         if node_path is None:
+            by_seq = self._latest_across_trajectory_by_seq(traj_refs)
+            if by_seq is not None:
+                return by_seq
+            # Fallback for legacy refs without a persisted seq.
             return self._latest_across_trajectory(traj_refs)
 
         ref_dir = self._refs_dir(client_flow_id, node_path)
@@ -292,6 +331,43 @@ class JsonFileCheckpointStore:
         if newest_path is None:
             return None
         return self._read_ref(newest_path)
+
+    def _latest_across_trajectory_by_seq(self, traj_refs: Path) -> str | None:
+        """Return the ref with the highest persisted ``seq`` under a trajectory.
+
+        Falls back to :meth:`_latest_across_trajectory` (mtime-based) when
+        no ref in the trajectory carries a ``seq`` — e.g., pre-``seq``
+        refs written before this change.
+        """
+        best_seq = -1
+        best_path: Path | None = None
+        for node_dir in traj_refs.iterdir():
+            if not node_dir.is_dir():
+                continue
+            for entry in node_dir.iterdir():
+                if not _ITER_RE.match(entry.name):
+                    continue
+                seq = self._read_ref_seq(entry)
+                if seq is None:
+                    continue
+                if seq > best_seq:
+                    best_seq = seq
+                    best_path = entry
+        if best_path is None:
+            return None
+        return self._read_ref(best_path)
+
+    @staticmethod
+    def _read_ref_seq(path: Path) -> int | None:
+        """Return the ``seq`` value stored in a ref file, or ``None`` if absent/unreadable."""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        raw = payload.get("seq")
+        if not isinstance(raw, int):
+            return None
+        return raw
 
     def _latest_under_node_path(self, ref_dir: Path) -> str | None:
         """Return the highest-iteration ref under ``ref_dir``, or ``None``."""

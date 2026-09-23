@@ -204,7 +204,13 @@ class PgCheckpointStore:
             stmt = stmt.where(FlowRef.node_path == node_path)
         if iteration is not None:
             stmt = stmt.where(FlowRef.iteration == iteration)
+        elif node_path is not None:
+            # Latest under a specific node_path = highest iteration, not
+            # newest write — matches the JsonFile helper's semantics and
+            # the Protocol contract.
+            stmt = stmt.order_by(FlowRef.iteration.desc()).limit(1)
         else:
+            # Latest across the whole trajectory = newest write.
             stmt = stmt.order_by(FlowRef.created_at.desc()).limit(1)
         with self._pg.session() as session:
             row = session.execute(stmt).first()

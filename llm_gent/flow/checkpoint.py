@@ -81,7 +81,7 @@ async def maybe_await(value: Any) -> Any:
     Use this helper at every checkpoint-store call site so sync and
     async stores are handled uniformly::
 
-        result = await maybe_await(store.get_object("commit", h))
+        result = await maybe_await(store.get_object(client_flow_id, "commit", h))
 
     Uses :func:`inspect.isawaitable`, which returns ``True`` only for
     coroutines and objects with ``__await__``. Generators and async

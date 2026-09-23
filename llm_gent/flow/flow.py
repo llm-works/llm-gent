@@ -58,6 +58,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from appinfra.log import Logger
@@ -91,7 +92,7 @@ from .nodes import (
 )
 from .role import Role
 from .state import State, StateFactory
-from .state.cas import Commit, Tree
+from .state.cas import Commit, CommitMeta, ProducedBy, Tree
 
 
 class Flow:
@@ -848,17 +849,70 @@ class Flow:
             *args, state=active_state, runtime=self, parent_replay=replay, **kwargs
         )
         self._assert_replay_consumed(replay)
-        # Preserve trajectory on halt-triggered exit; on clean exit consult
-        # the store's retention policy — default "retain" keeps the record
-        # for audit / diff / provenance, "gc_on_success" prunes.
-        if (
-            self._checkpointer is not None
-            and self._client_flow_id is not None
-            and (self._halt_event is None or not self._halt_event.is_set())
-            and self._checkpointer.retention == "gc_on_success"
-        ):
-            await maybe_await(self._checkpointer.gc_trajectory(self._client_flow_id))
+        await self._apply_clean_exit_retention()
         return result
+
+    async def _apply_clean_exit_retention(self) -> None:
+        """Apply the store's retention policy on the clean-exit path.
+
+        Halt-triggered exits preserve the trajectory regardless of policy.
+        On a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the
+        record and stamps a completion marker so a subsequent
+        ``run(resume=True)`` doesn't replay the final iterate commit and
+        re-execute chain steps after the iterate.
+        """
+        if (
+            self._checkpointer is None
+            or self._client_flow_id is None
+            or (self._halt_event is not None and self._halt_event.is_set())
+        ):
+            return
+        if self._checkpointer.retention == "gc_on_success":
+            await maybe_await(self._checkpointer.gc_trajectory(self._client_flow_id))
+        else:
+            await self._stamp_completion_marker()
+
+    async def _stamp_completion_marker(self) -> None:
+        """Write a sentinel commit + ref marking the trajectory complete.
+
+        The marker uses a reserved ``node_path="$complete"`` and
+        ``produced_by.node_id="$complete"``; :meth:`_hydrate_resume_state`
+        detects it and returns a fresh-run replay context.
+        """
+        assert self._checkpointer is not None
+        assert self._client_flow_id is not None
+        empty_tree = Tree.from_entries([])
+        meta = self._completion_marker_meta()
+        commit = Commit.build(root_tree_hash=empty_tree.content_hash, parent_hashes=(), meta=meta)
+        cfid = self._client_flow_id
+        await maybe_await(
+            self._checkpointer.put_object(
+                cfid, "tree", empty_tree.content_hash, empty_tree.to_bytes()
+            )
+        )
+        await maybe_await(
+            self._checkpointer.put_object(cfid, "commit", commit.content_hash, commit.to_bytes())
+        )
+        await maybe_await(self._checkpointer.put_ref(cfid, "$complete", 0, commit.content_hash))
+
+    def _completion_marker_meta(self) -> CommitMeta:
+        """Build :class:`CommitMeta` for the completion sentinel."""
+        from llm_gent import __version__
+
+        assert self._client_flow_id is not None
+        return CommitMeta(
+            client_flow_id=self._client_flow_id,
+            node_path="$complete",
+            iteration=0,
+            produced_by=ProducedBy(
+                node_id="$complete", verb_name=None, role=None, result_hash=None
+            ),
+            trace_ref=(),
+            outcome="ok",
+            flow_root_id=self._client_flow_id,
+            timestamp_iso=datetime.now(UTC).isoformat(),
+            framework_version=__version__,
+        )
 
     def _assert_replay_consumed(self, replay: _ResumeReplay | None) -> None:
         """Raise if a resume request never found its save-point iterate.
@@ -1157,6 +1211,10 @@ class Flow:
         if loaded is None:
             return fallback, None
         commit, scope_data = loaded
+        # A completion marker (stamped on clean exit under "retain") means
+        # the trajectory finished successfully — do not replay.
+        if commit.meta.node_path == "$complete":
+            return fallback, None
         return self._replay_from_commit(commit, scope_data)
 
     def _replay_from_commit(
@@ -1164,11 +1222,13 @@ class Flow:
     ) -> tuple[State[Any], _ResumeReplay | None]:
         """Split root / middle / leaf scope payloads, return State + replay.
 
-        Root scope hydrates the top-level :class:`State`; leaf scope
-        rides on ``_ResumeReplay.child_state_data`` for the save-point
-        iterate; middle scopes ride on ``intermediate_scope_data`` so
-        each scope-creating descent along the path can use the
-        checkpointed payload instead of re-projecting.
+        Root scope hydrates the top-level :class:`State`. Every non-root
+        scope rides on ``intermediate_scope_data`` in order; each
+        scope-creating descent (``.call(state=)``, ``.iterate(state=)``,
+        ``.map(state=)``) consumes the next entry at its own descent
+        site via :func:`_consume_scope_data`. A leaf iterate without a
+        ``state_fn`` creates no scope of its own and simply reuses the
+        parent scope with the fast-forwarded iteration count.
         """
         root_raw = scope_data[0] if scope_data else None
         hydrated_root = (
@@ -1176,8 +1236,7 @@ class Flow:
             if self._state_factory is None or root_raw is None
             else self._state_factory.restore(root_raw if isinstance(root_raw, dict) else {})
         )
-        leaf_raw = scope_data[-1] if len(scope_data) > 1 else None
-        intermediate_raw = tuple(scope_data[1:-1]) if len(scope_data) > 2 else ()
+        intermediate_raw = tuple(scope_data[1:])
         path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
         return (
             State(data=hydrated_root, _factory=self._state_factory),
@@ -1185,7 +1244,7 @@ class Flow:
                 remaining_path=path_tuple,
                 full_path=path_tuple,
                 iteration=commit.meta.iteration,
-                child_state_data=leaf_raw,
+                child_state_data=None,
                 intermediate_scope_data=intermediate_raw,
             ),
         )

@@ -136,6 +136,47 @@ class TestResumeDeterminism:
         result = await flow.run(resume=True)
         assert result["iterations_completed"] == 2
 
+    async def test_resume_after_clean_exit_does_not_replay_final_commit(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A completed run stamps a marker so `resume=True` after success is a no-op.
+
+        Without the marker, `run(resume=True)` after a successful run
+        resolves to the final iterate commit, fast-forwards iteration to
+        `max_iters`, and re-executes any chain steps after the iterate —
+        firing their side effects twice.
+        """
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        tail_calls: list[int] = []
+
+        @verb
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["counter"] += 1
+            return ctx.state.data["counter"]
+
+        @verb
+        async def tail(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            tail_calls.append(ctx.state.data["counter"])
+            return ctx.state.data["counter"]
+
+        def _flow() -> Any:
+            return (
+                FlowFactory(make_test_logger())
+                .create(state={"counter": 0})
+                .with_checkpointer(store, "complete-1")
+                .iterate(lambda body: body.call(bump), max_iters=3)
+                .call(tail)
+            )
+
+        await _flow().run()
+        assert tail_calls == [3]
+        # Resume after completion — should be a no-op (fresh run since the
+        # trajectory is marked complete). Tail runs ONCE more from the
+        # fresh state, not twice from the resumed one.
+        await _flow().run(resume=True)
+        assert tail_calls == [3, 3], f"tail should have fired only twice total; got {tail_calls}"
+
     async def test_multiple_resume_boundaries(self, store: JsonFileCheckpointStore) -> None:
         """Interrupt at different iterations, resume each — final state matches uninterrupted."""
         for cut_at in (1, 2, 3, 4):
@@ -311,14 +352,19 @@ class TestResumeErrorPaths:
 
 class TestScopedStateRoundTrip:
     async def test_call_scope_state_survives_resume(self, store: JsonFileCheckpointStore) -> None:
-        """A ``.call(state=child)`` scope's mutations survive across resume.
+        """A ``.call(state=child)`` scope's mutations survive resume.
 
-        The executor walks the scope stack per iteration and writes a
-        Blob per scope into the commit tree; on resume, the load path
-        reconstructs the leaf scope's data and hands it to the iterate
-        body via ``_ResumeReplay.child_state_data``.
+        Outer flow projects a child scope for its inner subflow; inner
+        subflow's iterate mutates the projected scope and halts. On
+        resume, the projected scope's payload restores from the CAS
+        commit instead of being re-projected fresh — verified by
+        inspecting the pre-resume commit's leaf blob and confirming the
+        resume completes without a structural-drift error.
         """
-        from llm_gent.flow import Context, verb
+        import json
+
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit, Tree
 
         @verb
         async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
@@ -328,29 +374,43 @@ class TestScopedStateRoundTrip:
         halt = asyncio.Event()
 
         @verb
-        async def halt_after_two(ctx: Context[dict[str, int]], _prev: Any = None) -> Any:
+        async def maybe_halt(ctx: Context[dict[str, int]], _prev: Any = None) -> Any:
             if ctx.state.data["counter"] >= 2:
                 halt.set()
             return _prev
 
-        from llm_gent.flow.factory import FlowFactory
-        from llm_gent.flow.state import TypeStateFactory
-        from llm_gent.flow.testing.checkpoint import CanonicalCounter  # reuse the FF pattern
+        ff = FlowFactory(make_test_logger())
+        inner = ff.create().iterate(lambda body: body.call(bump).then(maybe_halt), max_iters=5)
 
-        ff = FlowFactory(make_test_logger(), state_factory=TypeStateFactory(CanonicalCounter))
-
-        def _body(f: Any) -> None:
-            f.call(bump).then(halt_after_two)
-
-        flow = (
-            ff.create(state={"counter": 0})
+        outer_pre = (
+            ff.create(state={"outer": True})
             .with_checkpointer(store, "scoped-1")
             .with_halt(halt)
-            .iterate(_body, max_iters=5)
+            .call(inner, state=lambda _p: {"counter": 0})
         )
-        await flow.run()
-        # Trajectory preserved (halt exit — not gc'd regardless of retention).
-        assert store.resolve_ref("scoped-1") is not None
+        await outer_pre.run()
+
+        # Halt-commit's leaf scope (the .call scope) carries counter=2.
+        halted_hash = store.resolve_ref("scoped-1")
+        assert halted_hash is not None
+        halted_commit = Commit.from_bytes(
+            store.get_object("scoped-1", "commit", halted_hash) or b""
+        )
+        halted_tree = Tree.from_bytes(
+            store.get_object("scoped-1", "tree", halted_commit.root_tree_hash) or b""
+        )
+        leaf_hash = halted_tree.entries[-1].child_hash
+        leaf_data = json.loads((store.get_object("scoped-1", "blob", leaf_hash) or b"").decode())
+        assert leaf_data == {"counter": 2}
+
+        # Resume — projected scope restores from the commit instead of
+        # re-projecting to counter=0; run reaches max_iters=5 cleanly.
+        outer_resume = (
+            ff.create(state={"outer": True})
+            .with_checkpointer(store, "scoped-1")
+            .call(inner, state=lambda _p: {"counter": 0})
+        )
+        await outer_resume.run(resume=True)
 
     async def test_three_level_nested_scopes_survive_resume(
         self, store: JsonFileCheckpointStore
@@ -449,8 +509,10 @@ class TestScopedStateRoundTrip:
             .call(mid_flow, state=lambda _p: {})
         )
         await outer_resume.run(resume=True)
-        # Inspect the FINAL commit's middle-scope blob.
-        final_commit_hash = store.resolve_ref("3-level-1")
+        # Inspect the FINAL commit under the iterate's node_path (the
+        # completion marker at "$complete" is skipped by this specific
+        # lookup — it's stamped on clean exit).
+        final_commit_hash = store.resolve_ref("3-level-1", commit.meta.node_path)
         assert final_commit_hash is not None
         final_commit = Commit.from_bytes(
             store.get_object("3-level-1", "commit", final_commit_hash) or b""
