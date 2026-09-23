@@ -50,6 +50,7 @@ from .state.cas import (
     Blob,
     Commit,
     CommitMeta,
+    CommitOutcome,
     ProducedBy,
     Tree,
     TreeEntry,
@@ -706,7 +707,43 @@ async def _save_iterate_checkpoint(
     node_id: str,
     current_state: State[Any],
 ) -> None:
-    """Persist a content-addressed commit at an iterate boundary.
+    """Persist an ``outcome="ok"`` commit at an iterate boundary."""
+    await _save_scope_commit(env, iteration, node_id, current_state, "ok")
+
+
+async def _save_halt_checkpoint(
+    env: _RunEnv,
+    iteration: int,
+    node_id: str,
+    current_state: State[Any],
+) -> None:
+    """Persist an ``outcome="halted"`` commit at a halt observation point.
+
+    Called from the executor's two halt-observation sites — the
+    between-iterations check in :func:`_run_iterate` and the
+    between-chain-steps check in :meth:`Flow._walk_chain` — so a
+    ``run(resume=True)`` after a halted process restart resolves to
+    this commit and re-enters at the halted position.
+
+    ``iteration`` is the iterate's current counter at halt time (``0``
+    for a chain-only halt with no enclosing iterate). ``node_id`` is
+    the node the halt was observed against — the iterate's node id for
+    the iterate case; the not-yet-run chain step's id for the chain
+    case. State is captured verbatim; verbs are expected to be
+    idempotent-in-effects to survive re-run on resume, the same
+    contract that already governs iterate re-run-iteration-N.
+    """
+    await _save_scope_commit(env, iteration, node_id, current_state, "halted")
+
+
+async def _save_scope_commit(
+    env: _RunEnv,
+    iteration: int,
+    node_id: str,
+    current_state: State[Any],
+    outcome: CommitOutcome,
+) -> None:
+    """Persist a content-addressed commit at ``node_id`` under ``env``.
 
     Walks the scope stack from root to ``current_state``. For each scope:
     serialize its ``data`` via the state-data contract (dict passthrough
@@ -716,12 +753,16 @@ async def _save_iterate_checkpoint(
     depth via a two-digit ``scope_id``). Wrap the Tree in a Commit whose
     :class:`CommitMeta` pins ``(client_flow_id, node_path, iteration)``
     and the provenance triple (``produced_by``, ``trace_ref``,
-    ``outcome``). Finally put_ref points this iterate boundary at the
-    commit hash.
+    ``outcome``). Finally put_ref points this boundary at the commit
+    hash.
 
     ``node_path`` is the ``"/"``-joined ancestor chain (from run root to
-    this iterate, inclusive). blake2b hex has no ``"/"``, so split
+    this node, inclusive). blake2b hex has no ``"/"``, so split
     round-trips on resume.
+
+    ``outcome`` records why the commit fired — ``"ok"`` for a successful
+    iterate boundary, ``"halted"`` when the halt-observation site
+    triggered the save.
 
     No-op when the runtime has no checkpointer / client_flow_id bound.
     """
@@ -734,7 +775,7 @@ async def _save_iterate_checkpoint(
         env.checkpointer.put_object(env.client_flow_id, "tree", tree.content_hash, tree.to_bytes())
     )
     node_path = "/".join(env.ancestor_chain + (node_id,))
-    meta = _build_commit_meta(env, node_path, iteration, node_id)
+    meta = _build_commit_meta(env, node_path, iteration, node_id, outcome)
     commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
     await maybe_await(
         env.checkpointer.put_object(
@@ -778,20 +819,26 @@ async def _put_scope_blobs(env: _RunEnv, scopes: list[State[Any]]) -> list[TreeE
     return entries
 
 
-def _build_commit_meta(env: _RunEnv, node_path: str, iteration: int, node_id: str) -> CommitMeta:
-    """Assemble :class:`CommitMeta` for one iterate-boundary save.
+def _build_commit_meta(
+    env: _RunEnv,
+    node_path: str,
+    iteration: int,
+    node_id: str,
+    outcome: CommitOutcome,
+) -> CommitMeta:
+    """Assemble :class:`CommitMeta` for one scope-commit save.
 
-    ``produced_by`` records the iterate's ``node_id`` — verb-level
-    attribution (``verb_name`` / ``role`` / ``result_hash``) lands under
-    the SAIA-verb-wrapper wiring in a later ticket. ``trace_ref`` is
-    empty until the same wiring stamps SAIA turn ids. ``outcome``
-    reflects that this save fires only on a successful iteration body;
-    ``failed`` / ``halted`` commits arrive with that wiring.
+    ``produced_by`` records the node's ``node_id`` — verb-level
+    attribution (``verb_name`` / ``role`` / ``result_hash``) lands with
+    the SAIA-verb-wrapper wiring. ``trace_ref`` is empty until the same
+    wiring stamps SAIA turn ids.
+
+    ``outcome`` is set by the caller: ``"ok"`` at an iterate boundary,
+    ``"halted"`` at a halt-observation save.
 
     ``flow_root_id`` is the run's ``client_flow_id`` — a stable
     per-run identifier — until the framework computes a proper
-    composition-tree root hash (structural-drift detection at that layer
-    is a follow-up).
+    composition-tree root hash.
     """
     from llm_gent import __version__
 
@@ -801,7 +848,7 @@ def _build_commit_meta(env: _RunEnv, node_path: str, iteration: int, node_id: st
         iteration=iteration,
         produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
         trace_ref=(),
-        outcome="ok",
+        outcome=outcome,
         flow_root_id=env.client_flow_id or "",
         timestamp_iso=datetime.now(UTC).isoformat(),
         framework_version=__version__,
