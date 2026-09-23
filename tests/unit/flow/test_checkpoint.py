@@ -196,6 +196,63 @@ class TestSaveOnHaltChain:
         # Run should complete without raising.
         await flow.run()
 
+    async def test_halt_before_branch_with_plain_verb_resumes_at_branch(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Halt before a Branch containing only plain verbs → resume runs the branch."""
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.state.cas import Commit
+
+        halt = asyncio.Event()
+
+        @verb
+        async def step_a(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            ctx.state.data["a"] = 1
+            halt.set()
+            return 1
+
+        @verb
+        async def branch_verb(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            # On resume, prev is None — read from state instead (same contract as
+            # _walk_chain's start_index > 0 behavior for plain chain steps).
+            ctx.state.data["branch"] = ctx.state.data["a"] + 10
+            return ctx.state.data["branch"]
+
+        @verb
+        async def step_c(ctx: Context[dict[str, Any]], prev: int) -> int:
+            ctx.state.data["c"] = prev + 100
+            return ctx.state.data["c"]
+
+        ff = FlowFactory(make_test_logger())
+        pre = (
+            ff.create(state={})
+            .with_checkpointer(store, "branch-halt")
+            .with_halt(halt)
+            .call(step_a)
+            .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
+            .then(step_c)
+        )
+        await pre.run()
+
+        # Halt fired after step_a, commit saved at the branch position.
+        halted_hash = store.resolve_ref("branch-halt")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("branch-halt", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+
+        # Resume: branch runs (with its plain verb), then step_c.
+        halt.clear()
+        resume = (
+            ff.create(state={})
+            .with_checkpointer(store, "branch-halt")
+            .call(step_a)
+            .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
+            .then(step_c)
+        )
+        result = await resume.run(resume=True)
+        # 1 (from restored a) + 10 (branch_verb) + 100 (step_c) = 111
+        assert result == 111
+
 
 class TestSaveOnHaltIterate:
     """Iterate halt-observation site writes a commit at the halted iteration."""

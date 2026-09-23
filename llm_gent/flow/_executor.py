@@ -742,8 +742,8 @@ async def _save_halt_checkpoint(
     """
     if env.runtime._halt_saved:
         return
-    await _save_scope_commit(env, iteration, node_id, current_state, "halted")
     env.runtime._halt_saved = True
+    await _save_scope_commit(env, iteration, node_id, current_state, "halted")
 
 
 async def _save_scope_commit(

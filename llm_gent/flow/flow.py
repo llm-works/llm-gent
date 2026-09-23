@@ -1035,13 +1035,13 @@ class Flow:
         for i, cid in enumerate(chain_ids):
             if cid == head:
                 # Single-element remaining path AND target is a plain-verb
-                # chain step (no inner container to consume the replay) means
-                # the halt-observation site saved here — mark consumed so
-                # :meth:`_assert_replay_consumed` does not fire. Iterate /
-                # subflow / branch / map leaves consume via their own descent
-                # machinery, so leave those alone.
+                # or Branch/Map/subflow chain step means the halt-observation
+                # site saved here — mark consumed so :meth:`_assert_replay_consumed`
+                # does not fire. Iterate has its own consumption in
+                # :func:`_resolve_iterate_resume`; Branch/Map/subflow do not
+                # (after pop the path is empty, nothing inside will consume it).
                 if len(replay.remaining_path) == 1 and not isinstance(
-                    self._nodes[i].target, Flow | _Branch | _Iterate | _Map
+                    self._nodes[i].target, _Iterate
                 ):
                     env.runtime._replay_consumed = True
                 return i
