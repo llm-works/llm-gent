@@ -232,7 +232,7 @@ async def assert_resume_determinism(
         ValueError: If a checkpoint already exists for the trajectory_id,
             or if halt_after_iteration is not in [1, max_iters].
     """
-    if await maybe_await(store.load_checkpoint(trajectory_id)) is not None:
+    if await maybe_await(store.resolve_ref(trajectory_id)) is not None:
         raise ValueError(f"checkpoint already exists for trajectory_id={trajectory_id!r}")
     if not (1 <= halt_after_iteration <= max_iters):
         raise ValueError(

@@ -5,10 +5,11 @@
 
 llm-gent owns one alembic tree at :mod:`llm_gent.migrations` covering
 every framework-level persistent table this package ships (currently
-just ``llm_gent_flow_checkpoint``; more revisions land here as future
-subsystems add persistence). Model classes live near their consumers
-(e.g. :class:`llm_gent.flow.stores.postgres.FlowCheckpoint`) but share
-the :class:`Base` defined here so ``Base.metadata`` sees every table
+``llm_gent_flow_object`` and ``llm_gent_flow_ref``; more revisions
+land here as future subsystems add persistence). Model classes live
+near their consumers (e.g. :class:`llm_gent.flow.stores.postgres.FlowObject`,
+:class:`llm_gent.flow.stores.postgres.FlowRef`) but share the
+:class:`Base` defined here so ``Base.metadata`` sees every table
 alembic needs to autogenerate against.
 
 The pattern mirrors llm-kelt's ``SchemaManager`` — one advisory-lock-guarded

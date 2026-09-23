@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 from typing import Any
 
 from appinfra.log import Logger
@@ -90,6 +91,7 @@ from .nodes import (
 )
 from .role import Role
 from .state import State, StateFactory
+from .state.cas import Commit, Tree
 
 
 class Flow:
@@ -843,13 +845,16 @@ class Flow:
             *args, state=active_state, runtime=self, parent_replay=replay, **kwargs
         )
         self._assert_replay_consumed(replay)
-        # Preserve checkpoint on halt-triggered exit per delete policy
+        # Preserve trajectory on halt-triggered exit; on clean exit consult
+        # the store's retention policy — default "retain" keeps the record
+        # for audit / diff / provenance, "gc_on_success" prunes.
         if (
             self._checkpointer is not None
             and self._client_flow_id is not None
             and (self._halt_event is None or not self._halt_event.is_set())
+            and self._checkpointer.retention == "gc_on_success"
         ):
-            await maybe_await(self._checkpointer.delete_checkpoint(self._client_flow_id))
+            await maybe_await(self._checkpointer.gc_trajectory(self._client_flow_id))
         return result
 
     def _assert_replay_consumed(self, replay: _ResumeReplay | None) -> None:
@@ -1109,22 +1114,34 @@ class Flow:
     async def _hydrate_resume_state(
         self, fallback: State[Any]
     ) -> tuple[State[Any], _ResumeReplay | None]:
-        """Load the latest checkpoint and reconstruct state + a replay context.
+        """Load the latest commit and reconstruct state + a replay context.
 
         Called only when :meth:`run` was invoked with ``resume=True``.
-        Consults :attr:`_checkpointer` for a checkpoint under
-        :attr:`_client_flow_id`; if absent, returns ``(fallback, None)`` so
-        the run proceeds with the caller's ``state=`` (or the flow's
-        construction state) and no replay work.
 
-        On hit: deserializes ``state_json['data']`` via
-        ``state_factory.restore`` (or passes it through when
-        ``state_factory`` is ``None`` — the plain-dict contract) and
-        constructs a :class:`_ResumeReplay` carrying the path + iteration
-        read out of ``metadata_json``. The empty-path branch is what a
-        pre-PR-3 checkpoint hits: no ``path`` key → nothing to replay,
-        iteration counter stays at 0, and the run proceeds from the
-        hydrated state as a normal (non-resume) execution.
+        Sequence:
+
+        1. :meth:`CheckpointStore.resolve_ref` under :attr:`_client_flow_id`
+           returns the latest commit hash across every ``node_path``, or
+           ``None`` (fresh run — no prior checkpoint).
+        2. :meth:`CheckpointStore.get_object` fetches the commit bytes;
+           :meth:`Commit.from_bytes` re-derives :class:`CommitMeta` +
+           :class:`ProducedBy` + :class:`TraceRef`.
+        3. The commit's ``root_tree_hash`` fetches the :class:`Tree`
+           object; each :class:`TreeEntry` fetches its Blob. Scope order
+           is root → leaf via the zero-padded ``scope_id`` (canonical
+           sort).
+        4. The root scope's payload rehydrates the top-level
+           :class:`State` (via ``state_factory.restore`` when bound,
+           passthrough otherwise). The leaf scope's payload rides on the
+           :class:`_ResumeReplay` as ``child_state_data`` for the
+           save-point iterate to restore its own scope.
+        5. ``node_path`` splits on ``"/"`` back into the ancestor chain
+           the executor's head-pop replay expects. blake2b hex has no
+           slashes, so the round-trip is exact.
+
+        Returns ``(fallback, None)`` when no commit exists yet — the
+        caller's ``state=`` (or the flow's construction state) is used
+        and no replay is scheduled.
         """
         assert self._checkpointer is not None
         if self._client_flow_id is None:
@@ -1133,39 +1150,62 @@ class Flow:
                 f"Flow {label!r} was run with resume=True but has no "
                 f"client_flow_id — call .with_checkpointer(store, client_flow_id) first"
             )
-        loaded = await maybe_await(self._checkpointer.load_checkpoint(self._client_flow_id))
+        loaded = await self._load_latest_commit_scopes()
         if loaded is None:
             return fallback, None
-        state_json, metadata_json = loaded
-        raw = state_json.get("data")
-        if self._state_factory is None:
-            hydrated = raw
-        else:
-            hydrated = self._state_factory.restore(raw if isinstance(raw, dict) else {})
+        commit, scope_data = loaded
+        root_raw = scope_data[0] if scope_data else None
+        hydrated_root = (
+            root_raw
+            if self._state_factory is None
+            else self._state_factory.restore(root_raw if isinstance(root_raw, dict) else {})
+        )
+        leaf_raw = scope_data[-1] if len(scope_data) > 1 else None
+        path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
         return (
-            State(data=hydrated, _factory=self._state_factory),
-            self._build_resume_replay(metadata_json, state_json),
+            State(data=hydrated_root, _factory=self._state_factory),
+            _ResumeReplay(
+                remaining_path=path_tuple,
+                full_path=path_tuple,
+                iteration=commit.meta.iteration,
+                child_state_data=leaf_raw,
+            ),
         )
 
-    def _build_resume_replay(
-        self, metadata_json: dict[str, Any], state_json: dict[str, Any]
-    ) -> _ResumeReplay | None:
-        """Construct a :class:`_ResumeReplay` from a loaded checkpoint's metadata.
+    async def _load_latest_commit_scopes(self) -> tuple[Commit, list[Any]] | None:
+        """Resolve the latest commit + walk its tree, returning ``(Commit, scope_data)``.
 
-        Returns ``None`` when the checkpoint carries no ``path`` — the
-        pre-PR-3 shape, where hydration alone is enough and no descent
-        replay is scheduled.
+        ``scope_data`` is root → leaf JSON payloads (one per :class:`Tree`
+        entry). Returns ``None`` when the ref, commit, tree, or any blob
+        is missing — the caller treats each miss as "no resumable
+        checkpoint" and falls through to a fresh run.
         """
-        raw_path = metadata_json.get("path", [])
-        if not raw_path:
+        assert self._checkpointer is not None
+        assert self._client_flow_id is not None
+        commit_hash = await maybe_await(self._checkpointer.resolve_ref(self._client_flow_id))
+        if commit_hash is None:
             return None
-        path_tuple = tuple(raw_path)
-        return _ResumeReplay(
-            remaining_path=path_tuple,
-            full_path=path_tuple,
-            iteration=int(metadata_json.get("iteration", 0)),
-            child_state_data=_extract_innermost_child(state_json),
+        commit_bytes = await maybe_await(
+            self._checkpointer.get_object(self._client_flow_id, "commit", commit_hash)
         )
+        if commit_bytes is None:
+            return None
+        commit = Commit.from_bytes(commit_bytes)
+        tree_bytes = await maybe_await(
+            self._checkpointer.get_object(self._client_flow_id, "tree", commit.root_tree_hash)
+        )
+        if tree_bytes is None:
+            return None
+        tree = Tree.from_bytes(tree_bytes)
+        scope_data: list[Any] = []
+        for entry in tree.entries:
+            blob = await maybe_await(
+                self._checkpointer.get_object(self._client_flow_id, "blob", entry.child_hash)
+            )
+            if blob is None:
+                return None
+            scope_data.append(json.loads(blob.decode("utf-8")))
+        return commit, scope_data
 
     # -------------------------------------------------------------------------
     # Internals
@@ -1297,24 +1337,6 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
     fresh = Flow(lg=lg, name=name)
     buildable(fresh)
     return fresh
-
-
-def _extract_innermost_child(state_json: dict[str, Any]) -> Any:
-    """Walk the state tree to find the innermost child's data.
-
-    The checkpoint tree is ``{data, children}`` where ``children`` is a list
-    (currently always 0 or 1 element). Returns the ``data`` of the deepest
-    nested child, or ``None`` if there are no children (root-only state).
-    """
-    node = state_json
-    while True:
-        children = node.get("children", [])
-        if not children:
-            # We're at the innermost scope; return None if this is root
-            if node is state_json:
-                return None
-            return node.get("data")
-        node = children[0]
 
 
 _NODE_ID_DIGEST_SIZE = 8

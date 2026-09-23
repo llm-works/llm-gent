@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import inspect
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from .checkpoint import maybe_await
@@ -45,6 +46,15 @@ from .nodes import (
     _RunEnv,
 )
 from .state import State, StateFactory
+from .state.cas import (
+    Blob,
+    Commit,
+    CommitMeta,
+    ProducedBy,
+    Tree,
+    TreeEntry,
+    canonical_json,
+)
 
 
 if TYPE_CHECKING:
@@ -608,62 +618,106 @@ async def _save_iterate_checkpoint(
     node_id: str,
     current_state: State[Any],
 ) -> None:
-    """Persist a recursive snapshot at an iterate boundary.
+    """Persist a content-addressed commit at an iterate boundary.
 
-    ``state_json`` carries the state stack from root to ``current_state``
-    as a nested ``{data, children}`` tree — ``data`` at the top is the
-    outermost run-level payload, and each layer of ``children`` is one
-    step deeper into scoped composition. Old-shape readers looking at
-    ``state_json["data"]`` still see the outermost payload; the tree
-    extension is additive.
+    Walks the scope stack from root to ``current_state``. For each scope:
+    serialize its ``data`` via the state-data contract (dict passthrough
+    or ``StateData.to_dict``) to canonical JSON bytes and
+    :meth:`put_object` a Blob keyed by content hash. Bundle every scope's
+    blob hash into a Tree (one :class:`TreeEntry` per scope, ordered by
+    depth via a two-digit ``scope_id``). Wrap the Tree in a Commit whose
+    :class:`CommitMeta` pins ``(client_flow_id, node_path, iteration)``
+    and the provenance triple (``produced_by``, ``trace_ref``,
+    ``outcome``). Finally put_ref points this iterate boundary at the
+    commit hash.
 
-    ``metadata_json`` carries the composition-tree path (a flat list of
-    content-addressed node IDs from root to and including this iterate —
-    the ancestor chain in ``env`` plus this iterate's own ID) and the
-    completed iteration count. Resume walks
-    the graph, matching each id at the corresponding chain step to
-    relocate the same iterate; a mismatch is a hard error at that
-    depth.
+    ``node_path`` is the ``"/"``-joined ancestor chain (from run root to
+    this iterate, inclusive). blake2b hex has no ``"/"``, so split
+    round-trips on resume.
 
     No-op when the runtime has no checkpointer / client_flow_id bound.
     """
     if env.checkpointer is None or env.client_flow_id is None:
         return
-    state_json = _serialize_state_tree(current_state)
-    path = list(env.ancestor_chain + (node_id,))
-    node_path = "/".join(path)
-    metadata_json = {"path": path, "iteration": iteration}
+    scopes = _collect_scope_stack(current_state)
+    entries = await _put_scope_blobs(env, scopes)
+    tree = Tree.from_entries(entries)
     await maybe_await(
-        env.checkpointer.save_checkpoint(
-            env.client_flow_id, node_path, iteration, state_json, metadata_json
+        env.checkpointer.put_object(env.client_flow_id, "tree", tree.content_hash, tree.to_bytes())
+    )
+    node_path = "/".join(env.ancestor_chain + (node_id,))
+    meta = _build_commit_meta(env, node_path, iteration, node_id)
+    commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
+    await maybe_await(
+        env.checkpointer.put_object(
+            env.client_flow_id, "commit", commit.content_hash, commit.to_bytes()
         )
+    )
+    await maybe_await(
+        env.checkpointer.put_ref(env.client_flow_id, node_path, iteration, commit.content_hash)
     )
 
 
-def _serialize_state_tree(current: State[Any]) -> dict[str, Any]:
-    """Serialize the state stack from root to ``current`` as a nested tree.
-
-    Returns ``{data, children}`` where the outermost dict is the run-level
-    (root) scope and each ``children`` slot descends one scoped layer;
-    ``children`` at the innermost scope is ``[]``. Every ``data`` is
-    normalized via :func:`_serialize_state_data` (plain-dict passthrough
-    or :class:`StateData.to_dict`).
-
-    The current stack is linear (each :class:`State` has one
-    ``_parent``) — a list would suffice today, but the nested shape
-    leaves room for a future scoped-composition site that fans out into
-    sibling children without a schema break.
-    """
+def _collect_scope_stack(current: State[Any]) -> list[State[Any]]:
+    """Return the ``State`` chain from run-root down to ``current``."""
     scopes: list[State[Any]] = []
     node: State[Any] | None = current
     while node is not None:
         scopes.append(node)
         node = node._parent
     scopes.reverse()
-    tree: dict[str, Any] = {"data": _serialize_state_data(scopes[-1].data), "children": []}
-    for scope in reversed(scopes[:-1]):
-        tree = {"data": _serialize_state_data(scope.data), "children": [tree]}
-    return tree
+    return scopes
+
+
+async def _put_scope_blobs(env: _RunEnv, scopes: list[State[Any]]) -> list[TreeEntry]:
+    """Serialize each scope's data to a blob, put_object it, return tree entries.
+
+    Uses a zero-padded two-digit index as :attr:`TreeEntry.scope_id` so
+    canonical sort ordering matches root→leaf depth ordering.
+    """
+    entries: list[TreeEntry] = []
+    for depth, scope in enumerate(scopes):
+        blob_bytes = canonical_json(_serialize_state_data(scope.data))
+        blob = Blob.from_bytes(blob_bytes)
+        assert env.checkpointer is not None
+        assert env.client_flow_id is not None
+        await maybe_await(
+            env.checkpointer.put_object(env.client_flow_id, "blob", blob.content_hash, blob.payload)
+        )
+        entries.append(
+            TreeEntry(scope_id=f"{depth:02d}", kind="blob", child_hash=blob.content_hash)
+        )
+    return entries
+
+
+def _build_commit_meta(env: _RunEnv, node_path: str, iteration: int, node_id: str) -> CommitMeta:
+    """Assemble :class:`CommitMeta` for one iterate-boundary save.
+
+    ``produced_by`` records the iterate's ``node_id`` — verb-level
+    attribution (``verb_name`` / ``role`` / ``result_hash``) lands under
+    the SAIA-verb-wrapper wiring in a later ticket. ``trace_ref`` is
+    empty until the same wiring stamps SAIA turn ids. ``outcome``
+    reflects that this save fires only on a successful iteration body;
+    ``failed`` / ``halted`` commits arrive with that wiring.
+
+    ``flow_root_id`` is the run's ``client_flow_id`` — a stable
+    per-run identifier — until the framework computes a proper
+    composition-tree root hash (structural-drift detection at that layer
+    is a follow-up).
+    """
+    from llm_gent import __version__
+
+    return CommitMeta(
+        client_flow_id=env.client_flow_id or "",
+        node_path=node_path,
+        iteration=iteration,
+        produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
+        trace_ref=(),
+        outcome="ok",
+        flow_root_id=env.client_flow_id or "",
+        timestamp_iso=datetime.now(UTC).isoformat(),
+        framework_version=__version__,
+    )
 
 
 def _serialize_state_data(data: Any) -> Any:

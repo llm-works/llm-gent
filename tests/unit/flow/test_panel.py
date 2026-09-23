@@ -254,38 +254,9 @@ class TestPanel:
         reach the inner verb; the nested Flow's resume should hydrate its
         own checkpoint independently.
         """
-        from dataclasses import dataclass, field
-
-        @dataclass
-        class _RecordingStore:
-            saves: list[tuple[str, str, int]] = field(default_factory=list)
-            loaded: dict[str, tuple[dict, dict]] = field(default_factory=dict)
-
-            def save_checkpoint(
-                self,
-                client_flow_id: str,
-                node_path: str,
-                iteration: int,
-                state_json: dict[str, Any],
-                metadata_json: dict[str, Any],
-            ) -> None:
-                self.saves.append((client_flow_id, node_path, iteration))
-                self.loaded[client_flow_id] = (state_json, metadata_json)
-
-            def load_checkpoint(
-                self,
-                client_flow_id: str,
-                node_path: str | None = None,
-                iteration: int | None = None,
-            ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-                return self.loaded.get(client_flow_id)
-
-            def delete_checkpoint(self, client_flow_id: str) -> None:
-                self.loaded.pop(client_flow_id, None)
-
         panel_state_observed: list[dict[str, Any]] = []
         nested_flow_result: list[int] = []
-        store = _RecordingStore()
+        store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "panel-cp")
 
         @verb(role=ROLE_A)
         async def nested_bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
