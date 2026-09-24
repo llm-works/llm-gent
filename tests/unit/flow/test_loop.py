@@ -19,7 +19,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -360,6 +360,95 @@ class TestLifecycleHooks:
         flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert events == ["complete"]
+
+
+@dataclass
+class _StubConversation:
+    """Stub conversation implementing ``to_dict`` for capture tests."""
+
+    messages: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"messages": list(self.messages), "n": len(self.messages)}
+
+
+class _StubConversationFactory:
+    """Stub :class:`ConversationFactory` for wiring Loop's capture path."""
+
+    def create(self) -> _StubConversation:
+        return _StubConversation()
+
+    def create_from_state(self, state: dict[str, Any]) -> _StubConversation:
+        conv = _StubConversation()
+        conv.messages = list(state.get("messages", []))
+        return conv
+
+
+class TestPausedCapture:
+    """Framework captures paused conversation bytes when a factory is wired."""
+
+    @pytest.mark.asyncio
+    async def test_paused_with_factory_captures_canonical_bytes(self) -> None:
+        """Paused + conversation_factory + conversation → _paused_bytes set."""
+        from llm_gent.flow.state.cas import canonical_json
+
+        conv = _StubConversation(messages=["hi", "there"])
+        factory = _CompleteFactory(result=_StubResult(paused=True))
+        loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t", conversation=conv)
+        assert loop._paused_bytes is not None
+        assert loop._paused_bytes == canonical_json({"messages": ["hi", "there"], "n": 2})
+
+    @pytest.mark.asyncio
+    async def test_paused_without_factory_no_capture(self) -> None:
+        """No conversation_factory → _paused_bytes stays None even on pause."""
+        conv = _StubConversation()
+        factory = _CompleteFactory(result=_StubResult(paused=True))
+        loop = Loop(ROLE_A)
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t", conversation=conv)
+        assert loop._paused_bytes is None
+
+    @pytest.mark.asyncio
+    async def test_paused_without_conversation_no_capture(self) -> None:
+        """No conversation object → _paused_bytes stays None."""
+        factory = _CompleteFactory(result=_StubResult(paused=True))
+        loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t")
+        assert loop._paused_bytes is None
+
+    @pytest.mark.asyncio
+    async def test_non_paused_no_capture(self) -> None:
+        """Non-paused result → _paused_bytes stays None regardless of factory."""
+        conv = _StubConversation()
+        factory = _CompleteFactory()
+        loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t", conversation=conv)
+        assert loop._paused_bytes is None
+
+    @pytest.mark.asyncio
+    async def test_paused_bytes_reset_per_dispatch(self) -> None:
+        """A subsequent non-paused dispatch clears bytes captured earlier."""
+        loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
+        # First dispatch: paused → capture.
+        factory1 = _CompleteFactory(result=_StubResult(paused=True))
+        flow1 = make_ff(saia_factory=factory1).create()
+        flow1.register(loop, name="loop")
+        await flow1.dispatch("loop", "t", conversation=_StubConversation(messages=["a"]))
+        assert loop._paused_bytes is not None
+        # Second dispatch: not paused → cleared.
+        factory2 = _CompleteFactory()
+        flow2 = make_ff(saia_factory=factory2).create()
+        flow2.register(loop, name="loop")
+        await flow2.dispatch("loop", "t", conversation=_StubConversation(messages=["b"]))
+        assert loop._paused_bytes is None
 
 
 class _RaisingSAIA:

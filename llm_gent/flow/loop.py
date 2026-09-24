@@ -38,11 +38,13 @@ from typing import Any
 
 from appinfra.log import Logger
 from llm_saia import SAIA
+from llm_saia.core.conversation import ConversationFactory
 
 from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .role import Role
+from .state.cas import canonical_json
 
 
 # ----------------------------------------------------------------------------
@@ -151,6 +153,7 @@ class Loop:
         *,
         saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
+        conversation_factory: ConversationFactory | None = None,
         on_iteration: OnIteration | None = None,
         on_complete: OnComplete | None = None,
         on_paused: OnPaused | None = None,
@@ -178,6 +181,15 @@ class Loop:
                 (not ``ctx.halt``) becomes SAIA's ``abort_signal``.
                 Matches the ``ctx.saia`` precedent: explicit at
                 construction wins over ambient.
+            conversation_factory: Optional
+                :class:`~llm_saia.core.conversation.ConversationFactory`.
+                When wired, an ``on_paused`` result triggers the
+                framework to capture the conversation's
+                :meth:`to_dict` payload as canonical bytes on
+                :attr:`_paused_bytes` for the halt-observation site
+                to stamp into the Flow's CAS commit. Consumers that
+                don't need mid-turn pause/resume can leave it
+                ``None``; capture becomes a no-op.
             on_iteration: Bridges to SAIA's per-turn hook.
             on_complete: Fires after a non-paused ``saia.complete``.
                 Non-``None`` return replaces the raw SAIA result as
@@ -203,6 +215,7 @@ class Loop:
         self._role = role
         self._saia = saia
         self._halt = halt
+        self._conversation_factory = conversation_factory
         self._on_iteration = on_iteration
         self._on_complete = on_complete
         self._on_paused = on_paused
@@ -211,6 +224,7 @@ class Loop:
         self._on_finally = on_finally
         self._on_executor_ready = on_executor_ready
         self._on_cost = on_cost
+        self._paused_bytes: bytes | None = None
 
     @property
     def role(self) -> Role:
@@ -256,6 +270,7 @@ class Loop:
                 no role or the enclosing flow had no SAIAFactory.
         """
         saia = self._require_saia(ctx)
+        self._paused_bytes = None
         try:
             if self._on_executor_ready is not None:
                 await maybe_await(self._on_executor_ready(saia, ctx))
@@ -274,7 +289,7 @@ class Loop:
                 if self._on_failed is not None:
                     await maybe_await(self._on_failed(exc, ctx))
                 raise
-            override = await self._after_run(result, ctx)
+            override = await self._after_run(result, ctx, conversation)
             return override if override is not None else result
         finally:
             if self._on_finally is not None:
@@ -311,22 +326,46 @@ class Loop:
 
         return bridge
 
-    async def _after_run(self, result: Any, ctx: Context[Any]) -> Any:
+    async def _after_run(self, result: Any, ctx: Context[Any], conversation: Any) -> Any:
         """Cost hook, then paused-vs-complete branching + return override.
 
-        Returns the value from ``on_paused`` / ``on_complete`` when the
-        hook returned non-``None`` — :meth:`__call__` uses it to replace
-        the raw SAIA result. ``None`` means "no override, keep raw result".
+        On the paused path, capture the conversation's serialized
+        :meth:`to_dict` payload as canonical bytes on
+        :attr:`_paused_bytes` when a :class:`ConversationFactory` is
+        wired — the halt-observation site reads it to stamp a
+        ``TraceRef(kind="saia_turn", ...)`` on the Flow's CAS halt
+        commit. Capture is a no-op when no factory is wired or when
+        the caller supplied no conversation object.
+
+        Returns the value from ``on_paused`` / ``on_complete`` when
+        the hook returned non-``None`` — :meth:`__call__` uses it to
+        replace the raw SAIA result. ``None`` means "no override, keep
+        raw result".
         """
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
+            self._capture_paused(conversation)
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
+
+    def _capture_paused(self, conversation: Any) -> None:
+        """Serialize the conversation's paused state to canonical bytes.
+
+        No-op when this Loop was constructed without a
+        :class:`ConversationFactory` or when no conversation object
+        flowed through this dispatch.
+        """
+        if self._conversation_factory is None or conversation is None:
+            return
+        to_dict = getattr(conversation, "to_dict", None)
+        if to_dict is None:
+            return
+        self._paused_bytes = canonical_json(to_dict())
 
 
 # ----------------------------------------------------------------------------
@@ -358,6 +397,7 @@ class LoopFactory:
         *,
         saia_factory: SAIAFactory | None = None,
         halt: asyncio.Event | None = None,
+        conversation_factory: ConversationFactory | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -371,10 +411,17 @@ class LoopFactory:
             halt: Optional :class:`asyncio.Event` used as the default
                 halt for every built Loop. Per-``create`` overrides
                 win (same explicit-wins rule the Loop itself uses).
+            conversation_factory: Optional
+                :class:`~llm_saia.core.conversation.ConversationFactory`.
+                Every :meth:`create` inherits it as the Loop's default
+                factory unless per-call overridden. Wire once at the
+                app boundary to enable mid-SAIA-turn pause/resume
+                across every Loop this factory builds.
         """
         self._lg = lg
         self._saia_factory = saia_factory
         self._halt = halt
+        self._conversation_factory = conversation_factory
 
     @property
     def lg(self) -> Logger:
@@ -391,12 +438,18 @@ class LoopFactory:
         """The default halt event captured at construction, or ``None``."""
         return self._halt
 
+    @property
+    def conversation_factory(self) -> ConversationFactory | None:
+        """The default conversation factory captured at construction, or ``None``."""
+        return self._conversation_factory
+
     def create(
         self,
         role: Role,
         *,
         saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
+        conversation_factory: ConversationFactory | None = None,
         on_iteration: OnIteration | None = None,
         on_complete: OnComplete | None = None,
         on_paused: OnPaused | None = None,
@@ -408,15 +461,20 @@ class LoopFactory:
     ) -> Loop:
         """Build a :class:`Loop` inheriting this factory's captured defaults.
 
-        Per-``create`` ``halt=`` overrides the factory default. ``saia=``
-        pins an explicit SAIA instance on the resulting Loop, bypassing
-        the enclosing flow's :class:`SAIAFactory`. Hooks are per-Loop and
-        never inherited.
+        Per-``create`` ``halt=`` / ``conversation_factory=`` override
+        the factory defaults. ``saia=`` pins an explicit SAIA instance
+        on the resulting Loop, bypassing the enclosing flow's
+        :class:`SAIAFactory`. Hooks are per-Loop and never inherited.
         """
         return Loop(
             role,
             saia=saia,
             halt=halt if halt is not None else self._halt,
+            conversation_factory=(
+                conversation_factory
+                if conversation_factory is not None
+                else self._conversation_factory
+            ),
             on_iteration=on_iteration,
             on_complete=on_complete,
             on_paused=on_paused,
@@ -433,6 +491,7 @@ class LoopFactory:
             self._lg,
             saia_factory=saia_factory,
             halt=self._halt,
+            conversation_factory=self._conversation_factory,
         )
 
     def with_halt(self, event: asyncio.Event) -> LoopFactory:
@@ -449,4 +508,14 @@ class LoopFactory:
             self._lg,
             saia_factory=self._saia_factory,
             halt=event,
+            conversation_factory=self._conversation_factory,
+        )
+
+    def with_conversation_factory(self, conversation_factory: ConversationFactory) -> LoopFactory:
+        """Return a new :class:`LoopFactory` whose conversation factory is swapped."""
+        return LoopFactory(
+            self._lg,
+            saia_factory=self._saia_factory,
+            halt=self._halt,
+            conversation_factory=conversation_factory,
         )
