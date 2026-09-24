@@ -349,6 +349,11 @@ class Loop:
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
+        # Clear stale paused bytes on non-paused completion so a subsequent
+        # halt-save doesn't stamp conversation state from an earlier pause.
+        env = ctx._env
+        if env is not None:
+            env.runtime._pending_saia_turn_bytes = None
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
