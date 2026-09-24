@@ -9,18 +9,17 @@ Covers:
   ``Flow.call`` / ``.iterate`` / ``.map`` body.
 - Halt resolution rule (explicit Loop(halt=X) wins over ctx.halt;
   ctx.halt is fallback).
-- Lifecycle hook ordering: on_start / on_resume, on_executor_ready,
-  on_iteration bridge, on_cost, on_complete.
-- Checkpointer seam: load-at-start decides start/resume path;
-  delete-on-non-paused only.
-- LoopFactory: default inheritance, per-create overrides, ``with_halt`` /
-  ``with_checkpointer`` derivations.
+- Lifecycle hook ordering: on_executor_ready, on_iteration bridge,
+  on_cost, on_complete / on_paused, on_cancelled / on_failed,
+  on_finally.
+- LoopFactory: default inheritance, per-create overrides,
+  ``with_halt`` / ``with_saia_factory`` derivations.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -29,7 +28,6 @@ from llm_gent.flow import (
     Context,
     Flow,
     Loop,
-    LoopCheckpointStore,
     LoopFactory,
     Role,
     verb,
@@ -113,32 +111,6 @@ class _CompleteFactory:
         saia = _CompleteSAIA(role, result=self._result, iterations=self._iterations)
         self.built.append(saia)
         return saia
-
-
-@dataclass
-class _RecordingStore:
-    """LoopCheckpointStore stub recording every call.
-
-    ``preload`` is what :meth:`load_checkpoint` returns for
-    ``(scope_id, run_id)`` matches (any scope_id + any run_id → the same
-    dict); ``None`` means "no checkpoint here" and drives the on_start
-    path in Loop.
-    """
-
-    preload: dict[str, Any] | None = None
-    saves: list[tuple[str, int, dict[str, Any]]] = field(default_factory=list)
-    loads: list[tuple[str, int | None]] = field(default_factory=list)
-    deletes: list[tuple[str, int | None]] = field(default_factory=list)
-
-    def save_checkpoint(self, scope_id: str, run_id: int, state: dict[str, Any]) -> None:
-        self.saves.append((scope_id, run_id, state))
-
-    def load_checkpoint(self, scope_id: str, run_id: int | None = None) -> dict[str, Any] | None:
-        self.loads.append((scope_id, run_id))
-        return self.preload
-
-    def delete_checkpoint(self, scope_id: str, run_id: int | None = None) -> None:
-        self.deletes.append((scope_id, run_id))
 
 
 # -----------------------------------------------------------------------------
@@ -308,13 +280,10 @@ class TestLifecycleHooks:
     """Hook firing conditions + ordering."""
 
     @pytest.mark.asyncio
-    async def test_start_and_complete_fire_on_normal_run(self) -> None:
-        """Non-resume, non-paused: on_start → complete → on_cost → on_complete."""
+    async def test_cost_and_complete_fire_on_normal_run(self) -> None:
+        """Non-paused: on_cost then on_complete fire on a clean return."""
         events: list[str] = []
         factory = _CompleteFactory()
-
-        def on_start(ctx: Context) -> None:
-            events.append("start")
 
         def on_complete(result: Any, ctx: Context) -> None:
             events.append("complete")
@@ -322,13 +291,13 @@ class TestLifecycleHooks:
         def on_cost(result: Any, ctx: Context) -> None:
             events.append("cost")
 
-        loop = Loop(ROLE_A, on_start=on_start, on_complete=on_complete, on_cost=on_cost)
+        loop = Loop(ROLE_A, on_complete=on_complete, on_cost=on_cost)
         flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
-        assert events == ["start", "cost", "complete"]
+        assert events == ["cost", "complete"]
 
     @pytest.mark.asyncio
-    async def test_on_executor_ready_fires_before_complete(self) -> None:
+    async def test_on_executor_ready_fires_before_saia_complete(self) -> None:
         """on_executor_ready runs after ctx.saia resolves, before saia.complete."""
         events: list[str] = []
         factory = _CompleteFactory()
@@ -336,14 +305,14 @@ class TestLifecycleHooks:
         def on_ready(saia: Any, ctx: Context) -> None:
             events.append(f"ready:{type(saia).__name__}")
 
-        def on_start(ctx: Context) -> None:
-            events.append("start")
+        def on_complete(result: Any, ctx: Context) -> None:
+            events.append("complete")
 
-        loop = Loop(ROLE_A, on_executor_ready=on_ready, on_start=on_start)
+        loop = Loop(ROLE_A, on_executor_ready=on_ready, on_complete=on_complete)
         flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
-        # on_executor_ready fires before on_start
-        assert events == ["ready:_CompleteSAIA", "start"]
+        # on_executor_ready fires before on_complete (after saia.complete returned).
+        assert events == ["ready:_CompleteSAIA", "complete"]
 
     @pytest.mark.asyncio
     async def test_iteration_hook_bridges_to_saia_per_turn(self) -> None:
@@ -383,14 +352,14 @@ class TestLifecycleHooks:
         events: list[str] = []
         factory = _CompleteFactory()
 
-        async def on_start(ctx: Context) -> None:
+        async def on_complete(result: Any, ctx: Context) -> None:
             await asyncio.sleep(0)
-            events.append("start")
+            events.append("complete")
 
-        loop = Loop(ROLE_A, on_start=on_start)
+        loop = Loop(ROLE_A, on_complete=on_complete)
         flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
-        assert events == ["start"]
+        assert events == ["complete"]
 
 
 class _RaisingSAIA:
@@ -566,30 +535,6 @@ class TestExceptionalPaths:
         assert events == ["paused", "finally"]
 
     @pytest.mark.asyncio
-    async def test_cancelled_does_not_delete_checkpoint(self) -> None:
-        """Cancellation preserves the checkpoint (resume path)."""
-        store = _RecordingStore()
-        factory = _RaisingFactory(asyncio.CancelledError())
-        loop = Loop(ROLE_A, checkpointer=store)
-        flow = make_ff(saia_factory=factory).create()
-        flow.register(loop, name="loop")
-        with pytest.raises(asyncio.CancelledError):
-            await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
-        assert store.deletes == []
-
-    @pytest.mark.asyncio
-    async def test_failed_does_not_delete_checkpoint(self) -> None:
-        """Failure preserves the checkpoint (resume path)."""
-        store = _RecordingStore()
-        factory = _RaisingFactory(RuntimeError("boom"))
-        loop = Loop(ROLE_A, checkpointer=store)
-        flow = make_ff(saia_factory=factory).create()
-        flow.register(loop, name="loop")
-        with pytest.raises(RuntimeError):
-            await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
-        assert store.deletes == []
-
-    @pytest.mark.asyncio
     async def test_on_failed_does_not_swallow_cancellation(self) -> None:
         """CancelledError takes on_cancelled path, NOT on_failed."""
         called: list[str] = []
@@ -606,89 +551,6 @@ class TestExceptionalPaths:
 
 
 # -----------------------------------------------------------------------------
-# Checkpointer seam
-# -----------------------------------------------------------------------------
-
-
-class TestCheckpointer:
-    """Load-at-start decides start/resume path; delete-on-non-paused only."""
-
-    @pytest.mark.asyncio
-    async def test_no_checkpoint_takes_start_path(self) -> None:
-        """``load_checkpoint`` → None → on_start fires (not on_resume)."""
-        events: list[str] = []
-        store = _RecordingStore(preload=None)
-
-        def on_start(ctx: Context) -> None:
-            events.append("start")
-
-        def on_resume(state: Any, ctx: Context) -> None:
-            events.append("resume")
-
-        loop = Loop(ROLE_A, checkpointer=store, on_start=on_start, on_resume=on_resume)
-        factory = _CompleteFactory()
-        flow = make_ff(saia_factory=factory).create()
-        flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
-        assert events == ["start"]
-        assert store.loads == [("s1", 1)]
-
-    @pytest.mark.asyncio
-    async def test_present_checkpoint_takes_resume_path(self) -> None:
-        """``load_checkpoint`` → dict → on_resume fires (not on_start), resume=True."""
-        events: list[Any] = []
-        preload = {"turn": 3, "history": ["a"]}
-        store = _RecordingStore(preload=preload)
-
-        def on_start(ctx: Context) -> None:
-            events.append("start")
-
-        def on_resume(state: Any, ctx: Context) -> None:
-            events.append(("resume", state))
-
-        loop = Loop(ROLE_A, checkpointer=store, on_start=on_start, on_resume=on_resume)
-        factory = _CompleteFactory()
-        flow = make_ff(saia_factory=factory).create()
-        flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", scope_id="s1", run_id=2)
-        assert events == [("resume", preload)]
-        assert factory.built[0].calls[0]["resume"] is True
-
-    @pytest.mark.asyncio
-    async def test_delete_on_non_paused(self) -> None:
-        """Successful (non-paused) result → delete_checkpoint called."""
-        store = _RecordingStore()
-        loop = Loop(ROLE_A, checkpointer=store)
-        factory = _CompleteFactory()
-        flow = make_ff(saia_factory=factory).create()
-        flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", scope_id="s9", run_id=7)
-        assert store.deletes == [("s9", 7)]
-
-    @pytest.mark.asyncio
-    async def test_no_delete_on_paused(self) -> None:
-        """Paused result → delete_checkpoint NOT called (checkpoint stays)."""
-        store = _RecordingStore()
-        loop = Loop(ROLE_A, checkpointer=store)
-        factory = _CompleteFactory(result=_StubResult(paused=True))
-        flow = make_ff(saia_factory=factory).create()
-        flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", scope_id="s9", run_id=7)
-        assert store.deletes == []
-
-    @pytest.mark.asyncio
-    async def test_no_scope_id_bypasses_checkpointer_entirely(self) -> None:
-        """``scope_id=None`` → checkpointer is not consulted regardless of wiring."""
-        store = _RecordingStore(preload={"anything": True})
-        loop = Loop(ROLE_A, checkpointer=store)
-        factory = _CompleteFactory()
-        flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")  # no scope_id → no load, no delete
-        assert store.loads == []
-        assert store.deletes == []
-
-
-# -----------------------------------------------------------------------------
 # LoopFactory
 # -----------------------------------------------------------------------------
 
@@ -697,13 +559,11 @@ class TestLoopFactory:
     """Default inheritance, per-create overrides, with_* derivations."""
 
     def test_create_inherits_defaults(self) -> None:
-        """``create(role)`` yields a Loop carrying the factory's halt + checkpointer."""
+        """``create(role)`` yields a Loop carrying the factory's halt."""
         halt = asyncio.Event()
-        store = _RecordingStore()
-        lf = LoopFactory(make_test_logger(), checkpointer=store, halt=halt)
+        lf = LoopFactory(make_test_logger(), halt=halt)
         loop = lf.create(ROLE_A)
         assert loop._halt is halt
-        assert loop._checkpointer is store
         assert loop.role is ROLE_A
 
     def test_per_create_halt_overrides_factory_default(self) -> None:
@@ -715,30 +575,18 @@ class TestLoopFactory:
         assert loop._halt is override
 
     def test_with_halt_derivation_preserves_other_slots(self) -> None:
-        """``with_halt`` swaps only halt; saia_factory + checkpointer + lg carry over."""
-        store = _RecordingStore()
-        first = LoopFactory(make_test_logger(), checkpointer=store)
+        """``with_halt`` swaps only halt; saia_factory + lg carry over."""
+        first = LoopFactory(make_test_logger())
         new_event = asyncio.Event()
         second = first.with_halt(new_event)
         assert second is not first
         assert second.halt is new_event
-        assert second.checkpointer is store
         assert second._lg is first._lg
 
-    def test_with_checkpointer_derivation_preserves_other_slots(self) -> None:
-        """``with_checkpointer`` swaps only checkpointer; halt + lg carry over."""
+    def test_with_saia_factory_preserves_halt(self) -> None:
+        """``with_saia_factory`` swaps only saia_factory; halt carries over."""
         halt = asyncio.Event()
         first = LoopFactory(make_test_logger(), halt=halt)
-        new_store = _RecordingStore()
-        second = first.with_checkpointer(new_store)
-        assert second.checkpointer is new_store
-        assert second.halt is halt
-
-    def test_with_saia_factory_preserves_halt_and_checkpointer(self) -> None:
-        """``with_saia_factory`` swaps only saia_factory; halt + checkpointer carry over."""
-        halt = asyncio.Event()
-        store = _RecordingStore()
-        first = LoopFactory(make_test_logger(), checkpointer=store, halt=halt)
 
         class _F:
             def build(self, role: Role) -> Any:
@@ -749,7 +597,6 @@ class TestLoopFactory:
         assert second.saia_factory is replacement
         assert first.saia_factory is None
         assert second.halt is halt
-        assert second.checkpointer is store
 
     @pytest.mark.asyncio
     async def test_factory_halt_reaches_saia_abort_signal_end_to_end(self) -> None:
@@ -761,90 +608,6 @@ class TestLoopFactory:
         flow = make_ff(saia_factory=factory).create().call(loop)
         await flow.run("t")
         assert factory.built[0].calls[0]["abort_signal"] is halt
-
-
-# -----------------------------------------------------------------------------
-# Protocol conformance
-# -----------------------------------------------------------------------------
-
-
-class TestLoopCheckpointStoreProtocol:
-    """``_RecordingStore`` satisfies the LoopCheckpointStore Protocol structurally."""
-
-    def test_recording_store_matches_protocol(self) -> None:
-        """``_RecordingStore`` satisfies LoopCheckpointStore structurally."""
-        store = _RecordingStore()
-        # Protocol without @runtime_checkable — verify method presence at runtime.
-        assert callable(store.save_checkpoint)
-        assert callable(store.load_checkpoint)
-        assert callable(store.delete_checkpoint)
-        # Static check: assignment to Protocol type verifies structural conformance.
-        _: LoopCheckpointStore = store
-        Loop(ROLE_A, checkpointer=store)
-
-
-@dataclass
-class _AsyncLoopStore:
-    """LoopCheckpointStore stub whose methods are ``async def``.
-
-    Delegates to a wrapped :class:`_RecordingStore` after
-    ``await asyncio.sleep(0)`` so the coroutine suspends at least once
-    — proves Loop awaits the return value rather than dropping it.
-    """
-
-    inner: _RecordingStore = field(default_factory=_RecordingStore)
-
-    async def save_checkpoint(self, scope_id: str, run_id: int, state: dict[str, Any]) -> None:
-        await asyncio.sleep(0)
-        self.inner.save_checkpoint(scope_id, run_id, state)
-
-    async def load_checkpoint(
-        self, scope_id: str, run_id: int | None = None
-    ) -> dict[str, Any] | None:
-        await asyncio.sleep(0)
-        return self.inner.load_checkpoint(scope_id, run_id)
-
-    async def delete_checkpoint(self, scope_id: str, run_id: int | None = None) -> None:
-        await asyncio.sleep(0)
-        self.inner.delete_checkpoint(scope_id, run_id)
-
-
-class TestAsyncLoopCheckpointStore:
-    """Loop awaits an ``async def`` store at every call site."""
-
-    def test_async_store_matches_protocol(self) -> None:
-        """Structural conformance: an ``async def`` LoopCheckpointStore fits."""
-        store = _AsyncLoopStore()
-        _: LoopCheckpointStore = store
-        Loop(ROLE_A, checkpointer=store)
-
-    @pytest.mark.asyncio
-    async def test_present_checkpoint_awaits_load(self) -> None:
-        """Async ``load_checkpoint`` returning a coroutine still drives on_resume."""
-        events: list[Any] = []
-        preload = {"turn": 5}
-        store = _AsyncLoopStore(inner=_RecordingStore(preload=preload))
-
-        def on_resume(state: Any, ctx: Context) -> None:
-            events.append(("resume", state))
-
-        loop = Loop(ROLE_A, checkpointer=store, on_resume=on_resume)
-        factory = _CompleteFactory()
-        flow = make_ff(saia_factory=factory).create()
-        flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", scope_id="s1", run_id=1)
-        assert events == [("resume", preload)]
-
-    @pytest.mark.asyncio
-    async def test_delete_on_completion_is_awaited(self) -> None:
-        """Async ``delete_checkpoint`` on a clean run actually fires."""
-        store = _AsyncLoopStore()
-        loop = Loop(ROLE_A, checkpointer=store)
-        factory = _CompleteFactory()
-        flow = make_ff(saia_factory=factory).create()
-        flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", scope_id="s9", run_id=7)
-        assert store.inner.deletes == [("s9", 7)]
 
 
 # -----------------------------------------------------------------------------
