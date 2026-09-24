@@ -779,6 +779,10 @@ async def _save_halt_checkpoint(
     env.runtime._halt_saved = True
     trace_ref = await _stash_pending_saia_turn(env)
     await _save_scope_commit(env, iteration, node_id, current_state, "halted", trace_ref)
+    # Clear only after both the blob writes and the halted commit are durable.
+    # put_object is content-addressed and idempotent, so a within-run retry can
+    # re-drain the same entries safely.
+    env.runtime._pending_saia_turn_bytes = {}
 
 
 async def _stash_pending_saia_turn(env: _RunEnv) -> tuple[TraceRef, ...]:
@@ -788,18 +792,22 @@ async def _stash_pending_saia_turn(env: _RunEnv) -> tuple[TraceRef, ...]:
     ``env.runtime._pending_saia_turn_bytes`` — a dict keyed by the
     Loop's ``ctx._node_id`` so concurrent ``.map`` bodies, sibling
     Loops in a chain, and nested Loops in an iterate body each keep
-    their own entry. On halt-save this helper drains every entry
-    into the CAS store as a standalone Blob and yields one
+    their own entry. On halt-save this helper puts every entry into
+    the CAS store as a standalone Blob and yields one
     ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
     entry to stamp on the halt commit's meta; the compound id lets
     the resume side route each blob back to the Loop that produced
     it. Returns ``()`` when no bytes are pending, no checkpointer
     is wired, or ``client_flow_id`` is absent.
+
+    Does not clear the dict — the caller drops it only after the
+    halted commit is durable so a within-run retry can re-emit the
+    same entries. ``put_object`` is content-addressed, so a repeat
+    write for the same blob is a no-op.
     """
     pending = env.runtime._pending_saia_turn_bytes
     if not pending or env.checkpointer is None or env.client_flow_id is None:
         return ()
-    env.runtime._pending_saia_turn_bytes = {}
     refs: list[TraceRef] = []
     for node_id, payload in pending.items():
         blob = Blob.from_bytes(payload)
