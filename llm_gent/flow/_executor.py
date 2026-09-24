@@ -777,16 +777,33 @@ async def _save_halt_checkpoint(
     if env.runtime._halt_saved:
         return
     env.runtime._halt_saved = True
-    trace_ref = await _stash_pending_saia_turn(env)
-    await _save_scope_commit(env, iteration, node_id, current_state, "halted", trace_ref)
-    # Clear only after both the blob writes and the halted commit are durable.
-    # put_object is content-addressed and idempotent, so a within-run retry can
-    # re-drain the same entries safely.
-    env.runtime._pending_saia_turn_bytes = {}
+    saved = False
+    stashed_ids: tuple[str, ...] = ()
+    try:
+        trace_ref, stashed_ids = await _stash_pending_saia_turn(env)
+        await _save_scope_commit(env, iteration, node_id, current_state, "halted", trace_ref)
+        saved = True
+    except Exception as e:
+        env.lg.warning(
+            "halt-save failed; un-latching for retry at next observation",
+            extra={"exception": e},
+        )
+        raise
+    finally:
+        if not saved:
+            # Both Exception and asyncio.CancelledError land here; the flag must
+            # un-latch either way so a later halt-observation site can retry.
+            env.runtime._halt_saved = False
+    # Drop only the entries we stashed. Late arrivals from concurrent .map
+    # items that landed after the snapshot stay on the runtime dict.
+    for stashed_id in stashed_ids:
+        env.runtime._pending_saia_turn_bytes.pop(stashed_id, None)
 
 
-async def _stash_pending_saia_turn(env: _RunEnv) -> tuple[TraceRef, ...]:
-    """Persist any pending SAIA turn bytes and return a matching TraceRef tuple.
+async def _stash_pending_saia_turn(
+    env: _RunEnv,
+) -> tuple[tuple[TraceRef, ...], tuple[str, ...]]:
+    """Persist any pending SAIA turn bytes; return TraceRefs + the stashed node_ids.
 
     Loop deposits paused-conversation bytes on
     ``env.runtime._pending_saia_turn_bytes`` — a dict keyed by the
@@ -797,25 +814,36 @@ async def _stash_pending_saia_turn(env: _RunEnv) -> tuple[TraceRef, ...]:
     ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
     entry to stamp on the halt commit's meta; the compound id lets
     the resume side route each blob back to the Loop that produced
-    it. Returns ``()`` when no bytes are pending, no checkpointer
-    is wired, or ``client_flow_id`` is absent.
+    it. Returns ``((), ())`` when no bytes are pending, no
+    checkpointer is wired, or ``client_flow_id`` is absent.
 
-    Does not clear the dict — the caller drops it only after the
-    halted commit is durable so a within-run retry can re-emit the
-    same entries. ``put_object`` is content-addressed, so a repeat
-    write for the same blob is a no-op.
+    Also returns the snapshot's node_ids so the caller can drop
+    exactly those entries after the halted commit is durable. Late
+    arrivals from concurrent ``.map`` items that landed after the
+    snapshot are not covered here — they stay on the runtime dict
+    (stranded under today's one-shot halt-save; the pause/resume
+    atomicity story is where that gets addressed).
+
+    Does not clear the dict — the caller drops the stashed entries
+    only after the halted commit is durable so a within-run retry
+    can re-emit them. ``put_object`` is content-addressed, so a
+    repeat write for the same blob is a no-op.
     """
     pending = env.runtime._pending_saia_turn_bytes
     if not pending or env.checkpointer is None or env.client_flow_id is None:
-        return ()
+        return (), ()
+    # Snapshot the pairs: concurrent .map bodies can mutate the live dict during
+    # the awaited put_object below (a sibling item's _capture_paused firing).
+    # Iterating the live dict would raise RuntimeError.
+    snapshot = list(pending.items())
     refs: list[TraceRef] = []
-    for node_id, payload in pending.items():
+    for node_id, payload in snapshot:
         blob = Blob.from_bytes(payload)
         await maybe_await(
             env.checkpointer.put_object(env.client_flow_id, "blob", blob.content_hash, blob.payload)
         )
         refs.append(TraceRef(kind="saia_turn", id=f"{node_id}:{blob.content_hash}"))
-    return tuple(refs)
+    return tuple(refs), tuple(node_id for node_id, _ in snapshot)
 
 
 async def _save_scope_commit(
