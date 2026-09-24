@@ -7,119 +7,49 @@ A ``Loop`` is a Flow-body citizen: it carries a :class:`Role` and is
 dispatched by a :class:`Flow` like an ``@verb`` function or a bound-method
 verb. Its body is a single ``saia.complete(...)`` invocation, wired with:
 
-- lifecycle hooks (``on_start`` / ``on_resume`` / ``on_iteration`` /
-  ``on_executor_ready`` / ``on_cost`` / ``on_complete`` / ``on_paused`` /
-  ``on_cancelled`` / ``on_failed`` / ``on_finally``)
-- an optional checkpointer seam (3-method Protocol mirroring
-  :class:`appware.CheckpointStore`) — ``Loop`` loads at start and deletes
-  on successful completion; save timing is the consumer's responsibility
-  (via ``on_iteration``, closing over the checkpointer they gave the Loop)
+- lifecycle hooks (``on_iteration`` / ``on_executor_ready`` / ``on_cost``
+  / ``on_complete`` / ``on_paused`` / ``on_cancelled`` / ``on_failed`` /
+  ``on_finally``)
 - halt bridging to SAIA's ``abort_signal``
 
 Halt resolution rule: an explicit ``Loop(halt=X)`` at construction wins
 over ambient ``ctx.halt`` — matches the ``ctx.saia`` precedent. Whichever
 is effective becomes SAIA's ``abort_signal``.
 
+Loop is CAS-native for durable pause capture — when a paused result
+includes a conversation and a
+:class:`~llm_saia.core.conversation.ConversationFactory` is wired,
+the conversation is serialized and published for the halt-observation
+site to stamp as a Blob referenced by ``TraceRef(kind="saia_turn", ...)``
+on the Flow's halt commit.
+
 :class:`LoopFactory` bundles the cross-cutting config (logger, SAIAFactory,
-checkpointer, halt) so consumers wire once at the app boundary and
-``.create(role, **hooks)`` many Loops. It mirrors :class:`FlowFactory`'s
-shape so a shared halt event threads uniformly across a mixed Loop-and-Flow
-tree.
+halt) so consumers wire once at the app boundary and ``.create(role,
+**hooks)`` many Loops. It mirrors :class:`FlowFactory`'s shape so a
+shared halt event threads uniformly across a mixed Loop-and-Flow tree.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol
+from typing import Any
 
 from appinfra.log import Logger
 from llm_saia import SAIA
+from llm_saia.core.conversation import ConversationFactory
 
 from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .role import Role
-
-
-# ----------------------------------------------------------------------------
-# LoopCheckpointStore Protocol
-# ----------------------------------------------------------------------------
-
-
-class LoopCheckpointStore(Protocol):
-    """3-method Protocol for persisting :class:`Loop` checkpoints (per-SAIA-turn).
-
-    Scoped to Loop's saia-turn lifecycle. The Flow-level composition
-    checkpointer (:class:`llm_gent.flow.CheckpointStore`) lives at a
-    different layer with a different Protocol; the two names disambiguate
-    at import.
-
-    Mirrors :class:`appware.CheckpointStore` (``save_checkpoint`` /
-    ``load_checkpoint`` / ``delete_checkpoint``) so an existing consumer
-    store composes without adaptation. Update-in-place is intentionally
-    absent — no consumer today mutates a checkpoint atomically, so the
-    minimal contract holds.
-
-    :class:`Loop` drives load-at-start and delete-on-successful-completion;
-    the save timing is the consumer's responsibility (typically wired
-    inside ``on_iteration`` so each turn's state is persisted before the
-    next).
-
-    Each method may be declared ``def`` (returning its value directly)
-    or ``async def`` (returning a coroutine). Loop awaits the return
-    value when it is awaitable — a synchronous store keeps working;
-    an async-native store (e.g. one using ``asyncio.to_thread``
-    internally) gains first-class support without blocking the event
-    loop.
-    """
-
-    def save_checkpoint(
-        self, scope_id: str, run_id: int, state: dict[str, Any]
-    ) -> None | Awaitable[None]:
-        """Persist a snapshot for later resume.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def load_checkpoint(
-        self, scope_id: str, run_id: int | None = None
-    ) -> dict[str, Any] | None | Awaitable[dict[str, Any] | None]:
-        """Return the snapshot, or ``None`` if no matching checkpoint exists.
-
-        ``run_id=None`` should return the latest checkpoint under
-        ``scope_id`` per the consumer's convention.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def delete_checkpoint(self, scope_id: str, run_id: int | None = None) -> None | Awaitable[None]:
-        """Delete the snapshot — called after a successful (non-paused) run.
-
-        May be declared ``async def``.
-        """
-        ...
+from .state.cas import canonical_json
 
 
 # ----------------------------------------------------------------------------
 # Hook types
 # ----------------------------------------------------------------------------
 
-
-OnStart = Callable[[Context[Any]], Any]
-"""``(ctx) -> None`` — fires before :meth:`saia.complete` when not resuming.
-
-May be async. Return value is ignored.
-"""
-
-OnResume = Callable[[dict[str, Any], Context[Any]], Any]
-"""``(checkpoint_state, ctx) -> None`` — fires when a checkpoint was loaded.
-
-Runs instead of ``on_start``. Consumer decides how to hydrate the run
-from ``checkpoint_state``. May be async; return value ignored.
-"""
 
 OnIteration = Callable[[int, Any, Context[Any]], Any]
 """``(iteration, response, ctx) -> None`` — bridges to SAIA's per-turn hook.
@@ -222,9 +152,7 @@ class Loop:
         *,
         saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
-        checkpointer: LoopCheckpointStore | None = None,
-        on_start: OnStart | None = None,
-        on_resume: OnResume | None = None,
+        conversation_factory: ConversationFactory | None = None,
         on_iteration: OnIteration | None = None,
         on_complete: OnComplete | None = None,
         on_paused: OnPaused | None = None,
@@ -252,14 +180,15 @@ class Loop:
                 (not ``ctx.halt``) becomes SAIA's ``abort_signal``.
                 Matches the ``ctx.saia`` precedent: explicit at
                 construction wins over ambient.
-            checkpointer: Optional 3-method store. When set, Loop
-                loads-at-start (for resume) and deletes-on-complete
-                (only on non-paused, non-cancelled, non-failed results);
-                save timing is the consumer's, wired through
-                ``on_iteration``.
-            on_start: Fires before ``saia.complete`` when not resuming.
-            on_resume: Fires instead of ``on_start`` when a checkpoint
-                was loaded — receives the loaded state.
+            conversation_factory: Optional
+                :class:`~llm_saia.core.conversation.ConversationFactory`.
+                When wired, an ``on_paused`` result triggers the
+                framework to capture the conversation's
+                :meth:`to_dict` payload as canonical bytes on
+                :attr:`_paused_bytes` for the halt-observation site
+                to stamp into the Flow's CAS commit. Consumers that
+                don't need durable pause capture can leave it
+                ``None``; capture becomes a no-op.
             on_iteration: Bridges to SAIA's per-turn hook.
             on_complete: Fires after a non-paused ``saia.complete``.
                 Non-``None`` return replaces the raw SAIA result as
@@ -285,9 +214,7 @@ class Loop:
         self._role = role
         self._saia = saia
         self._halt = halt
-        self._checkpointer = checkpointer
-        self._on_start = on_start
-        self._on_resume = on_resume
+        self._conversation_factory = conversation_factory
         self._on_iteration = on_iteration
         self._on_complete = on_complete
         self._on_paused = on_paused
@@ -296,6 +223,7 @@ class Loop:
         self._on_finally = on_finally
         self._on_executor_ready = on_executor_ready
         self._on_cost = on_cost
+        self._paused_bytes: bytes | None = None
 
     @property
     def role(self) -> Role:
@@ -312,8 +240,6 @@ class Loop:
         ctx: Context[Any],
         task: str,
         *,
-        scope_id: str | None = None,
-        run_id: int | None = None,
         conversation: Any = None,
     ) -> Any:
         """Dispatch one ``saia.complete`` under this Loop's role.
@@ -324,13 +250,6 @@ class Loop:
                 ``abort_signal`` when no explicit halt was given at
                 construction.
             task: The task/prompt handed to ``saia.complete``.
-            scope_id: Checkpoint scope id — identifies a resumable
-                trajectory. Required for checkpoint load/delete;
-                omitted → the checkpointer is not consulted regardless
-                of its wiring.
-            run_id: Checkpoint run id — scopes to a specific attempt.
-                ``None`` → load the latest checkpoint under
-                ``scope_id`` (per the store's convention).
             conversation: Optional conversation-like object passed
                 through to ``saia.complete`` for prior history.
 
@@ -343,23 +262,26 @@ class Loop:
 
         Raises:
             asyncio.CancelledError: Re-raised after ``on_cancelled`` and
-                ``on_finally`` fire. Checkpoint is preserved.
+                ``on_finally`` fire.
             Exception: Re-raised after ``on_failed`` and ``on_finally``
-                fire. Checkpoint is preserved.
+                fire.
             RuntimeError: ``ctx.saia`` is ``None`` — either the ctx has
                 no role or the enclosing flow had no SAIAFactory.
         """
         saia = self._require_saia(ctx)
-        checkpoint = await self._load_checkpoint(scope_id, run_id)
+        self._paused_bytes = None
+        env = ctx._env
+        if env is not None and ctx._node_id is not None:
+            env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
         try:
-            await self._before_run(saia, ctx, checkpoint)
+            if self._on_executor_ready is not None:
+                await maybe_await(self._on_executor_ready(saia, ctx))
             try:
                 result = await saia.complete(
                     task,
                     on_iteration=self._make_iter_bridge(ctx),
                     conversation=conversation,
                     abort_signal=self._resolve_halt(ctx),
-                    resume=checkpoint is not None,
                 )
             except asyncio.CancelledError:
                 if self._on_cancelled is not None:
@@ -369,7 +291,7 @@ class Loop:
                 if self._on_failed is not None:
                     await maybe_await(self._on_failed(exc, ctx))
                 raise
-            override = await self._after_run(result, ctx, scope_id, run_id)
+            override = await self._after_run(result, ctx, conversation)
             return override if override is not None else result
         finally:
             if self._on_finally is not None:
@@ -395,29 +317,6 @@ class Loop:
         """Explicit ``Loop(halt=X)`` wins over ambient ``ctx.halt``."""
         return self._halt if self._halt is not None else ctx.halt
 
-    async def _load_checkpoint(
-        self, scope_id: str | None, run_id: int | None
-    ) -> dict[str, Any] | None:
-        """Return the checkpoint state, or ``None`` when not consulted."""
-        if self._checkpointer is None or scope_id is None:
-            return None
-        loaded: dict[str, Any] | None = await maybe_await(
-            self._checkpointer.load_checkpoint(scope_id, run_id)
-        )
-        return loaded
-
-    async def _before_run(
-        self, saia: Any, ctx: Context[Any], checkpoint: dict[str, Any] | None
-    ) -> None:
-        """Fire ``on_executor_ready`` and the start/resume lifecycle hook."""
-        if self._on_executor_ready is not None:
-            await maybe_await(self._on_executor_ready(saia, ctx))
-        if checkpoint is not None:
-            if self._on_resume is not None:
-                await maybe_await(self._on_resume(checkpoint, ctx))
-        elif self._on_start is not None:
-            await maybe_await(self._on_start(ctx))
-
     def _make_iter_bridge(self, ctx: Context[Any]) -> Callable[[int, Any], Awaitable[None]] | None:
         """Return a SAIA-compatible per-turn bridge, or ``None`` when unwired."""
         hook = self._on_iteration
@@ -429,30 +328,71 @@ class Loop:
 
         return bridge
 
-    async def _after_run(
-        self,
-        result: Any,
-        ctx: Context[Any],
-        scope_id: str | None,
-        run_id: int | None,
-    ) -> Any:
+    async def _after_run(self, result: Any, ctx: Context[Any], conversation: Any) -> Any:
         """Cost hook, then paused-vs-complete branching + return override.
 
-        Returns the value from ``on_paused`` / ``on_complete`` when the
-        hook returned non-``None`` — :meth:`__call__` uses it to replace
-        the raw SAIA result. ``None`` means "no override, keep raw result".
+        On the paused path, capture the conversation's serialized
+        :meth:`to_dict` payload as canonical bytes on
+        :attr:`_paused_bytes` when a :class:`ConversationFactory` is
+        wired — the halt-observation site reads it to stamp a
+        ``TraceRef(kind="saia_turn", ...)`` on the Flow's CAS halt
+        commit. Capture is a no-op when no factory is wired or when
+        the caller supplied no conversation object.
+
+        Returns the value from ``on_paused`` / ``on_complete`` when
+        the hook returned non-``None`` — :meth:`__call__` uses it to
+        replace the raw SAIA result. ``None`` means "no override, keep
+        raw result".
         """
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
+            self._capture_paused(ctx, conversation)
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
-        if self._checkpointer is not None and scope_id is not None:
-            await maybe_await(self._checkpointer.delete_checkpoint(scope_id, run_id))
+        # Clear this Loop's stale paused bytes on non-paused completion so a
+        # later halt-save doesn't stamp conversation state from an earlier
+        # pause of this Loop. Sibling Loops' entries stay put.
+        env = ctx._env
+        if env is not None and ctx._node_id is not None:
+            env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
+
+    def _capture_paused(self, ctx: Context[Any], conversation: Any) -> None:
+        """Serialize the conversation's paused state to canonical bytes.
+
+        Publishes to two seams:
+
+        - :attr:`_paused_bytes` on this Loop instance — introspection
+          surface for tests and consumers that already hold a Loop
+          reference.
+        - ``env.runtime._pending_saia_turn_bytes`` on the top-level
+          Flow runtime — a dict keyed by ``ctx._node_id`` so each
+          Loop's bytes stay distinct (concurrent ``.map`` bodies,
+          sibling Loops in a chain, and nested Loops in an iterate
+          body all share one runtime). The halt-observation site
+          drains the dict to stamp one
+          ``TraceRef(kind="saia_turn", ...)`` per entry on the halt
+          commit.
+
+        No-op when this Loop was constructed without a
+        :class:`ConversationFactory`, when no conversation object
+        flowed through this dispatch, or when ``ctx._node_id`` is
+        unset.
+        """
+        if self._conversation_factory is None or conversation is None:
+            return
+        to_dict = getattr(conversation, "to_dict", None)
+        if to_dict is None:
+            return
+        payload = canonical_json(to_dict())
+        self._paused_bytes = payload
+        env = ctx._env
+        if env is not None and ctx._node_id is not None:
+            env.runtime._pending_saia_turn_bytes[ctx._node_id] = payload
 
 
 # ----------------------------------------------------------------------------
@@ -483,8 +423,8 @@ class LoopFactory:
         lg: Logger,
         *,
         saia_factory: SAIAFactory | None = None,
-        checkpointer: LoopCheckpointStore | None = None,
         halt: asyncio.Event | None = None,
+        conversation_factory: ConversationFactory | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -495,17 +435,20 @@ class LoopFactory:
             saia_factory: Optional :class:`SAIAFactory`. Reserved for
                 standalone-Loop use; Flow-body Loops read ``ctx.saia``
                 from the enclosing Flow's factory.
-            checkpointer: Optional :class:`LoopCheckpointStore`. Every
-                :meth:`create` inherits it as the Loop's default
-                checkpointer unless per-call overridden.
             halt: Optional :class:`asyncio.Event` used as the default
                 halt for every built Loop. Per-``create`` overrides
                 win (same explicit-wins rule the Loop itself uses).
+            conversation_factory: Optional
+                :class:`~llm_saia.core.conversation.ConversationFactory`.
+                Every :meth:`create` inherits it as the Loop's default
+                factory unless per-call overridden. Wire once at the
+                app boundary so every Loop this factory builds captures
+                paused conversations into the Flow's CAS halt commit.
         """
         self._lg = lg
         self._saia_factory = saia_factory
-        self._checkpointer = checkpointer
         self._halt = halt
+        self._conversation_factory = conversation_factory
 
     @property
     def lg(self) -> Logger:
@@ -518,14 +461,14 @@ class LoopFactory:
         return self._saia_factory
 
     @property
-    def checkpointer(self) -> LoopCheckpointStore | None:
-        """The checkpointer captured at construction, or ``None``."""
-        return self._checkpointer
-
-    @property
     def halt(self) -> asyncio.Event | None:
         """The default halt event captured at construction, or ``None``."""
         return self._halt
+
+    @property
+    def conversation_factory(self) -> ConversationFactory | None:
+        """The default conversation factory captured at construction, or ``None``."""
+        return self._conversation_factory
 
     def create(
         self,
@@ -533,9 +476,7 @@ class LoopFactory:
         *,
         saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
-        checkpointer: LoopCheckpointStore | None = None,
-        on_start: OnStart | None = None,
-        on_resume: OnResume | None = None,
+        conversation_factory: ConversationFactory | None = None,
         on_iteration: OnIteration | None = None,
         on_complete: OnComplete | None = None,
         on_paused: OnPaused | None = None,
@@ -547,19 +488,20 @@ class LoopFactory:
     ) -> Loop:
         """Build a :class:`Loop` inheriting this factory's captured defaults.
 
-        Per-``create`` ``halt=`` / ``checkpointer=`` override the factory
-        defaults (same explicit-wins rule the Loop itself uses). ``saia=``
-        pins an explicit SAIA instance on the resulting Loop, bypassing
-        the enclosing flow's :class:`SAIAFactory`. Hooks are per-Loop and
-        never inherited.
+        Per-``create`` ``halt=`` / ``conversation_factory=`` override
+        the factory defaults. ``saia=`` pins an explicit SAIA instance
+        on the resulting Loop, bypassing the enclosing flow's
+        :class:`SAIAFactory`. Hooks are per-Loop and never inherited.
         """
         return Loop(
             role,
             saia=saia,
             halt=halt if halt is not None else self._halt,
-            checkpointer=(checkpointer if checkpointer is not None else self._checkpointer),
-            on_start=on_start,
-            on_resume=on_resume,
+            conversation_factory=(
+                conversation_factory
+                if conversation_factory is not None
+                else self._conversation_factory
+            ),
             on_iteration=on_iteration,
             on_complete=on_complete,
             on_paused=on_paused,
@@ -575,17 +517,8 @@ class LoopFactory:
         return LoopFactory(
             self._lg,
             saia_factory=saia_factory,
-            checkpointer=self._checkpointer,
             halt=self._halt,
-        )
-
-    def with_checkpointer(self, checkpointer: LoopCheckpointStore | None) -> LoopFactory:
-        """Return a new :class:`LoopFactory` whose checkpointer is swapped."""
-        return LoopFactory(
-            self._lg,
-            saia_factory=self._saia_factory,
-            checkpointer=checkpointer,
-            halt=self._halt,
+            conversation_factory=self._conversation_factory,
         )
 
     def with_halt(self, event: asyncio.Event) -> LoopFactory:
@@ -601,6 +534,15 @@ class LoopFactory:
         return LoopFactory(
             self._lg,
             saia_factory=self._saia_factory,
-            checkpointer=self._checkpointer,
             halt=event,
+            conversation_factory=self._conversation_factory,
+        )
+
+    def with_conversation_factory(self, conversation_factory: ConversationFactory) -> LoopFactory:
+        """Return a new :class:`LoopFactory` whose conversation factory is swapped."""
+        return LoopFactory(
+            self._lg,
+            saia_factory=self._saia_factory,
+            halt=self._halt,
+            conversation_factory=conversation_factory,
         )

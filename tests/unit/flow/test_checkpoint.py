@@ -334,6 +334,186 @@ class TestCtxCheckpoint:
         assert called == 1
 
 
+class TestSaiaTurnTraceRef:
+    """Loop's paused conversation lands as a Blob referenced by trace_ref."""
+
+    async def test_halt_save_stamps_saia_turn_and_writes_blob(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Loop paused mid-turn → halt commit's trace_ref points at a blob equal to canonical to_dict."""
+        from dataclasses import dataclass, field
+
+        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
+        from llm_gent.flow.state.cas import Commit, canonical_json
+
+        role = Role(name="r", backend="openai", model="gpt-4o-mini")
+
+        @dataclass
+        class _Conv:
+            messages: list[str] = field(default_factory=list)
+
+            def to_dict(self) -> dict[str, Any]:
+                return {"messages": list(self.messages), "n": len(self.messages)}
+
+        class _ConvFactory:
+            def create(self) -> _Conv:
+                return _Conv()
+
+            def create_from_state(self, state: dict[str, Any]) -> _Conv:
+                c = _Conv()
+                c.messages = list(state.get("messages", []))
+                return c
+
+        @dataclass
+        class _Result:
+            paused: bool = True
+            reason: str = "halt"
+
+        halt = asyncio.Event()
+        conv = _Conv(messages=["hello", "world"])
+        loop = Loop(role, conversation_factory=_ConvFactory())
+
+        # SAIA stub simulates a mid-turn pause: sets halt during complete and
+        # returns paused so Loop captures the conversation before returning.
+        class _PausingSAIA:
+            def __init__(self, role: Role) -> None:
+                self.role = role
+
+            async def complete(self, task: str, **kwargs: Any) -> _Result:
+                halt.set()
+                return _Result()
+
+        class _PausingSAIAFactory:
+            def build(self, role: Role) -> _PausingSAIA:
+                return _PausingSAIA(role)
+
+        @verb(role=role)
+        async def run_loop(ctx: Context, _prev: Any = None) -> Any:
+            return await loop(ctx, "t", conversation=conv)
+
+        @verb(role=role)
+        async def after(ctx: Context, _prev: Any = None) -> str:
+            return "not run"
+
+        ff = FlowFactory(make_test_logger(), saia_factory=_PausingSAIAFactory())
+        flow = (
+            ff.create(state={})
+            .with_checkpointer(store, "saia-turn-1")
+            .with_halt(halt)
+            .call(run_loop)
+            .then(after)
+        )
+        await flow.run()
+
+        halted_hash = store.resolve_ref("saia-turn-1")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("saia-turn-1", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+        # trace_ref carries exactly one saia_turn entry whose id encodes the
+        # Loop's node_id and the blob hash; the blob bytes match canonical_json
+        # of the conversation's to_dict.
+        assert len(commit.meta.trace_ref) == 1
+        ref = commit.meta.trace_ref[0]
+        assert ref.kind == "saia_turn"
+        node_id, _, blob_hash = ref.id.partition(":")
+        assert node_id and blob_hash
+        expected = canonical_json(conv.to_dict())
+        stored = store.get_object("saia-turn-1", "blob", blob_hash)
+        assert stored == expected
+
+    async def test_sibling_non_paused_clear_does_not_erase_other_loops_bytes(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Loop A pauses; sibling Loop B completes non-paused; A's bytes still land."""
+        from dataclasses import dataclass, field
+
+        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
+        from llm_gent.flow.state.cas import Commit, canonical_json
+
+        role = Role(name="r", backend="openai", model="gpt-4o-mini")
+
+        @dataclass
+        class _Conv:
+            messages: list[str] = field(default_factory=list)
+
+            def to_dict(self) -> dict[str, Any]:
+                return {"messages": list(self.messages), "n": len(self.messages)}
+
+        class _ConvFactory:
+            def create(self) -> _Conv:
+                return _Conv()
+
+            def create_from_state(self, state: dict[str, Any]) -> _Conv:
+                c = _Conv()
+                c.messages = list(state.get("messages", []))
+                return c
+
+        @dataclass
+        class _Result:
+            paused: bool = False
+            reason: str = ""
+
+        halt = asyncio.Event()
+        conv_a = _Conv(messages=["from-a"])
+        conv_b = _Conv(messages=["from-b"])
+
+        class _PausingSAIA:
+            def __init__(self, role: Role) -> None:
+                self.role = role
+
+            async def complete(self, task: str, **kwargs: Any) -> _Result:
+                return _Result(paused=True, reason="tool")
+
+        class _HaltingSAIA:
+            def __init__(self, role: Role) -> None:
+                self.role = role
+
+            async def complete(self, task: str, **kwargs: Any) -> _Result:
+                halt.set()
+                return _Result(paused=False)
+
+        loop_a = Loop(role, saia=_PausingSAIA(role), conversation_factory=_ConvFactory())
+        loop_b = Loop(role, saia=_HaltingSAIA(role), conversation_factory=_ConvFactory())
+
+        @verb(role=role)
+        async def run_a(ctx: Context, _prev: Any = None) -> Any:
+            return await loop_a(ctx, "t", conversation=conv_a)
+
+        @verb(role=role)
+        async def run_b(ctx: Context, _prev: Any = None) -> Any:
+            return await loop_b(ctx, "t", conversation=conv_b)
+
+        @verb(role=role)
+        async def after(ctx: Context, _prev: Any = None) -> str:
+            return "not run"
+
+        ff = FlowFactory(make_test_logger())
+        flow = (
+            ff.create(state={})
+            .with_checkpointer(store, "saia-turn-multi")
+            .with_halt(halt)
+            .call(run_a)
+            .then(run_b)
+            .then(after)
+        )
+        await flow.run()
+
+        halted_hash = store.resolve_ref("saia-turn-multi")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(
+            store.get_object("saia-turn-multi", "commit", halted_hash) or b""
+        )
+        assert commit.meta.outcome == "halted"
+        # Under the old single-slot design Loop B's non-paused clear would have
+        # erased Loop A's bytes. With per-node_id keying A's entry survives and
+        # halt-save stamps it.
+        saia_refs = [r for r in commit.meta.trace_ref if r.kind == "saia_turn"]
+        assert len(saia_refs) == 1
+        _, _, blob_hash = saia_refs[0].id.partition(":")
+        expected = canonical_json(conv_a.to_dict())
+        assert store.get_object("saia-turn-multi", "blob", blob_hash) == expected
+
+
 class TestSaveOnHaltChain:
     """Chain-only halt-observation site writes a commit at the not-yet-run step."""
 

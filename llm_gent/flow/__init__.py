@@ -28,14 +28,14 @@ Public surface:
   and one :class:`SAIAFactory`); preferred entry point at the application
   boundary
 - :class:`Loop` — Flow-body primitive wrapping one ``saia.complete()``
-  invocation with lifecycle hooks + halt bridging + optional checkpointer
+  invocation with lifecycle hooks + halt bridging; CAS-native
+  pause/resume via the framework halt-save site
 - :class:`LoopFactory` — app-scoped :class:`Loop` builder (mirrors
   :class:`FlowFactory` for ``with_halt``); pair on the same halt event to
   thread it across a mixed Loop-and-Flow tree
 - :class:`CheckpointStore` — Flow-level pause/resume Protocol; persists
-  composition-graph state at ``.iterate`` boundaries
-- :class:`LoopCheckpointStore` — 3-method Protocol :class:`Loop` drives
-  for SAIA-turn pause/resume (distinct layer from the Flow-level Protocol)
+  composition-graph state at ``.iterate`` boundaries and mid-SAIA-turn
+  state at halt observation
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
 - :class:`Skipped` — sentinel returned for an item gated out by
   ``Flow.guard`` on a ``Flow.map`` node
@@ -59,7 +59,7 @@ from .checkpoint import CheckpointPolicy, CheckpointStore
 from .context import Context
 from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
-from .loop import Loop, LoopCheckpointStore, LoopFactory
+from .loop import Loop, LoopFactory
 from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
 from .role import Role
@@ -76,7 +76,6 @@ __all__ = [
     "Flow",
     "FlowFactory",
     "Loop",
-    "LoopCheckpointStore",
     "LoopFactory",
     "Panel",
     "Role",

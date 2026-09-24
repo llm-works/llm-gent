@@ -52,6 +52,7 @@ from .state.cas import (
     CommitMeta,
     CommitOutcome,
     ProducedBy,
+    TraceRef,
     Tree,
     TreeEntry,
     canonical_json,
@@ -776,7 +777,73 @@ async def _save_halt_checkpoint(
     if env.runtime._halt_saved:
         return
     env.runtime._halt_saved = True
-    await _save_scope_commit(env, iteration, node_id, current_state, "halted")
+    saved = False
+    stashed_ids: tuple[str, ...] = ()
+    try:
+        trace_ref, stashed_ids = await _stash_pending_saia_turn(env)
+        await _save_scope_commit(env, iteration, node_id, current_state, "halted", trace_ref)
+        saved = True
+    except Exception as e:
+        env.lg.warning(
+            "halt-save failed; un-latching for retry at next observation",
+            extra={"exception": e},
+        )
+        raise
+    finally:
+        if not saved:
+            # Both Exception and asyncio.CancelledError land here; the flag must
+            # un-latch either way so a later halt-observation site can retry.
+            env.runtime._halt_saved = False
+    # Drop only the entries we stashed. Late arrivals from concurrent .map
+    # items that landed after the snapshot stay on the runtime dict.
+    for stashed_id in stashed_ids:
+        env.runtime._pending_saia_turn_bytes.pop(stashed_id, None)
+
+
+async def _stash_pending_saia_turn(
+    env: _RunEnv,
+) -> tuple[tuple[TraceRef, ...], tuple[str, ...]]:
+    """Persist any pending SAIA turn bytes; return TraceRefs + the stashed node_ids.
+
+    Loop deposits paused-conversation bytes on
+    ``env.runtime._pending_saia_turn_bytes`` — a dict keyed by the
+    Loop's ``ctx._node_id`` so concurrent ``.map`` bodies, sibling
+    Loops in a chain, and nested Loops in an iterate body each keep
+    their own entry. On halt-save this helper puts every entry into
+    the CAS store as a standalone Blob and yields one
+    ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
+    entry to stamp on the halt commit's meta; the compound id lets
+    the resume side route each blob back to the Loop that produced
+    it. Returns ``((), ())`` when no bytes are pending, no
+    checkpointer is wired, or ``client_flow_id`` is absent.
+
+    Also returns the snapshot's node_ids so the caller can drop
+    exactly those entries after the halted commit is durable. Late
+    arrivals from concurrent ``.map`` items that landed after the
+    snapshot are not covered here — they stay on the runtime dict
+    (stranded under today's one-shot halt-save; the pause/resume
+    atomicity story is where that gets addressed).
+
+    Does not clear the dict — the caller drops the stashed entries
+    only after the halted commit is durable so a within-run retry
+    can re-emit them. ``put_object`` is content-addressed, so a
+    repeat write for the same blob is a no-op.
+    """
+    pending = env.runtime._pending_saia_turn_bytes
+    if not pending or env.checkpointer is None or env.client_flow_id is None:
+        return (), ()
+    # Snapshot the pairs: concurrent .map bodies can mutate the live dict during
+    # the awaited put_object below (a sibling item's _capture_paused firing).
+    # Iterating the live dict would raise RuntimeError.
+    snapshot = list(pending.items())
+    refs: list[TraceRef] = []
+    for node_id, payload in snapshot:
+        blob = Blob.from_bytes(payload)
+        await maybe_await(
+            env.checkpointer.put_object(env.client_flow_id, "blob", blob.content_hash, blob.payload)
+        )
+        refs.append(TraceRef(kind="saia_turn", id=f"{node_id}:{blob.content_hash}"))
+    return tuple(refs), tuple(node_id for node_id, _ in snapshot)
 
 
 async def _save_scope_commit(
@@ -785,6 +852,7 @@ async def _save_scope_commit(
     node_id: str,
     current_state: State[Any],
     outcome: CommitOutcome,
+    trace_ref: tuple[TraceRef, ...] = (),
 ) -> None:
     """Persist a content-addressed commit at ``node_id`` under ``env``.
 
@@ -818,7 +886,7 @@ async def _save_scope_commit(
         env.checkpointer.put_object(env.client_flow_id, "tree", tree.content_hash, tree.to_bytes())
     )
     node_path = "/".join(env.ancestor_chain + (node_id,))
-    meta = _build_commit_meta(env, node_path, iteration, node_id, outcome)
+    meta = _build_commit_meta(env, node_path, iteration, node_id, outcome, trace_ref)
     commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
     await maybe_await(
         env.checkpointer.put_object(
@@ -868,13 +936,17 @@ def _build_commit_meta(
     iteration: int,
     node_id: str,
     outcome: CommitOutcome,
+    trace_ref: tuple[TraceRef, ...] = (),
 ) -> CommitMeta:
     """Assemble :class:`CommitMeta` for one scope-commit save.
 
     ``produced_by`` records the node's ``node_id`` — verb-level
     attribution (``verb_name`` / ``role`` / ``result_hash``) lands with
-    the SAIA-verb-wrapper wiring. ``trace_ref`` is empty until the same
-    wiring stamps SAIA turn ids.
+    the SAIA-verb-wrapper wiring. ``trace_ref`` carries cross-system
+    pointers stamped by the caller — halt-save passes one
+    ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
+    Loop that published paused-conversation bytes, empty tuple
+    otherwise.
 
     ``outcome`` is set by the caller: ``"ok"`` at an iterate boundary,
     ``"halted"`` at a halt-observation save.
@@ -890,7 +962,7 @@ def _build_commit_meta(
         node_path=node_path,
         iteration=iteration,
         produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
-        trace_ref=(),
+        trace_ref=trace_ref,
         outcome=outcome,
         flow_root_id=env.client_flow_id or "",
         timestamp_iso=datetime.now(UTC).isoformat(),

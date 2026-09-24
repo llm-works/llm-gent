@@ -168,6 +168,7 @@ class Flow:
         self._replay_consumed: bool = False
         self._halt_saved: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
+        self._pending_saia_turn_bytes: dict[str, bytes] = {}
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -907,6 +908,7 @@ class Flow:
             active_state, replay = await self._hydrate_resume_state(active_state)
         self._replay_consumed = False
         self._halt_saved = False
+        self._pending_saia_turn_bytes = {}
         result = await self._run_as_subflow(
             *args,
             state=active_state,
