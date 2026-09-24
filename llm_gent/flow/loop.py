@@ -270,6 +270,9 @@ class Loop:
         """
         saia = self._require_saia(ctx)
         self._paused_bytes = None
+        env = ctx._env
+        if env is not None and ctx._node_id is not None:
+            env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
         try:
             if self._on_executor_ready is not None:
                 await maybe_await(self._on_executor_ready(saia, ctx))
