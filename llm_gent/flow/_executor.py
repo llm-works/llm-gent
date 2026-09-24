@@ -785,23 +785,29 @@ async def _stash_pending_saia_turn(env: _RunEnv) -> tuple[TraceRef, ...]:
     """Persist any pending SAIA turn bytes and return a matching TraceRef tuple.
 
     Loop deposits paused-conversation bytes on
-    ``env.runtime._pending_saia_turn_bytes`` after
-    :meth:`saia.complete` returns paused. On halt-save this helper
-    puts them into the CAS store as a standalone Blob and yields a
-    ``(TraceRef(kind="saia_turn", id=<hash>),)`` tuple to stamp on
-    the halt commit's meta. Returns ``()`` when no bytes are
-    pending, no checkpointer is wired, or ``client_flow_id`` is
-    absent.
+    ``env.runtime._pending_saia_turn_bytes`` — a dict keyed by the
+    Loop's ``ctx._node_id`` so concurrent ``.map`` bodies, sibling
+    Loops in a chain, and nested Loops in an iterate body each keep
+    their own entry. On halt-save this helper drains every entry
+    into the CAS store as a standalone Blob and yields one
+    ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
+    entry to stamp on the halt commit's meta; the compound id lets
+    the resume side route each blob back to the Loop that produced
+    it. Returns ``()`` when no bytes are pending, no checkpointer
+    is wired, or ``client_flow_id`` is absent.
     """
-    payload = env.runtime._pending_saia_turn_bytes
-    if payload is None or env.checkpointer is None or env.client_flow_id is None:
+    pending = env.runtime._pending_saia_turn_bytes
+    if not pending or env.checkpointer is None or env.client_flow_id is None:
         return ()
-    env.runtime._pending_saia_turn_bytes = None
-    blob = Blob.from_bytes(payload)
-    await maybe_await(
-        env.checkpointer.put_object(env.client_flow_id, "blob", blob.content_hash, blob.payload)
-    )
-    return (TraceRef(kind="saia_turn", id=blob.content_hash),)
+    env.runtime._pending_saia_turn_bytes = {}
+    refs: list[TraceRef] = []
+    for node_id, payload in pending.items():
+        blob = Blob.from_bytes(payload)
+        await maybe_await(
+            env.checkpointer.put_object(env.client_flow_id, "blob", blob.content_hash, blob.payload)
+        )
+        refs.append(TraceRef(kind="saia_turn", id=f"{node_id}:{blob.content_hash}"))
+    return tuple(refs)
 
 
 async def _save_scope_commit(
@@ -901,9 +907,10 @@ def _build_commit_meta(
     ``produced_by`` records the node's ``node_id`` — verb-level
     attribution (``verb_name`` / ``role`` / ``result_hash``) lands with
     the SAIA-verb-wrapper wiring. ``trace_ref`` carries cross-system
-    pointers stamped by the caller — halt-save passes a
-    ``(TraceRef(kind="saia_turn", id=<hash>),)`` tuple when Loop
-    published paused-conversation bytes, empty tuple otherwise.
+    pointers stamped by the caller — halt-save passes one
+    ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
+    Loop that published paused-conversation bytes, empty tuple
+    otherwise.
 
     ``outcome`` is set by the caller: ``"ok"`` at an iterate boundary,
     ``"halted"`` at a halt-observation save.

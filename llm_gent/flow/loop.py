@@ -16,13 +16,12 @@ Halt resolution rule: an explicit ``Loop(halt=X)`` at construction wins
 over ambient ``ctx.halt`` — matches the ``ctx.saia`` precedent. Whichever
 is effective becomes SAIA's ``abort_signal``.
 
-Loop is CAS-native for durable pause/resume — mid-SAIA-turn state is
-captured by the framework at halt observation and stamped as a Blob
-referenced by ``TraceRef(kind="saia_turn", ...)`` on the Flow's halt
-commit. Consumers wire a :class:`~llm_saia.core.conversation.ConversationFactory`
-to enable the resume path; the framework reconstructs the conversation
-via the factory before the next dispatch and hands it to SAIA with
-``resume=True``.
+Loop is CAS-native for durable pause capture — when a paused result
+includes a conversation and a
+:class:`~llm_saia.core.conversation.ConversationFactory` is wired,
+the conversation is serialized and published for the halt-observation
+site to stamp as a Blob referenced by ``TraceRef(kind="saia_turn", ...)``
+on the Flow's halt commit.
 
 :class:`LoopFactory` bundles the cross-cutting config (logger, SAIAFactory,
 halt) so consumers wire once at the app boundary and ``.create(role,
@@ -188,7 +187,7 @@ class Loop:
                 :meth:`to_dict` payload as canonical bytes on
                 :attr:`_paused_bytes` for the halt-observation site
                 to stamp into the Flow's CAS commit. Consumers that
-                don't need mid-turn pause/resume can leave it
+                don't need durable pause capture can leave it
                 ``None``; capture becomes a no-op.
             on_iteration: Bridges to SAIA's per-turn hook.
             on_complete: Fires after a non-paused ``saia.complete``.
@@ -349,11 +348,12 @@ class Loop:
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
-        # Clear stale paused bytes on non-paused completion so a subsequent
-        # halt-save doesn't stamp conversation state from an earlier pause.
+        # Clear this Loop's stale paused bytes on non-paused completion so a
+        # later halt-save doesn't stamp conversation state from an earlier
+        # pause of this Loop. Sibling Loops' entries stay put.
         env = ctx._env
-        if env is not None:
-            env.runtime._pending_saia_turn_bytes = None
+        if env is not None and ctx._node_id is not None:
+            env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
@@ -367,13 +367,18 @@ class Loop:
           surface for tests and consumers that already hold a Loop
           reference.
         - ``env.runtime._pending_saia_turn_bytes`` on the top-level
-          Flow runtime — the pointer the halt-observation site reads
-          to stamp a ``TraceRef(kind="saia_turn", ...)`` on the Flow's
-          CAS halt commit.
+          Flow runtime — a dict keyed by ``ctx._node_id`` so each
+          Loop's bytes stay distinct (concurrent ``.map`` bodies,
+          sibling Loops in a chain, and nested Loops in an iterate
+          body all share one runtime). The halt-observation site
+          drains the dict to stamp one
+          ``TraceRef(kind="saia_turn", ...)`` per entry on the halt
+          commit.
 
         No-op when this Loop was constructed without a
-        :class:`ConversationFactory` or when no conversation object
-        flowed through this dispatch.
+        :class:`ConversationFactory`, when no conversation object
+        flowed through this dispatch, or when ``ctx._node_id`` is
+        unset.
         """
         if self._conversation_factory is None or conversation is None:
             return
@@ -383,8 +388,8 @@ class Loop:
         payload = canonical_json(to_dict())
         self._paused_bytes = payload
         env = ctx._env
-        if env is not None:
-            env.runtime._pending_saia_turn_bytes = payload
+        if env is not None and ctx._node_id is not None:
+            env.runtime._pending_saia_turn_bytes[ctx._node_id] = payload
 
 
 # ----------------------------------------------------------------------------
@@ -434,8 +439,8 @@ class LoopFactory:
                 :class:`~llm_saia.core.conversation.ConversationFactory`.
                 Every :meth:`create` inherits it as the Loop's default
                 factory unless per-call overridden. Wire once at the
-                app boundary to enable mid-SAIA-turn pause/resume
-                across every Loop this factory builds.
+                app boundary so every Loop this factory builds captures
+                paused conversations into the Flow's CAS halt commit.
         """
         self._lg = lg
         self._saia_factory = saia_factory
