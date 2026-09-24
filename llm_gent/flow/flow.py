@@ -1187,19 +1187,7 @@ class Flow:
         """
         result: Any = UNSET
         for index in range(start_index, len(self._nodes)):
-            # Halt observation: only at the top-level chain (env.runtime is self)
-            # AND only with a checkpointer bound. Nested body chains let halt
-            # propagate to iterate boundaries where iteration state is consistent.
-            # Without a checkpointer, halt-save is meaningless and the step's own
-            # halt-handling (e.g., Map returning Skipped) should run.
-            if (
-                index > start_index
-                and env.runtime is self
-                and env.checkpointer is not None
-                and env.halt is not None
-                and env.halt.is_set()
-            ):
-                await _save_halt_checkpoint(env, 0, chain_ids[index], env.state)
+            if await self._observe_chain_halt(env, chain_ids, index, start_index):
                 break
             node = self._nodes[index]
             node_id = chain_ids[index]
@@ -1212,6 +1200,37 @@ class Flow:
             ctx = _build_ctx(node.target, env, node_id)
             result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
         return result
+
+    async def _observe_chain_halt(
+        self, env: _RunEnv, chain_ids: tuple[str, ...], index: int, start_index: int
+    ) -> bool:
+        """Save a halt commit between chain steps when appropriate, return True if saved.
+
+        Only fires at the top-level chain (``env.runtime is self``) with a
+        checkpointer bound and past the first step of this walk (so resume
+        runs at least the halted step). Nested body chains let halt
+        propagate to iterate boundaries where iteration state is consistent.
+
+        When the just-completed step paused SAIA mid-turn (a Loop deposited
+        bytes on ``env.runtime._pending_saia_turn_bytes``), lands the halt
+        commit at THAT step's node so resume re-dispatches it — its Loop's
+        ``__call__`` then picks up the saia_turn entry and hands SAIA
+        ``resume=True`` with the rebuilt conversation. Otherwise saves at
+        the not-yet-run step (the normal chain-halt case).
+        """
+        if (
+            index <= start_index
+            or env.runtime is not self
+            or env.checkpointer is None
+            or env.halt is None
+            or not env.halt.is_set()
+        ):
+            return False
+        halt_node_id = (
+            chain_ids[index - 1] if env.runtime._pending_saia_turn_bytes else chain_ids[index]
+        )
+        await _save_halt_checkpoint(env, 0, halt_node_id, env.state)
+        return True
 
     def _make_run_env(
         self,
