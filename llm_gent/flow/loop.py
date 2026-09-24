@@ -32,6 +32,7 @@ shared halt event threads uniformly across a mixed Loop-and-Flow tree.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -268,21 +269,12 @@ class Loop:
             RuntimeError: ``ctx.saia`` is ``None`` — either the ctx has
                 no role or the enclosing flow had no SAIAFactory.
         """
-        saia = self._require_saia(ctx)
-        self._paused_bytes = None
-        env = ctx._env
-        if env is not None and ctx._node_id is not None:
-            env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
+        saia, complete_kwargs, conversation = self._prepare_dispatch(ctx, conversation)
         try:
             if self._on_executor_ready is not None:
                 await maybe_await(self._on_executor_ready(saia, ctx))
             try:
-                result = await saia.complete(
-                    task,
-                    on_iteration=self._make_iter_bridge(ctx),
-                    conversation=conversation,
-                    abort_signal=self._resolve_halt(ctx),
-                )
+                result = await saia.complete(task, **complete_kwargs)
             except asyncio.CancelledError:
                 if self._on_cancelled is not None:
                     await maybe_await(self._on_cancelled(ctx))
@@ -360,6 +352,76 @@ class Loop:
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
+
+    def _prepare_dispatch(
+        self, ctx: Context[Any], conversation: Any
+    ) -> tuple[Any, dict[str, Any], Any]:
+        """Resolve saia, build ``saia.complete`` kwargs, return the effective conversation.
+
+        On dispatch entry: pop this Loop's stale pending-turn entry
+        from the runtime, reset :attr:`_paused_bytes`, and consume
+        any resume entry left by :meth:`Flow._hydrate_resume_state`.
+        When a resume entry is present, its reconstructed
+        :class:`Conversation` replaces the caller-supplied one AND
+        ``resume=True`` is added to the ``saia.complete`` kwargs.
+
+        Returns ``(saia, complete_kwargs, effective_conversation)``.
+        The effective conversation is what :meth:`__call__` hands
+        back to :meth:`_after_run` for paused-path capture.
+        """
+        saia = self._require_saia(ctx)
+        self._paused_bytes = None
+        env = ctx._env
+        if env is not None and ctx._node_id is not None:
+            env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
+        resumed_conversation, is_resume = self._consume_resume_entry(ctx)
+        if is_resume:
+            conversation = resumed_conversation
+        complete_kwargs: dict[str, Any] = {
+            "on_iteration": self._make_iter_bridge(ctx),
+            "conversation": conversation,
+            "abort_signal": self._resolve_halt(ctx),
+        }
+        if is_resume:
+            complete_kwargs["resume"] = True
+        return saia, complete_kwargs, conversation
+
+    def _consume_resume_entry(self, ctx: Context[Any]) -> tuple[Any, bool]:
+        """Pop this Loop's resume bytes off the runtime and rebuild the conversation.
+
+        Reads ``env.runtime._resume_saia_turn_bytes`` at
+        ``ctx._node_id``. When an entry is present, decodes the
+        canonical-json bytes and hands the payload to
+        :attr:`_conversation_factory`'s ``create_from_state`` to
+        reconstruct the paused ``Conversation``. Pops the entry so a
+        later dispatch at the same node_id (an iterate re-entry once
+        the resumed turn completes) starts fresh instead of
+        re-resuming.
+
+        Returns ``(reconstructed_conversation, True)`` when a resume
+        entry was consumed, ``(None, False)`` otherwise. Raises
+        :class:`RuntimeError` when an entry exists but no
+        :class:`ConversationFactory` is wired — a fresh dispatch
+        would silently drop the SAIA turn the halted commit
+        captured.
+        """
+        env = ctx._env
+        node_id = ctx._node_id
+        if env is None or node_id is None:
+            return None, False
+        payload = env.runtime._resume_saia_turn_bytes.pop(node_id, None)
+        if payload is None:
+            return None, False
+        if self._conversation_factory is None:
+            raise RuntimeError(
+                f"Loop at node {node_id!r} scheduled to resume a paused "
+                "SAIA turn but no ConversationFactory is wired; the "
+                "reconstructed conversation would be lost. Wire a "
+                "ConversationFactory matching the format SAIA used at "
+                "save time."
+            )
+        state = json.loads(payload)
+        return self._conversation_factory.create_from_state(state), True
 
     def _capture_paused(self, ctx: Context[Any], conversation: Any) -> None:
         """Serialize the conversation's paused state to canonical bytes.
