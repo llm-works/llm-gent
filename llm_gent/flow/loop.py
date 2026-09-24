@@ -345,7 +345,7 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
-            self._capture_paused(conversation)
+            self._capture_paused(ctx, conversation)
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
@@ -353,8 +353,18 @@ class Loop:
             return await maybe_await(self._on_complete(result, ctx))
         return None
 
-    def _capture_paused(self, conversation: Any) -> None:
+    def _capture_paused(self, ctx: Context[Any], conversation: Any) -> None:
         """Serialize the conversation's paused state to canonical bytes.
+
+        Publishes to two seams:
+
+        - :attr:`_paused_bytes` on this Loop instance — introspection
+          surface for tests and consumers that already hold a Loop
+          reference.
+        - ``env.runtime._pending_saia_turn_bytes`` on the top-level
+          Flow runtime — the pointer the halt-observation site reads
+          to stamp a ``TraceRef(kind="saia_turn", ...)`` on the Flow's
+          CAS halt commit.
 
         No-op when this Loop was constructed without a
         :class:`ConversationFactory` or when no conversation object
@@ -365,7 +375,11 @@ class Loop:
         to_dict = getattr(conversation, "to_dict", None)
         if to_dict is None:
             return
-        self._paused_bytes = canonical_json(to_dict())
+        payload = canonical_json(to_dict())
+        self._paused_bytes = payload
+        env = ctx._env
+        if env is not None:
+            env.runtime._pending_saia_turn_bytes = payload
 
 
 # ----------------------------------------------------------------------------

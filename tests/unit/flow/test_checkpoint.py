@@ -334,6 +334,91 @@ class TestCtxCheckpoint:
         assert called == 1
 
 
+class TestSaiaTurnTraceRef:
+    """Loop's paused conversation lands as a Blob referenced by trace_ref."""
+
+    async def test_halt_save_stamps_saia_turn_and_writes_blob(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Loop paused mid-turn → halt commit's trace_ref points at a blob equal to canonical to_dict."""
+        from dataclasses import dataclass, field
+
+        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
+        from llm_gent.flow.state.cas import Commit, canonical_json
+
+        role = Role(name="r", backend="openai", model="gpt-4o-mini")
+
+        @dataclass
+        class _Conv:
+            messages: list[str] = field(default_factory=list)
+
+            def to_dict(self) -> dict[str, Any]:
+                return {"messages": list(self.messages), "n": len(self.messages)}
+
+        class _ConvFactory:
+            def create(self) -> _Conv:
+                return _Conv()
+
+            def create_from_state(self, state: dict[str, Any]) -> _Conv:
+                c = _Conv()
+                c.messages = list(state.get("messages", []))
+                return c
+
+        @dataclass
+        class _Result:
+            paused: bool = True
+            reason: str = "halt"
+
+        halt = asyncio.Event()
+        conv = _Conv(messages=["hello", "world"])
+        loop = Loop(role, conversation_factory=_ConvFactory())
+
+        # SAIA stub simulates a mid-turn pause: sets halt during complete and
+        # returns paused so Loop captures the conversation before returning.
+        class _PausingSAIA:
+            def __init__(self, role: Role) -> None:
+                self.role = role
+
+            async def complete(self, task: str, **kwargs: Any) -> _Result:
+                halt.set()
+                return _Result()
+
+        class _PausingSAIAFactory:
+            def build(self, role: Role) -> _PausingSAIA:
+                return _PausingSAIA(role)
+
+        @verb(role=role)
+        async def run_loop(ctx: Context, _prev: Any = None) -> Any:
+            return await loop(ctx, "t", conversation=conv)
+
+        @verb(role=role)
+        async def after(ctx: Context, _prev: Any = None) -> str:
+            return "not run"
+
+        ff = FlowFactory(make_test_logger(), saia_factory=_PausingSAIAFactory())
+        flow = (
+            ff.create(state={})
+            .with_checkpointer(store, "saia-turn-1")
+            .with_halt(halt)
+            .call(run_loop)
+            .then(after)
+        )
+        await flow.run()
+
+        halted_hash = store.resolve_ref("saia-turn-1")
+        assert halted_hash is not None
+        commit = Commit.from_bytes(store.get_object("saia-turn-1", "commit", halted_hash) or b"")
+        assert commit.meta.outcome == "halted"
+        # trace_ref carries exactly one saia_turn entry pointing at a blob whose
+        # bytes match canonical_json of the conversation's to_dict.
+        assert len(commit.meta.trace_ref) == 1
+        ref = commit.meta.trace_ref[0]
+        assert ref.kind == "saia_turn"
+        expected = canonical_json(conv.to_dict())
+        stored = store.get_object("saia-turn-1", "blob", ref.id)
+        assert stored == expected
+
+
 class TestSaveOnHaltChain:
     """Chain-only halt-observation site writes a commit at the not-yet-run step."""
 
