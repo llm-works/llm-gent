@@ -1226,8 +1226,11 @@ class Flow:
             or not env.halt.is_set()
         ):
             return False
+        just_completed = chain_ids[index - 1]
         halt_node_id = (
-            chain_ids[index - 1] if env.runtime._pending_saia_turn_bytes else chain_ids[index]
+            just_completed
+            if just_completed in env.runtime._pending_saia_turn_bytes
+            else chain_ids[index]
         )
         await _save_halt_checkpoint(env, 0, halt_node_id, env.state)
         return True
