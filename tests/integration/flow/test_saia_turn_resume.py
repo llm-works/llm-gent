@@ -212,6 +212,9 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
         f"resumed dispatch should carry the SAVED task 'please answer', not "
         f"the caller's 'caller-task'; got {contents}"
     )
+    assert not any(m.role == "user" and m.content == "caller-task" for m in resumed_msgs), (
+        f"resumed dispatch must NOT carry the caller's task 'caller-task'; got {contents}"
+    )
     # Saved conversation must be restored (conv envelope restored, not the caller's).
     assert any(m.content == "SAVED_CONV_MARKER" for m in resumed_msgs), (
         f"resumed dispatch should carry the SAVED conversation (SAVED_CONV_MARKER), got {contents}"
