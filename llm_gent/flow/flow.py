@@ -1201,6 +1201,11 @@ class Flow:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             ctx = _build_ctx(node.target, env, node_id)
             result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
+        else:
+            # for-else: chain exhausted without a between-steps halt-save. If the
+            # LAST step paused SAIA mid-turn, save at its node so resume can
+            # re-dispatch — no next step exists to save at.
+            await self._observe_final_chain_halt(env, chain_ids)
         return result
 
     async def _observe_chain_halt(
@@ -1236,6 +1241,32 @@ class Flow:
         )
         await _save_halt_checkpoint(env, 0, halt_node_id, env.state)
         return True
+
+    async def _observe_final_chain_halt(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> None:
+        """Save a halt commit after the LAST chain step when it paused a Loop.
+
+        :meth:`_observe_chain_halt` only fires between steps. When halt was
+        signaled during the final step's dispatch, no next step exists to
+        save at and the chain-walker just returns — losing the paused turn
+        on resume. This mirror observes halt at the trailing edge and, when
+        the last step owns pending SAIA-turn bytes, saves at its node so
+        resume re-dispatches it and the Loop consumes the saia_turn entry.
+
+        No-op when halt is not set, no pending Loop entry is owned by the
+        last step, or the run is nested / has no checkpointer bound.
+        """
+        if (
+            env.runtime is not self
+            or env.checkpointer is None
+            or env.halt is None
+            or not env.halt.is_set()
+            or not chain_ids
+        ):
+            return
+        last = chain_ids[-1]
+        if not self._just_completed_owns_pending_saia(env, last):
+            return
+        await _save_halt_checkpoint(env, 0, last, env.state)
 
     @staticmethod
     def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:

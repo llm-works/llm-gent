@@ -287,6 +287,10 @@ class Loop:
                 if self._on_failed is not None:
                     await maybe_await(self._on_failed(exc, ctx))
                 raise
+            # saia.complete returned successfully — safe to drop the resume
+            # entry now. A raise above leaves it in place so a rescue-then-
+            # iterate-retry re-consumes it with resume=True.
+            self._release_resume_entry(ctx)
             override = await self._after_run(result, ctx, conversation)
             return override if override is not None else result
         finally:
@@ -393,25 +397,28 @@ class Loop:
         return saia, complete_kwargs, conversation
 
     def _consume_resume_entry(self, ctx: Context[Any]) -> tuple[Any, bool]:
-        """Pop this Loop's resume bytes off the runtime and rebuild the conversation.
+        """Rebuild the Conversation from this Loop's resume entry, leaving the entry in place.
 
         Reads ``env.runtime._resume_saia_turn_bytes`` at
         ``ctx._node_id``. When an entry is present, decodes the
         canonical-json bytes and hands the payload to
         :attr:`_conversation_factory`'s ``create_from_state`` to
-        reconstruct the paused ``Conversation``. Pops the entry so a
-        later dispatch at the same node_id (an iterate re-entry once
-        the resumed turn completes) starts fresh instead of
-        re-resuming.
+        reconstruct the paused ``Conversation``.
 
         Returns ``(reconstructed_conversation, True)`` when a resume
-        entry was consumed, ``(None, False)`` otherwise. Raises
+        entry was found, ``(None, False)`` otherwise. Raises
         :class:`RuntimeError` when an entry exists but no
         :class:`ConversationFactory` is wired — a fresh dispatch
         would silently drop the SAIA turn the halted commit
-        captured. Pop happens only after ``json.loads`` and
-        ``create_from_state`` both succeed so a rescue-then-iterate-
-        retry can try again with the same data instead of losing it.
+        captured.
+
+        The entry is intentionally NOT popped here.
+        :meth:`_release_resume_entry` drops it only after
+        ``saia.complete`` returns successfully — a raise from
+        ``on_executor_ready`` or ``saia.complete`` leaves the entry
+        in place so a rescue-then-iterate-retry re-reconstructs the
+        same conversation instead of falling through to a fresh
+        dispatch without ``resume=True``.
         """
         env = ctx._env
         node_id = ctx._node_id
@@ -428,11 +435,22 @@ class Loop:
                 "ConversationFactory matching the format SAIA used at "
                 "save time."
             )
-        payload = resume_map[node_id]
-        state = json.loads(payload)
-        conversation = self._conversation_factory.create_from_state(state)
-        resume_map.pop(node_id, None)
-        return conversation, True
+        state = json.loads(resume_map[node_id])
+        return self._conversation_factory.create_from_state(state), True
+
+    def _release_resume_entry(self, ctx: Context[Any]) -> None:
+        """Drop this Loop's resume entry — safe to call unconditionally after ``saia.complete``.
+
+        Popped here (not in :meth:`_consume_resume_entry`) so a raise
+        from ``on_executor_ready`` or ``saia.complete`` leaves the
+        entry available for a rescue-then-iterate-retry to consume
+        again with ``resume=True``.
+        """
+        env = ctx._env
+        node_id = ctx._node_id
+        if env is None or node_id is None:
+            return
+        env.runtime._resume_saia_turn_bytes.pop(node_id, None)
 
     def _capture_paused(self, ctx: Context[Any], conversation: Any) -> None:
         """Serialize the conversation's paused state to canonical bytes.
