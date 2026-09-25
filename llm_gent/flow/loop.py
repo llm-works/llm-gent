@@ -269,8 +269,12 @@ class Loop:
             RuntimeError: ``ctx.saia`` is ``None`` — either the ctx has
                 no role or the enclosing flow had no SAIAFactory.
         """
-        saia, complete_kwargs, conversation = self._prepare_dispatch(ctx, conversation)
         try:
+            # Inside the outer try so a raise from _prepare_dispatch (JSON
+            # decode fail, ConversationFactory.create_from_state raise, etc.)
+            # still fires on_finally per its "runs last on every dispatch"
+            # contract. on_failed's scope stays around saia.complete only.
+            saia, complete_kwargs, conversation = self._prepare_dispatch(ctx, conversation)
             if self._on_executor_ready is not None:
                 await maybe_await(self._on_executor_ready(saia, ctx))
             try:
@@ -349,6 +353,7 @@ class Loop:
         env = ctx._env
         if env is not None and ctx._node_id is not None:
             env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
+            env.runtime._pending_saia_turn_ancestors.pop(ctx._node_id, None)
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
@@ -374,6 +379,7 @@ class Loop:
         env = ctx._env
         if env is not None and ctx._node_id is not None:
             env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
+            env.runtime._pending_saia_turn_ancestors.pop(ctx._node_id, None)
         resumed_conversation, is_resume = self._consume_resume_entry(ctx)
         if is_resume:
             conversation = resumed_conversation
@@ -403,14 +409,16 @@ class Loop:
         :class:`RuntimeError` when an entry exists but no
         :class:`ConversationFactory` is wired — a fresh dispatch
         would silently drop the SAIA turn the halted commit
-        captured.
+        captured. Pop happens only after ``json.loads`` and
+        ``create_from_state`` both succeed so a rescue-then-iterate-
+        retry can try again with the same data instead of losing it.
         """
         env = ctx._env
         node_id = ctx._node_id
         if env is None or node_id is None:
             return None, False
-        payload = env.runtime._resume_saia_turn_bytes.pop(node_id, None)
-        if payload is None:
+        resume_map = env.runtime._resume_saia_turn_bytes
+        if node_id not in resume_map:
             return None, False
         if self._conversation_factory is None:
             raise RuntimeError(
@@ -420,8 +428,11 @@ class Loop:
                 "ConversationFactory matching the format SAIA used at "
                 "save time."
             )
+        payload = resume_map[node_id]
         state = json.loads(payload)
-        return self._conversation_factory.create_from_state(state), True
+        conversation = self._conversation_factory.create_from_state(state)
+        resume_map.pop(node_id, None)
+        return conversation, True
 
     def _capture_paused(self, ctx: Context[Any], conversation: Any) -> None:
         """Serialize the conversation's paused state to canonical bytes.
@@ -455,6 +466,7 @@ class Loop:
         env = ctx._env
         if env is not None and ctx._node_id is not None:
             env.runtime._pending_saia_turn_bytes[ctx._node_id] = payload
+            env.runtime._pending_saia_turn_ancestors[ctx._node_id] = env.ancestor_chain
 
 
 # ----------------------------------------------------------------------------

@@ -673,7 +673,13 @@ class TestSaiaTurnTraceRef:
                 self._phase = phase
 
             async def complete(self, task: str, **kwargs: Any) -> _Result:
-                complete_calls.append({"phase": self._phase, "resume": kwargs.get("resume", False)})
+                complete_calls.append(
+                    {
+                        "phase": self._phase,
+                        "resume": kwargs.get("resume", False),
+                        "conversation": kwargs.get("conversation"),
+                    }
+                )
                 if self._phase == "first":
                     self._halt.set()
                     return _Result(paused=True)
@@ -732,6 +738,11 @@ class TestSaiaTurnTraceRef:
         resume_calls = [c for c in complete_calls if c["phase"] == "resume"]
         assert len(resume_calls) == 1
         assert resume_calls[0]["resume"] is True
+        # SAIA must receive the checkpoint-restored Conversation, not the
+        # caller-supplied _Conv(["overridden"]) — a regression that dropped
+        # the override would otherwise slip through.
+        assert isinstance(resume_calls[0]["conversation"], _Conv)
+        assert resume_calls[0]["conversation"].messages == ["turn-1"]
         assert after_calls == [1]
         assert result == "ran-after"
 

@@ -169,6 +169,7 @@ class Flow:
         self._halt_saved: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._pending_saia_turn_bytes: dict[str, bytes] = {}
+        self._pending_saia_turn_ancestors: dict[str, tuple[str, ...]] = {}
         self._resume_saia_turn_bytes: dict[str, bytes] = {}
 
     # -------------------------------------------------------------------------
@@ -911,6 +912,7 @@ class Flow:
         self._replay_consumed = False
         self._halt_saved = False
         self._pending_saia_turn_bytes = {}
+        self._pending_saia_turn_ancestors = {}
         result = await self._run_as_subflow(
             *args,
             state=active_state,
@@ -1229,11 +1231,29 @@ class Flow:
         just_completed = chain_ids[index - 1]
         halt_node_id = (
             just_completed
-            if just_completed in env.runtime._pending_saia_turn_bytes
+            if self._just_completed_owns_pending_saia(env, just_completed)
             else chain_ids[index]
         )
         await _save_halt_checkpoint(env, 0, halt_node_id, env.state)
         return True
+
+    @staticmethod
+    def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
+        """True when ``node_id`` is a pending Loop's own id or an ancestor of one.
+
+        Direct match covers the `.call(loop_verb)` case (Loop's ctx._node_id
+        IS the chain step's id). Ancestry match covers nested Loops — Loop
+        paused inside an iterate body inside the chain step, where the
+        pending entry's key is the Loop's descendant id computed under the
+        chain step's descent context. Either match means resume should
+        re-dispatch the chain step so the Loop's __call__ picks up the
+        saia_turn entry.
+        """
+        pending = env.runtime._pending_saia_turn_bytes
+        if node_id in pending:
+            return True
+        ancestors = env.runtime._pending_saia_turn_ancestors
+        return any(node_id in chain for chain in ancestors.values())
 
     def _make_run_env(
         self,
