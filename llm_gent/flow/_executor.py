@@ -778,9 +778,13 @@ async def _save_halt_checkpoint(
         return
     env.runtime._halt_saved = True
     saved = False
+    trace_ref: tuple[TraceRef, ...] = ()
     stashed_ids: tuple[str, ...] = ()
     try:
-        trace_ref, stashed_ids = await _stash_pending_saia_turn(env)
+        if env.checkpointer is not None and env.client_flow_id is not None:
+            trace_ref, stashed_ids = await env.runtime._pending_saia_turns.stash_to_store(
+                env.checkpointer, env.client_flow_id
+            )
         await _save_scope_commit(env, iteration, node_id, current_state, "halted", trace_ref)
         saved = True
     except Exception as e:
@@ -798,52 +802,6 @@ async def _save_halt_checkpoint(
     # items that landed after the snapshot stay on the runtime dict.
     for stashed_id in stashed_ids:
         env.runtime._pending_saia_turns.remove(stashed_id)
-
-
-async def _stash_pending_saia_turn(
-    env: _RunEnv,
-) -> tuple[tuple[TraceRef, ...], tuple[str, ...]]:
-    """Persist any pending SAIA turn bytes; return TraceRefs + the stashed node_ids.
-
-    Loop deposits paused-conversation bytes on
-    ``env.runtime._pending_saia_turns`` — keyed by the Loop's
-    ``ctx._node_id`` so concurrent ``.map`` bodies, sibling Loops in
-    a chain, and nested Loops in an iterate body each keep their own
-    entry. On halt-save this helper puts every entry into the CAS
-    store as a standalone Blob and yields one
-    ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
-    entry to stamp on the halt commit's meta; the compound id lets
-    the resume side route each blob back to the Loop that produced
-    it. Returns ``((), ())`` when no bytes are pending, no
-    checkpointer is wired, or ``client_flow_id`` is absent.
-
-    Also returns the snapshot's node_ids so the caller can drop
-    exactly those entries after the halted commit is durable. Late
-    arrivals from concurrent ``.map`` items that landed after the
-    snapshot are not covered here — they stay on the runtime dict
-    (stranded under today's one-shot halt-save; the pause/resume
-    atomicity story is where that gets addressed).
-
-    Does not clear the dict — the caller drops the stashed entries
-    only after the halted commit is durable so a within-run retry
-    can re-emit them. ``put_object`` is content-addressed, so a
-    repeat write for the same blob is a no-op.
-    """
-    pending = env.runtime._pending_saia_turns
-    if not pending or env.checkpointer is None or env.client_flow_id is None:
-        return (), ()
-    # Snapshot the pairs: concurrent .map bodies can mutate the live dict during
-    # the awaited put_object below (a sibling item's _capture_paused firing).
-    # Iterating the live dict would raise RuntimeError.
-    snapshot = pending.snapshot()
-    refs: list[TraceRef] = []
-    for node_id, payload in snapshot:
-        blob = Blob.from_bytes(payload)
-        await maybe_await(
-            env.checkpointer.put_object(env.client_flow_id, "blob", blob.content_hash, blob.payload)
-        )
-        refs.append(TraceRef(kind="saia_turn", id=f"{node_id}:{blob.content_hash}"))
-    return tuple(refs), tuple(node_id for node_id, _ in snapshot)
 
 
 async def _save_scope_commit(
