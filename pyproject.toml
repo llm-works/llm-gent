@@ -32,6 +32,7 @@ dependencies = [
     "pydantic>=2.0",
     "pyzmq>=26.0",
     "rapidfuzz>=3.0",
+    "SQLAlchemy>=2.0,<2.1",  # sqlalchemy-utils 0.42 incompatible with 2.1
     "trafilatura>=2.0",
 ]
 
