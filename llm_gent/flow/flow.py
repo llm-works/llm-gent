@@ -93,6 +93,7 @@ from .nodes import (
 from .role import Role
 from .state import State, StateFactory
 from .state.cas import Commit, CommitMeta, ProducedBy, Tree
+from .state.saia_turn import PendingSaiaTurns, ResumeSaiaTurns
 
 
 class Flow:
@@ -168,9 +169,8 @@ class Flow:
         self._replay_consumed: bool = False
         self._halt_saved: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
-        self._pending_saia_turn_bytes: dict[str, bytes] = {}
-        self._pending_saia_turn_ancestors: dict[str, tuple[str, ...]] = {}
-        self._resume_saia_turn_bytes: dict[str, bytes] = {}
+        self._pending_saia_turns: PendingSaiaTurns = PendingSaiaTurns()
+        self._resume_saia_turns: ResumeSaiaTurns = ResumeSaiaTurns()
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -906,13 +906,12 @@ class Flow:
             )
         active_state = self._wrap_top_state(state)
         replay: _ResumeReplay | None = None
-        self._resume_saia_turn_bytes = {}
+        self._resume_saia_turns.clear()
         if resume:
             active_state, replay = await self._hydrate_resume_state(active_state)
         self._replay_consumed = False
         self._halt_saved = False
-        self._pending_saia_turn_bytes = {}
-        self._pending_saia_turn_ancestors = {}
+        self._pending_saia_turns.clear()
         result = await self._run_as_subflow(
             *args,
             state=active_state,
@@ -1219,7 +1218,7 @@ class Flow:
         propagate to iterate boundaries where iteration state is consistent.
 
         When the just-completed step paused SAIA mid-turn (a Loop deposited
-        bytes on ``env.runtime._pending_saia_turn_bytes``), lands the halt
+        bytes on ``env.runtime._pending_saia_turns``), lands the halt
         commit at THAT step's node so resume re-dispatches it — its Loop's
         ``__call__`` then picks up the saia_turn entry and hands SAIA
         ``resume=True`` with the rebuilt conversation. Otherwise saves at
@@ -1280,11 +1279,7 @@ class Flow:
         re-dispatch the chain step so the Loop's __call__ picks up the
         saia_turn entry.
         """
-        pending = env.runtime._pending_saia_turn_bytes
-        if node_id in pending:
-            return True
-        ancestors = env.runtime._pending_saia_turn_ancestors
-        return any(node_id in chain for chain in ancestors.values())
+        return env.runtime._pending_saia_turns.owns(node_id)
 
     def _make_run_env(
         self,
@@ -1415,10 +1410,10 @@ class Flow:
         was stamped by :func:`_stash_pending_saia_turn` with
         ``id=f"{node_id}:{blob_hash}"``. Split on the first colon,
         fetch the blob under ``blob_hash``, and stash
-        ``{node_id: blob_bytes}`` on :attr:`_resume_saia_turn_bytes`
-        so the Loop at that node can pick its own entry up on its
-        first dispatch and hand the reconstructed conversation to
-        SAIA with ``resume=True``.
+        ``(node_id, blob_bytes)`` on :attr:`_resume_saia_turns` so
+        the Loop at that node can pick its own entry up on its first
+        dispatch and hand the reconstructed conversation to SAIA
+        with ``resume=True``.
 
         Silently skips entries whose blob is missing from the store
         — the run then falls back to a fresh dispatch at that Loop.
@@ -1439,7 +1434,7 @@ class Flow:
             )
             if payload is None:
                 continue
-            self._resume_saia_turn_bytes[node_id] = payload
+            self._resume_saia_turns.add(node_id, payload)
 
     def _replay_from_commit(
         self, commit: Commit, scope_data: list[Any]

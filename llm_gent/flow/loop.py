@@ -32,7 +32,6 @@ shared halt event threads uniformly across a mixed Loop-and-Flow tree.
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -44,7 +43,7 @@ from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .role import Role
-from .state.cas import canonical_json
+from .state.saia_turn import SaiaTurnEnvelope
 
 
 # ----------------------------------------------------------------------------
@@ -387,8 +386,7 @@ class Loop:
         # pause of this Loop. Sibling Loops' entries stay put.
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
-            env.runtime._pending_saia_turn_ancestors.pop(ctx._node_id, None)
+            env.runtime._pending_saia_turns.remove(ctx._node_id)
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
@@ -417,8 +415,7 @@ class Loop:
         self._paused_bytes = None
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
-            env.runtime._pending_saia_turn_ancestors.pop(ctx._node_id, None)
+            env.runtime._pending_saia_turns.remove(ctx._node_id)
         resumed_task, resumed_conversation, is_resume = self._consume_resume_entry(ctx)
         if is_resume:
             task = resumed_task
@@ -435,7 +432,7 @@ class Loop:
     def _consume_resume_entry(self, ctx: Context[Any]) -> tuple[str | None, Any, bool]:
         """Rebuild task + Conversation from this Loop's resume entry, leaving the entry in place.
 
-        Reads ``env.runtime._resume_saia_turn_bytes`` at
+        Reads ``env.runtime._resume_saia_turns`` at
         ``ctx._node_id``. When an entry is present, decodes the
         canonical-json envelope ``{"task": ..., "conversation":
         ...}`` and hands the conversation-state payload to
@@ -461,8 +458,8 @@ class Loop:
         node_id = ctx._node_id
         if env is None or node_id is None:
             return None, None, False
-        resume_map = env.runtime._resume_saia_turn_bytes
-        if node_id not in resume_map:
+        payload = env.runtime._resume_saia_turns.load(node_id)
+        if payload is None:
             return None, None, False
         if self._conversation_factory is None:
             raise RuntimeError(
@@ -472,9 +469,9 @@ class Loop:
                 "ConversationFactory matching the format SAIA used at "
                 "save time."
             )
-        payload = json.loads(resume_map[node_id])
-        conversation = self._conversation_factory.create_from_state(payload["conversation"])
-        return payload["task"], conversation, True
+        envelope = SaiaTurnEnvelope.from_bytes(payload)
+        conversation = self._conversation_factory.create_from_state(envelope.conversation)
+        return envelope.task, conversation, True
 
     def _release_resume_entry(self, ctx: Context[Any]) -> None:
         """Drop this Loop's resume entry — safe to call unconditionally after ``saia.complete``.
@@ -488,7 +485,7 @@ class Loop:
         node_id = ctx._node_id
         if env is None or node_id is None:
             return
-        env.runtime._resume_saia_turn_bytes.pop(node_id, None)
+        env.runtime._resume_saia_turns.release(node_id)
 
     def _capture_paused(self, ctx: Context[Any], task: str, conversation: Any) -> None:
         """Serialize the paused task + conversation to canonical bytes.
@@ -498,14 +495,13 @@ class Loop:
         - :attr:`_paused_bytes` on this Loop instance — introspection
           surface for tests and consumers that already hold a Loop
           reference.
-        - ``env.runtime._pending_saia_turn_bytes`` on the top-level
-          Flow runtime — a dict keyed by ``ctx._node_id`` so each
-          Loop's bytes stay distinct (concurrent ``.map`` bodies,
-          sibling Loops in a chain, and nested Loops in an iterate
-          body all share one runtime). The halt-observation site
-          drains the dict to stamp one
-          ``TraceRef(kind="saia_turn", ...)`` per entry on the halt
-          commit.
+        - ``env.runtime._pending_saia_turns`` on the top-level
+          Flow runtime — keyed by ``ctx._node_id`` so each Loop's
+          bytes stay distinct (concurrent ``.map`` bodies, sibling
+          Loops in a chain, and nested Loops in an iterate body all
+          share one runtime). The halt-observation site drains it
+          to stamp one ``TraceRef(kind="saia_turn", ...)`` per
+          entry on the halt commit.
 
         The blob envelope is ``{"task": <str>, "conversation":
         <to_dict()>}`` — persisting ``task`` alongside the
@@ -523,12 +519,11 @@ class Loop:
         to_dict = getattr(conversation, "to_dict", None)
         if to_dict is None:
             return
-        payload = canonical_json({"task": task, "conversation": to_dict()})
+        payload = SaiaTurnEnvelope(task=task, conversation=to_dict()).to_bytes()
         self._paused_bytes = payload
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.runtime._pending_saia_turn_bytes[ctx._node_id] = payload
-            env.runtime._pending_saia_turn_ancestors[ctx._node_id] = env.ancestor_chain
+            env.runtime._pending_saia_turns.add(ctx._node_id, payload, env.ancestor_chain)
 
 
 # ----------------------------------------------------------------------------

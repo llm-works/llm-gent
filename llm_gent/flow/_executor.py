@@ -797,8 +797,7 @@ async def _save_halt_checkpoint(
     # Drop only the entries we stashed. Late arrivals from concurrent .map
     # items that landed after the snapshot stay on the runtime dict.
     for stashed_id in stashed_ids:
-        env.runtime._pending_saia_turn_bytes.pop(stashed_id, None)
-        env.runtime._pending_saia_turn_ancestors.pop(stashed_id, None)
+        env.runtime._pending_saia_turns.remove(stashed_id)
 
 
 async def _stash_pending_saia_turn(
@@ -807,11 +806,11 @@ async def _stash_pending_saia_turn(
     """Persist any pending SAIA turn bytes; return TraceRefs + the stashed node_ids.
 
     Loop deposits paused-conversation bytes on
-    ``env.runtime._pending_saia_turn_bytes`` — a dict keyed by the
-    Loop's ``ctx._node_id`` so concurrent ``.map`` bodies, sibling
-    Loops in a chain, and nested Loops in an iterate body each keep
-    their own entry. On halt-save this helper puts every entry into
-    the CAS store as a standalone Blob and yields one
+    ``env.runtime._pending_saia_turns`` — keyed by the Loop's
+    ``ctx._node_id`` so concurrent ``.map`` bodies, sibling Loops in
+    a chain, and nested Loops in an iterate body each keep their own
+    entry. On halt-save this helper puts every entry into the CAS
+    store as a standalone Blob and yields one
     ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
     entry to stamp on the halt commit's meta; the compound id lets
     the resume side route each blob back to the Loop that produced
@@ -830,13 +829,13 @@ async def _stash_pending_saia_turn(
     can re-emit them. ``put_object`` is content-addressed, so a
     repeat write for the same blob is a no-op.
     """
-    pending = env.runtime._pending_saia_turn_bytes
+    pending = env.runtime._pending_saia_turns
     if not pending or env.checkpointer is None or env.client_flow_id is None:
         return (), ()
     # Snapshot the pairs: concurrent .map bodies can mutate the live dict during
     # the awaited put_object below (a sibling item's _capture_paused firing).
     # Iterating the live dict would raise RuntimeError.
-    snapshot = list(pending.items())
+    snapshot = pending.snapshot()
     refs: list[TraceRef] = []
     for node_id, payload in snapshot:
         blob = Blob.from_bytes(payload)
