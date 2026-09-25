@@ -27,7 +27,7 @@ identifier the checkpoint layer uses. Tests pin four properties:
 from __future__ import annotations
 
 from llm_gent.flow import Flow, verb
-from llm_gent.flow.flow import _compute_node_id, _descend_context
+from llm_gent.flow._node_id import _compute_node_id, _descend_context
 
 from .conftest import ROLE_A, ROLE_B, make_test_logger
 
