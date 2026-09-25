@@ -169,6 +169,8 @@ class Flow:
         self._halt_saved: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._pending_saia_turn_bytes: dict[str, bytes] = {}
+        self._pending_saia_turn_ancestors: dict[str, tuple[str, ...]] = {}
+        self._resume_saia_turn_bytes: dict[str, bytes] = {}
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -904,11 +906,13 @@ class Flow:
             )
         active_state = self._wrap_top_state(state)
         replay: _ResumeReplay | None = None
+        self._resume_saia_turn_bytes = {}
         if resume:
             active_state, replay = await self._hydrate_resume_state(active_state)
         self._replay_consumed = False
         self._halt_saved = False
         self._pending_saia_turn_bytes = {}
+        self._pending_saia_turn_ancestors = {}
         result = await self._run_as_subflow(
             *args,
             state=active_state,
@@ -1185,19 +1189,7 @@ class Flow:
         """
         result: Any = UNSET
         for index in range(start_index, len(self._nodes)):
-            # Halt observation: only at the top-level chain (env.runtime is self)
-            # AND only with a checkpointer bound. Nested body chains let halt
-            # propagate to iterate boundaries where iteration state is consistent.
-            # Without a checkpointer, halt-save is meaningless and the step's own
-            # halt-handling (e.g., Map returning Skipped) should run.
-            if (
-                index > start_index
-                and env.runtime is self
-                and env.checkpointer is not None
-                and env.halt is not None
-                and env.halt.is_set()
-            ):
-                await _save_halt_checkpoint(env, 0, chain_ids[index], env.state)
+            if await self._observe_chain_halt(env, chain_ids, index, start_index):
                 break
             node = self._nodes[index]
             node_id = chain_ids[index]
@@ -1209,7 +1201,90 @@ class Flow:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             ctx = _build_ctx(node.target, env, node_id)
             result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
+        else:
+            # for-else: chain exhausted without a between-steps halt-save. If the
+            # LAST step paused SAIA mid-turn, save at its node so resume can
+            # re-dispatch — no next step exists to save at.
+            await self._observe_final_chain_halt(env, chain_ids)
         return result
+
+    async def _observe_chain_halt(
+        self, env: _RunEnv, chain_ids: tuple[str, ...], index: int, start_index: int
+    ) -> bool:
+        """Save a halt commit between chain steps when appropriate, return True if saved.
+
+        Only fires at the top-level chain (``env.runtime is self``) with a
+        checkpointer bound and past the first step of this walk (so resume
+        runs at least the halted step). Nested body chains let halt
+        propagate to iterate boundaries where iteration state is consistent.
+
+        When the just-completed step paused SAIA mid-turn (a Loop deposited
+        bytes on ``env.runtime._pending_saia_turn_bytes``), lands the halt
+        commit at THAT step's node so resume re-dispatches it — its Loop's
+        ``__call__`` then picks up the saia_turn entry and hands SAIA
+        ``resume=True`` with the rebuilt conversation. Otherwise saves at
+        the not-yet-run step (the normal chain-halt case).
+        """
+        if (
+            index <= start_index
+            or env.runtime is not self
+            or env.checkpointer is None
+            or env.halt is None
+            or not env.halt.is_set()
+        ):
+            return False
+        just_completed = chain_ids[index - 1]
+        halt_node_id = (
+            just_completed
+            if self._just_completed_owns_pending_saia(env, just_completed)
+            else chain_ids[index]
+        )
+        await _save_halt_checkpoint(env, 0, halt_node_id, env.state)
+        return True
+
+    async def _observe_final_chain_halt(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> None:
+        """Save a halt commit after the LAST chain step when it paused a Loop.
+
+        :meth:`_observe_chain_halt` only fires between steps. When halt was
+        signaled during the final step's dispatch, no next step exists to
+        save at and the chain-walker just returns — losing the paused turn
+        on resume. This mirror observes halt at the trailing edge and, when
+        the last step owns pending SAIA-turn bytes, saves at its node so
+        resume re-dispatches it and the Loop consumes the saia_turn entry.
+
+        No-op when halt is not set, no pending Loop entry is owned by the
+        last step, or the run is nested / has no checkpointer bound.
+        """
+        if (
+            env.runtime is not self
+            or env.checkpointer is None
+            or env.halt is None
+            or not env.halt.is_set()
+            or not chain_ids
+        ):
+            return
+        last = chain_ids[-1]
+        if not self._just_completed_owns_pending_saia(env, last):
+            return
+        await _save_halt_checkpoint(env, 0, last, env.state)
+
+    @staticmethod
+    def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
+        """True when ``node_id`` is a pending Loop's own id or an ancestor of one.
+
+        Direct match covers the `.call(loop_verb)` case (Loop's ctx._node_id
+        IS the chain step's id). Ancestry match covers nested Loops — Loop
+        paused inside an iterate body inside the chain step, where the
+        pending entry's key is the Loop's descendant id computed under the
+        chain step's descent context. Either match means resume should
+        re-dispatch the chain step so the Loop's __call__ picks up the
+        saia_turn entry.
+        """
+        pending = env.runtime._pending_saia_turn_bytes
+        if node_id in pending:
+            return True
+        ancestors = env.runtime._pending_saia_turn_ancestors
+        return any(node_id in chain for chain in ancestors.values())
 
     def _make_run_env(
         self,
@@ -1330,7 +1405,41 @@ class Flow:
         # the trajectory finished successfully — do not replay.
         if commit.meta.node_path == "$complete":
             return fallback, None
+        await self._load_resume_saia_turn_bytes(commit)
         return self._replay_from_commit(commit, scope_data)
+
+    async def _load_resume_saia_turn_bytes(self, commit: Commit) -> None:
+        """Pull every saia_turn entry out of ``commit.meta.trace_ref`` and cache the blob bytes.
+
+        Each ``TraceRef(kind="saia_turn", ...)`` on the halted commit
+        was stamped by :func:`_stash_pending_saia_turn` with
+        ``id=f"{node_id}:{blob_hash}"``. Split on the first colon,
+        fetch the blob under ``blob_hash``, and stash
+        ``{node_id: blob_bytes}`` on :attr:`_resume_saia_turn_bytes`
+        so the Loop at that node can pick its own entry up on its
+        first dispatch and hand the reconstructed conversation to
+        SAIA with ``resume=True``.
+
+        Silently skips entries whose blob is missing from the store
+        — the run then falls back to a fresh dispatch at that Loop.
+        Entries whose ``id`` is not in ``node_id:blob_hash`` shape
+        are ignored (defensive against future ``saia_turn`` variants
+        this framework does not understand).
+        """
+        assert self._checkpointer is not None
+        assert self._client_flow_id is not None
+        for ref in commit.meta.trace_ref:
+            if ref.kind != "saia_turn":
+                continue
+            node_id, sep, blob_hash = ref.id.partition(":")
+            if not sep or not node_id or not blob_hash:
+                continue
+            payload = await maybe_await(
+                self._checkpointer.get_object(self._client_flow_id, "blob", blob_hash)
+            )
+            if payload is None:
+                continue
+            self._resume_saia_turn_bytes[node_id] = payload
 
     def _replay_from_commit(
         self, commit: Commit, scope_data: list[Any]

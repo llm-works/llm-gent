@@ -798,6 +798,7 @@ async def _save_halt_checkpoint(
     # items that landed after the snapshot stay on the runtime dict.
     for stashed_id in stashed_ids:
         env.runtime._pending_saia_turn_bytes.pop(stashed_id, None)
+        env.runtime._pending_saia_turn_ancestors.pop(stashed_id, None)
 
 
 async def _stash_pending_saia_turn(

@@ -399,7 +399,9 @@ class TestPausedCapture:
         flow.register(loop, name="loop")
         await flow.dispatch("loop", "t", conversation=conv)
         assert loop._paused_bytes is not None
-        assert loop._paused_bytes == canonical_json({"messages": ["hi", "there"], "n": 2})
+        assert loop._paused_bytes == canonical_json(
+            {"task": "t", "conversation": {"messages": ["hi", "there"], "n": 2}}
+        )
 
     @pytest.mark.asyncio
     async def test_paused_without_factory_no_capture(self) -> None:

@@ -417,7 +417,7 @@ class TestSaiaTurnTraceRef:
         assert ref.kind == "saia_turn"
         node_id, _, blob_hash = ref.id.partition(":")
         assert node_id and blob_hash
-        expected = canonical_json(conv.to_dict())
+        expected = canonical_json({"task": "t", "conversation": conv.to_dict()})
         stored = store.get_object("saia-turn-1", "blob", blob_hash)
         assert stored == expected
 
@@ -510,8 +510,303 @@ class TestSaiaTurnTraceRef:
         saia_refs = [r for r in commit.meta.trace_ref if r.kind == "saia_turn"]
         assert len(saia_refs) == 1
         _, _, blob_hash = saia_refs[0].id.partition(":")
-        expected = canonical_json(conv_a.to_dict())
+        expected = canonical_json({"task": "t", "conversation": conv_a.to_dict()})
         assert store.get_object("saia-turn-multi", "blob", blob_hash) == expected
+
+    async def test_resume_round_trip_hands_reconstructed_conv_and_resume_true(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Halt mid-Loop-turn on run 1 → run 2 dispatches SAIA with resume=True + rebuilt conv."""
+        from dataclasses import dataclass, field
+
+        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
+
+        role = Role(name="r", backend="openai", model="gpt-4o-mini")
+
+        @dataclass
+        class _Conv:
+            messages: list[str] = field(default_factory=list)
+
+            def to_dict(self) -> dict[str, Any]:
+                return {"messages": list(self.messages)}
+
+        class _ConvFactory:
+            def create(self) -> _Conv:
+                return _Conv()
+
+            def create_from_state(self, state: dict[str, Any]) -> _Conv:
+                c = _Conv()
+                c.messages = list(state.get("messages", []))
+                return c
+
+        @dataclass
+        class _Result:
+            paused: bool = False
+            reason: str = ""
+
+        # Recording SAIA — captures every call so the test can assert what
+        # the resume-side dispatch handed to complete().
+        complete_calls: list[dict[str, Any]] = []
+
+        class _RecordingSAIA:
+            def __init__(self, role: Role, halt: asyncio.Event, phase: str) -> None:
+                self.role = role
+                self._halt = halt
+                self._phase = phase
+
+            async def complete(self, task: str, **kwargs: Any) -> _Result:
+                complete_calls.append(
+                    {
+                        "phase": self._phase,
+                        "conversation": kwargs.get("conversation"),
+                        "resume": kwargs.get("resume", False),
+                    }
+                )
+                if self._phase == "first":
+                    self._halt.set()
+                    return _Result(paused=True, reason="halt")
+                return _Result(paused=False)
+
+        class _PhaseFactory:
+            def __init__(self, halt: asyncio.Event, phase: str) -> None:
+                self._halt = halt
+                self._phase = phase
+
+            def build(self, role: Role) -> _RecordingSAIA:
+                return _RecordingSAIA(role, self._halt, self._phase)
+
+        # ONE Loop instance and ONE pair of verbs — same qualnames across both
+        # runs so ctx._node_id is stable and the resume dict entry matches.
+        loop = Loop(role, conversation_factory=_ConvFactory())
+
+        @verb(role=role)
+        async def run_loop(ctx: Context, _prev: Any = None) -> Any:
+            return await loop(ctx, "t", conversation=ctx.extra["conv"])
+
+        @verb(role=role)
+        async def after(ctx: Context, _prev: Any = None) -> str:
+            return "ran-after"
+
+        # Iterate body so halt-save lands at the iterate's node with the
+        # paused iteration index — resume re-runs that iteration, which is
+        # when the Loop's re-dispatch consumes the saia_turn entry. A pure
+        # chain would halt-save at the NEXT chain step, skipping the
+        # paused Loop entirely.
+        body_ff = FlowFactory(make_test_logger())
+        body = body_ff.create()
+        body.call(run_loop)
+
+        # ---- Run 1: iterate iteration 0 halts mid-Loop-turn.
+        halt1 = asyncio.Event()
+        ff1 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
+        flow1 = (
+            ff1.create(state={})
+            .with_checkpointer(store, "resume-round-trip")
+            .with_halt(halt1)
+            .iterate(body, max_iters=2)
+        )
+        await flow1.run(extra={"conv": _Conv(messages=["from-turn-1"])})
+        assert [c["phase"] for c in complete_calls] == ["first"]
+
+        # ---- Run 2: resume=True re-runs iteration 0. The Loop's re-dispatch
+        # picks up the saia_turn entry and hands SAIA the reconstructed
+        # conversation with resume=True. The caller supplies a different
+        # conversation — the resume path must override it with the rebuilt
+        # one from the halted commit.
+        halt2 = asyncio.Event()
+        ff2 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
+        flow2 = (
+            ff2.create(state={})
+            .with_checkpointer(store, "resume-round-trip")
+            .with_halt(halt2)
+            .iterate(body, max_iters=2)
+        )
+        await flow2.run(
+            resume=True,
+            extra={"conv": _Conv(messages=["caller-supplied-but-overridden"])},
+        )
+
+        resume_calls = [c for c in complete_calls if c["phase"] == "resume"]
+        assert len(resume_calls) == 1
+        resumed = resume_calls[0]
+        assert resumed["resume"] is True
+        assert isinstance(resumed["conversation"], _Conv)
+        assert resumed["conversation"].messages == ["from-turn-1"]
+
+    async def test_chain_resume_re_dispatches_paused_loop_verb(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Chain flow with Loop verb: halt on turn 1 → resume re-runs the loop verb."""
+        from dataclasses import dataclass, field
+
+        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
+
+        role = Role(name="r", backend="openai", model="gpt-4o-mini")
+
+        @dataclass
+        class _Conv:
+            messages: list[str] = field(default_factory=list)
+
+            def to_dict(self) -> dict[str, Any]:
+                return {"messages": list(self.messages)}
+
+        class _ConvFactory:
+            def create(self) -> _Conv:
+                return _Conv()
+
+            def create_from_state(self, state: dict[str, Any]) -> _Conv:
+                c = _Conv()
+                c.messages = list(state.get("messages", []))
+                return c
+
+        @dataclass
+        class _Result:
+            paused: bool = False
+
+        after_calls: list[int] = []
+        complete_calls: list[dict[str, Any]] = []
+
+        class _RecordingSAIA:
+            def __init__(self, role: Role, halt: asyncio.Event, phase: str) -> None:
+                self.role = role
+                self._halt = halt
+                self._phase = phase
+
+            async def complete(self, task: str, **kwargs: Any) -> _Result:
+                complete_calls.append(
+                    {
+                        "phase": self._phase,
+                        "task": task,
+                        "resume": kwargs.get("resume", False),
+                        "conversation": kwargs.get("conversation"),
+                    }
+                )
+                if self._phase == "first":
+                    self._halt.set()
+                    return _Result(paused=True)
+                return _Result(paused=False)
+
+        class _PhaseFactory:
+            def __init__(self, halt: asyncio.Event, phase: str) -> None:
+                self._halt = halt
+                self._phase = phase
+
+            def build(self, role: Role) -> _RecordingSAIA:
+                return _RecordingSAIA(role, self._halt, self._phase)
+
+        loop = Loop(role, conversation_factory=_ConvFactory())
+
+        @verb(role=role)
+        async def run_loop(ctx: Context, _prev: Any = None) -> Any:
+            return await loop(ctx, ctx.extra["task"], conversation=ctx.extra["conv"])
+
+        @verb(role=role)
+        async def after_step(ctx: Context, _prev: Any = None) -> str:
+            after_calls.append(1)
+            return "ran-after"
+
+        # Run 1: chain halts mid-Loop-turn. With the chain-halt fix, the halt
+        # commit lands at run_loop's node (not after_step's) so resume re-runs
+        # the loop verb.
+        halt1 = asyncio.Event()
+        ff1 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
+        flow1 = (
+            ff1.create(state={})
+            .with_checkpointer(store, "chain-resume")
+            .with_halt(halt1)
+            .call(run_loop)
+            .then(after_step)
+        )
+        await flow1.run(extra={"task": "saved-task", "conv": _Conv(messages=["turn-1"])})
+        assert after_calls == []  # halt observed before after_step ran
+
+        # Run 2: resume. Loop is re-dispatched, consumes saia_turn, SAIA
+        # completes non-paused, chain moves on to after_step.
+        halt2 = asyncio.Event()
+        ff2 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
+        flow2 = (
+            ff2.create(state={})
+            .with_checkpointer(store, "chain-resume")
+            .with_halt(halt2)
+            .call(run_loop)
+            .then(after_step)
+        )
+        result = await flow2.run(
+            resume=True,
+            # Caller passes DIFFERENT task + conv on run 2 to prove the resume
+            # path forwards the SAVED values from the envelope, not the ones
+            # the verb happened to hand this dispatch.
+            extra={"task": "caller-task", "conv": _Conv(messages=["overridden"])},
+        )
+
+        resume_calls = [c for c in complete_calls if c["phase"] == "resume"]
+        assert len(resume_calls) == 1
+        assert resume_calls[0]["resume"] is True
+        # SAIA must receive the checkpoint-restored Conversation, not the
+        # caller-supplied _Conv(["overridden"]).
+        assert isinstance(resume_calls[0]["conversation"], _Conv)
+        assert resume_calls[0]["conversation"].messages == ["turn-1"]
+        # SAIA must receive the SAVED task from the envelope, not the caller's
+        # "caller-task" on run 2 — a regression that forwarded the caller task
+        # instead would fail this line.
+        assert resume_calls[0]["task"] == "saved-task"
+        assert after_calls == [1]
+        assert result == "ran-after"
+
+    async def test_resume_restores_saved_task_from_saia_turn_envelope(self) -> None:
+        """Loop._consume_resume_entry decodes both task and conversation from the envelope."""
+        from dataclasses import dataclass, field
+        from types import SimpleNamespace
+
+        from llm_gent.flow import Loop, Role
+        from llm_gent.flow.state.cas import canonical_json
+
+        role = Role(name="r", backend="openai", model="gpt-4o-mini")
+
+        @dataclass
+        class _Conv:
+            messages: list[str] = field(default_factory=list)
+
+            def to_dict(self) -> dict[str, Any]:
+                return {"messages": list(self.messages)}
+
+        class _ConvFactory:
+            def create(self) -> _Conv:
+                return _Conv()
+
+            def create_from_state(self, state: dict[str, Any]) -> _Conv:
+                c = _Conv()
+                c.messages = list(state.get("messages", []))
+                return c
+
+        node_id = "node-abc"
+        loop = Loop(role, conversation_factory=_ConvFactory())
+
+        # Seed a runtime resume-map with a saia_turn envelope carrying BOTH the
+        # task and the conversation state. This is exactly the shape
+        # _hydrate_resume_state populates from a halt commit's saia_turn blob.
+        runtime = SimpleNamespace(
+            _resume_saia_turn_bytes={
+                node_id: canonical_json(
+                    {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
+                )
+            }
+        )
+        env = SimpleNamespace(runtime=runtime)
+        ctx = SimpleNamespace(_env=env, _node_id=node_id)
+
+        task, conversation, is_resume = loop._consume_resume_entry(ctx)  # type: ignore[arg-type]
+        assert is_resume is True
+        # Without this test the direct-Loop chain-step at index > 0 case CR
+        # flagged would silently lose the task on resume; _walk_chain calls
+        # Loop.__call__(ctx) and _prepare_dispatch has no task to hand SAIA.
+        assert task == "saved-task-string"
+        assert isinstance(conversation, _Conv)
+        assert conversation.messages == ["mid-turn"]
+        # Entry is NOT popped by _consume_resume_entry — release happens only
+        # after saia.complete succeeds, so a rescue-then-iterate-retry can
+        # re-consume the same envelope.
+        assert node_id in runtime._resume_saia_turn_bytes
 
 
 class TestSaveOnHaltChain:
