@@ -760,6 +760,7 @@ class TestSaiaTurnTraceRef:
 
         from llm_gent.flow import Loop, Role
         from llm_gent.flow.state.cas import canonical_json
+        from llm_gent.flow.state.saia_turn import ResumeSaiaTurns
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -785,13 +786,14 @@ class TestSaiaTurnTraceRef:
         # Seed a runtime resume-map with a saia_turn envelope carrying BOTH the
         # task and the conversation state. This is exactly the shape
         # _hydrate_resume_state populates from a halt commit's saia_turn blob.
-        runtime = SimpleNamespace(
-            _resume_saia_turn_bytes={
-                node_id: canonical_json(
-                    {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
-                )
-            }
+        resume_turns = ResumeSaiaTurns()
+        resume_turns.add(
+            node_id,
+            canonical_json(
+                {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
+            ),
         )
+        runtime = SimpleNamespace(_resume_saia_turns=resume_turns)
         env = SimpleNamespace(runtime=runtime)
         ctx = SimpleNamespace(_env=env, _node_id=node_id)
 
@@ -806,7 +808,7 @@ class TestSaiaTurnTraceRef:
         # Entry is NOT popped by _consume_resume_entry — release happens only
         # after saia.complete succeeds, so a rescue-then-iterate-retry can
         # re-consume the same envelope.
-        assert node_id in runtime._resume_saia_turn_bytes
+        assert resume_turns.load(node_id) is not None
 
 
 class TestSaveOnHaltChain:
