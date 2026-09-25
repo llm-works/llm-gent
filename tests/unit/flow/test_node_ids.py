@@ -4,8 +4,8 @@
 """Content-addressed node IDs — lazy, chained, collision-free.
 
 Exercises the pair
-:func:`llm_gent.flow.flow._compute_node_id` /
-:func:`llm_gent.flow.flow._descend_context`. IDs are computed at
+:func:`llm_gent.flow._node_id._compute_node_id` /
+:func:`llm_gent.flow._node_id._descend_context`. IDs are computed at
 descent time from the enclosing Flow's ``chain_context`` plus the
 node's local key (kind, chain position, target qualname); the descent
 context is itself a hash chain from the run's root through every
@@ -27,7 +27,7 @@ identifier the checkpoint layer uses. Tests pin four properties:
 from __future__ import annotations
 
 from llm_gent.flow import Flow, verb
-from llm_gent.flow.flow import _compute_node_id, _descend_context
+from llm_gent.flow._node_id import _compute_node_id, _descend_context
 
 from .conftest import ROLE_A, ROLE_B, make_test_logger
 

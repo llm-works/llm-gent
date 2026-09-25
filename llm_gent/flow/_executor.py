@@ -294,7 +294,7 @@ async def _run_subflow(
     ``_descend_context(node_id, "call")`` — the hash the child's
     chain-step IDs are computed against.
     """
-    from .flow import _descend_context
+    from ._node_id import _descend_context
 
     child_replay = _pop_replay_for(env, node_id)
     raw, child_replay = _consume_scope_data(child_replay, state_fn)
@@ -451,7 +451,7 @@ async def _run_branch(
     identity-distinct positions in the composition tree even when they
     share a target Flow.
     """
-    from .flow import _descend_context
+    from ._node_id import _descend_context
 
     prev_result = node_args[0] if node_args else None
     verdict = br.when(prev_result, ctx)
@@ -649,7 +649,7 @@ def _resolve_map_item_replay(
     This prevents scheduling-dependent replay failures when concurrent
     map items race to validate the path.
     """
-    from .flow import _compute_node_id, _descend_context
+    from ._node_id import _compute_node_id, _descend_context
 
     result: dict[int, _ResumeReplay | None] = {}
     popped = _pop_replay_for(env, node_id)
@@ -702,7 +702,7 @@ async def _dispatch_iterate_body(
     steps have iteration-invariant IDs (the runtime pass counter is
     stored alongside the path, not baked into node identity).
     """
-    from .flow import _descend_context
+    from ._node_id import _descend_context
 
     return await it.body._run_as_subflow(
         prev_result,
@@ -1026,7 +1026,7 @@ async def _dispatch_map_body(
     contains the replay's path head receives a non-None value; all
     others receive ``None`` and skip replay validation.
     """
-    from .flow import _descend_context
+    from ._node_id import _descend_context
 
     return await mp.body._run_as_subflow(
         item,
