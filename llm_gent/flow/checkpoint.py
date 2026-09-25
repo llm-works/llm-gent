@@ -82,11 +82,12 @@ class CheckpointPolicy:
 
     Two save triggers are always on and NOT gated by this policy:
 
-    - Halt observation — :func:`_save_halt_checkpoint` fires whenever
-      the executor observes ``env.halt.is_set()`` at an iterate
-      boundary or between chain steps, provided a checkpointer +
-      client_flow_id are wired. This is the durability guarantee
-      that makes ``run(resume=True)`` reach a halted trajectory.
+    - Halt observation — :meth:`HaltSaveObserver.save_if_signaled`
+      fires whenever the executor observes the halt event set at
+      any of its save sites (iterate boundary, chain between-step,
+      chain tail), provided a checkpointer + client_flow_id are
+      wired. This is the durability guarantee that makes
+      ``run(resume=True)`` reach a halted trajectory.
     - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires
       regardless of policy; when the verb asks to save, we save.
 

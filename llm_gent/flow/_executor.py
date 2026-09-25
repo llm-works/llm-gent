@@ -26,6 +26,7 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from ._halt_observer import HaltSaveObserver, is_halt_signaled
 from .checkpoint import maybe_await
 from .context import Context
 from .nodes import (
@@ -535,8 +536,7 @@ async def _run_iterate(
             break
         if it.deadline is not None and time.monotonic() - started >= it.deadline:
             break
-        if env.halt is not None and env.halt.is_set():
-            await _save_halt_checkpoint(env, iteration, node_id, child_state)
+        if await HaltSaveObserver.save_if_signaled(env, iteration, node_id, child_state):
             break
         result = await _dispatch_iterate_body(it, env, child_state, result, node_id)
         iteration += 1
@@ -1103,7 +1103,7 @@ async def _run_map_item_strict(
     halt-Skipped, guard-Skipped, or a synthesized :class:`Failure` before
     re-raise) — cancellation is unconditional and never fires the hook.
     """
-    if env.halt is not None and env.halt.is_set():
+    if is_halt_signaled(env):
         skipped = Skipped(item=item)
         await _fire_on_item_complete(
             mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state, node_id), env
@@ -1151,7 +1151,7 @@ async def _run_map_item(
     :class:`Failure`, halt-Skipped, guard-Skipped); cancellation is
     unconditional and never fires the hook.
     """
-    if env.halt is not None and env.halt.is_set():
+    if is_halt_signaled(env):
         skipped = Skipped(item=item)
         await _fire_on_item_complete(
             mp.on_item_complete, item, skipped, _map_item_ctx(env, env.state, node_id), env

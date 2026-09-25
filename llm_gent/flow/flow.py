@@ -65,7 +65,8 @@ from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
-from ._executor import _build_ctx, _execute_node, _save_halt_checkpoint, _step_inputs
+from ._executor import _build_ctx, _execute_node, _step_inputs
+from ._halt_observer import HaltSaveObserver, is_halt_signaled
 from .checkpoint import CheckpointPolicy, CheckpointStore, maybe_await
 from .context import Context
 from .factory import SAIAFactory
@@ -1228,8 +1229,7 @@ class Flow:
             index <= start_index
             or env.runtime is not self
             or env.checkpointer is None
-            or env.halt is None
-            or not env.halt.is_set()
+            or not is_halt_signaled(env)
         ):
             return False
         just_completed = chain_ids[index - 1]
@@ -1238,8 +1238,7 @@ class Flow:
             if self._just_completed_owns_pending_saia(env, just_completed)
             else chain_ids[index]
         )
-        await _save_halt_checkpoint(env, 0, halt_node_id, env.state)
-        return True
+        return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
 
     async def _observe_final_chain_halt(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> None:
         """Save a halt commit after the LAST chain step when it paused a Loop.
@@ -1257,15 +1256,14 @@ class Flow:
         if (
             env.runtime is not self
             or env.checkpointer is None
-            or env.halt is None
-            or not env.halt.is_set()
+            or not is_halt_signaled(env)
             or not chain_ids
         ):
             return
         last = chain_ids[-1]
         if not self._just_completed_owns_pending_saia(env, last):
             return
-        await _save_halt_checkpoint(env, 0, last, env.state)
+        await HaltSaveObserver.save_if_signaled(env, 0, last, env.state)
 
     @staticmethod
     def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
