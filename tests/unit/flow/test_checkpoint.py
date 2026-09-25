@@ -698,7 +698,7 @@ class TestSaiaTurnTraceRef:
 
         @verb(role=role)
         async def run_loop(ctx: Context, _prev: Any = None) -> Any:
-            return await loop(ctx, "t", conversation=ctx.extra["conv"])
+            return await loop(ctx, ctx.extra["task"], conversation=ctx.extra["conv"])
 
         @verb(role=role)
         async def after_step(ctx: Context, _prev: Any = None) -> str:
@@ -717,7 +717,7 @@ class TestSaiaTurnTraceRef:
             .call(run_loop)
             .then(after_step)
         )
-        await flow1.run(extra={"conv": _Conv(messages=["turn-1"])})
+        await flow1.run(extra={"task": "saved-task", "conv": _Conv(messages=["turn-1"])})
         assert after_calls == []  # halt observed before after_step ran
 
         # Run 2: resume. Loop is re-dispatched, consumes saia_turn, SAIA
@@ -733,21 +733,23 @@ class TestSaiaTurnTraceRef:
         )
         result = await flow2.run(
             resume=True,
-            extra={"conv": _Conv(messages=["overridden"])},
+            # Caller passes DIFFERENT task + conv on run 2 to prove the resume
+            # path forwards the SAVED values from the envelope, not the ones
+            # the verb happened to hand this dispatch.
+            extra={"task": "caller-task", "conv": _Conv(messages=["overridden"])},
         )
 
         resume_calls = [c for c in complete_calls if c["phase"] == "resume"]
         assert len(resume_calls) == 1
         assert resume_calls[0]["resume"] is True
         # SAIA must receive the checkpoint-restored Conversation, not the
-        # caller-supplied _Conv(["overridden"]) — a regression that dropped
-        # the override would otherwise slip through.
+        # caller-supplied _Conv(["overridden"]).
         assert isinstance(resume_calls[0]["conversation"], _Conv)
         assert resume_calls[0]["conversation"].messages == ["turn-1"]
-        # And SAIA got the saved task from the envelope (verb passed "t" both
-        # runs, but even if a regression changed the resume-time task the
-        # envelope-restored value should win).
-        assert resume_calls[0]["task"] == "t"
+        # SAIA must receive the SAVED task from the envelope, not the caller's
+        # "caller-task" on run 2 — a regression that forwarded the caller task
+        # instead would fail this line.
+        assert resume_calls[0]["task"] == "saved-task"
         assert after_calls == [1]
         assert result == "ran-after"
 
