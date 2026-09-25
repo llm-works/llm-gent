@@ -169,6 +169,7 @@ class Flow:
         self._halt_saved: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._pending_saia_turn_bytes: dict[str, bytes] = {}
+        self._resume_saia_turn_bytes: dict[str, bytes] = {}
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -904,6 +905,7 @@ class Flow:
             )
         active_state = self._wrap_top_state(state)
         replay: _ResumeReplay | None = None
+        self._resume_saia_turn_bytes = {}
         if resume:
             active_state, replay = await self._hydrate_resume_state(active_state)
         self._replay_consumed = False
@@ -1330,7 +1332,41 @@ class Flow:
         # the trajectory finished successfully — do not replay.
         if commit.meta.node_path == "$complete":
             return fallback, None
+        await self._load_resume_saia_turn_bytes(commit)
         return self._replay_from_commit(commit, scope_data)
+
+    async def _load_resume_saia_turn_bytes(self, commit: Commit) -> None:
+        """Pull every saia_turn entry out of ``commit.meta.trace_ref`` and cache the blob bytes.
+
+        Each ``TraceRef(kind="saia_turn", ...)`` on the halted commit
+        was stamped by :func:`_stash_pending_saia_turn` with
+        ``id=f"{node_id}:{blob_hash}"``. Split on the first colon,
+        fetch the blob under ``blob_hash``, and stash
+        ``{node_id: blob_bytes}`` on :attr:`_resume_saia_turn_bytes`
+        so the Loop at that node can pick its own entry up on its
+        first dispatch and hand the reconstructed conversation to
+        SAIA with ``resume=True``.
+
+        Silently skips entries whose blob is missing from the store
+        — the run then falls back to a fresh dispatch at that Loop.
+        Entries whose ``id`` is not in ``node_id:blob_hash`` shape
+        are ignored (defensive against future ``saia_turn`` variants
+        this framework does not understand).
+        """
+        assert self._checkpointer is not None
+        assert self._client_flow_id is not None
+        for ref in commit.meta.trace_ref:
+            if ref.kind != "saia_turn":
+                continue
+            node_id, sep, blob_hash = ref.id.partition(":")
+            if not sep or not node_id or not blob_hash:
+                continue
+            payload = await maybe_await(
+                self._checkpointer.get_object(self._client_flow_id, "blob", blob_hash)
+            )
+            if payload is None:
+                continue
+            self._resume_saia_turn_bytes[node_id] = payload
 
     def _replay_from_commit(
         self, commit: Commit, scope_data: list[Any]
