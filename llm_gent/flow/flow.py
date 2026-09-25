@@ -63,9 +63,7 @@ from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
-from ._executor import _build_ctx, _execute_node, _step_inputs
-from ._halt_observer import HaltSaveObserver, is_halt_signaled
-from ._node_id import _compute_node_id
+from ._chain import Chain
 from ._validation import _materialize, _require_state_for_merge, _validate_target
 from .checkpoint import CheckpointPolicy, CheckpointStore, maybe_await
 from .context import Context
@@ -992,7 +990,7 @@ class Flow:
         """Raise if a resume request never found its save-point iterate.
 
         Belt-and-suspenders check called after :meth:`_run_as_subflow`
-        returns. :meth:`_assert_replay_reachable` will typically have
+        returns. :meth:`Chain._assert_replay_reachable` will typically have
         raised earlier — as soon as a Flow entry sees a path head that
         no chain step at that level provides. This post-run raise
         catches the residual cases where the entry-level pre-scan
@@ -1016,84 +1014,6 @@ class Flow:
             f"since the checkpoint was written. "
             f"Saved path (root→leaf): {path_repr}"
         )
-
-    def _compute_chain_ids(self, env: _RunEnv) -> tuple[str, ...]:
-        """Content-addressed node id for every step in this Flow's chain."""
-        return tuple(_compute_node_id(env.chain_context, n, i) for i, n in enumerate(self._nodes))
-
-    def _assert_replay_reachable(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> None:
-        """Fail-fast: raise if the replay's remaining head is unreachable at this Flow level.
-
-        Called at the top of every chain walk. If a resume replay is
-        threaded and its ``remaining_path[0]`` does not match any of
-        this level's ``chain_ids``, the composition graph has changed
-        since the checkpoint was written and there is no descent from
-        this level that could reach the save-point. Raising here
-        prevents unrelated chain steps and iterates from running fresh
-        under a doomed replay — the whole point of the head-pop
-        redesign. No-op when there is no replay, the path is empty,
-        or the leaf has already been consumed.
-        """
-        replay = env.replay
-        if replay is None or not replay.remaining_path:
-            return
-        if env.runtime._replay_consumed:
-            return
-        head = replay.remaining_path[0]
-        if head in chain_ids:
-            return
-        label = self._name or "<anonymous>"
-        ids_repr = ", ".join(chain_ids) if chain_ids else "<empty>"
-        full_repr = " → ".join(replay.full_path) if replay.full_path else "<empty>"
-        raise RuntimeError(
-            f"Flow {label!r}: resume path head {head!r} not found in this level's "
-            f"chain step ids [{ids_repr}] — the composition graph has "
-            f"structurally changed since the checkpoint was written. "
-            f"Saved path (root→leaf): {full_repr}"
-        )
-
-    def _resume_start_index(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> int:
-        """Return the chain index to start execution from on resume.
-
-        ``0`` on a fresh run (no replay, empty path, or already-consumed
-        leaf). On resume, returns the index of the chain step whose id
-        matches ``env.replay.remaining_path[0]`` — that step is on the
-        save-point ancestor chain (or IS the save-point leaf when
-        ``remaining_path`` has shrunk to one entry); every prior chain
-        step completed BEFORE the checkpoint was written and re-running
-        them would clobber hydrated state (their verbs typically write
-        to ``ctx.state.data`` on the way through).
-
-        :meth:`_assert_replay_reachable` guarantees the head is in
-        ``chain_ids`` before this fires, so the loop is a lookup, not
-        a search.
-
-        Contract on the on-path node when ``start_index > 0``: it runs
-        with no ``prev_result`` — its predecessor didn't re-run, so
-        there is no return value to thread in. Iterate bodies that
-        depend on the outer chain's return value on resume-first-
-        iteration must either be at chain index 0 or read from state.
-        """
-        replay = env.replay
-        if replay is None or not replay.remaining_path:
-            return 0
-        if env.runtime._replay_consumed:
-            return 0
-        head = replay.remaining_path[0]
-        for i, cid in enumerate(chain_ids):
-            if cid == head:
-                # Single-element remaining path AND target is a plain-verb
-                # or Branch/Map/subflow chain step means the halt-observation
-                # site saved here — mark consumed so :meth:`_assert_replay_consumed`
-                # does not fire. Iterate has its own consumption in
-                # :func:`_resolve_iterate_resume`; Branch/Map/subflow do not
-                # (after pop the path is empty, nothing inside will consume it).
-                if len(replay.remaining_path) == 1 and not isinstance(
-                    self._nodes[i].target, _Iterate
-                ):
-                    env.runtime._replay_consumed = True
-                return i
-        return 0
 
     async def _run_as_subflow(
         self,
@@ -1158,126 +1078,9 @@ class Flow:
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
-        chain_ids = self._compute_chain_ids(env)
-        self._assert_replay_reachable(env, chain_ids)
-        start_index = self._resume_start_index(env, chain_ids)
-        result = await self._walk_chain(env, chain_ids, start_index, args, kwargs)
+        result = await Chain(self, env).walk(args, kwargs)
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
-
-    async def _walk_chain(
-        self,
-        env: _RunEnv,
-        chain_ids: tuple[str, ...],
-        start_index: int,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> Any:
-        """Execute chain steps from ``start_index`` onward, threading returns.
-
-        ``start_index > 0`` on resume: predecessors already completed
-        before the checkpoint was written; the on-path step at
-        ``start_index`` runs with no ``prev_result`` (see
-        :meth:`_resume_start_index` for the contract).
-
-        Halt observation: between chain steps (never at the very first
-        iteration of this walk, so resume runs at least the halted
-        step), if ``env.halt`` is set, stamp a halted commit at the
-        not-yet-run step's position and break. On a subsequent
-        ``run(resume=True)``, that ref resolves to this commit and the
-        walk restarts at the halted step.
-        """
-        result: Any = UNSET
-        for index in range(start_index, len(self._nodes)):
-            if await self._observe_chain_halt(env, chain_ids, index, start_index):
-                break
-            node = self._nodes[index]
-            node_id = chain_ids[index]
-            node_args: tuple[Any, ...]
-            node_kwargs: dict[str, Any]
-            if index == start_index and start_index > 0:
-                node_args, node_kwargs = (), {}
-            else:
-                node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
-            ctx = _build_ctx(node.target, env, node_id)
-            result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
-        else:
-            # for-else: chain exhausted without a between-steps halt-save. If the
-            # LAST step paused SAIA mid-turn, save at its node so resume can
-            # re-dispatch — no next step exists to save at.
-            await self._observe_final_chain_halt(env, chain_ids)
-        return result
-
-    async def _observe_chain_halt(
-        self, env: _RunEnv, chain_ids: tuple[str, ...], index: int, start_index: int
-    ) -> bool:
-        """Save a halt commit between chain steps when appropriate, return True if saved.
-
-        Only fires at the top-level chain (``env.runtime is self``) with a
-        checkpointer bound and past the first step of this walk (so resume
-        runs at least the halted step). Nested body chains let halt
-        propagate to iterate boundaries where iteration state is consistent.
-
-        When the just-completed step paused SAIA mid-turn (a Loop deposited
-        bytes on ``env.runtime._pending_saia_turns``), lands the halt
-        commit at THAT step's node so resume re-dispatches it — its Loop's
-        ``__call__`` then picks up the saia_turn entry and hands SAIA
-        ``resume=True`` with the rebuilt conversation. Otherwise saves at
-        the not-yet-run step (the normal chain-halt case).
-        """
-        if (
-            index <= start_index
-            or env.runtime is not self
-            or env.checkpointer is None
-            or not is_halt_signaled(env)
-        ):
-            return False
-        just_completed = chain_ids[index - 1]
-        halt_node_id = (
-            just_completed
-            if self._just_completed_owns_pending_saia(env, just_completed)
-            else chain_ids[index]
-        )
-        return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
-
-    async def _observe_final_chain_halt(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> None:
-        """Save a halt commit after the LAST chain step when it paused a Loop.
-
-        :meth:`_observe_chain_halt` only fires between steps. When halt was
-        signaled during the final step's dispatch, no next step exists to
-        save at and the chain-walker just returns — losing the paused turn
-        on resume. This mirror observes halt at the trailing edge and, when
-        the last step owns pending SAIA-turn bytes, saves at its node so
-        resume re-dispatches it and the Loop consumes the saia_turn entry.
-
-        No-op when halt is not set, no pending Loop entry is owned by the
-        last step, or the run is nested / has no checkpointer bound.
-        """
-        if (
-            env.runtime is not self
-            or env.checkpointer is None
-            or not is_halt_signaled(env)
-            or not chain_ids
-        ):
-            return
-        last = chain_ids[-1]
-        if not self._just_completed_owns_pending_saia(env, last):
-            return
-        await HaltSaveObserver.save_if_signaled(env, 0, last, env.state)
-
-    @staticmethod
-    def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
-        """True when ``node_id`` is a pending Loop's own id or an ancestor of one.
-
-        Direct match covers the `.call(loop_verb)` case (Loop's ctx._node_id
-        IS the chain step's id). Ancestry match covers nested Loops — Loop
-        paused inside an iterate body inside the chain step, where the
-        pending entry's key is the Loop's descendant id computed under the
-        chain step's descent context. Either match means resume should
-        re-dispatch the chain step so the Loop's __call__ picks up the
-        saia_turn entry.
-        """
-        return env.runtime._pending_saia_turns.owns(node_id)
 
     def _make_run_env(
         self,
