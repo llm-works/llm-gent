@@ -417,7 +417,7 @@ class TestSaiaTurnTraceRef:
         assert ref.kind == "saia_turn"
         node_id, _, blob_hash = ref.id.partition(":")
         assert node_id and blob_hash
-        expected = canonical_json(conv.to_dict())
+        expected = canonical_json({"task": "t", "conversation": conv.to_dict()})
         stored = store.get_object("saia-turn-1", "blob", blob_hash)
         assert stored == expected
 
@@ -510,7 +510,7 @@ class TestSaiaTurnTraceRef:
         saia_refs = [r for r in commit.meta.trace_ref if r.kind == "saia_turn"]
         assert len(saia_refs) == 1
         _, _, blob_hash = saia_refs[0].id.partition(":")
-        expected = canonical_json(conv_a.to_dict())
+        expected = canonical_json({"task": "t", "conversation": conv_a.to_dict()})
         assert store.get_object("saia-turn-multi", "blob", blob_hash) == expected
 
     async def test_resume_round_trip_hands_reconstructed_conv_and_resume_true(
@@ -676,6 +676,7 @@ class TestSaiaTurnTraceRef:
                 complete_calls.append(
                     {
                         "phase": self._phase,
+                        "task": task,
                         "resume": kwargs.get("resume", False),
                         "conversation": kwargs.get("conversation"),
                     }
@@ -743,8 +744,67 @@ class TestSaiaTurnTraceRef:
         # the override would otherwise slip through.
         assert isinstance(resume_calls[0]["conversation"], _Conv)
         assert resume_calls[0]["conversation"].messages == ["turn-1"]
+        # And SAIA got the saved task from the envelope (verb passed "t" both
+        # runs, but even if a regression changed the resume-time task the
+        # envelope-restored value should win).
+        assert resume_calls[0]["task"] == "t"
         assert after_calls == [1]
         assert result == "ran-after"
+
+    async def test_resume_restores_saved_task_from_saia_turn_envelope(self) -> None:
+        """Loop._consume_resume_entry decodes both task and conversation from the envelope."""
+        from dataclasses import dataclass, field
+        from types import SimpleNamespace
+
+        from llm_gent.flow import Loop, Role
+        from llm_gent.flow.state.cas import canonical_json
+
+        role = Role(name="r", backend="openai", model="gpt-4o-mini")
+
+        @dataclass
+        class _Conv:
+            messages: list[str] = field(default_factory=list)
+
+            def to_dict(self) -> dict[str, Any]:
+                return {"messages": list(self.messages)}
+
+        class _ConvFactory:
+            def create(self) -> _Conv:
+                return _Conv()
+
+            def create_from_state(self, state: dict[str, Any]) -> _Conv:
+                c = _Conv()
+                c.messages = list(state.get("messages", []))
+                return c
+
+        node_id = "node-abc"
+        loop = Loop(role, conversation_factory=_ConvFactory())
+
+        # Seed a runtime resume-map with a saia_turn envelope carrying BOTH the
+        # task and the conversation state. This is exactly the shape
+        # _hydrate_resume_state populates from a halt commit's saia_turn blob.
+        runtime = SimpleNamespace(
+            _resume_saia_turn_bytes={
+                node_id: canonical_json(
+                    {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
+                )
+            }
+        )
+        env = SimpleNamespace(runtime=runtime)
+        ctx = SimpleNamespace(_env=env, _node_id=node_id)
+
+        task, conversation, is_resume = loop._consume_resume_entry(ctx)  # type: ignore[arg-type]
+        assert is_resume is True
+        # Without this test the direct-Loop chain-step at index > 0 case CR
+        # flagged would silently lose the task on resume; _walk_chain calls
+        # Loop.__call__(ctx) and _prepare_dispatch has no task to hand SAIA.
+        assert task == "saved-task-string"
+        assert isinstance(conversation, _Conv)
+        assert conversation.messages == ["mid-turn"]
+        # Entry is NOT popped by _consume_resume_entry — release happens only
+        # after saia.complete succeeds, so a rescue-then-iterate-retry can
+        # re-consume the same envelope.
+        assert node_id in runtime._resume_saia_turn_bytes
 
 
 class TestSaveOnHaltChain:

@@ -239,7 +239,7 @@ class Loop:
     async def __call__(
         self,
         ctx: Context[Any],
-        task: str,
+        task: str | None = None,
         *,
         conversation: Any = None,
     ) -> Any:
@@ -251,8 +251,14 @@ class Loop:
                 ``abort_signal`` when no explicit halt was given at
                 construction.
             task: The task/prompt handed to ``saia.complete``.
+                ``None`` is only valid when resuming from a
+                ``saia_turn`` checkpoint that carries the saved task —
+                :meth:`_prepare_dispatch` restores it before
+                :meth:`saia.complete` runs. Any other dispatch with
+                ``task=None`` raises ``TypeError``.
             conversation: Optional conversation-like object passed
-                through to ``saia.complete`` for prior history.
+                through to ``saia.complete`` for prior history. On
+                resume the saved conversation overrides this.
 
         Returns:
             Whatever ``saia.complete`` returns (a ``TaskResult`` in
@@ -268,30 +274,30 @@ class Loop:
                 fire.
             RuntimeError: ``ctx.saia`` is ``None`` — either the ctx has
                 no role or the enclosing flow had no SAIAFactory.
+            TypeError: ``task`` is ``None`` and no resume entry
+                supplies one.
         """
         try:
             # Inside the outer try so a raise from _prepare_dispatch (JSON
             # decode fail, ConversationFactory.create_from_state raise, etc.)
             # still fires on_finally per its "runs last on every dispatch"
             # contract. on_failed's scope stays around saia.complete only.
-            saia, complete_kwargs, conversation = self._prepare_dispatch(ctx, conversation)
+            saia, complete_kwargs, conversation, task = self._prepare_dispatch(
+                ctx, task, conversation
+            )
+            if task is None:
+                raise TypeError(
+                    f"Loop at node {ctx._node_id!r} dispatched without a task and "
+                    "no saia_turn resume entry supplied one."
+                )
             if self._on_executor_ready is not None:
                 await maybe_await(self._on_executor_ready(saia, ctx))
-            try:
-                result = await saia.complete(task, **complete_kwargs)
-            except asyncio.CancelledError:
-                if self._on_cancelled is not None:
-                    await maybe_await(self._on_cancelled(ctx))
-                raise
-            except Exception as exc:
-                if self._on_failed is not None:
-                    await maybe_await(self._on_failed(exc, ctx))
-                raise
-            # saia.complete returned successfully — safe to drop the resume
-            # entry now. A raise above leaves it in place so a rescue-then-
-            # iterate-retry re-consumes it with resume=True.
+            result = await self._run_saia_complete(saia, task, complete_kwargs, ctx)
+            # saia.complete returned successfully — drop the resume entry now.
+            # A raise inside _run_saia_complete leaves it in place so a
+            # rescue-then-iterate-retry re-consumes it with resume=True.
             self._release_resume_entry(ctx)
-            override = await self._after_run(result, ctx, conversation)
+            override = await self._after_run(result, ctx, task, conversation)
             return override if override is not None else result
         finally:
             if self._on_finally is not None:
@@ -328,16 +334,41 @@ class Loop:
 
         return bridge
 
-    async def _after_run(self, result: Any, ctx: Context[Any], conversation: Any) -> Any:
+    async def _run_saia_complete(
+        self, saia: Any, task: str, complete_kwargs: dict[str, Any], ctx: Context[Any]
+    ) -> Any:
+        """Await ``saia.complete`` with the on_cancelled / on_failed hooks wired.
+
+        Extracted from :meth:`__call__` to keep it within the strict
+        function-size limit. The two hooks fire against
+        ``saia.complete``'s exceptions ONLY; a raise from
+        :meth:`_prepare_dispatch` or :meth:`_after_run` does not
+        invoke them.
+        """
+        try:
+            return await saia.complete(task, **complete_kwargs)
+        except asyncio.CancelledError:
+            if self._on_cancelled is not None:
+                await maybe_await(self._on_cancelled(ctx))
+            raise
+        except Exception as exc:
+            if self._on_failed is not None:
+                await maybe_await(self._on_failed(exc, ctx))
+            raise
+
+    async def _after_run(self, result: Any, ctx: Context[Any], task: str, conversation: Any) -> Any:
         """Cost hook, then paused-vs-complete branching + return override.
 
-        On the paused path, capture the conversation's serialized
-        :meth:`to_dict` payload as canonical bytes on
-        :attr:`_paused_bytes` when a :class:`ConversationFactory` is
-        wired — the halt-observation site reads it to stamp a
-        ``TraceRef(kind="saia_turn", ...)`` on the Flow's CAS halt
-        commit. Capture is a no-op when no factory is wired or when
-        the caller supplied no conversation object.
+        On the paused path, capture ``task`` alongside the
+        conversation's serialized :meth:`to_dict` payload as
+        canonical bytes on :attr:`_paused_bytes` when a
+        :class:`ConversationFactory` is wired — the halt-observation
+        site reads it to stamp a ``TraceRef(kind="saia_turn", ...)``
+        on the Flow's CAS halt commit. Persisting the task lets
+        :meth:`_consume_resume_entry` restore both when a direct
+        :class:`Loop` chain step resumes at index > 0 with empty
+        ``node_args``. Capture is a no-op when no factory is wired
+        or when no conversation object flowed through this dispatch.
 
         Returns the value from ``on_paused`` / ``on_complete`` when
         the hook returned non-``None`` — :meth:`__call__` uses it to
@@ -347,7 +378,7 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
-            self._capture_paused(ctx, conversation)
+            self._capture_paused(ctx, task, conversation)
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
@@ -363,20 +394,24 @@ class Loop:
         return None
 
     def _prepare_dispatch(
-        self, ctx: Context[Any], conversation: Any
-    ) -> tuple[Any, dict[str, Any], Any]:
-        """Resolve saia, build ``saia.complete`` kwargs, return the effective conversation.
+        self, ctx: Context[Any], task: str | None, conversation: Any
+    ) -> tuple[Any, dict[str, Any], Any, str | None]:
+        """Resolve saia, build ``saia.complete`` kwargs, return the effective task + conversation.
 
         On dispatch entry: pop this Loop's stale pending-turn entry
         from the runtime, reset :attr:`_paused_bytes`, and consume
         any resume entry left by :meth:`Flow._hydrate_resume_state`.
-        When a resume entry is present, its reconstructed
-        :class:`Conversation` replaces the caller-supplied one AND
-        ``resume=True`` is added to the ``saia.complete`` kwargs.
+        When a resume entry is present, its saved task AND
+        reconstructed :class:`Conversation` replace the caller's
+        AND ``resume=True`` is added to the ``saia.complete`` kwargs.
+        The task-restore lets a direct :class:`Loop` chain step at
+        index > 0 resume — ``_walk_chain``'s resume contract calls
+        the target with empty ``node_args``, so without the saved
+        task ``Loop.__call__`` would have none.
 
-        Returns ``(saia, complete_kwargs, effective_conversation)``.
-        The effective conversation is what :meth:`__call__` hands
-        back to :meth:`_after_run` for paused-path capture.
+        Returns ``(saia, complete_kwargs, effective_conversation,
+        effective_task)``. :meth:`__call__` hands the effective
+        values to :meth:`saia.complete` and :meth:`_after_run`.
         """
         saia = self._require_saia(ctx)
         self._paused_bytes = None
@@ -384,8 +419,9 @@ class Loop:
         if env is not None and ctx._node_id is not None:
             env.runtime._pending_saia_turn_bytes.pop(ctx._node_id, None)
             env.runtime._pending_saia_turn_ancestors.pop(ctx._node_id, None)
-        resumed_conversation, is_resume = self._consume_resume_entry(ctx)
+        resumed_task, resumed_conversation, is_resume = self._consume_resume_entry(ctx)
         if is_resume:
+            task = resumed_task
             conversation = resumed_conversation
         complete_kwargs: dict[str, Any] = {
             "on_iteration": self._make_iter_bridge(ctx),
@@ -394,22 +430,23 @@ class Loop:
         }
         if is_resume:
             complete_kwargs["resume"] = True
-        return saia, complete_kwargs, conversation
+        return saia, complete_kwargs, conversation, task
 
-    def _consume_resume_entry(self, ctx: Context[Any]) -> tuple[Any, bool]:
-        """Rebuild the Conversation from this Loop's resume entry, leaving the entry in place.
+    def _consume_resume_entry(self, ctx: Context[Any]) -> tuple[str | None, Any, bool]:
+        """Rebuild task + Conversation from this Loop's resume entry, leaving the entry in place.
 
         Reads ``env.runtime._resume_saia_turn_bytes`` at
         ``ctx._node_id``. When an entry is present, decodes the
-        canonical-json bytes and hands the payload to
+        canonical-json envelope ``{"task": ..., "conversation":
+        ...}`` and hands the conversation-state payload to
         :attr:`_conversation_factory`'s ``create_from_state`` to
         reconstruct the paused ``Conversation``.
 
-        Returns ``(reconstructed_conversation, True)`` when a resume
-        entry was found, ``(None, False)`` otherwise. Raises
-        :class:`RuntimeError` when an entry exists but no
-        :class:`ConversationFactory` is wired — a fresh dispatch
-        would silently drop the SAIA turn the halted commit
+        Returns ``(saved_task, reconstructed_conversation, True)``
+        when a resume entry was found, ``(None, None, False)``
+        otherwise. Raises :class:`RuntimeError` when an entry exists
+        but no :class:`ConversationFactory` is wired — a fresh
+        dispatch would silently drop the SAIA turn the halted commit
         captured.
 
         The entry is intentionally NOT popped here.
@@ -417,16 +454,16 @@ class Loop:
         ``saia.complete`` returns successfully — a raise from
         ``on_executor_ready`` or ``saia.complete`` leaves the entry
         in place so a rescue-then-iterate-retry re-reconstructs the
-        same conversation instead of falling through to a fresh
+        same task/conversation instead of falling through to a fresh
         dispatch without ``resume=True``.
         """
         env = ctx._env
         node_id = ctx._node_id
         if env is None or node_id is None:
-            return None, False
+            return None, None, False
         resume_map = env.runtime._resume_saia_turn_bytes
         if node_id not in resume_map:
-            return None, False
+            return None, None, False
         if self._conversation_factory is None:
             raise RuntimeError(
                 f"Loop at node {node_id!r} scheduled to resume a paused "
@@ -435,8 +472,9 @@ class Loop:
                 "ConversationFactory matching the format SAIA used at "
                 "save time."
             )
-        state = json.loads(resume_map[node_id])
-        return self._conversation_factory.create_from_state(state), True
+        payload = json.loads(resume_map[node_id])
+        conversation = self._conversation_factory.create_from_state(payload["conversation"])
+        return payload["task"], conversation, True
 
     def _release_resume_entry(self, ctx: Context[Any]) -> None:
         """Drop this Loop's resume entry — safe to call unconditionally after ``saia.complete``.
@@ -452,8 +490,8 @@ class Loop:
             return
         env.runtime._resume_saia_turn_bytes.pop(node_id, None)
 
-    def _capture_paused(self, ctx: Context[Any], conversation: Any) -> None:
-        """Serialize the conversation's paused state to canonical bytes.
+    def _capture_paused(self, ctx: Context[Any], task: str, conversation: Any) -> None:
+        """Serialize the paused task + conversation to canonical bytes.
 
         Publishes to two seams:
 
@@ -469,6 +507,12 @@ class Loop:
           ``TraceRef(kind="saia_turn", ...)`` per entry on the halt
           commit.
 
+        The blob envelope is ``{"task": <str>, "conversation":
+        <to_dict()>}`` — persisting ``task`` alongside the
+        conversation state so :meth:`_consume_resume_entry` restores
+        both when a direct :class:`Loop` chain step resumes at
+        index > 0 with empty ``node_args``.
+
         No-op when this Loop was constructed without a
         :class:`ConversationFactory`, when no conversation object
         flowed through this dispatch, or when ``ctx._node_id`` is
@@ -479,7 +523,7 @@ class Loop:
         to_dict = getattr(conversation, "to_dict", None)
         if to_dict is None:
             return
-        payload = canonical_json(to_dict())
+        payload = canonical_json({"task": task, "conversation": to_dict()})
         self._paused_bytes = payload
         env = ctx._env
         if env is not None and ctx._node_id is not None:
