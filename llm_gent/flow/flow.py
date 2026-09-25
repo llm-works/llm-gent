@@ -65,7 +65,8 @@ from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
-from ._executor import _build_ctx, _execute_node, _save_halt_checkpoint, _step_inputs
+from ._executor import _build_ctx, _execute_node, _step_inputs
+from ._halt_observer import HaltSaveObserver, is_halt_signaled
 from .checkpoint import CheckpointPolicy, CheckpointStore, maybe_await
 from .context import Context
 from .factory import SAIAFactory
@@ -1228,8 +1229,7 @@ class Flow:
             index <= start_index
             or env.runtime is not self
             or env.checkpointer is None
-            or env.halt is None
-            or not env.halt.is_set()
+            or not is_halt_signaled(env)
         ):
             return False
         just_completed = chain_ids[index - 1]
@@ -1238,8 +1238,7 @@ class Flow:
             if self._just_completed_owns_pending_saia(env, just_completed)
             else chain_ids[index]
         )
-        await _save_halt_checkpoint(env, 0, halt_node_id, env.state)
-        return True
+        return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
 
     async def _observe_final_chain_halt(self, env: _RunEnv, chain_ids: tuple[str, ...]) -> None:
         """Save a halt commit after the LAST chain step when it paused a Loop.
@@ -1257,15 +1256,14 @@ class Flow:
         if (
             env.runtime is not self
             or env.checkpointer is None
-            or env.halt is None
-            or not env.halt.is_set()
+            or not is_halt_signaled(env)
             or not chain_ids
         ):
             return
         last = chain_ids[-1]
         if not self._just_completed_owns_pending_saia(env, last):
             return
-        await _save_halt_checkpoint(env, 0, last, env.state)
+        await HaltSaveObserver.save_if_signaled(env, 0, last, env.state)
 
     @staticmethod
     def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
@@ -1400,41 +1398,12 @@ class Flow:
         # the trajectory finished successfully — do not replay.
         if commit.meta.node_path == "$complete":
             return fallback, None
-        await self._load_resume_saia_turn_bytes(commit)
-        return self._replay_from_commit(commit, scope_data)
-
-    async def _load_resume_saia_turn_bytes(self, commit: Commit) -> None:
-        """Pull every saia_turn entry out of ``commit.meta.trace_ref`` and cache the blob bytes.
-
-        Each ``TraceRef(kind="saia_turn", ...)`` on the halted commit
-        was stamped by :func:`_stash_pending_saia_turn` with
-        ``id=f"{node_id}:{blob_hash}"``. Split on the first colon,
-        fetch the blob under ``blob_hash``, and stash
-        ``(node_id, blob_bytes)`` on :attr:`_resume_saia_turns` so
-        the Loop at that node can pick its own entry up on its first
-        dispatch and hand the reconstructed conversation to SAIA
-        with ``resume=True``.
-
-        Silently skips entries whose blob is missing from the store
-        — the run then falls back to a fresh dispatch at that Loop.
-        Entries whose ``id`` is not in ``node_id:blob_hash`` shape
-        are ignored (defensive against future ``saia_turn`` variants
-        this framework does not understand).
-        """
         assert self._checkpointer is not None
         assert self._client_flow_id is not None
-        for ref in commit.meta.trace_ref:
-            if ref.kind != "saia_turn":
-                continue
-            node_id, sep, blob_hash = ref.id.partition(":")
-            if not sep or not node_id or not blob_hash:
-                continue
-            payload = await maybe_await(
-                self._checkpointer.get_object(self._client_flow_id, "blob", blob_hash)
-            )
-            if payload is None:
-                continue
-            self._resume_saia_turns.add(node_id, payload)
+        await self._resume_saia_turns.load_from_commit(
+            self._checkpointer, self._client_flow_id, commit
+        )
+        return self._replay_from_commit(commit, scope_data)
 
     def _replay_from_commit(
         self, commit: Commit, scope_data: list[Any]
