@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from llm_saia import SAIA
 from llm_saia.core.backend import Backend
-from llm_saia.core.config import Config
+from llm_saia.core.config import CallOptions, Config
 from llm_saia.core.errors import PauseRequested
 from llm_saia.core.logger import NullLogger
 from llm_saia.core.types import ChatResponse, Message, ToolDef
@@ -63,9 +63,7 @@ class _RecordingBackend(Backend):
         # JSON payload so they don't derail before the pause point.
         if response_schema is not None:
             return ChatResponse(
-                content=json.dumps(
-                    {"category": "in_progress", "confidence": 0.9, "reason": "test"}
-                ),
+                content=json.dumps({"category": "completed", "confidence": 0.9, "reason": "test"}),
                 tool_calls=[],
                 finish_reason="end_turn",
             )
@@ -119,7 +117,11 @@ class _SaiaFactory:
 
         tools = [ToolDef(name="noop", description="unused in test", parameters={"type": "object"})]
         config = Config(
-            lg=NullLogger(), backend=self._backend, tools=tools, executor=_noop_executor
+            lg=NullLogger(),
+            backend=self._backend,
+            tools=tools,
+            executor=_noop_executor,
+            call=CallOptions(max_iterations=2),
         )
         return SAIA(config)
 
@@ -153,7 +155,8 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
         .with_halt(halt1)
         .iterate(body, max_iters=2)
     )
-    await flow1.run(extra={"task": "please answer", "conv": _SerializableConv()})
+    saved_conv = _SerializableConv(messages=[Message(role="user", content="SAVED_CONV_MARKER")])
+    await flow1.run(extra={"task": "please answer", "conv": saved_conv})
 
     # SAIA's real complete() was called exactly once — it hit PauseRequested and
     # returned paused before the second turn could start.
@@ -188,11 +191,12 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
         .with_halt(halt2)
         .iterate(body, max_iters=2)
     )
+    caller_conv = _SerializableConv(messages=[Message(role="user", content="CALLER_CONV_MARKER")])
     await flow2.run(
         resume=True,
         # Caller supplies a DIFFERENT task + conv to prove the resume path
         # forwards the SAVED values from the envelope, not the caller's.
-        extra={"task": "caller-task", "conv": _SerializableConv()},
+        extra={"task": "caller-task", "conv": caller_conv},
     )
 
     # Backend2 saw at least one real (non-structured) chat call carrying the
@@ -202,7 +206,17 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     ]
     assert real_calls, "resume path did not reach the backend"
     resumed_msgs = real_calls[0]["messages"]
+    contents = [(m.role, m.content) for m in resumed_msgs]
+    # Saved task must be present (task envelope restored).
     assert any(m.role == "user" and m.content == "please answer" for m in resumed_msgs), (
         f"resumed dispatch should carry the SAVED task 'please answer', not "
-        f"the caller's 'caller-task'; got {[(m.role, m.content) for m in resumed_msgs]}"
+        f"the caller's 'caller-task'; got {contents}"
+    )
+    # Saved conversation must be restored (conv envelope restored, not the caller's).
+    assert any(m.content == "SAVED_CONV_MARKER" for m in resumed_msgs), (
+        f"resumed dispatch should carry the SAVED conversation (SAVED_CONV_MARKER), got {contents}"
+    )
+    assert not any(m.content == "CALLER_CONV_MARKER" for m in resumed_msgs), (
+        f"resumed dispatch must NOT carry the caller's conversation "
+        f"(CALLER_CONV_MARKER); got {contents}"
     )
