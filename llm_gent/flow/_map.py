@@ -32,6 +32,7 @@ from ._executor import (
     _pop_replay_for,
     _project_state,
     _save_scope_commit,
+    _serialize_state_data,
 )
 from ._halt_observer import is_halt_signaled
 from ._node_id import _compute_node_id, _descend_context
@@ -281,9 +282,17 @@ class MapItemRunner:
         returns the :class:`Failure` sentinel. The hook fires exactly
         once with the final outcome — either the body result or a
         :class:`Failure` wrapping the merge/save exception.
+
+        When ``on_map_item`` checkpointing is enabled, the merge is
+        atomic with the checkpoint write: a snapshot is taken before
+        merge, and on checkpoint failure the parent state is rolled
+        back so concurrent items don't serialize an uncommitted merge.
         """
+        snapshot = None
         try:
             async with self.merge_lock:
+                if self.env.policy.on_map_item:
+                    snapshot = _serialize_state_data(self.env.state.data)
                 await _merge_state(self.mp.merge_fn, self.env.state, child_state)
                 if self.env.policy.on_map_item:
                     await _save_scope_commit(
@@ -292,6 +301,8 @@ class MapItemRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if snapshot is not None:
+                _restore_state_data(self.env.state.data, snapshot)
             if self.mp.on_error is not None:
                 await self._run_on_error(exc, item_ctx)
             failure = Failure(exception=exc, item=self.item)
@@ -372,6 +383,35 @@ async def _resolve_items(
         return list(source)
     except TypeError as exc:
         raise TypeError(f".map items must be iterable; got {type(source).__name__}") from exc
+
+
+def _restore_state_data(data: Any, snapshot: Any) -> None:
+    """Restore state data in-place from a serialized snapshot.
+
+    Used to roll back a failed checkpoint: after ``_merge_state`` has
+    mutated the parent's data, a checkpoint-write failure should leave
+    the parent unchanged so concurrent items don't serialize a merge
+    that was never committed.
+
+    Dicts are restored via clear+update. Objects with a ``from_dict``
+    classmethod (the :class:`StateData` contract) are restored by
+    reconstructing from the snapshot and copying attributes. Payloads
+    that satisfy neither are unsupported under checkpoint atomicity.
+    """
+    if isinstance(data, dict):
+        data.clear()
+        data.update(snapshot)
+        return
+    from_dict = getattr(type(data), "from_dict", None)
+    if callable(from_dict):
+        restored = from_dict(snapshot)
+        for key, value in vars(restored).items():
+            object.__setattr__(data, key, value)
+        return
+    raise TypeError(
+        f"cannot restore state.data of type {type(data).__name__} — "
+        f"payload must be a plain dict or satisfy StateData"
+    )
 
 
 async def _run_guard(guard_fn: Any, item: Any, ctx: Context[Any]) -> bool:
