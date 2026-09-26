@@ -55,7 +55,6 @@ Buildable materializer :func:`_materialize`.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -64,6 +63,7 @@ from appinfra.log import Logger
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
+from ._resume import Resume
 from ._validation import _materialize, _require_state_for_merge, _validate_target
 from .checkpoint import CheckpointPolicy, CheckpointStore, maybe_await
 from .context import Context
@@ -907,7 +907,7 @@ class Flow:
         replay: _ResumeReplay | None = None
         self._resume_saia_turns.clear()
         if resume:
-            active_state, replay = await self._hydrate_resume_state(active_state)
+            active_state, replay = await Resume(self).hydrate(active_state)
         self._replay_consumed = False
         self._halt_saved = False
         self._pending_saia_turns.clear()
@@ -948,7 +948,7 @@ class Flow:
         """Write a sentinel commit + ref marking the trajectory complete.
 
         The marker uses a reserved ``node_path="$complete"`` and
-        ``produced_by.node_id="$complete"``; :meth:`_hydrate_resume_state`
+        ``produced_by.node_id="$complete"``; :meth:`Resume.hydrate`
         detects it and returns a fresh-run replay context.
         """
         assert self._checkpointer is not None
@@ -1153,127 +1153,6 @@ class Flow:
         if isinstance(payload, State):
             return payload
         return State(data=payload, _factory=self._state_factory)
-
-    async def _hydrate_resume_state(
-        self, fallback: State[Any]
-    ) -> tuple[State[Any], _ResumeReplay | None]:
-        """Load the latest commit and reconstruct state + a replay context.
-
-        Called only when :meth:`run` was invoked with ``resume=True``.
-
-        Sequence:
-
-        1. :meth:`CheckpointStore.resolve_ref` under :attr:`_client_flow_id`
-           returns the latest commit hash across every ``node_path``, or
-           ``None`` (fresh run — no prior checkpoint).
-        2. :meth:`CheckpointStore.get_object` fetches the commit bytes;
-           :meth:`Commit.from_bytes` re-derives :class:`CommitMeta` +
-           :class:`ProducedBy` + :class:`TraceRef`.
-        3. The commit's ``root_tree_hash`` fetches the :class:`Tree`
-           object; each :class:`TreeEntry` fetches its Blob. Scope order
-           is root → leaf via the zero-padded ``scope_id`` (canonical
-           sort).
-        4. The root scope's payload rehydrates the top-level
-           :class:`State` (via ``state_factory.restore`` when bound,
-           passthrough otherwise). The leaf scope's payload rides on the
-           :class:`_ResumeReplay` as ``child_state_data`` for the
-           save-point iterate to restore its own scope.
-        5. ``node_path`` splits on ``"/"`` back into the ancestor chain
-           the executor's head-pop replay expects. blake2b hex has no
-           slashes, so the round-trip is exact.
-
-        Returns ``(fallback, None)`` when no commit exists yet — the
-        caller's ``state=`` (or the flow's construction state) is used
-        and no replay is scheduled.
-        """
-        assert self._checkpointer is not None
-        if self._client_flow_id is None:
-            label = self._name or "<anonymous>"
-            raise RuntimeError(
-                f"Flow {label!r} was run with resume=True but has no "
-                f"client_flow_id — call .with_checkpointer(store, client_flow_id) first"
-            )
-        loaded = await self._load_latest_commit_scopes()
-        if loaded is None:
-            return fallback, None
-        commit, scope_data = loaded
-        # A completion marker (stamped on clean exit under "retain") means
-        # the trajectory finished successfully — do not replay.
-        if commit.meta.node_path == "$complete":
-            return fallback, None
-        assert self._checkpointer is not None
-        assert self._client_flow_id is not None
-        await self._resume_saia_turns.load_from_commit(
-            self._checkpointer, self._client_flow_id, commit
-        )
-        return self._replay_from_commit(commit, scope_data)
-
-    def _replay_from_commit(
-        self, commit: Commit, scope_data: list[Any]
-    ) -> tuple[State[Any], _ResumeReplay | None]:
-        """Split root / middle / leaf scope payloads, return State + replay.
-
-        Root scope hydrates the top-level :class:`State`. Every non-root
-        scope rides on ``intermediate_scope_data`` in order; each
-        scope-creating descent (``.call(state=)``, ``.iterate(state=)``,
-        ``.map(state=)``) consumes the next entry at its own descent
-        site via :func:`_consume_scope_data`. A leaf iterate without a
-        ``state_fn`` creates no scope of its own and simply reuses the
-        parent scope with the fast-forwarded iteration count.
-        """
-        root_raw = scope_data[0] if scope_data else None
-        hydrated_root = (
-            root_raw
-            if self._state_factory is None or root_raw is None
-            else self._state_factory.restore(root_raw if isinstance(root_raw, dict) else {})
-        )
-        intermediate_raw = tuple(scope_data[1:])
-        path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
-        return (
-            State(data=hydrated_root, _factory=self._state_factory),
-            _ResumeReplay(
-                remaining_path=path_tuple,
-                full_path=path_tuple,
-                iteration=commit.meta.iteration,
-                child_state_data=None,
-                intermediate_scope_data=intermediate_raw,
-            ),
-        )
-
-    async def _load_latest_commit_scopes(self) -> tuple[Commit, list[Any]] | None:
-        """Resolve the latest commit + walk its tree, returning ``(Commit, scope_data)``.
-
-        ``scope_data`` is root → leaf JSON payloads (one per :class:`Tree`
-        entry). Returns ``None`` when the ref, commit, tree, or any blob
-        is missing — the caller treats each miss as "no resumable
-        checkpoint" and falls through to a fresh run.
-        """
-        assert self._checkpointer is not None
-        assert self._client_flow_id is not None
-        commit_hash = await maybe_await(self._checkpointer.resolve_ref(self._client_flow_id))
-        if commit_hash is None:
-            return None
-        commit_bytes = await maybe_await(
-            self._checkpointer.get_object(self._client_flow_id, "commit", commit_hash)
-        )
-        if commit_bytes is None:
-            return None
-        commit = Commit.from_bytes(commit_bytes)
-        tree_bytes = await maybe_await(
-            self._checkpointer.get_object(self._client_flow_id, "tree", commit.root_tree_hash)
-        )
-        if tree_bytes is None:
-            return None
-        tree = Tree.from_bytes(tree_bytes)
-        scope_data: list[Any] = []
-        for entry in tree.entries:
-            blob = await maybe_await(
-                self._checkpointer.get_object(self._client_flow_id, "blob", entry.child_hash)
-            )
-            if blob is None:
-                return None
-            scope_data.append(json.loads(blob.decode("utf-8")))
-        return commit, scope_data
 
     # -------------------------------------------------------------------------
     # Internals
