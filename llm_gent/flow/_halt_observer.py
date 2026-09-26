@@ -6,8 +6,8 @@
 Three halt-observation sites in the executor persist a halt commit
 when the ambient halt event fires: the iterate boundary check
 (:func:`_run_iterate`), the chain between-step walker
-(:meth:`Flow._observe_chain_halt`), and the chain trailing edge
-(:meth:`Flow._observe_final_chain_halt`). Two additional sites in
+(:meth:`Chain._observe_halt_between`), and the chain trailing edge
+(:meth:`Chain._observe_halt_trailing`). Two additional sites in
 map-item dispatch (strict + non-strict) observe halt to short-
 circuit the item as :class:`Skipped` without persisting; they use
 :func:`is_halt_signaled` only.

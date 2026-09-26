@@ -403,7 +403,7 @@ class Loop:
         reconstructed :class:`Conversation` replace the caller's
         AND ``resume=True`` is added to the ``saia.complete`` kwargs.
         The task-restore lets a direct :class:`Loop` chain step at
-        index > 0 resume — ``_walk_chain``'s resume contract calls
+        index > 0 resume — Chain's resume contract calls
         the target with empty ``node_args``, so without the saved
         task ``Loop.__call__`` would have none.
 
