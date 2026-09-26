@@ -793,8 +793,7 @@ class TestSaiaTurnTraceRef:
                 {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
             ),
         )
-        runtime = SimpleNamespace(_resume_saia_turns=resume_turns)
-        env = SimpleNamespace(runtime=runtime)
+        env = SimpleNamespace(resume_saia_turns=resume_turns)
         ctx = SimpleNamespace(_env=env, _node_id=node_id)
 
         task, conversation, is_resume = loop._consume_resume_entry(ctx)  # type: ignore[arg-type]
@@ -890,7 +889,7 @@ class TestSaveOnHaltChain:
         ff = FlowFactory(make_test_logger())
         flow = ff.create(state={}).with_halt(halt).call(a).then(b)
         # No .with_checkpointer — halt check fires between chain steps but
-        # _save_halt_checkpoint short-circuits at env.checkpointer is None.
+        # _save_halt_checkpoint short-circuits at env.checkpoint_ctx is None.
         # Run should complete without raising.
         await flow.run()
 
@@ -1214,21 +1213,6 @@ class TestResumeDeterminism:
 
 
 class TestResumeErrorPaths:
-    async def test_resume_without_client_flow_id_raises(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        """resume=True on a checkpointer bound without client_flow_id raises."""
-        from llm_gent.flow.factory import FlowFactory
-
-        ff = FlowFactory(make_test_logger())
-        # with_checkpointer is what binds client_flow_id — skip it, leave
-        # _checkpointer set but _client_flow_id None by manual attribute.
-        flow = ff.create(state={})
-        flow._checkpointer = store
-        # resume=True with no client_flow_id → RuntimeError.
-        with pytest.raises(RuntimeError, match="no client_flow_id"):
-            await flow.run(resume=True)
-
     async def test_resume_falls_through_when_commit_object_missing(
         self, store: JsonFileCheckpointStore
     ) -> None:

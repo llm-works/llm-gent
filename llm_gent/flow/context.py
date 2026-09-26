@@ -280,8 +280,6 @@ class Context(Generic[T]):
         node_id = self._node_id
         if env is None or node_id is None:
             return
-        if env.checkpointer is None or env.client_flow_id is None:
-            return
         from ._executor import _save_scope_commit
 
         await _save_scope_commit(env, 0, node_id, self.state, "ok")

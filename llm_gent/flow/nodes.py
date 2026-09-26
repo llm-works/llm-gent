@@ -35,9 +35,11 @@ from .state import State, StateFactory
 
 
 if TYPE_CHECKING:
+    from ._checkpoint_ctx import CheckpointContext
     from .flow import Flow
+    from .state.saia_turn import PendingSaiaTurns, ResumeSaiaTurns
 
-from .checkpoint import CheckpointPolicy, CheckpointStore
+from .checkpoint import CheckpointPolicy
 
 
 class Unset:
@@ -258,13 +260,32 @@ class _RunEnv:
     lg: Logger
     halt: asyncio.Event | None = None
     budget: Tracker | None = None
-    checkpointer: CheckpointStore | None = None
-    client_flow_id: str | None = None
+    checkpoint_ctx: CheckpointContext | None = None
     chain_context: str = ""
     ancestor_chain: tuple[str, ...] = ()
     replay: _ResumeReplay | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
+
+    @property
+    def pending_saia_turns(self) -> PendingSaiaTurns:
+        """Typed accessor for the runtime's pending SAIA turn container.
+
+        Callers use this instead of reaching through
+        ``env.runtime._pending_saia_turns``. The container itself lives
+        on the top-level Flow (which is what ``runtime`` points at);
+        this property is the typed public interface across the module
+        boundary.
+        """
+        return self.runtime._pending_saia_turns
+
+    @property
+    def resume_saia_turns(self) -> ResumeSaiaTurns:
+        """Typed accessor for the runtime's resume SAIA turn container.
+
+        Companion to :attr:`pending_saia_turns` on the read side.
+        """
+        return self.runtime._resume_saia_turns
 
 
 @dataclass

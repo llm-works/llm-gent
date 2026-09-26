@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..checkpoint import CheckpointStore, maybe_await
 from .cas import Blob, Commit, TraceRef, canonical_json
+
+
+if TYPE_CHECKING:
+    from .._checkpoint_ctx import CheckpointContext
 
 
 @dataclass
@@ -84,12 +87,11 @@ class PendingSaiaTurns:
         self._bytes.clear()
         self._ancestors.clear()
 
-    async def stash_to_store(
+    async def stash_to_ctx(
         self,
-        store: CheckpointStore,
-        client_flow_id: str,
+        ctx: CheckpointContext,
     ) -> tuple[tuple[TraceRef, ...], tuple[str, ...]]:
-        """Persist a snapshot to ``store``; return TraceRefs + stashed node_ids.
+        """Persist a snapshot via ``ctx``; return TraceRefs + stashed node_ids.
 
         Each entry becomes a standalone :class:`Blob` under the
         trajectory and yields one
@@ -101,12 +103,12 @@ class PendingSaiaTurns:
 
         Iterates over :meth:`snapshot`, not the live dict, so
         concurrent ``.map`` items depositing new entries during the
-        awaited ``put_object`` calls don't raise
-        :class:`RuntimeError`. Late arrivals stay pending; the
-        caller drops only the returned ``stashed_ids`` after the
-        halted commit is durable so a within-run retry can re-emit
-        them. ``put_object`` is content-addressed — a repeat write
-        for the same blob is a no-op.
+        awaited put-blob calls don't raise :class:`RuntimeError`.
+        Late arrivals stay pending; the caller drops only the
+        returned ``stashed_ids`` after the halted commit is durable
+        so a within-run retry can re-emit them. Blob puts are
+        content-addressed — a repeat write for the same blob is a
+        no-op.
         """
         if not self._bytes:
             return (), ()
@@ -114,9 +116,7 @@ class PendingSaiaTurns:
         refs: list[TraceRef] = []
         for node_id, payload in snapshot:
             blob = Blob.from_bytes(payload)
-            await maybe_await(
-                store.put_object(client_flow_id, "blob", blob.content_hash, blob.payload)
-            )
+            await ctx.put_blob(blob.content_hash, blob.payload)
             refs.append(TraceRef(kind="saia_turn", id=f"{node_id}:{blob.content_hash}"))
         return tuple(refs), tuple(node_id for node_id, _ in snapshot)
 
@@ -152,16 +152,15 @@ class ResumeSaiaTurns:
 
     async def load_from_commit(
         self,
-        store: CheckpointStore,
-        client_flow_id: str,
+        ctx: CheckpointContext,
         commit: Commit,
     ) -> None:
         """Populate resume entries from ``commit``'s saia_turn TraceRefs.
 
         Each :class:`TraceRef` with ``kind="saia_turn"`` on the
-        halted commit was stamped by :meth:`PendingSaiaTurns.stash_to_store`
+        halted commit was stamped by :meth:`PendingSaiaTurns.stash_to_ctx`
         with ``id=f"{node_id}:{blob_hash}"``. Split on the first
-        colon, fetch the blob under ``blob_hash`` from ``store``, and
+        colon, fetch the blob under ``blob_hash`` from ``ctx``, and
         register ``{node_id: blob_bytes}`` so the Loop at that node
         can pick its own entry up on first dispatch and hand the
         reconstructed conversation to SAIA with ``resume=True``.
@@ -178,7 +177,7 @@ class ResumeSaiaTurns:
             node_id, sep, blob_hash = ref.id.partition(":")
             if not sep or not node_id or not blob_hash:
                 continue
-            payload = await maybe_await(store.get_object(client_flow_id, "blob", blob_hash))
+            payload = await ctx.get_object("blob", blob_hash)
             if payload is None:
                 continue
             self.add(node_id, payload)

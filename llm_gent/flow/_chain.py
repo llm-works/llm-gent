@@ -186,7 +186,7 @@ class Chain:
         is consistent.
 
         When the just-completed step paused SAIA mid-turn (a Loop
-        deposited bytes on ``env.runtime._pending_saia_turns``), lands
+        deposited bytes on ``env.pending_saia_turns``), lands
         the halt commit at THAT step's node so resume re-dispatches it
         — its Loop's ``__call__`` then picks up the saia_turn entry
         and hands SAIA ``resume=True`` with the rebuilt conversation.
@@ -197,7 +197,7 @@ class Chain:
         if (
             index <= start_index
             or env.runtime is not self.flow
-            or env.checkpointer is None
+            or env.checkpoint_ctx is None
             or not is_halt_signaled(env)
         ):
             return False
@@ -227,7 +227,7 @@ class Chain:
         env = self.env
         if (
             env.runtime is not self.flow
-            or env.checkpointer is None
+            or env.checkpoint_ctx is None
             or not is_halt_signaled(env)
             or not self.ids
         ):
@@ -249,4 +249,4 @@ def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
     Either match means resume should re-dispatch the chain step so
     the Loop's ``__call__`` picks up the saia_turn entry.
     """
-    return env.runtime._pending_saia_turns.owns(node_id)
+    return env.pending_saia_turns.owns(node_id)

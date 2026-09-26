@@ -163,8 +163,9 @@ class TestCreateHaltAndCheckpointer:
         store = JsonFileCheckpointStore(make_test_logger(), tmp_path)
         ff = FlowFactory(make_test_logger(), saia_factory=StubFactory())
         flow = ff.create(checkpointer=(store, "flow-1"))
-        assert flow._checkpointer is store
-        assert flow._client_flow_id == "flow-1"
+        assert flow._checkpoint_ctx is not None
+        assert flow._checkpoint_ctx.store is store
+        assert flow._checkpoint_ctx.client_flow_id == "flow-1"
 
     def test_create_checkpointer_supersedes_factory_pair(self, tmp_path: Any) -> None:
         """``checkpointer=`` wins over the factory-level store + client_flow_id."""
@@ -175,8 +176,9 @@ class TestCreateHaltAndCheckpointer:
         create_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "b")
         ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), checkpointer=factory_store)
         flow = ff.create(client_flow_id="ignored", checkpointer=(create_store, "flow-override"))
-        assert flow._checkpointer is create_store
-        assert flow._client_flow_id == "flow-override"
+        assert flow._checkpoint_ctx is not None
+        assert flow._checkpoint_ctx.store is create_store
+        assert flow._checkpoint_ctx.client_flow_id == "flow-override"
 
 
 class TestPricingProviderSwap:

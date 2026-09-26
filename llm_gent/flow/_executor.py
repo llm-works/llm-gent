@@ -22,10 +22,8 @@ import asyncio
 import contextlib
 import dataclasses
 import inspect
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import maybe_await
 from .context import Context
 from .nodes import (
     UNSET,
@@ -41,15 +39,8 @@ from .nodes import (
 )
 from .state import State, StateFactory
 from .state.cas import (
-    Blob,
-    Commit,
-    CommitMeta,
     CommitOutcome,
-    ProducedBy,
     TraceRef,
-    Tree,
-    TreeEntry,
-    canonical_json,
 )
 
 
@@ -306,8 +297,7 @@ async def _run_subflow(
         runtime=env.runtime,
         parent_halt=env.halt,
         parent_budget=env.budget,
-        parent_checkpointer=env.checkpointer,
-        parent_client_flow_id=env.client_flow_id,
+        parent_checkpoint_ctx=env.checkpoint_ctx,
         parent_chain_context=_descend_context(node_id, "call"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=child_replay,
@@ -470,8 +460,7 @@ async def _run_branch(
         runtime=env.runtime,
         parent_halt=env.halt,
         parent_budget=env.budget,
-        parent_checkpointer=env.checkpointer,
-        parent_client_flow_id=env.client_flow_id,
+        parent_checkpoint_ctx=env.checkpoint_ctx,
         parent_chain_context=_descend_context(node_id, "then" if verdict else "else"),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=_pop_replay_for(env, node_id),
@@ -553,34 +542,42 @@ async def _save_halt_checkpoint(
     idempotent-in-effects to survive re-run on resume, the same
     contract that already governs iterate re-run-iteration-N.
     """
-    if env.runtime._halt_saved:
+    if env.runtime._halt_saved or env.checkpoint_ctx is None:
         return
     env.runtime._halt_saved = True
-    saved = False
-    trace_ref: tuple[TraceRef, ...] = ()
-    stashed_ids: tuple[str, ...] = ()
     try:
-        if env.checkpointer is not None and env.client_flow_id is not None:
-            trace_ref, stashed_ids = await env.runtime._pending_saia_turns.stash_to_store(
-                env.checkpointer, env.client_flow_id
-            )
-        await _save_scope_commit(env, iteration, node_id, current_state, "halted", trace_ref)
-        saved = True
+        stashed_ids = await _persist_halt(env, iteration, node_id, current_state)
+    except BaseException:
+        # Both Exception and asyncio.CancelledError un-latch so a later
+        # halt-observation site can retry.
+        env.runtime._halt_saved = False
+        raise
+    # Drop only the entries we stashed. Late arrivals from concurrent .map
+    # items that landed after the snapshot stay on the runtime dict.
+    for stashed_id in stashed_ids:
+        env.pending_saia_turns.remove(stashed_id)
+
+
+async def _persist_halt(
+    env: _RunEnv,
+    iteration: int,
+    node_id: str,
+    current_state: State[Any],
+) -> tuple[str, ...]:
+    """Stash pending SAIA turns + save the halted commit; return stashed node_ids."""
+    assert env.checkpoint_ctx is not None
+    try:
+        trace_ref, stashed_ids = await env.pending_saia_turns.stash_to_ctx(env.checkpoint_ctx)
+        await env.checkpoint_ctx.save_scope_commit(
+            env.ancestor_chain, iteration, node_id, current_state, "halted", trace_ref
+        )
     except Exception as e:
         env.lg.warning(
             "halt-save failed; un-latching for retry at next observation",
             extra={"exception": e},
         )
         raise
-    finally:
-        if not saved:
-            # Both Exception and asyncio.CancelledError land here; the flag must
-            # un-latch either way so a later halt-observation site can retry.
-            env.runtime._halt_saved = False
-    # Drop only the entries we stashed. Late arrivals from concurrent .map
-    # items that landed after the snapshot stay on the runtime dict.
-    for stashed_id in stashed_ids:
-        env.runtime._pending_saia_turns.remove(stashed_id)
+    return stashed_ids
 
 
 async def _save_scope_commit(
@@ -591,140 +588,18 @@ async def _save_scope_commit(
     outcome: CommitOutcome,
     trace_ref: tuple[TraceRef, ...] = (),
 ) -> None:
-    """Persist a content-addressed commit at ``node_id`` under ``env``.
+    """Persist a scope commit via ``env.checkpoint_ctx``; no-op when unbound.
 
-    Walks the scope stack from root to ``current_state``. For each scope:
-    serialize its ``data`` via the state-data contract (dict passthrough
-    or ``StateData.to_dict``) to canonical JSON bytes and
-    :meth:`put_object` a Blob keyed by content hash. Bundle every scope's
-    blob hash into a Tree (one :class:`TreeEntry` per scope, ordered by
-    depth via a two-digit ``scope_id``). Wrap the Tree in a Commit whose
-    :class:`CommitMeta` pins ``(client_flow_id, node_path, iteration)``
-    and the provenance triple (``produced_by``, ``trace_ref``,
-    ``outcome``). Finally put_ref points this boundary at the commit
-    hash.
-
-    ``node_path`` is the ``"/"``-joined ancestor chain (from run root to
-    this node, inclusive). blake2b hex has no ``"/"``, so split
-    round-trips on resume.
-
-    ``outcome`` records why the commit fired — ``"ok"`` for a successful
-    iterate boundary, ``"halted"`` when the halt-observation site
-    triggered the save.
-
-    No-op when the runtime has no checkpointer / client_flow_id bound.
+    Thin wrapper that resolves the ``env → checkpoint context`` reach
+    for callers that already have an ``env`` in scope
+    (:class:`IterateRunner`, :class:`MapItemRunner`,
+    :meth:`Context.checkpoint`). Delegates the actual persistence
+    machinery to :meth:`CheckpointContext.save_scope_commit`.
     """
-    if env.checkpointer is None or env.client_flow_id is None:
+    if env.checkpoint_ctx is None:
         return
-    scopes = _collect_scope_stack(current_state)
-    entries = await _put_scope_blobs(env, scopes)
-    tree = Tree.from_entries(entries)
-    await maybe_await(
-        env.checkpointer.put_object(env.client_flow_id, "tree", tree.content_hash, tree.to_bytes())
-    )
-    node_path = "/".join(env.ancestor_chain + (node_id,))
-    meta = _build_commit_meta(env, node_path, iteration, node_id, outcome, trace_ref)
-    commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
-    await maybe_await(
-        env.checkpointer.put_object(
-            env.client_flow_id, "commit", commit.content_hash, commit.to_bytes()
-        )
-    )
-    await maybe_await(
-        env.checkpointer.put_ref(env.client_flow_id, node_path, iteration, commit.content_hash)
-    )
-
-
-def _collect_scope_stack(current: State[Any]) -> list[State[Any]]:
-    """Return the ``State`` chain from run-root down to ``current``."""
-    scopes: list[State[Any]] = []
-    node: State[Any] | None = current
-    while node is not None:
-        scopes.append(node)
-        node = node._parent
-    scopes.reverse()
-    return scopes
-
-
-async def _put_scope_blobs(env: _RunEnv, scopes: list[State[Any]]) -> list[TreeEntry]:
-    """Serialize each scope's data to a blob, put_object it, return tree entries.
-
-    Uses a zero-padded two-digit index as :attr:`TreeEntry.scope_id` so
-    canonical sort ordering matches root→leaf depth ordering.
-    """
-    entries: list[TreeEntry] = []
-    for depth, scope in enumerate(scopes):
-        blob_bytes = canonical_json(_serialize_state_data(scope.data))
-        blob = Blob.from_bytes(blob_bytes)
-        assert env.checkpointer is not None
-        assert env.client_flow_id is not None
-        await maybe_await(
-            env.checkpointer.put_object(env.client_flow_id, "blob", blob.content_hash, blob.payload)
-        )
-        entries.append(
-            TreeEntry(scope_id=f"{depth:02d}", kind="blob", child_hash=blob.content_hash)
-        )
-    return entries
-
-
-def _build_commit_meta(
-    env: _RunEnv,
-    node_path: str,
-    iteration: int,
-    node_id: str,
-    outcome: CommitOutcome,
-    trace_ref: tuple[TraceRef, ...] = (),
-) -> CommitMeta:
-    """Assemble :class:`CommitMeta` for one scope-commit save.
-
-    ``produced_by`` records the node's ``node_id`` — verb-level
-    attribution (``verb_name`` / ``role`` / ``result_hash``) lands with
-    the SAIA-verb-wrapper wiring. ``trace_ref`` carries cross-system
-    pointers stamped by the caller — halt-save passes one
-    ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")`` per
-    Loop that published paused-conversation bytes, empty tuple
-    otherwise.
-
-    ``outcome`` is set by the caller: ``"ok"`` at an iterate boundary,
-    ``"halted"`` at a halt-observation save.
-
-    ``flow_root_id`` is the run's ``client_flow_id`` — a stable
-    per-run identifier — until the framework computes a proper
-    composition-tree root hash.
-    """
-    from llm_gent import __version__
-
-    return CommitMeta(
-        client_flow_id=env.client_flow_id or "",
-        node_path=node_path,
-        iteration=iteration,
-        produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
-        trace_ref=trace_ref,
-        outcome=outcome,
-        flow_root_id=env.client_flow_id or "",
-        timestamp_iso=datetime.now(UTC).isoformat(),
-        framework_version=__version__,
-    )
-
-
-def _serialize_state_data(data: Any) -> Any:
-    """Return a JSON-compatible view of ``data`` for the checkpoint.
-
-    Plain dicts pass through as-is (the framework does not deep-copy — the
-    store implementation owns durability). Objects satisfying
-    :class:`StateData` are converted via ``to_dict()``. ``None`` also
-    passes through (a payload that never carried structured data).
-    Anything else raises :class:`TypeError` at the save site with a
-    pointer to the contract.
-    """
-    if data is None or isinstance(data, dict):
-        return data
-    to_dict = getattr(data, "to_dict", None)
-    if callable(to_dict):
-        return to_dict()
-    raise TypeError(
-        f"cannot checkpoint state.data of type {type(data).__name__} — "
-        f"payload must be a plain dict or satisfy StateData (to_dict/from_dict)"
+    await env.checkpoint_ctx.save_scope_commit(
+        env.ancestor_chain, iteration, node_id, current_state, outcome, trace_ref
     )
 
 
