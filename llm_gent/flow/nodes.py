@@ -35,10 +35,11 @@ from .state import State, StateFactory
 
 
 if TYPE_CHECKING:
+    from ._checkpoint_ctx import CheckpointContext
     from .flow import Flow
     from .state.saia_turn import PendingSaiaTurns, ResumeSaiaTurns
 
-from .checkpoint import CheckpointPolicy, CheckpointStore
+from .checkpoint import CheckpointPolicy
 
 
 class Unset:
@@ -259,8 +260,7 @@ class _RunEnv:
     lg: Logger
     halt: asyncio.Event | None = None
     budget: Tracker | None = None
-    checkpointer: CheckpointStore | None = None
-    client_flow_id: str | None = None
+    checkpoint_ctx: CheckpointContext | None = None
     chain_context: str = ""
     ancestor_chain: tuple[str, ...] = ()
     replay: _ResumeReplay | None = None

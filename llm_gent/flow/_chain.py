@@ -197,7 +197,7 @@ class Chain:
         if (
             index <= start_index
             or env.runtime is not self.flow
-            or env.checkpointer is None
+            or env.checkpoint_ctx is None
             or not is_halt_signaled(env)
         ):
             return False
@@ -227,7 +227,7 @@ class Chain:
         env = self.env
         if (
             env.runtime is not self.flow
-            or env.checkpointer is None
+            or env.checkpoint_ctx is None
             or not is_halt_signaled(env)
             or not self.ids
         ):

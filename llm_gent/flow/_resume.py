@@ -29,7 +29,6 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import maybe_await
 from .state import State
 from .state.cas import Commit, CommitMeta, ProducedBy, Tree
 
@@ -84,13 +83,7 @@ class Resume:
         the trajectory has a completion marker.
         """
         flow = self.flow
-        assert flow._checkpointer is not None
-        if flow._client_flow_id is None:
-            label = flow._name or "<anonymous>"
-            raise RuntimeError(
-                f"Flow {label!r} was run with resume=True but has no "
-                f"client_flow_id — call .with_checkpointer(store, client_flow_id) first"
-            )
+        assert flow._checkpoint_ctx is not None
         loaded = await self._load_latest_commit_scopes()
         if loaded is None:
             return fallback, None
@@ -99,9 +92,7 @@ class Resume:
         # the trajectory finished successfully — do not replay.
         if commit.meta.node_path == "$complete":
             return fallback, None
-        await flow._resume_saia_turns.load_from_commit(
-            flow._checkpointer, flow._client_flow_id, commit
-        )
+        await flow._resume_saia_turns.load_from_commit(flow._checkpoint_ctx, commit)
         return self._split_scopes(commit, scope_data)
 
     async def _load_latest_commit_scopes(self) -> tuple[Commit, list[Any]] | None:
@@ -114,28 +105,22 @@ class Resume:
         checkpoint" and falls through to a fresh run.
         """
         flow = self.flow
-        assert flow._checkpointer is not None
-        assert flow._client_flow_id is not None
-        commit_hash = await maybe_await(flow._checkpointer.resolve_ref(flow._client_flow_id))
+        assert flow._checkpoint_ctx is not None
+        ctx = flow._checkpoint_ctx
+        commit_hash = await ctx.resolve_ref()
         if commit_hash is None:
             return None
-        commit_bytes = await maybe_await(
-            flow._checkpointer.get_object(flow._client_flow_id, "commit", commit_hash)
-        )
+        commit_bytes = await ctx.get_object("commit", commit_hash)
         if commit_bytes is None:
             return None
         commit = Commit.from_bytes(commit_bytes)
-        tree_bytes = await maybe_await(
-            flow._checkpointer.get_object(flow._client_flow_id, "tree", commit.root_tree_hash)
-        )
+        tree_bytes = await ctx.get_object("tree", commit.root_tree_hash)
         if tree_bytes is None:
             return None
         tree = Tree.from_bytes(tree_bytes)
         scope_data: list[Any] = []
         for entry in tree.entries:
-            blob = await maybe_await(
-                flow._checkpointer.get_object(flow._client_flow_id, "blob", entry.child_hash)
-            )
+            blob = await ctx.get_object("blob", entry.child_hash)
             if blob is None:
                 return None
             scope_data.append(json.loads(blob.decode("utf-8")))
@@ -188,14 +173,14 @@ async def apply_clean_exit_retention(flow: Flow) -> None:
     re-execute chain steps after the iterate.
     """
     if (
-        flow._checkpointer is None
-        or flow._client_flow_id is None
+        flow._checkpoint_ctx is None
         or flow._halt_saved
         or (flow._halt_event is not None and flow._halt_event.is_set())
     ):
         return
-    if flow._checkpointer.retention == "gc_on_success":
-        await maybe_await(flow._checkpointer.gc_trajectory(flow._client_flow_id))
+    ctx = flow._checkpoint_ctx
+    if ctx.retention == "gc_on_success":
+        await ctx.gc_trajectory()
     else:
         await stamp_completion_marker(flow)
 
@@ -207,34 +192,28 @@ async def stamp_completion_marker(flow: Flow) -> None:
     ``produced_by.node_id="$complete"``; :meth:`Resume.hydrate`
     detects it and returns a fresh-run replay context.
     """
-    assert flow._checkpointer is not None
-    assert flow._client_flow_id is not None
+    assert flow._checkpoint_ctx is not None
+    ctx = flow._checkpoint_ctx
     empty_tree = Tree.from_entries([])
-    meta = _build_completion_marker_meta(flow)
+    meta = _build_completion_marker_meta(ctx.client_flow_id)
     commit = Commit.build(root_tree_hash=empty_tree.content_hash, parent_hashes=(), meta=meta)
-    cfid = flow._client_flow_id
-    await maybe_await(
-        flow._checkpointer.put_object(cfid, "tree", empty_tree.content_hash, empty_tree.to_bytes())
-    )
-    await maybe_await(
-        flow._checkpointer.put_object(cfid, "commit", commit.content_hash, commit.to_bytes())
-    )
-    await maybe_await(flow._checkpointer.put_ref(cfid, "$complete", 0, commit.content_hash))
+    await ctx.put_tree(empty_tree)
+    await ctx.put_commit(commit)
+    await ctx.put_ref("$complete", 0, commit.content_hash)
 
 
-def _build_completion_marker_meta(flow: Flow) -> CommitMeta:
+def _build_completion_marker_meta(client_flow_id: str) -> CommitMeta:
     """Build :class:`CommitMeta` for the completion sentinel."""
     from llm_gent import __version__
 
-    assert flow._client_flow_id is not None
     return CommitMeta(
-        client_flow_id=flow._client_flow_id,
+        client_flow_id=client_flow_id,
         node_path="$complete",
         iteration=0,
         produced_by=ProducedBy(node_id="$complete", verb_name=None, role=None, result_hash=None),
         trace_ref=(),
         outcome="ok",
-        flow_root_id=flow._client_flow_id,
+        flow_root_id=client_flow_id,
         timestamp_iso=datetime.now(UTC).isoformat(),
         framework_version=__version__,
     )

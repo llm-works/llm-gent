@@ -27,12 +27,12 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any
 
+from ._checkpoint_ctx import serialize_state_data
 from ._executor import (
     _merge_state,
     _pop_replay_for,
     _project_state,
     _save_scope_commit,
-    _serialize_state_data,
 )
 from ._halt_observer import is_halt_signaled
 from ._node_id import _compute_node_id, _descend_context
@@ -262,8 +262,7 @@ class MapItemRunner:
             runtime=env.runtime,
             parent_halt=env.halt,
             parent_budget=env.budget,
-            parent_checkpointer=env.checkpointer,
-            parent_client_flow_id=env.client_flow_id,
+            parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_chain_context=_descend_context(self.node_id, f"map:{self.item_index}"),
             parent_ancestor_chain=env.ancestor_chain + (self.node_id,),
             parent_replay=self.replay,
@@ -292,7 +291,7 @@ class MapItemRunner:
         try:
             async with self.merge_lock:
                 if self.env.policy.on_map_item:
-                    snapshot = _serialize_state_data(self.env.state.data)
+                    snapshot = serialize_state_data(self.env.state.data)
                 await _merge_state(self.mp.merge_fn, self.env.state, child_state)
                 if self.env.policy.on_map_item:
                     await _save_scope_commit(

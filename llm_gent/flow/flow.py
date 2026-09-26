@@ -62,6 +62,7 @@ from appinfra.log import Logger
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
+from ._checkpoint_ctx import CheckpointContext
 from ._resume import Resume, apply_clean_exit_retention, assert_replay_consumed
 from ._validation import _materialize, _require_state_for_merge, _validate_target
 from .checkpoint import CheckpointPolicy, CheckpointStore
@@ -158,8 +159,7 @@ class Flow:
         self._state_factory = state_factory
         self._halt_event: asyncio.Event | None = None
         self._budget_tracker: Tracker | None = None
-        self._checkpointer: CheckpointStore | None = None
-        self._client_flow_id: str | None = None
+        self._checkpoint_ctx: CheckpointContext | None = None
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
@@ -773,8 +773,7 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
-        self._checkpointer = store
-        self._client_flow_id = client_flow_id
+        self._checkpoint_ctx = CheckpointContext(store, client_flow_id)
         return self
 
     def with_checkpoint_policy(
@@ -895,7 +894,7 @@ class Flow:
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
         """
-        if resume and self._checkpointer is None:
+        if resume and self._checkpoint_ctx is None:
             label = self._name or "<anonymous>"
             raise RuntimeError(
                 f"Flow {label!r} was run with resume=True but has no "
@@ -928,8 +927,7 @@ class Flow:
         runtime: Flow,
         parent_halt: asyncio.Event | None = None,
         parent_budget: Tracker | None = None,
-        parent_checkpointer: CheckpointStore | None = None,
-        parent_client_flow_id: str | None = None,
+        parent_checkpoint_ctx: CheckpointContext | None = None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
         parent_replay: _ResumeReplay | None = None,
@@ -945,14 +943,12 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_halt`` / ``parent_budget`` / ``parent_checkpointer`` are the
-        effective ambients from the calling scope — nested subflows fall
-        back to them when they have no local
+        ``parent_halt`` / ``parent_budget`` / ``parent_checkpoint_ctx`` are
+        the effective ambients from the calling scope — nested subflows
+        fall back to them when they have no local
         ``.with_halt()`` / ``.with_budget()`` / ``.with_checkpointer()``
         override, preserving an intermediate layer's ambient through
-        arbitrarily deep nesting. ``parent_client_flow_id`` pairs with
-        ``parent_checkpointer``; either both are inherited or a local
-        override supplies both.
+        arbitrarily deep nesting.
 
         ``parent_chain_context`` is the hash the executor uses to compute
         this Flow's chain-step node IDs (empty at run root; extended by
@@ -970,8 +966,7 @@ class Flow:
             state=state,
             parent_halt=parent_halt,
             parent_budget=parent_budget,
-            parent_checkpointer=parent_checkpointer,
-            parent_client_flow_id=parent_client_flow_id,
+            parent_checkpoint_ctx=parent_checkpoint_ctx,
             parent_chain_context=parent_chain_context,
             parent_ancestor_chain=parent_ancestor_chain,
             parent_replay=parent_replay,
@@ -995,8 +990,7 @@ class Flow:
         state: State[Any],
         parent_halt: asyncio.Event | None,
         parent_budget: Tracker | None,
-        parent_checkpointer: CheckpointStore | None,
-        parent_client_flow_id: str | None,
+        parent_checkpoint_ctx: CheckpointContext | None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
         parent_replay: _ResumeReplay | None = None,
@@ -1008,7 +1002,7 @@ class Flow:
         Local ``.with_halt`` / ``.with_budget`` / ``.with_checkpointer``
         wins over the caller's parent ambients; unset locals fall back to
         the parent so an intermediate layer's ambient survives arbitrarily
-        deep nesting. Checkpointer + ``client_flow_id`` inherit as a pair.
+        deep nesting.
 
         ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
         verbatim: the descent sites in :mod:`._executor` are the ones
@@ -1023,22 +1017,16 @@ class Flow:
             policy = parent_policy
         else:
             policy = CheckpointPolicy()
-        checkpointer: CheckpointStore | None
-        client_flow_id: str | None
-        if self._checkpointer is not None:
-            checkpointer = self._checkpointer
-            client_flow_id = self._client_flow_id
-        else:
-            checkpointer = parent_checkpointer
-            client_flow_id = parent_client_flow_id
+        checkpoint_ctx = (
+            self._checkpoint_ctx if self._checkpoint_ctx is not None else parent_checkpoint_ctx
+        )
         return _RunEnv(
             runtime=runtime,
             state=state,
             lg=runtime._lg,
             halt=halt,
             budget=budget,
-            checkpointer=checkpointer,
-            client_flow_id=client_flow_id,
+            checkpoint_ctx=checkpoint_ctx,
             chain_context=parent_chain_context,
             ancestor_chain=parent_ancestor_chain,
             replay=parent_replay,
