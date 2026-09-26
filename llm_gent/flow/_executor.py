@@ -22,11 +22,10 @@ import asyncio
 import contextlib
 import dataclasses
 import inspect
-import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from ._halt_observer import HaltSaveObserver, is_halt_signaled
+from ._halt_observer import is_halt_signaled
 from .checkpoint import maybe_await
 from .context import Context
 from .nodes import (
@@ -170,7 +169,9 @@ async def _invoke_target(
     if isinstance(target, _Branch):
         return await _run_branch(target, ctx, env, node_args, node_id)
     if isinstance(target, _Iterate):
-        return await _run_iterate(target, ctx, env, node_args, node_id)
+        from ._iterate import IterateRunner
+
+        return await IterateRunner(target, env, node_id).run(node_args)
     if isinstance(target, _Map):
         return await _run_map(target, ctx, env, node_args, node_id)
     passed_args, passed_kwargs = _filter_verb_args(target, node_args, node_kwargs)
@@ -483,138 +484,6 @@ async def _run_branch(
     )
 
 
-async def _run_iterate(
-    it: _Iterate,
-    ctx: Context[Any],
-    env: _RunEnv,
-    node_args: tuple[Any, ...],
-    node_id: str,
-) -> Any:
-    """Iterate the body under bounds, threading each result to the next.
-
-    Post-check semantics: the body runs at least once, then ``until`` (if
-    set) is evaluated. ``max_iters`` and ``deadline`` bound the total
-    iteration count and elapsed wall clock respectively; an ambient halt
-    event (via :meth:`Flow.with_halt`) is checked between iterations, so a
-    running body is not interrupted mid-request. Scoped state is projected
-    once before the first iteration; every iteration sees the same child
-    state, and the merge fires once after the block exits successfully.
-
-    Save-at-iterate-boundary: when the runtime carries a checkpointer +
-    ``client_flow_id`` (attached via :meth:`Flow.with_checkpointer`), the
-    framework builds a content-addressed commit (Blob→Tree→Commit) after each
-    successful iteration with the parent-scope payload (``env.state``,
-    which is the outer scope's :class:`State` that persists across
-    iterations of this block). Note: when ``state=`` projects a child
-    scope, only the parent state is checkpointed — progress in the child
-    state is lost on resume. To preserve iteration progress, accumulate
-    results in the parent state or use ``until=`` with state-driven
-    termination.
-
-    Resume: when a ``_ResumeReplay`` is threaded via :attr:`_RunEnv.replay`
-    and its ``remaining_path`` has been head-popped down to a single
-    entry equal to this iterate's runtime ``node_id`` (i.e., this
-    iterate IS the save-point leaf), the counter starts at the saved
-    iteration instead of 0 — the folded fix for the note-423 gap
-    (``max_iters`` becomes a cumulative bound across resumes, not
-    per-run). At most one iterate per run consumes the replay;
-    :attr:`Flow._replay_consumed` flips the first time a match fires
-    so re-entrant dispatches of the same node (e.g., an inner iterate
-    spun up by an outer loop) do not re-apply the fast-forward.
-    ``deadline`` is not restored — the wall clock resets each run.
-
-    When resuming, if ``child_state_data`` is present in the replay, it
-    replaces the projected child state — restoring mutations that
-    occurred before the checkpoint was saved.
-    """
-    iteration, restored_child = _resume_iteration_for(env, node_id)
-    env, child_state = await _iterate_child_scope(it, env, node_id, restored_child)
-    result: Any = node_args[0] if node_args else None
-    started = time.monotonic()
-    while True:
-        if it.max_iters is not None and iteration >= it.max_iters:
-            break
-        if it.deadline is not None and time.monotonic() - started >= it.deadline:
-            break
-        if await HaltSaveObserver.save_if_signaled(env, iteration, node_id, child_state):
-            break
-        result = await _dispatch_iterate_body(it, env, child_state, result, node_id)
-        iteration += 1
-        if env.policy.on_iterate:
-            await _save_iterate_checkpoint(env, iteration, node_id, child_state)
-        if await _check_until(it.until, result, child_state, env, node_id):
-            break
-    await _merge_state(it.merge_fn, env.state, child_state)
-    return result
-
-
-async def _iterate_child_scope(
-    it: _Iterate,
-    env: _RunEnv,
-    node_id: str,
-    restored_child: Any,
-) -> tuple[_RunEnv, State[Any]]:
-    """Build the iterate body's child :class:`State` for this run.
-
-    Three paths, tried in order:
-
-    1. ``restored_child`` is not ``None`` — this iterate is the leaf, use
-       the checkpointed leaf-scope data (via ``_ResumeReplay.child_state_data``).
-    2. This iterate is a middle scope on the replay path with a scoping
-       ``state_fn`` — consume the next intermediate scope payload from
-       the replay and return an ``env`` with the popped replay so the
-       body descent sees the aligned tail.
-    3. Fresh projection via ``state_fn`` (or passthrough when
-       ``state_fn`` is ``None``).
-    """
-    effective_factory = it.state_factory if it.state_factory is not None else env.state._factory
-    if restored_child is not None:
-        restored_data = (
-            effective_factory.restore(restored_child)
-            if effective_factory is not None
-            else restored_child
-        )
-        return env, State(data=restored_data, _parent=env.state, _factory=effective_factory)
-    on_path = (
-        env.replay is not None
-        and env.replay.remaining_path
-        and env.replay.remaining_path[0] == node_id
-        and not env.runtime._replay_consumed
-    )
-    if on_path:
-        raw, updated_replay = _consume_scope_data(env.replay, it.state_fn)
-        if raw is not UNSET:
-            env = dataclasses.replace(env, replay=updated_replay)
-            return env, _restore_scope_state(env.state, raw, effective_factory)
-    return env, await _project_state(it.state_fn, env.state, it.state_factory)
-
-
-def _resume_iteration_for(env: _RunEnv, node_id: str) -> tuple[int, Any]:
-    """Return the starting iteration count and restored child state for ``_run_iterate``.
-
-    ``(0, None)`` for a fresh run. On resume, when ``env.replay`` is set
-    and ``remaining_path == (node_id,)`` — the head-pop path has shrunk
-    to a single entry equal to this iterate's ``node_id`` — this iterate
-    IS the save-point leaf: returns the saved iteration and
-    ``child_state_data`` (if present) and flips
-    :attr:`Flow._replay_consumed` on the top-level runtime so the
-    fast-forward fires exactly once. Any longer remaining path means
-    this iterate is an ancestor of the leaf (its body descent will
-    head-pop and thread the tail); a non-matching head, empty path, or
-    already-consumed replay all yield ``(0, None)`` and the iterate
-    runs from scratch.
-    """
-    replay = env.replay
-    if replay is None or not replay.remaining_path:
-        return 0, None
-    if env.runtime._replay_consumed:
-        return 0, None
-    if replay.remaining_path[0] != node_id or len(replay.remaining_path) != 1:
-        return 0, None
-    env.runtime._replay_consumed = True
-    return replay.iteration, replay.child_state_data
-
-
 def _pop_replay_for(env: _RunEnv, node_id: str) -> _ResumeReplay | None:
     """Return the replay to thread through a descent under ``node_id``.
 
@@ -624,7 +493,7 @@ def _pop_replay_for(env: _RunEnv, node_id: str) -> _ResumeReplay | None:
     descent is off-path (its subtree cannot contain the leaf) or the
     replay has already been consumed at the leaf, and no replay is
     threaded. Called by every descent helper (``_run_subflow``,
-    ``_run_branch``, ``_dispatch_iterate_body``, ``_dispatch_map_body``).
+    ``_run_branch``, ``IterateRunner._dispatch_body``, ``_dispatch_map_body``).
     ``full_path`` is preserved verbatim across the pop so downstream
     triage messages can show the whole saved ancestor chain.
     """
@@ -687,49 +556,6 @@ def _assert_replay_allows_skip(env: _RunEnv, node_id: str, reason: str) -> None:
     raise RuntimeError(f"{reason} Saved path: {path_repr}")
 
 
-async def _dispatch_iterate_body(
-    it: _Iterate,
-    env: _RunEnv,
-    child_state: State[Any],
-    prev_result: Any,
-    node_id: str,
-) -> Any:
-    """Run one pass of an ``.iterate`` body under the current env.
-
-    Descends into the body with ``chain_context =
-    _descend_context(node_id, "body")`` and ``ancestor_chain`` extended
-    by ``node_id`` — the same context every pass, so the body's chain
-    steps have iteration-invariant IDs (the runtime pass counter is
-    stored alongside the path, not baked into node identity).
-    """
-    from ._node_id import _descend_context
-
-    return await it.body._run_as_subflow(
-        prev_result,
-        state=child_state,
-        runtime=env.runtime,
-        parent_halt=env.halt,
-        parent_budget=env.budget,
-        parent_checkpointer=env.checkpointer,
-        parent_client_flow_id=env.client_flow_id,
-        parent_chain_context=_descend_context(node_id, "body"),
-        parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=_pop_replay_for(env, node_id),
-        parent_extra=env.extra,
-        parent_policy=env.policy,
-    )
-
-
-async def _save_iterate_checkpoint(
-    env: _RunEnv,
-    iteration: int,
-    node_id: str,
-    current_state: State[Any],
-) -> None:
-    """Persist an ``outcome="ok"`` commit at an iterate boundary."""
-    await _save_scope_commit(env, iteration, node_id, current_state, "ok")
-
-
 async def _save_map_item_checkpoint(
     env: _RunEnv,
     item_index: int,
@@ -755,7 +581,7 @@ async def _save_halt_checkpoint(
     """Persist an ``outcome="halted"`` commit at a halt observation point.
 
     Called from the executor's halt-observation sites — the between-
-    iterations check in :func:`_run_iterate` and the between-chain-
+    iterations check in :meth:`IterateRunner.run` and the between-chain-
     steps check in :meth:`Chain._walk_steps` — so a ``run(resume=True)``
     after a halted process restart resolves to this commit and re-
     enters at the halted position.
