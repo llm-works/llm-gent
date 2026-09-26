@@ -793,8 +793,7 @@ class TestSaiaTurnTraceRef:
                 {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
             ),
         )
-        runtime = SimpleNamespace(_resume_saia_turns=resume_turns)
-        env = SimpleNamespace(runtime=runtime)
+        env = SimpleNamespace(resume_saia_turns=resume_turns)
         ctx = SimpleNamespace(_env=env, _node_id=node_id)
 
         task, conversation, is_resume = loop._consume_resume_entry(ctx)  # type: ignore[arg-type]

@@ -561,7 +561,7 @@ async def _save_halt_checkpoint(
     stashed_ids: tuple[str, ...] = ()
     try:
         if env.checkpointer is not None and env.client_flow_id is not None:
-            trace_ref, stashed_ids = await env.runtime._pending_saia_turns.stash_to_store(
+            trace_ref, stashed_ids = await env.pending_saia_turns.stash_to_store(
                 env.checkpointer, env.client_flow_id
             )
         await _save_scope_commit(env, iteration, node_id, current_state, "halted", trace_ref)
@@ -580,7 +580,7 @@ async def _save_halt_checkpoint(
     # Drop only the entries we stashed. Late arrivals from concurrent .map
     # items that landed after the snapshot stay on the runtime dict.
     for stashed_id in stashed_ids:
-        env.runtime._pending_saia_turns.remove(stashed_id)
+        env.pending_saia_turns.remove(stashed_id)
 
 
 async def _save_scope_commit(

@@ -386,7 +386,7 @@ class Loop:
         # pause of this Loop. Sibling Loops' entries stay put.
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.runtime._pending_saia_turns.remove(ctx._node_id)
+            env.pending_saia_turns.remove(ctx._node_id)
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
@@ -415,7 +415,7 @@ class Loop:
         self._paused_bytes = None
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.runtime._pending_saia_turns.remove(ctx._node_id)
+            env.pending_saia_turns.remove(ctx._node_id)
         resumed_task, resumed_conversation, is_resume = self._consume_resume_entry(ctx)
         if is_resume:
             task = resumed_task
@@ -432,7 +432,7 @@ class Loop:
     def _consume_resume_entry(self, ctx: Context[Any]) -> tuple[str | None, Any, bool]:
         """Rebuild task + Conversation from this Loop's resume entry, leaving the entry in place.
 
-        Reads ``env.runtime._resume_saia_turns`` at
+        Reads ``env.resume_saia_turns`` at
         ``ctx._node_id``. When an entry is present, decodes the
         canonical-json envelope ``{"task": ..., "conversation":
         ...}`` and hands the conversation-state payload to
@@ -458,7 +458,7 @@ class Loop:
         node_id = ctx._node_id
         if env is None or node_id is None:
             return None, None, False
-        payload = env.runtime._resume_saia_turns.load(node_id)
+        payload = env.resume_saia_turns.load(node_id)
         if payload is None:
             return None, None, False
         if self._conversation_factory is None:
@@ -485,7 +485,7 @@ class Loop:
         node_id = ctx._node_id
         if env is None or node_id is None:
             return
-        env.runtime._resume_saia_turns.release(node_id)
+        env.resume_saia_turns.release(node_id)
 
     def _capture_paused(self, ctx: Context[Any], task: str, conversation: Any) -> None:
         """Serialize the paused task + conversation to canonical bytes.
@@ -495,8 +495,8 @@ class Loop:
         - :attr:`_paused_bytes` on this Loop instance — introspection
           surface for tests and consumers that already hold a Loop
           reference.
-        - ``env.runtime._pending_saia_turns`` on the top-level
-          Flow runtime — keyed by ``ctx._node_id`` so each Loop's
+        - ``env.pending_saia_turns`` on the top-level Flow runtime
+          — keyed by ``ctx._node_id`` so each Loop's
           bytes stay distinct (concurrent ``.map`` bodies, sibling
           Loops in a chain, and nested Loops in an iterate body all
           share one runtime). The halt-observation site drains it
@@ -523,7 +523,7 @@ class Loop:
         self._paused_bytes = payload
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.runtime._pending_saia_turns.add(ctx._node_id, payload, env.ancestor_chain)
+            env.pending_saia_turns.add(ctx._node_id, payload, env.ancestor_chain)
 
 
 # ----------------------------------------------------------------------------
