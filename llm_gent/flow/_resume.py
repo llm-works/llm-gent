@@ -1,30 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Resume hydration: load the latest halt commit, rebuild state + replay plan.
+"""Resume protocol: read-side hydration + write-side completion marker.
 
-Extracted from :class:`Flow`. A :class:`Resume` is constructed per
-``run(resume=True)`` call with the flow being resumed; its public
-:meth:`hydrate` returns the ``(State, _ResumeReplay | None)`` pair the
-executor threads through the walk.
+Read side — :class:`Resume` is constructed per ``run(resume=True)``
+call with the flow being resumed; its public :meth:`hydrate` returns
+the ``(State, _ResumeReplay | None)`` pair the executor threads
+through the walk. The flow provides the checkpointer +
+``client_flow_id`` + state factory; :class:`Resume` (a) fetches the
+latest commit under the trajectory ref, (b) walks its tree to
+collect one JSON payload per scope, (c) hydrates the top-level
+:class:`State` from the root scope, and (d) hands every non-root
+scope payload to ``_ResumeReplay.intermediate_scope_data`` so
+descent sites (``_consume_scope_data``) can restore their own scope
+in order.
 
-The flow provides the checkpointer + ``client_flow_id`` + state
-factory; :class:`Resume` uses them to (a) fetch the latest commit
-under the trajectory ref, (b) walk its tree to collect one JSON
-payload per scope, (c) hydrate the top-level :class:`State` from
-the root scope, and (d) hand every non-root scope payload to
-``_ResumeReplay.intermediate_scope_data`` so descent sites
-(``_consume_scope_data``) can restore their own scope in order.
+Write side — :func:`apply_clean_exit_retention` and
+:func:`stamp_completion_marker` write the sentinel commit that
+:meth:`Resume.hydrate` reads to detect an already-completed
+trajectory. :func:`assert_replay_consumed` is the belt-and-
+suspenders check called after a resume run to fail-fast when the
+save-point iterate was never found.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from .checkpoint import maybe_await
 from .state import State
-from .state.cas import Commit, Tree
+from .state.cas import Commit, CommitMeta, ProducedBy, Tree
 
 
 if TYPE_CHECKING:
@@ -169,3 +176,95 @@ class Resume:
                 intermediate_scope_data=intermediate_raw,
             ),
         )
+
+
+async def apply_clean_exit_retention(flow: Flow) -> None:
+    """Apply the store's retention policy on the clean-exit path.
+
+    Halt-triggered exits preserve the trajectory regardless of policy.
+    On a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the
+    record and stamps a completion marker so a subsequent
+    ``run(resume=True)`` doesn't replay the final iterate commit and
+    re-execute chain steps after the iterate.
+    """
+    if (
+        flow._checkpointer is None
+        or flow._client_flow_id is None
+        or flow._halt_saved
+        or (flow._halt_event is not None and flow._halt_event.is_set())
+    ):
+        return
+    if flow._checkpointer.retention == "gc_on_success":
+        await maybe_await(flow._checkpointer.gc_trajectory(flow._client_flow_id))
+    else:
+        await stamp_completion_marker(flow)
+
+
+async def stamp_completion_marker(flow: Flow) -> None:
+    """Write a sentinel commit + ref marking the trajectory complete.
+
+    The marker uses a reserved ``node_path="$complete"`` and
+    ``produced_by.node_id="$complete"``; :meth:`Resume.hydrate`
+    detects it and returns a fresh-run replay context.
+    """
+    assert flow._checkpointer is not None
+    assert flow._client_flow_id is not None
+    empty_tree = Tree.from_entries([])
+    meta = _build_completion_marker_meta(flow)
+    commit = Commit.build(root_tree_hash=empty_tree.content_hash, parent_hashes=(), meta=meta)
+    cfid = flow._client_flow_id
+    await maybe_await(
+        flow._checkpointer.put_object(cfid, "tree", empty_tree.content_hash, empty_tree.to_bytes())
+    )
+    await maybe_await(
+        flow._checkpointer.put_object(cfid, "commit", commit.content_hash, commit.to_bytes())
+    )
+    await maybe_await(flow._checkpointer.put_ref(cfid, "$complete", 0, commit.content_hash))
+
+
+def _build_completion_marker_meta(flow: Flow) -> CommitMeta:
+    """Build :class:`CommitMeta` for the completion sentinel."""
+    from llm_gent import __version__
+
+    assert flow._client_flow_id is not None
+    return CommitMeta(
+        client_flow_id=flow._client_flow_id,
+        node_path="$complete",
+        iteration=0,
+        produced_by=ProducedBy(node_id="$complete", verb_name=None, role=None, result_hash=None),
+        trace_ref=(),
+        outcome="ok",
+        flow_root_id=flow._client_flow_id,
+        timestamp_iso=datetime.now(UTC).isoformat(),
+        framework_version=__version__,
+    )
+
+
+def assert_replay_consumed(flow: Flow, replay: _ResumeReplay | None) -> None:
+    """Raise if a resume request never found its save-point iterate.
+
+    Belt-and-suspenders check called after :meth:`Flow._run_as_subflow`
+    returns. :meth:`Chain._assert_replay_reachable` will typically have
+    raised earlier — as soon as a Flow entry sees a path head that no
+    chain step at that level provides. This post-run raise catches the
+    residual cases where the entry-level pre-scan matched something but
+    no iterate ever consumed the tail (structurally impossible under
+    normal composition, but the check costs nothing and keeps the
+    invariant explicit).
+
+    The raise includes the full saved path (root → leaf) so ops triage
+    can correlate the ancestor chain with the current composition tree
+    and locate the layer where the graph diverged.
+    """
+    if replay is None or flow._replay_consumed:
+        return
+    target_id = replay.remaining_path[-1] if replay.remaining_path else "<empty>"
+    label = flow._name or "<anonymous>"
+    path_repr = " → ".join(replay.full_path) if replay.full_path else "<empty>"
+    raise RuntimeError(
+        f"Flow {label!r}: resume checkpoint's save-point iterate "
+        f"id {target_id!r} was not found in the composition graph "
+        f"during the run — the graph has structurally changed "
+        f"since the checkpoint was written. "
+        f"Saved path (root→leaf): {path_repr}"
+    )

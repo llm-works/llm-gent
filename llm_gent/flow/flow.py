@@ -55,7 +55,6 @@ Buildable materializer :func:`_materialize`.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from typing import Any
 
 from appinfra.log import Logger
@@ -63,9 +62,9 @@ from appinfra.log import Logger
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
-from ._resume import Resume
+from ._resume import Resume, apply_clean_exit_retention, assert_replay_consumed
 from ._validation import _materialize, _require_state_for_merge, _validate_target
-from .checkpoint import CheckpointPolicy, CheckpointStore, maybe_await
+from .checkpoint import CheckpointPolicy, CheckpointStore
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -91,7 +90,6 @@ from .nodes import (
 )
 from .role import Role
 from .state import State, StateFactory
-from .state.cas import Commit, CommitMeta, ProducedBy, Tree
 from .state.saia_turn import PendingSaiaTurns, ResumeSaiaTurns
 
 
@@ -919,101 +917,9 @@ class Flow:
             parent_extra=extra,
             **kwargs,
         )
-        self._assert_replay_consumed(replay)
-        await self._apply_clean_exit_retention()
+        assert_replay_consumed(self, replay)
+        await apply_clean_exit_retention(self)
         return result
-
-    async def _apply_clean_exit_retention(self) -> None:
-        """Apply the store's retention policy on the clean-exit path.
-
-        Halt-triggered exits preserve the trajectory regardless of policy.
-        On a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the
-        record and stamps a completion marker so a subsequent
-        ``run(resume=True)`` doesn't replay the final iterate commit and
-        re-execute chain steps after the iterate.
-        """
-        if (
-            self._checkpointer is None
-            or self._client_flow_id is None
-            or self._halt_saved
-            or (self._halt_event is not None and self._halt_event.is_set())
-        ):
-            return
-        if self._checkpointer.retention == "gc_on_success":
-            await maybe_await(self._checkpointer.gc_trajectory(self._client_flow_id))
-        else:
-            await self._stamp_completion_marker()
-
-    async def _stamp_completion_marker(self) -> None:
-        """Write a sentinel commit + ref marking the trajectory complete.
-
-        The marker uses a reserved ``node_path="$complete"`` and
-        ``produced_by.node_id="$complete"``; :meth:`Resume.hydrate`
-        detects it and returns a fresh-run replay context.
-        """
-        assert self._checkpointer is not None
-        assert self._client_flow_id is not None
-        empty_tree = Tree.from_entries([])
-        meta = self._completion_marker_meta()
-        commit = Commit.build(root_tree_hash=empty_tree.content_hash, parent_hashes=(), meta=meta)
-        cfid = self._client_flow_id
-        await maybe_await(
-            self._checkpointer.put_object(
-                cfid, "tree", empty_tree.content_hash, empty_tree.to_bytes()
-            )
-        )
-        await maybe_await(
-            self._checkpointer.put_object(cfid, "commit", commit.content_hash, commit.to_bytes())
-        )
-        await maybe_await(self._checkpointer.put_ref(cfid, "$complete", 0, commit.content_hash))
-
-    def _completion_marker_meta(self) -> CommitMeta:
-        """Build :class:`CommitMeta` for the completion sentinel."""
-        from llm_gent import __version__
-
-        assert self._client_flow_id is not None
-        return CommitMeta(
-            client_flow_id=self._client_flow_id,
-            node_path="$complete",
-            iteration=0,
-            produced_by=ProducedBy(
-                node_id="$complete", verb_name=None, role=None, result_hash=None
-            ),
-            trace_ref=(),
-            outcome="ok",
-            flow_root_id=self._client_flow_id,
-            timestamp_iso=datetime.now(UTC).isoformat(),
-            framework_version=__version__,
-        )
-
-    def _assert_replay_consumed(self, replay: _ResumeReplay | None) -> None:
-        """Raise if a resume request never found its save-point iterate.
-
-        Belt-and-suspenders check called after :meth:`_run_as_subflow`
-        returns. :meth:`Chain._assert_replay_reachable` will typically have
-        raised earlier — as soon as a Flow entry sees a path head that
-        no chain step at that level provides. This post-run raise
-        catches the residual cases where the entry-level pre-scan
-        matched something but no iterate ever consumed the tail
-        (structurally impossible under normal composition, but the
-        check costs nothing and keeps the invariant explicit).
-
-        The raise includes the full saved path (root → leaf) so ops
-        triage can correlate the ancestor chain with the current
-        composition tree and locate the layer where the graph diverged.
-        """
-        if replay is None or self._replay_consumed:
-            return
-        target_id = replay.remaining_path[-1] if replay.remaining_path else "<empty>"
-        label = self._name or "<anonymous>"
-        path_repr = " → ".join(replay.full_path) if replay.full_path else "<empty>"
-        raise RuntimeError(
-            f"Flow {label!r}: resume checkpoint's save-point iterate "
-            f"id {target_id!r} was not found in the composition graph "
-            f"during the run — the graph has structurally changed "
-            f"since the checkpoint was written. "
-            f"Saved path (root→leaf): {path_repr}"
-        )
 
     async def _run_as_subflow(
         self,
