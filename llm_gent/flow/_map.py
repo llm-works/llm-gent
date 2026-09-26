@@ -273,50 +273,22 @@ class MapItemRunner:
     async def _on_success(
         self, result: Any, child_state: State[Any], item_ctx: Context[Any]
     ) -> Any:
-        """Merge, fire on_item_complete, save-per-policy; return the body result.
+        """Merge, save-per-policy, fire on_item_complete; return the body result.
 
         Both strict and non-strict converge here on the successful
         body path. Merge-time and checkpoint-save failures are handled
         per-mode: strict re-raises the underlying exception; non-strict
-        returns the :class:`Failure` sentinel. Successful merges save a
-        scope commit when ``env.policy.on_map_item`` is set (see
-        :attr:`CheckpointPolicy`).
-        """
-        failure = await self._merge_and_notify(result, child_state, item_ctx)
-        if failure is not None:
-            if self.mp.strict:
-                raise failure.exception
-            return failure
-        if self.env.policy.on_map_item:
-            try:
-                async with self.merge_lock:
-                    await _save_scope_commit(
-                        self.env, self.item_index, self.node_id, self.env.state, "ok"
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if self.mp.on_error is not None:
-                    await self._run_on_error(exc, item_ctx)
-                failure = Failure(exception=exc, item=self.item)
-                await self._fire_on_item_complete(failure, item_ctx)
-                if self.mp.strict:
-                    raise
-                return failure
-        return result
-
-    async def _merge_and_notify(
-        self, result: Any, child_state: Any, item_ctx: Context[Any]
-    ) -> Failure | None:
-        """Merge child state into parent, then fire on_item_complete.
-
-        Returns a :class:`Failure` if the merge raised (so the
-        strict/non-strict fan-out at the caller can dispatch);
-        otherwise returns ``None`` after firing the outcome hook.
+        returns the :class:`Failure` sentinel. The hook fires exactly
+        once with the final outcome — either the body result or a
+        :class:`Failure` wrapping the merge/save exception.
         """
         try:
             async with self.merge_lock:
                 await _merge_state(self.mp.merge_fn, self.env.state, child_state)
+                if self.env.policy.on_map_item:
+                    await _save_scope_commit(
+                        self.env, self.item_index, self.node_id, self.env.state, "ok"
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -324,9 +296,11 @@ class MapItemRunner:
                 await self._run_on_error(exc, item_ctx)
             failure = Failure(exception=exc, item=self.item)
             await self._fire_on_item_complete(failure, item_ctx)
+            if self.mp.strict:
+                raise
             return failure
         await self._fire_on_item_complete(result, item_ctx)
-        return None
+        return result
 
     async def _run_on_error(self, exc: BaseException, ctx: Context[Any]) -> None:
         """Invoke on_error and swallow any exception it raises.
