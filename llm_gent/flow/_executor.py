@@ -169,7 +169,7 @@ async def _invoke_target(
     if isinstance(target, _Map):
         from ._map import MapRunner
 
-        return await MapRunner(target, env, node_id).run(ctx, node_args)
+        return await MapRunner(target, env, node_id).run(node_args)
     passed_args, passed_kwargs = _filter_verb_args(target, node_args, node_kwargs)
     return await target(ctx, *passed_args, **passed_kwargs)
 

@@ -59,7 +59,7 @@ class MapRunner:
         self.env = env
         self.node_id = node_id
 
-    async def run(self, ctx: Context[Any], node_args: tuple[Any, ...]) -> Any:
+    async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Resolve items, spawn per-item runners, aggregate.
 
         ``strict=True`` re-raises the first non-cancellation
@@ -79,9 +79,29 @@ class MapRunner:
         running any more bodies. Already-in-flight items complete.
         """
         prev_result = node_args[0] if node_args else None
+        ctx = self._build_ctx()
         items = await _resolve_items(self.mp.items, prev_result, ctx)
         results = await self._gather_items(items)
         return await self._aggregate(results)
+
+    def _build_ctx(self) -> Context[Any]:
+        """Build the :class:`Context` passed to ``items_fn``.
+
+        Uses the parent state at map entry. Role is ``None`` since
+        ``items_fn`` is a data-producing callback, not a role action.
+        """
+        env = self.env
+        return Context(
+            role=None,
+            state=env.state,
+            flow=env.runtime,
+            traits=env.runtime._traits,
+            halt=env.halt,
+            budget=env.budget,
+            extra=env.extra,
+            _env=env,
+            _node_id=self.node_id,
+        )
 
     async def _gather_items(self, items: list[Any]) -> list[Any]:
         """Spawn one runner per item under the concurrency cap; return per-item results.
@@ -256,10 +276,10 @@ class MapItemRunner:
         """Merge, fire on_item_complete, save-per-policy; return the body result.
 
         Both strict and non-strict converge here on the successful
-        body path. Merge-time failures are handled per-mode: strict
-        re-raises the underlying exception; non-strict returns the
-        :class:`Failure` sentinel. Successful merges save a scope
-        commit when ``env.policy.on_map_item`` is set (see
+        body path. Merge-time and checkpoint-save failures are handled
+        per-mode: strict re-raises the underlying exception; non-strict
+        returns the :class:`Failure` sentinel. Successful merges save a
+        scope commit when ``env.policy.on_map_item`` is set (see
         :attr:`CheckpointPolicy`).
         """
         failure = await self._merge_and_notify(result, child_state, item_ctx)
@@ -268,10 +288,21 @@ class MapItemRunner:
                 raise failure.exception
             return failure
         if self.env.policy.on_map_item:
-            async with self.merge_lock:
-                await _save_scope_commit(
-                    self.env, self.item_index, self.node_id, self.env.state, "ok"
-                )
+            try:
+                async with self.merge_lock:
+                    await _save_scope_commit(
+                        self.env, self.item_index, self.node_id, self.env.state, "ok"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self.mp.on_error is not None:
+                    await self._run_on_error(exc, item_ctx)
+                failure = Failure(exception=exc, item=self.item)
+                await self._fire_on_item_complete(failure, item_ctx)
+                if self.mp.strict:
+                    raise
+                return failure
         return result
 
     async def _merge_and_notify(
