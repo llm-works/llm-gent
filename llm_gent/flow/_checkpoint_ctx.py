@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from .checkpoint import CheckpointStore, Kind, Retention, maybe_await
+from .state import serialize_state_data
 from .state.cas import (
     Blob,
     Commit,
@@ -208,24 +209,3 @@ class CheckpointContext:
             timestamp_iso=datetime.now(UTC).isoformat(),
             framework_version=__version__,
         )
-
-
-def serialize_state_data(data: Any) -> Any:
-    """Return a JSON-compatible view of ``data`` for the checkpoint.
-
-    Plain dicts pass through as-is (the framework does not deep-copy
-    — the store implementation owns durability). Objects satisfying
-    :class:`StateData` are converted via ``to_dict()``. ``None`` also
-    passes through (a payload that never carried structured data).
-    Anything else raises :class:`TypeError` at the save site with a
-    pointer to the contract.
-    """
-    if data is None or isinstance(data, dict):
-        return data
-    to_dict = getattr(data, "to_dict", None)
-    if callable(to_dict):
-        return to_dict()
-    raise TypeError(
-        f"cannot checkpoint state.data of type {type(data).__name__} — "
-        f"payload must be a plain dict or satisfy StateData (to_dict/from_dict)"
-    )

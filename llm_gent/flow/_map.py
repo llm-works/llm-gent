@@ -27,7 +27,6 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any
 
-from ._checkpoint_ctx import serialize_state_data
 from ._executor import (
     _merge_state,
     _pop_replay_for,
@@ -38,6 +37,7 @@ from ._halt_observer import is_halt_signaled
 from ._node_id import _compute_node_id, _descend_context
 from .context import Context
 from .nodes import Failure, ItemsFn, Skipped
+from .state import serialize_state_data
 
 
 if TYPE_CHECKING:

@@ -32,6 +32,27 @@ from .base import (
 from .serialization import state_converter
 
 
+def serialize_state_data(data: object) -> object:
+    """Return a JSON-compatible view of ``data`` for checkpointing.
+
+    Plain dicts pass through as-is (the framework does not deep-copy
+    — the store implementation owns durability). Objects satisfying
+    :class:`StateData` are converted via ``to_dict()``. ``None`` also
+    passes through (a payload that never carried structured data).
+    Anything else raises :class:`TypeError` at the save site with a
+    pointer to the contract.
+    """
+    if data is None or isinstance(data, dict):
+        return data
+    to_dict = getattr(data, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    raise TypeError(
+        f"cannot checkpoint state.data of type {type(data).__name__} — "
+        f"payload must be a plain dict or satisfy StateData (to_dict/from_dict)"
+    )
+
+
 __all__ = [
     "State",
     "StateData",
@@ -40,5 +61,6 @@ __all__ = [
     "T",
     "T_co",
     "TypeStateFactory",
+    "serialize_state_data",
     "state_converter",
 ]
