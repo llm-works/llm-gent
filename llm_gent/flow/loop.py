@@ -21,7 +21,7 @@ Loop is CAS-native for durable pause capture — when a
 every dispatch runs against a conversation (the caller's, or a
 factory-created one), and a paused result's conversation is serialized
 and published for the halt-observation site to stamp as a Blob
-referenced by ``TraceRef(kind="saia_turn", ...)`` on the Flow's halt
+referenced by ``TraceRef(kind="paused_turn", ...)`` on the Flow's halt
 commit.
 
 :class:`LoopFactory` bundles the cross-cutting config (logger, SAIAFactory,
@@ -44,7 +44,7 @@ from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .role import Role
-from .state.saia_turn import SaiaTurnEnvelope
+from .state.paused_turn import PausedTurnEnvelope
 
 
 # ----------------------------------------------------------------------------
@@ -258,7 +258,7 @@ class Loop:
                 construction.
             task: The task/prompt handed to ``saia.complete``.
                 ``None`` is only valid when resuming from a
-                ``saia_turn`` checkpoint that carries the saved task —
+                ``paused_turn`` checkpoint that carries the saved task —
                 :meth:`_prepare_dispatch` restores it before
                 :meth:`saia.complete` runs. Any other dispatch with
                 ``task=None`` raises ``TypeError``.
@@ -296,7 +296,7 @@ class Loop:
             if task is None:
                 raise TypeError(
                     f"Loop at node {ctx._node_id!r} dispatched without a task and "
-                    "no saia_turn resume entry supplied one."
+                    "no paused_turn resume entry supplied one."
                 )
             if self._on_executor_ready is not None:
                 await maybe_await(self._on_executor_ready(saia, ctx))
@@ -371,7 +371,7 @@ class Loop:
         conversation's serialized :meth:`to_dict` payload as
         canonical bytes on :attr:`_paused_bytes` when a
         :class:`ConversationFactory` is wired — the halt-observation
-        site reads it to stamp a ``TraceRef(kind="saia_turn", ...)``
+        site reads it to stamp a ``TraceRef(kind="paused_turn", ...)``
         on the Flow's CAS halt commit. Persisting the task lets
         :meth:`_consume_resume_entry` restore both when a direct
         :class:`Loop` chain step resumes at index > 0 with empty
@@ -396,7 +396,7 @@ class Loop:
         # pause of this Loop. Sibling Loops' entries stay put.
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.pending_saia_turns.remove(ctx._node_id)
+            env.pending_paused_turns.remove(ctx._node_id)
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
@@ -429,7 +429,7 @@ class Loop:
         self._paused_bytes = None
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.pending_saia_turns.remove(ctx._node_id)
+            env.pending_paused_turns.remove(ctx._node_id)
         resumed_task, resumed_conversation, is_resume = self._consume_resume_entry(ctx)
         if is_resume:
             task = resumed_task
@@ -450,7 +450,7 @@ class Loop:
     def _consume_resume_entry(self, ctx: Context[Any]) -> tuple[str | None, Any, bool]:
         """Rebuild task + Conversation from this Loop's resume entry, leaving the entry in place.
 
-        Reads ``env.resume_saia_turns`` at
+        Reads ``env.resume_paused_turns`` at
         ``ctx._node_id``. When an entry is present, decodes the
         canonical-json envelope ``{"task": ..., "conversation":
         ...}`` and hands the conversation-state payload to
@@ -476,7 +476,7 @@ class Loop:
         node_id = ctx._node_id
         if env is None or node_id is None:
             return None, None, False
-        payload = env.resume_saia_turns.load(node_id)
+        payload = env.resume_paused_turns.load(node_id)
         if payload is None:
             return None, None, False
         if self._conversation_factory is None:
@@ -487,7 +487,7 @@ class Loop:
                 "ConversationFactory matching the format SAIA used at "
                 "save time."
             )
-        envelope = SaiaTurnEnvelope.from_bytes(payload)
+        envelope = PausedTurnEnvelope.from_bytes(payload)
         conversation = self._conversation_factory.create_from_state(envelope.conversation)
         return envelope.task, conversation, True
 
@@ -503,7 +503,7 @@ class Loop:
         node_id = ctx._node_id
         if env is None or node_id is None:
             return
-        env.resume_saia_turns.release(node_id)
+        env.resume_paused_turns.release(node_id)
 
     def _capture_paused(self, ctx: Context[Any], task: str, conversation: Any) -> None:
         """Serialize the paused task + conversation to canonical bytes.
@@ -513,12 +513,12 @@ class Loop:
         - :attr:`_paused_bytes` on this Loop instance — introspection
           surface for tests and consumers that already hold a Loop
           reference.
-        - ``env.pending_saia_turns`` on the top-level Flow runtime
+        - ``env.pending_paused_turns`` on the top-level Flow runtime
           — keyed by ``ctx._node_id`` so each Loop's
           bytes stay distinct (concurrent ``.map`` bodies, sibling
           Loops in a chain, and nested Loops in an iterate body all
           share one runtime). The halt-observation site drains it
-          to stamp one ``TraceRef(kind="saia_turn", ...)`` per
+          to stamp one ``TraceRef(kind="paused_turn", ...)`` per
           entry on the halt commit.
 
         The blob envelope is ``{"task": <str>, "conversation":
@@ -538,11 +538,11 @@ class Loop:
         to_dict = getattr(conversation, "to_dict", None)
         if to_dict is None:
             return
-        payload = SaiaTurnEnvelope(task=task, conversation=to_dict()).to_bytes()
+        payload = PausedTurnEnvelope(task=task, conversation=to_dict()).to_bytes()
         self._paused_bytes = payload
         env = ctx._env
         if env is not None and ctx._node_id is not None:
-            env.pending_saia_turns.add(ctx._node_id, payload, env.ancestor_chain)
+            env.pending_paused_turns.add(ctx._node_id, payload, env.ancestor_chain)
 
 
 # ----------------------------------------------------------------------------

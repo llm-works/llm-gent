@@ -57,7 +57,7 @@ commits. Changing the flow's shape between runs changes the ids and orphans the 
   pending: ['content-addressed storage', 'async cancellation']
   summaries: []
   ref files: ['durable-resume-demo/refs/e62e0596ecc27e3c/1.json']
-  halted mid-turn (saia_turn saved) — invoke again to resume
+  halted mid-turn (paused_turn saved) — invoke again to resume
 ```
 
 Sequence inside the process:
@@ -71,7 +71,7 @@ Sequence inside the process:
 5. `summarize` sees `result.paused` and returns with state untouched.
 6. The iterate body finishes; `IterateRunner` increments its counter to 1, checks `until` (topics
    remain), then observes halt at the top of the next pass and writes the halt commit — draining
-   the stashed turn into a `saia_turn` blob referenced from that commit.
+   the stashed turn into a `paused_turn` blob referenced from that commit.
 
 ## Run 2 — resumes the paused turn
 
@@ -92,7 +92,7 @@ The first topic is summarized with no `lookup_reference` line: the model's first
 run 2 is the one run 1 never got to make. Sequence:
 
 1. `Resume.hydrate` resolves the latest commit (the halt commit), restores `Digest` from its tree
-   through `TypeStateFactory(Digest)`, and loads each `saia_turn` blob as a resume entry keyed by
+   through `TypeStateFactory(Digest)`, and loads each `paused_turn` blob as a resume entry keyed by
    the dispatching step's node id.
 2. `IterateRunner` sees it is the save-point leaf and fast-forwards its counter to 1.
 3. `summarize` runs for `pending[0]` — still the halted topic, because run 1 left state untouched.
@@ -120,12 +120,12 @@ durable-resume-demo/                       # URL-quoted client_flow_id
     ├── tree/614ab218…                     # halt commit's tree
     ├── tree/c2c013c8…                     # empty tree (completion marker)
     ├── blob/e6e66548…                     # Digest state at halt
-    └── blob/8f339b74…                     # saia_turn envelope
+    └── blob/8f339b74…                     # paused_turn envelope
 ```
 
 Only `refs/` is mutable. Everything under `objects/` is immutable and named by the hash of its
 bytes; identical content is stored once. If resume finds the commit, tree, or a state blob
-missing, it falls back to a fresh run; a missing `saia_turn` blob makes only that Loop restart its
+missing, it falls back to a fresh run; a missing `paused_turn` blob makes only that Loop restart its
 turn from the task.
 
 ### Refs
@@ -151,7 +151,7 @@ latest commit.
     "outcome": "halted",
     "produced_by": {"node_id": "e62e0596ecc27e3c", "...": null},
     "trace_ref": [
-      {"kind": "saia_turn", "id": "0b799bf8f1f3498c:8f339b74…"}
+      {"kind": "paused_turn", "id": "0b799bf8f1f3498c:8f339b74…"}
     ]
   },
   "parent_hashes": [],
@@ -183,7 +183,7 @@ The tree holds one blob per state scope, keyed by two-digit depth. This flow has
 scope. The state blob is `Digest.to_dict()` as canonical JSON — both topics pending, no summaries:
 the paused pass did not mutate state.
 
-### saia_turn blob
+### paused_turn blob
 
 ```json
 {
@@ -207,8 +207,8 @@ after. `conversation` is the `to_dict()` payload of the conversation class the L
 `ConversationFactory` produces (`llm_kelt.conversation.Conversation` here); the same factory's
 `create_from_state` rebuilds it on resume.
 
-The state blob and the saia_turn blob are separate on purpose: state is the flow's data at the
-save site; the saia_turn blob is the in-flight model turn. Resume needs both.
+The state blob and the paused_turn blob are separate on purpose: state is the flow's data at the
+save site; the paused_turn blob is the in-flight model turn. Resume needs both.
 
 ### Completion marker
 
@@ -218,8 +218,8 @@ save site; the saia_turn blob is the in-flight model turn. Resume needs both.
 ```
 
 Stamped on clean exit when the store's retention is `retain` (the `JsonFileCheckpointStore`
-default). `run(resume=True)` treats a trajectory whose latest commit is this marker as a fresh
-start instead of replaying the old halt commit. With `retention="gc_on_success"` the trajectory is
+default). `run(resume=True)` treats a branch whose latest commit is this marker as a fresh
+start instead of replaying the old halt commit. With `retention="gc_on_success"` the branch is
 deleted instead.
 
 ## Save sites
@@ -236,7 +236,7 @@ deleted instead.
 
 **Wire a `ConversationFactory` on the Loop.** It supplies the conversation SAIA appends the turn
 to, and rebuilds it on resume. Without one, a pause still writes a halt commit, but with no
-`saia_turn` ref, and resume re-runs the turn from the task.
+`paused_turn` ref, and resume re-runs the turn from the task.
 
 **Do not mutate state on a paused result.** The halt commit snapshots state after the verb
 returns. A verb that pops its input or appends a placeholder on a paused `TaskResult` checkpoints a
@@ -250,7 +250,7 @@ A scripted `saia.Backend` stands in for the model; SAIA, Loop, Flow, and the sto
 phase rebuilds store, factory, backend, and flow, so only disk carries over. The run fails unless:
 
 - phase 1 halted with state untouched,
-- the halt commit carries a `saia_turn` ref,
+- the halt commit carries a `paused_turn` ref,
 - phase 2 issued exactly one `lookup_reference` (the second topic only — a restarted first turn
   would make it two),
 - phase 2 drained every topic with non-empty summaries.

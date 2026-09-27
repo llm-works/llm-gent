@@ -91,7 +91,7 @@ from .nodes import (
 )
 from .role import Role
 from .state import State, StateFactory
-from .state.saia_turn import PendingSaiaTurns, ResumeSaiaTurns
+from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
 
 
 class Flow:
@@ -166,8 +166,8 @@ class Flow:
         self._replay_consumed: bool = False
         self._halt_saved: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
-        self._pending_saia_turns: PendingSaiaTurns = PendingSaiaTurns()
-        self._resume_saia_turns: ResumeSaiaTurns = ResumeSaiaTurns()
+        self._pending_paused_turns: PendingPausedTurns = PendingPausedTurns()
+        self._resume_paused_turns: ResumePausedTurns = ResumePausedTurns()
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -739,14 +739,14 @@ class Flow:
         :meth:`run` ``resume=True``, a load-at-start that hydrates the
         run's payload before the first node dispatches. On fully
         successful :meth:`run` completion the framework calls
-        :meth:`CheckpointStore.gc_trajectory` when the store's
+        :meth:`CheckpointStore.gc_branch` when the store's
         ``retention`` is ``"gc_on_success"``; the default ``"retain"``
-        keeps the trajectory for audit. Cancellation, halt exits, and
+        keeps the branch for audit. Cancellation, halt exits, and
         unhandled exceptions preserve the checkpoint regardless of
         retention so a subsequent resume can pick up.
 
         Both arguments bind together — the ``client_flow_id`` scopes every
-        save/load/delete call and identifies the resumable trajectory. It
+        save/load/delete call and identifies the resumable branch. It
         is agent-owned: the framework never assigns one automatically.
 
         A subflow inherits the outer runtime's checkpointer + id
@@ -880,7 +880,7 @@ class Flow:
                 ``state_factory.restore``; a flow without ``state_factory``
                 treats the stored payload as a plain dict. Absent-checkpoint
                 resume is a no-op — the run proceeds with ``state`` as given.
-                On fully successful completion the trajectory is gc'd when
+                On fully successful completion the branch is gc'd when
                 the store's ``retention`` is ``"gc_on_success"``. Requires
                 :meth:`with_checkpointer` to be wired; raises otherwise.
                 Bound parameter: not forwarded to the first node.
@@ -902,12 +902,12 @@ class Flow:
             )
         active_state = self._wrap_top_state(state)
         replay: _ResumeReplay | None = None
-        self._resume_saia_turns.clear()
+        self._resume_paused_turns.clear()
         if resume:
             active_state, replay = await Resume(self).hydrate(active_state)
         self._replay_consumed = False
         self._halt_saved = False
-        self._pending_saia_turns.clear()
+        self._pending_paused_turns.clear()
         result = await self._run_as_subflow(
             *args,
             state=active_state,

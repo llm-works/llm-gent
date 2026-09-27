@@ -14,8 +14,8 @@ Creates the content-addressed persistence pair backing
   ``(client_flow_id, node_path, iteration)`` pointing at a
   ``commit_hash`` with a ``created_at`` timestamp for latest-ref lookup.
 
-Both are trajectory-scoped by ``client_flow_id``, matching the arc's
-non-goal on cross-trajectory blob sharing.
+Both are branch-scoped by ``client_flow_id``, matching the arc's
+non-goal on cross-branch blob sharing.
 
 Revision ID: 001
 Revises:
@@ -58,7 +58,7 @@ def _create_object_table() -> None:
 
 
 def _create_ref_table() -> None:
-    """Create ``llm_gent_flow_ref`` — trajectory-keyed pointers at commit hashes."""
+    """Create ``llm_gent_flow_ref`` — branch-keyed pointers at commit hashes."""
     op.create_table(
         "llm_gent_flow_ref",
         sa.Column("client_flow_id", sa.String(length=255), nullable=False),

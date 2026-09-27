@@ -39,7 +39,7 @@ async def _run(payload: dict[str, Any]) -> Any:
     flow = flow_builder(
         lg,
         store=store,
-        trajectory_id=payload["trajectory_id"],
+        client_flow_id=payload["client_flow_id"],
         **payload["flow_builder_kwargs"],
     )
     return await flow.run(resume=True)

@@ -37,7 +37,7 @@ from .state import State, StateFactory
 if TYPE_CHECKING:
     from ._checkpoint_ctx import CheckpointContext
     from .flow import Flow
-    from .state.saia_turn import PendingSaiaTurns, ResumeSaiaTurns
+    from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
 
 from .checkpoint import CheckpointPolicy
 
@@ -268,24 +268,24 @@ class _RunEnv:
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
 
     @property
-    def pending_saia_turns(self) -> PendingSaiaTurns:
+    def pending_paused_turns(self) -> PendingPausedTurns:
         """Typed accessor for the runtime's pending SAIA turn container.
 
         Callers use this instead of reaching through
-        ``env.runtime._pending_saia_turns``. The container itself lives
+        ``env.runtime._pending_paused_turns``. The container itself lives
         on the top-level Flow (which is what ``runtime`` points at);
         this property is the typed public interface across the module
         boundary.
         """
-        return self.runtime._pending_saia_turns
+        return self.runtime._pending_paused_turns
 
     @property
-    def resume_saia_turns(self) -> ResumeSaiaTurns:
+    def resume_paused_turns(self) -> ResumePausedTurns:
         """Typed accessor for the runtime's resume SAIA turn container.
 
-        Companion to :attr:`pending_saia_turns` on the read side.
+        Companion to :attr:`pending_paused_turns` on the read side.
         """
-        return self.runtime._resume_saia_turns
+        return self.runtime._resume_paused_turns
 
 
 @dataclass

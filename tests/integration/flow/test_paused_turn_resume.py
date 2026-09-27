@@ -3,7 +3,7 @@
 
 """Integration test: real :class:`llm_saia.SAIA` + gent Loop mid-turn pause/resume.
 
-Exercises the full save-side (halt-observation stamps a saia_turn Blob +
+Exercises the full save-side (halt-observation stamps a paused_turn Blob +
 TraceRef on the halt commit) and resume-side (framework loads the blob and
 Loop dispatches SAIA with the reconstructed Conversation + ``resume=True``)
 against an actual ``llm_saia.SAIA`` driven by a Backend that halts mid-turn
@@ -218,7 +218,7 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     # returned paused before the second turn could start.
     assert len(backend1.calls) == 1
 
-    # The halt commit was written with a saia_turn TraceRef pointing at a blob
+    # The halt commit was written with a paused_turn TraceRef pointing at a blob
     # that encodes the paused task + conversation-state envelope.
     from llm_gent.flow.state.cas import Commit
 
@@ -226,7 +226,7 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     assert halted_hash is not None
     commit = Commit.from_bytes(store.get_object("real-saia-resume", "commit", halted_hash) or b"")
     assert commit.meta.outcome == "halted"
-    saia_refs = [r for r in commit.meta.trace_ref if r.kind == "saia_turn"]
+    saia_refs = [r for r in commit.meta.trace_ref if r.kind == "paused_turn"]
     assert len(saia_refs) == 1
 
     # ---- Run 2: framework loads the envelope, Loop dispatches SAIA with
@@ -288,11 +288,11 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
 
     The Loop hands SAIA a factory-created conversation, SAIA appends
     the user task + tool call + tool result to it, and the halt pauses
-    the follow-up chat. The halt commit's saia_turn blob must carry
+    the follow-up chat. The halt commit's paused_turn blob must carry
     that whole prefix — otherwise resume re-runs the turn from scratch.
     """
     from llm_gent.flow.state.cas import Commit
-    from llm_gent.flow.state.saia_turn import SaiaTurnEnvelope
+    from llm_gent.flow.state.paused_turn import PausedTurnEnvelope
 
     role = Role(name="r", backend="openai", model="gpt-4o-mini")
     halt = asyncio.Event()
@@ -317,10 +317,10 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
     assert head is not None
     commit = Commit.from_bytes(store.get_object("no-caller-conv", "commit", head) or b"")
     assert commit.meta.outcome == "halted"
-    saia_refs = [r for r in commit.meta.trace_ref if r.kind == "saia_turn"]
+    saia_refs = [r for r in commit.meta.trace_ref if r.kind == "paused_turn"]
     assert len(saia_refs) == 1
     _node_id, _, blob_hash = saia_refs[0].id.partition(":")
-    envelope = SaiaTurnEnvelope.from_bytes(
+    envelope = PausedTurnEnvelope.from_bytes(
         store.get_object("no-caller-conv", "blob", blob_hash) or b""
     )
     assert envelope.task == "look up cas"

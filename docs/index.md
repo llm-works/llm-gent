@@ -224,7 +224,7 @@ wanted.
 ```python
 flow = (
     ff.create(state=...)
-    .with_checkpointer(store, "trajectory-42")
+    .with_checkpointer(store, "branch-42")
     .with_checkpoint_policy(on_iterate=True, on_map_item=True)
     .iterate(body, max_iters=10)
 )

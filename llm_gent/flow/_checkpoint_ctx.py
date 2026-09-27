@@ -52,7 +52,7 @@ class CheckpointContext:
     fields are always populated once the context exists — the
     Optional lives at the context level, not per-field). Exposes
     the put-object triad, ref put/resolve, get_object,
-    gc_trajectory, and the compound :meth:`save_scope_commit` that
+    gc_branch, and the compound :meth:`save_scope_commit` that
     assembles a Blob→Tree→Commit chain and refs it at the boundary.
     """
 
@@ -68,17 +68,17 @@ class CheckpointContext:
     # --- store passthrough (kind-specific put_object variants) ---
 
     async def put_blob(self, content_hash: str, payload: bytes) -> None:
-        """Put a blob under this trajectory's ``client_flow_id``."""
+        """Put a blob under this branch's ``client_flow_id``."""
         await maybe_await(self.store.put_object(self.client_flow_id, "blob", content_hash, payload))
 
     async def put_tree(self, tree: Tree) -> None:
-        """Serialize + put a Tree under this trajectory."""
+        """Serialize + put a Tree under this branch."""
         await maybe_await(
             self.store.put_object(self.client_flow_id, "tree", tree.content_hash, tree.to_bytes())
         )
 
     async def put_commit(self, commit: Commit) -> None:
-        """Serialize + put a Commit under this trajectory."""
+        """Serialize + put a Commit under this branch."""
         await maybe_await(
             self.store.put_object(
                 self.client_flow_id, "commit", commit.content_hash, commit.to_bytes()
@@ -92,20 +92,20 @@ class CheckpointContext:
         )
 
     async def resolve_ref(self) -> str | None:
-        """Latest commit hash across this trajectory, or ``None``."""
+        """Latest commit hash across this branch, or ``None``."""
         result: str | None = await maybe_await(self.store.resolve_ref(self.client_flow_id))
         return result
 
     async def get_object(self, kind: Kind, content_hash: str) -> bytes | None:
-        """Fetch an object under this trajectory by kind + hash."""
+        """Fetch an object under this branch by kind + hash."""
         result: bytes | None = await maybe_await(
             self.store.get_object(self.client_flow_id, kind, content_hash)
         )
         return result
 
-    async def gc_trajectory(self) -> None:
+    async def gc_branch(self) -> None:
         """Remove every object and ref under this ``client_flow_id``."""
-        await maybe_await(self.store.gc_trajectory(self.client_flow_id))
+        await maybe_await(self.store.gc_branch(self.client_flow_id))
 
     # --- compound: save a scope commit ---
 
@@ -191,8 +191,8 @@ class CheckpointContext:
 
         ``produced_by`` records the node's ``node_id`` — verb-level
         attribution (``verb_name`` / ``role`` / ``result_hash``)
-        lands with the SAIA-verb-wrapper wiring. ``flow_root_id`` is
-        this trajectory's ``client_flow_id`` — a stable per-run
+        lands with the SAIA-verb-wrapper wiring. ``flow_root_hash`` is
+        this branch's ``client_flow_id`` — a stable per-run
         identifier — until the framework computes a proper
         composition-tree root hash.
         """
@@ -205,7 +205,7 @@ class CheckpointContext:
             produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
             trace_ref=trace_ref,
             outcome=outcome,
-            flow_root_id=self.client_flow_id,
+            flow_root_hash=self.client_flow_id,
             timestamp_iso=datetime.now(UTC).isoformat(),
             framework_version=__version__,
         )

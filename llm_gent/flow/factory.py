@@ -134,7 +134,7 @@ class FlowFactory:
             checkpointer: Optional :class:`CheckpointStore` captured for
                 subsequent :meth:`create` calls. Only wired onto a built
                 :class:`Flow` when :meth:`create` is passed a
-                ``client_flow_id=`` — the id scopes the trajectory and is
+                ``client_flow_id=`` — the id scopes the branch and is
                 agent-owned per Flow instance.
         """
         self._lg = lg
@@ -165,7 +165,7 @@ class FlowFactory:
                 :data:`UNSET` (default) inherits the factory's ``state``;
                 passing ``None`` explicitly is honored as "payload is
                 ``None``"; any other value replaces the factory default.
-            client_flow_id: Per-Flow trajectory identifier for the
+            client_flow_id: Per-Flow branch identifier for the
                 captured :class:`CheckpointStore`. Required to bind the
                 store — the built Flow gets
                 :meth:`Flow.with_checkpointer` called with
@@ -186,7 +186,7 @@ class FlowFactory:
                 Supersedes the factory's captured ``checkpointer`` and
                 the ``client_flow_id`` argument above; use when the
                 store differs from the factory's default or when a
-                shared factory hands each flow its own trajectory id.
+                shared factory hands each flow its own branch id.
                 ``None`` (default) inherits the factory's store paired
                 with ``client_flow_id``.
         """
@@ -290,7 +290,7 @@ class FlowFactory:
 
         Every other captured slot carries over. The store binds to each
         built :class:`Flow` only when :meth:`create` is called with a
-        ``client_flow_id=`` — the trajectory identifier is agent-owned
+        ``client_flow_id=`` — the branch identifier is agent-owned
         per Flow instance, so the factory captures the store once and
         the id is chosen at construction time.
         """

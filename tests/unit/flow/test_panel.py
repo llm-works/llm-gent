@@ -281,7 +281,7 @@ class TestPanel:
             primed = (
                 make_ff()
                 .create(state={"nested_n": 0})
-                .with_checkpointer(store, "nested-traj")
+                .with_checkpointer(store, "nested-branch")
                 .iterate(bump_then_halt, max_iters=5)
                 .with_halt(halt)
             )
@@ -291,7 +291,7 @@ class TestPanel:
             resumed = (
                 make_ff()
                 .create(state={"nested_n": 0})
-                .with_checkpointer(store, "nested-traj")
+                .with_checkpointer(store, "nested-branch")
                 .iterate(nested_bump, max_iters=5)
             )
             result = await resumed.run(resume=True)
