@@ -496,7 +496,7 @@ class TestPausedCapture:
         flow.iterate(lambda body: body.call(body_verb), max_iters=2)
         await flow.run()
         assert not convs, "both passes should have dispatched"
-        assert flow._pending_saia_turns.snapshot() == []
+        assert flow._pending_paused_turns.snapshot() == []
 
     @pytest.mark.asyncio
     async def test_paused_bytes_reset_per_dispatch(self) -> None:

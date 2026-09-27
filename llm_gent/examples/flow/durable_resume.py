@@ -9,7 +9,7 @@
 
 Verifies Flow's checkpoint + mid-SAIA-turn pause + resume story
 end-to-end. Structurally exercises every save site: iterate
-boundary, halt-observation mid-turn, ``$saia_turn`` trace_ref on
+boundary, halt-observation mid-turn, ``paused_turn`` trace_ref on
 the CAS commit, :class:`JsonFileCheckpointStore` persistence, and
 :meth:`Flow.run(resume=True)` hydration on a subsequent process.
 
@@ -129,7 +129,7 @@ STORE_DIR = Path.home() / ".cache" / "llm-gent-durable-resume"
 """On-disk store path — stable across process invocations so run 2 finds run 1's commit."""
 
 CLIENT_FLOW_ID = "durable-resume-demo"
-"""Trajectory id — the resume path reads back commits under this key."""
+"""Client flow id naming this example's history — the resume path reads back commits under it."""
 
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 """Cheap, tool-capable Anthropic model. Override with ``--model``."""
@@ -183,7 +183,7 @@ def _make_tool_executor(
     ``halt_event``. SAIA's next iteration's ``Backend.chat`` sees
     the event via ``abort_signal`` and raises :class:`PauseRequested`
     — SAIA returns ``TaskResult(paused=True)``, Loop stashes the
-    conversation onto ``env.pending_saia_turns``, and the halt-
+    conversation onto ``env.pending_paused_turns``, and the halt-
     observation site writes a CAS commit whose ``trace_ref`` slot
     holds the paused-turn payload.
 
@@ -445,7 +445,7 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
 
 
 def _latest_commit(store: JsonFileCheckpointStore) -> Commit | None:
-    """Return the trajectory's latest commit, or ``None`` for an empty store."""
+    """Return the history's latest commit, or ``None`` for an empty store."""
     head = store.resolve_ref(CLIENT_FLOW_ID)
     if head is None:
         return None
@@ -466,9 +466,9 @@ def _resume_pending(store: JsonFileCheckpointStore) -> bool:
 
 
 def _paused_turn_saved(store: JsonFileCheckpointStore) -> bool:
-    """True when the latest commit carries a ``saia_turn`` trace ref (the paused conversation)."""
+    """True when the latest commit carries a ``paused_turn`` trace ref (the paused conversation)."""
     commit = _latest_commit(store)
-    return commit is not None and any(r.kind == "saia_turn" for r in commit.meta.trace_ref)
+    return commit is not None and any(r.kind == "paused_turn" for r in commit.meta.trace_ref)
 
 
 async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> tuple[Digest, bool]:
@@ -503,7 +503,9 @@ def _report(store: JsonFileCheckpointStore, store_dir: Path, final: Digest, halt
     print(f"  summaries: {final.summaries}")
     print(f"  ref files: {refs}")
     if halted:
-        saved = "saia_turn saved" if _paused_turn_saved(store) else "NO saia_turn on halt commit"
+        saved = (
+            "paused_turn saved" if _paused_turn_saved(store) else "NO paused_turn on halt commit"
+        )
         print(f"  halted mid-turn ({saved}) — invoke again to resume")
     else:
         print("  complete — $complete marker stamped; next invocation starts fresh")
@@ -529,7 +531,7 @@ async def _run_smoke(lg: Logger) -> int:
     # its tool call instead of restarting from the task.
     checks = {
         "halted with state untouched": halted and first.pending == list(TOPICS),
-        "halt commit carries saia_turn": turn_saved,
+        "halt commit carries paused_turn": turn_saved,
         "resume continued the paused turn": resumed_backend.lookups == len(TOPICS) - 1,
         "full drain": not still_halted
         and not final.pending

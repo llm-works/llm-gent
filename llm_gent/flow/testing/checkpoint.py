@@ -142,7 +142,7 @@ def build_canonical_flow(
     halt: asyncio.Event | None = None,
     halt_after_iteration: int | None = None,
     store: CheckpointStore | None = None,
-    trajectory_id: str = "canonical-multi-stage",
+    client_flow_id: str = "canonical-multi-stage",
 ) -> Flow:
     """Build the canonical multi-stage Flow.
 
@@ -169,8 +169,8 @@ def build_canonical_flow(
         halt_after_iteration: Iteration count at which to fire ``halt``.
             Requires ``halt``.
         store: Optional :class:`CheckpointStore`. Wires
-            ``.with_checkpointer(store, trajectory_id)`` when present.
-        trajectory_id: Checkpoint trajectory identifier.
+            ``.with_checkpointer(store, client_flow_id)`` when present.
+        client_flow_id: Checkpoint history identifier.
 
     Raises:
         ValueError: When exactly one of ``halt`` / ``halt_after_iteration``
@@ -182,7 +182,7 @@ def build_canonical_flow(
     ff = FlowFactory(lg, state_factory=TypeStateFactory(CanonicalCounter))
     flow = ff.create(state=state if state is not None else CanonicalCounter())
     if store is not None:
-        flow.with_checkpointer(store, trajectory_id)
+        flow.with_checkpointer(store, client_flow_id)
         # Canonical fixture opts into per-iteration saves: the determinism
         # assertions and resume tests need each boundary as a resumable anchor.
         flow.with_checkpoint_policy(on_iterate=True)
@@ -208,7 +208,7 @@ async def assert_resume_determinism(
     *,
     halt_after_iteration: int = 2,
     max_iters: int = 5,
-    trajectory_id: str = "determinism-check",
+    client_flow_id: str = "determinism-check",
 ) -> dict[str, Any]:
     """Run baseline, interrupt, resume, assert equality, return final state.
 
@@ -225,18 +225,18 @@ async def assert_resume_determinism(
         store: Checkpoint store for the interrupt and resume runs.
         halt_after_iteration: Iteration at which to fire halt (default 2).
         max_iters: Total iterations for the flow (default 5).
-        trajectory_id: Checkpoint trajectory identifier.
+        client_flow_id: Checkpoint history identifier.
 
     Returns:
         The final state dict (``CanonicalCounter.to_dict()``).
 
     Raises:
         AssertionError: If the resumed state differs from baseline.
-        ValueError: If a checkpoint already exists for the trajectory_id,
+        ValueError: If a checkpoint already exists for the client_flow_id,
             or if halt_after_iteration is not in [1, max_iters].
     """
-    if await maybe_await(store.resolve_ref(trajectory_id)) is not None:
-        raise ValueError(f"checkpoint already exists for trajectory_id={trajectory_id!r}")
+    if await maybe_await(store.resolve_ref(client_flow_id)) is not None:
+        raise ValueError(f"checkpoint already exists for client_flow_id={client_flow_id!r}")
     if not (1 <= halt_after_iteration <= max_iters):
         raise ValueError(
             f"halt_after_iteration must be in [1, {max_iters}]; got {halt_after_iteration}"
@@ -251,14 +251,14 @@ async def assert_resume_determinism(
         halt=halt,
         halt_after_iteration=halt_after_iteration,
         store=store,
-        trajectory_id=trajectory_id,
+        client_flow_id=client_flow_id,
     ).run()
 
     resumed = await build_canonical_flow(
         lg,
         max_iters=max_iters,
         store=store,
-        trajectory_id=trajectory_id,
+        client_flow_id=client_flow_id,
     ).run(resume=True)
 
     assert resumed == baseline, (
@@ -299,7 +299,7 @@ def resume_in_subprocess(
     flow_module: str = "llm_gent.flow.testing.checkpoint",
     flow_builder: str = "build_canonical_flow",
     flow_builder_kwargs: dict[str, Any] | None = None,
-    trajectory_id: str = "canonical-multi-stage",
+    client_flow_id: str = "canonical-multi-stage",
     subprocess_timeout: float = 30.0,
 ) -> dict[str, Any]:
     """Spawn a fresh Python process, resume the Flow from checkpoint, return final state.
@@ -308,7 +308,7 @@ def resume_in_subprocess(
     It reconstructs the store by resolving ``store_module.store_factory``
     (a class or a function) and calling it as
     ``store_factory(lg, **store_kwargs)``, resolves and calls the flow
-    builder with ``store=<instance>, trajectory_id=<>, **flow_builder_kwargs``,
+    builder with ``store=<instance>, client_flow_id=<>, **flow_builder_kwargs``,
     invokes ``await flow.run(resume=True)``, and prints the return value
     as JSON to stdout. The parent parses and returns it.
 
@@ -328,9 +328,9 @@ def resume_in_subprocess(
         store_kwargs: JSON-serializable kwargs for the store factory.
         flow_module: Dotted module path exposing the flow builder.
         flow_builder: Builder function name inside that module. Must
-            accept ``(lg, *, store, trajectory_id, **kwargs) -> Flow``.
+            accept ``(lg, *, store, client_flow_id, **kwargs) -> Flow``.
         flow_builder_kwargs: Additional kwargs passed to the flow builder.
-        trajectory_id: Checkpoint trajectory identifier — must match the
+        client_flow_id: Checkpoint history identifier — must match the
             id used by the interrupt run that wrote the checkpoint.
         subprocess_timeout: Wall-clock cap on the subprocess in seconds.
 
@@ -350,7 +350,7 @@ def resume_in_subprocess(
         "flow_module": flow_module,
         "flow_builder": flow_builder,
         "flow_builder_kwargs": flow_builder_kwargs or {},
-        "trajectory_id": trajectory_id,
+        "client_flow_id": client_flow_id,
     }
     result = subprocess.run(
         [sys.executable, "-m", "llm_gent.flow.testing._resume_helper"],

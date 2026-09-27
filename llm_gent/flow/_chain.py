@@ -186,9 +186,9 @@ class Chain:
         is consistent.
 
         When the just-completed step paused SAIA mid-turn (a Loop
-        deposited bytes on ``env.pending_saia_turns``), lands
+        deposited bytes on ``env.pending_paused_turns``), lands
         the halt commit at THAT step's node so resume re-dispatches it
-        — its Loop's ``__call__`` then picks up the saia_turn entry
+        — its Loop's ``__call__`` then picks up the paused_turn entry
         and hands SAIA ``resume=True`` with the rebuilt conversation.
         Otherwise saves at the not-yet-run step (the normal chain-halt
         case).
@@ -204,7 +204,7 @@ class Chain:
         just_completed = self.ids[index - 1]
         halt_node_id = (
             just_completed
-            if _just_completed_owns_pending_saia(env, just_completed)
+            if _just_completed_owns_paused_turn(env, just_completed)
             else self.ids[index]
         )
         return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
@@ -216,9 +216,9 @@ class Chain:
         halt was signaled during the final step's dispatch, no next
         step exists to save at and the walker just returns — losing
         the paused turn on resume. This mirror observes halt at the
-        trailing edge and, when the last step owns pending SAIA-turn
+        trailing edge and, when the last step owns pending paused-turn
         bytes, saves at its node so resume re-dispatches it and the
-        Loop consumes the saia_turn entry.
+        Loop consumes the paused_turn entry.
 
         No-op when halt is not set, no pending Loop entry is owned by
         the last step, or the run is nested / has no checkpointer
@@ -233,12 +233,12 @@ class Chain:
         ):
             return
         last = self.ids[-1]
-        if not _just_completed_owns_pending_saia(env, last):
+        if not _just_completed_owns_paused_turn(env, last):
             return
         await HaltSaveObserver.save_if_signaled(env, 0, last, env.state)
 
 
-def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
+def _just_completed_owns_paused_turn(env: _RunEnv, node_id: str) -> bool:
     """True when ``node_id`` is a pending Loop's own id or an ancestor of one.
 
     Direct match covers the ``.call(loop_verb)`` case (Loop's
@@ -247,6 +247,6 @@ def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
     chain step, where the pending entry's key is the Loop's
     descendant id computed under the chain step's descent context.
     Either match means resume should re-dispatch the chain step so
-    the Loop's ``__call__`` picks up the saia_turn entry.
+    the Loop's ``__call__`` picks up the paused_turn entry.
     """
-    return env.pending_saia_turns.owns(node_id)
+    return env.pending_paused_turns.owns(node_id)

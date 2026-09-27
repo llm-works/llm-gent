@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Framework state for SAIA turn pause/resume.
+"""Framework state for paused turns — SAIA turns stopped mid-turn, saved, and resumed.
 
 Groups three concerns the halt-save + resume path shares across
 ``Flow`` / ``Loop`` / executor: the pending-side dict pair keyed by
@@ -15,7 +15,7 @@ ancestry match on ``owns``, snapshot-during-iteration) that were
 implicit before.
 
 Not re-exported from :mod:`llm_gent.flow.state` — internal callers
-import from :mod:`llm_gent.flow.state.saia_turn` explicitly.
+import from :mod:`llm_gent.flow.state.paused_turn` explicitly.
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class PendingSaiaTurns:
-    """Paused SAIA turns awaiting a halt-save.
+class PendingPausedTurns:
+    """Paused turns awaiting a halt-save.
 
     :class:`Loop` deposits an entry via :meth:`add` on pause; the
     halt-observation site drains via :meth:`snapshot` +
@@ -94,8 +94,8 @@ class PendingSaiaTurns:
         """Persist a snapshot via ``ctx``; return TraceRefs + stashed node_ids.
 
         Each entry becomes a standalone :class:`Blob` under the
-        trajectory and yields one
-        ``TraceRef(kind="saia_turn", id=f"{node_id}:{blob_hash}")``
+        history and yields one
+        ``TraceRef(kind="paused_turn", id=f"{node_id}:{blob_hash}")``
         for the caller to stamp on the halt commit's meta; the
         compound id lets the resume side route each blob back to the
         Loop that produced it. Returns ``((), ())`` when nothing is
@@ -117,16 +117,16 @@ class PendingSaiaTurns:
         for node_id, payload in snapshot:
             blob = Blob.from_bytes(payload)
             await ctx.put_blob(blob.content_hash, blob.payload)
-            refs.append(TraceRef(kind="saia_turn", id=f"{node_id}:{blob.content_hash}"))
+            refs.append(TraceRef(kind="paused_turn", id=f"{node_id}:{blob.content_hash}"))
         return tuple(refs), tuple(node_id for node_id, _ in snapshot)
 
 
 @dataclass
-class ResumeSaiaTurns:
-    """Reconstructed SAIA turn payloads awaiting Loop pickup on resume.
+class ResumePausedTurns:
+    """Reconstructed paused-turn payloads awaiting Loop pickup on resume.
 
-    :meth:`Flow._load_resume_saia_turn_bytes` populates via :meth:`add`
-    from the halt commit's ``saia_turn`` :class:`TraceRef` entries;
+    :meth:`load_from_commit` (called from ``Resume.hydrate``) populates
+    via :meth:`add` from the halt commit's ``paused_turn`` :class:`TraceRef` entries;
     :class:`Loop` reads via :meth:`load` at dispatch and drops via
     :meth:`release` only after ``saia.complete`` returns (so a
     rescue-then-iterate-retry re-consumes the same envelope).
@@ -155,10 +155,10 @@ class ResumeSaiaTurns:
         ctx: CheckpointContext,
         commit: Commit,
     ) -> None:
-        """Populate resume entries from ``commit``'s saia_turn TraceRefs.
+        """Populate resume entries from ``commit``'s paused_turn TraceRefs.
 
-        Each :class:`TraceRef` with ``kind="saia_turn"`` on the
-        halted commit was stamped by :meth:`PendingSaiaTurns.stash_to_ctx`
+        Each :class:`TraceRef` with ``kind="paused_turn"`` on the
+        halted commit was stamped by :meth:`PendingPausedTurns.stash_to_ctx`
         with ``id=f"{node_id}:{blob_hash}"``. Split on the first
         colon, fetch the blob under ``blob_hash`` from ``ctx``, and
         register ``{node_id: blob_bytes}`` so the Loop at that node
@@ -168,11 +168,11 @@ class ResumeSaiaTurns:
         Silently skips entries whose blob is missing from the store
         — the run then falls back to a fresh dispatch at that Loop.
         Entries whose ``id`` is not in ``node_id:blob_hash`` shape
-        are ignored (defensive against future ``saia_turn`` variants
+        are ignored (defensive against future ``paused_turn`` variants
         this framework does not understand).
         """
         for ref in commit.meta.trace_ref:
-            if ref.kind != "saia_turn":
+            if ref.kind != "paused_turn":
                 continue
             node_id, sep, blob_hash = ref.id.partition(":")
             if not sep or not node_id or not blob_hash:
@@ -184,7 +184,7 @@ class ResumeSaiaTurns:
 
 
 @dataclass(frozen=True)
-class SaiaTurnEnvelope:
+class PausedTurnEnvelope:
     """Canonical ``{"task", "conversation"}`` envelope for a paused SAIA turn.
 
     Single owner of the shape both :meth:`Loop._capture_paused` writes
@@ -203,7 +203,7 @@ class SaiaTurnEnvelope:
         return canonical_json({"task": self.task, "conversation": self.conversation})
 
     @classmethod
-    def from_bytes(cls, payload: bytes) -> SaiaTurnEnvelope:
+    def from_bytes(cls, payload: bytes) -> PausedTurnEnvelope:
         """Decode canonical JSON bytes; raises on missing keys."""
         data = json.loads(payload)
         return cls(task=data["task"], conversation=data["conversation"])

@@ -555,7 +555,7 @@ async def _save_halt_checkpoint(
     # Drop only the entries we stashed. Late arrivals from concurrent .map
     # items that landed after the snapshot stay on the runtime dict.
     for stashed_id in stashed_ids:
-        env.pending_saia_turns.remove(stashed_id)
+        env.pending_paused_turns.remove(stashed_id)
 
 
 async def _persist_halt(
@@ -564,10 +564,10 @@ async def _persist_halt(
     node_id: str,
     current_state: State[Any],
 ) -> tuple[str, ...]:
-    """Stash pending SAIA turns + save the halted commit; return stashed node_ids."""
+    """Stash pending paused turns + save the halted commit; return stashed node_ids."""
     assert env.checkpoint_ctx is not None
     try:
-        trace_ref, stashed_ids = await env.pending_saia_turns.stash_to_ctx(env.checkpoint_ctx)
+        trace_ref, stashed_ids = await env.pending_paused_turns.stash_to_ctx(env.checkpoint_ctx)
         await env.checkpoint_ctx.save_scope_commit(
             env.ancestor_chain, iteration, node_id, current_state, "halted", trace_ref
         )

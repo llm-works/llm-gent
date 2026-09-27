@@ -8,7 +8,7 @@ call with the flow being resumed; its public :meth:`hydrate` returns
 the ``(State, _ResumeReplay | None)`` pair the executor threads
 through the walk. The flow provides the checkpointer +
 ``client_flow_id`` + state factory; :class:`Resume` (a) fetches the
-latest commit under the trajectory ref, (b) walks its tree to
+latest commit under the history ref, (b) walks its tree to
 collect one JSON payload per scope, (c) hydrates the top-level
 :class:`State` from the root scope, and (d) hands every non-root
 scope payload to ``_ResumeReplay.intermediate_scope_data`` so
@@ -18,7 +18,7 @@ in order.
 Write side — :func:`apply_clean_exit_retention` and
 :func:`stamp_completion_marker` write the sentinel commit that
 :meth:`Resume.hydrate` reads to detect an already-completed
-trajectory. :func:`assert_replay_consumed` is the belt-and-
+history. :func:`assert_replay_consumed` is the belt-and-
 suspenders check called after a resume run to fail-fast when the
 save-point iterate was never found.
 """
@@ -44,7 +44,7 @@ class Resume:
     Constructed with the flow being resumed. Caller invokes
     :meth:`hydrate` with the fallback :class:`State` (the wrapped
     ``run(state=...)`` payload) and receives the hydrated state +
-    replay tuple. On a fresh run (no commit yet, or the trajectory
+    replay tuple. On a fresh run (no commit yet, or the history
     already stamped a ``$complete`` marker), returns ``(fallback,
     None)`` so the caller falls through to a normal fresh run.
     """
@@ -80,7 +80,7 @@ class Resume:
            hex has no slashes, so the round-trip is exact.
 
         Returns ``(fallback, None)`` when no commit exists yet or
-        the trajectory has a completion marker.
+        the history has a completion marker.
         """
         flow = self.flow
         assert flow._checkpoint_ctx is not None
@@ -89,10 +89,10 @@ class Resume:
             return fallback, None
         commit, scope_data = loaded
         # A completion marker (stamped on clean exit under "retain") means
-        # the trajectory finished successfully — do not replay.
+        # the history finished successfully — do not replay.
         if commit.meta.node_path == "$complete":
             return fallback, None
-        await flow._resume_saia_turns.load_from_commit(flow._checkpoint_ctx, commit)
+        await flow._resume_paused_turns.load_from_commit(flow._checkpoint_ctx, commit)
         return self._split_scopes(commit, scope_data)
 
     async def _load_latest_commit_scopes(self) -> tuple[Commit, list[Any]] | None:
@@ -166,7 +166,7 @@ class Resume:
 async def apply_clean_exit_retention(flow: Flow) -> None:
     """Apply the store's retention policy on the clean-exit path.
 
-    Halt-triggered exits preserve the trajectory regardless of policy.
+    Halt-triggered exits preserve the history regardless of policy.
     On a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the
     record and stamps a completion marker so a subsequent
     ``run(resume=True)`` doesn't replay the final iterate commit and
@@ -180,13 +180,13 @@ async def apply_clean_exit_retention(flow: Flow) -> None:
         return
     ctx = flow._checkpoint_ctx
     if ctx.retention == "gc_on_success":
-        await ctx.gc_trajectory()
+        await ctx.gc_history()
     else:
         await stamp_completion_marker(flow)
 
 
 async def stamp_completion_marker(flow: Flow) -> None:
-    """Write a sentinel commit + ref marking the trajectory complete.
+    """Write a sentinel commit + ref marking the history complete.
 
     The marker uses a reserved ``node_path="$complete"`` and
     ``produced_by.node_id="$complete"``; :meth:`Resume.hydrate`
@@ -213,7 +213,7 @@ def _build_completion_marker_meta(client_flow_id: str) -> CommitMeta:
         produced_by=ProducedBy(node_id="$complete", verb_name=None, role=None, result_hash=None),
         trace_ref=(),
         outcome="ok",
-        flow_root_id=client_flow_id,
+        flow_root_hash="",
         timestamp_iso=datetime.now(UTC).isoformat(),
         framework_version=__version__,
     )

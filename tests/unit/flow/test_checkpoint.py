@@ -10,7 +10,7 @@ iterated) through a real :class:`JsonFileCheckpointStore` and asserts:
 - resume from a mid-run halt reaches the same final state as an
   uninterrupted run (determinism);
 - the retention policy toggles gc-on-clean-exit;
-- halt-triggered exit always preserves the trajectory.
+- halt-triggered exit always preserves the history.
 
 Direct-Protocol tests (put/get/put_ref/resolve_ref/gc) live in
 :mod:`tests.unit.flow.test_stores_json` (and the PG equivalent in
@@ -57,17 +57,17 @@ class TestFreshRunSaves:
     async def test_saves_a_commit_per_iteration(self, store: JsonFileCheckpointStore) -> None:
         """Each successful iterate iteration writes a commit + ref."""
         await build_canonical_flow(
-            make_test_logger(), max_iters=3, store=store, trajectory_id="freshrun"
+            make_test_logger(), max_iters=3, store=store, client_flow_id="freshrun"
         ).run()
-        # A resolvable ref exists — the trajectory reached at least one commit.
+        # A resolvable ref exists — the history reached at least one commit.
         assert store.resolve_ref("freshrun") is not None
 
-    async def test_default_retention_keeps_trajectory_on_success(
+    async def test_default_retention_keeps_history_on_success(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """retention="retain" (default): clean-exit does NOT gc the trajectory."""
+        """retention="retain" (default): clean-exit does NOT gc the history."""
         await build_canonical_flow(
-            make_test_logger(), max_iters=2, store=store, trajectory_id="retain-1"
+            make_test_logger(), max_iters=2, store=store, client_flow_id="retain-1"
         ).run()
         # Successful run — but retention="retain" so the ref survives.
         assert store.resolve_ref("retain-1") is not None
@@ -80,17 +80,17 @@ class TestFreshRunSaves:
 
 class TestRetention:
     async def test_gc_on_success_prunes(self, tmp_path: Path) -> None:
-        """retention="gc_on_success": clean-exit removes the trajectory."""
+        """retention="gc_on_success": clean-exit removes the history."""
         store = JsonFileCheckpointStore(
             make_test_logger(), tmp_path / "cp", retention="gc_on_success"
         )
         await build_canonical_flow(
-            make_test_logger(), max_iters=2, store=store, trajectory_id="gc-1"
+            make_test_logger(), max_iters=2, store=store, client_flow_id="gc-1"
         ).run()
         assert store.resolve_ref("gc-1") is None
 
-    async def test_halt_preserves_trajectory_regardless_of_retention(self, tmp_path: Path) -> None:
-        """A halt-triggered exit preserves the trajectory even under gc_on_success —
+    async def test_halt_preserves_history_regardless_of_retention(self, tmp_path: Path) -> None:
+        """A halt-triggered exit preserves the history even under gc_on_success —
         the framework only prunes on fully successful runs.
         """
         store = JsonFileCheckpointStore(
@@ -103,7 +103,7 @@ class TestRetention:
             halt=halt,
             halt_after_iteration=2,
             store=store,
-            trajectory_id="halt-preserve",
+            client_flow_id="halt-preserve",
         ).run()
         assert store.resolve_ref("halt-preserve") is not None
 
@@ -334,10 +334,10 @@ class TestCtxCheckpoint:
         assert called == 1
 
 
-class TestSaiaTurnTraceRef:
+class TestPausedTurnTraceRef:
     """Loop's paused conversation lands as a Blob referenced by trace_ref."""
 
-    async def test_halt_save_stamps_saia_turn_and_writes_blob(
+    async def test_halt_save_stamps_paused_turn_and_writes_blob(
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Loop paused mid-turn → halt commit's trace_ref points at a blob equal to canonical to_dict."""
@@ -398,27 +398,27 @@ class TestSaiaTurnTraceRef:
         ff = FlowFactory(make_test_logger(), saia_factory=_PausingSAIAFactory())
         flow = (
             ff.create(state={})
-            .with_checkpointer(store, "saia-turn-1")
+            .with_checkpointer(store, "paused-turn-1")
             .with_halt(halt)
             .call(run_loop)
             .then(after)
         )
         await flow.run()
 
-        halted_hash = store.resolve_ref("saia-turn-1")
+        halted_hash = store.resolve_ref("paused-turn-1")
         assert halted_hash is not None
-        commit = Commit.from_bytes(store.get_object("saia-turn-1", "commit", halted_hash) or b"")
+        commit = Commit.from_bytes(store.get_object("paused-turn-1", "commit", halted_hash) or b"")
         assert commit.meta.outcome == "halted"
-        # trace_ref carries exactly one saia_turn entry whose id encodes the
+        # trace_ref carries exactly one paused_turn entry whose id encodes the
         # Loop's node_id and the blob hash; the blob bytes match canonical_json
         # of the conversation's to_dict.
         assert len(commit.meta.trace_ref) == 1
         ref = commit.meta.trace_ref[0]
-        assert ref.kind == "saia_turn"
+        assert ref.kind == "paused_turn"
         node_id, _, blob_hash = ref.id.partition(":")
         assert node_id and blob_hash
         expected = canonical_json({"task": "t", "conversation": conv.to_dict()})
-        stored = store.get_object("saia-turn-1", "blob", blob_hash)
+        stored = store.get_object("paused-turn-1", "blob", blob_hash)
         assert stored == expected
 
     async def test_sibling_non_paused_clear_does_not_erase_other_loops_bytes(
@@ -490,7 +490,7 @@ class TestSaiaTurnTraceRef:
         ff = FlowFactory(make_test_logger())
         flow = (
             ff.create(state={})
-            .with_checkpointer(store, "saia-turn-multi")
+            .with_checkpointer(store, "paused-turn-multi")
             .with_halt(halt)
             .call(run_a)
             .then(run_b)
@@ -498,20 +498,20 @@ class TestSaiaTurnTraceRef:
         )
         await flow.run()
 
-        halted_hash = store.resolve_ref("saia-turn-multi")
+        halted_hash = store.resolve_ref("paused-turn-multi")
         assert halted_hash is not None
         commit = Commit.from_bytes(
-            store.get_object("saia-turn-multi", "commit", halted_hash) or b""
+            store.get_object("paused-turn-multi", "commit", halted_hash) or b""
         )
         assert commit.meta.outcome == "halted"
         # Under the old single-slot design Loop B's non-paused clear would have
         # erased Loop A's bytes. With per-node_id keying A's entry survives and
         # halt-save stamps it.
-        saia_refs = [r for r in commit.meta.trace_ref if r.kind == "saia_turn"]
+        saia_refs = [r for r in commit.meta.trace_ref if r.kind == "paused_turn"]
         assert len(saia_refs) == 1
         _, _, blob_hash = saia_refs[0].id.partition(":")
         expected = canonical_json({"task": "t", "conversation": conv_a.to_dict()})
-        assert store.get_object("saia-turn-multi", "blob", blob_hash) == expected
+        assert store.get_object("paused-turn-multi", "blob", blob_hash) == expected
 
     async def test_resume_round_trip_hands_reconstructed_conv_and_resume_true(
         self, store: JsonFileCheckpointStore
@@ -589,7 +589,7 @@ class TestSaiaTurnTraceRef:
 
         # Iterate body so halt-save lands at the iterate's node with the
         # paused iteration index — resume re-runs that iteration, which is
-        # when the Loop's re-dispatch consumes the saia_turn entry. A pure
+        # when the Loop's re-dispatch consumes the paused_turn entry. A pure
         # chain would halt-save at the NEXT chain step, skipping the
         # paused Loop entirely.
         body_ff = FlowFactory(make_test_logger())
@@ -609,7 +609,7 @@ class TestSaiaTurnTraceRef:
         assert [c["phase"] for c in complete_calls] == ["first"]
 
         # ---- Run 2: resume=True re-runs iteration 0. The Loop's re-dispatch
-        # picks up the saia_turn entry and hands SAIA the reconstructed
+        # picks up the paused_turn entry and hands SAIA the reconstructed
         # conversation with resume=True. The caller supplies a different
         # conversation — the resume path must override it with the rebuilt
         # one from the halted commit.
@@ -720,7 +720,7 @@ class TestSaiaTurnTraceRef:
         await flow1.run(extra={"task": "saved-task", "conv": _Conv(messages=["turn-1"])})
         assert after_calls == []  # halt observed before after_step ran
 
-        # Run 2: resume. Loop is re-dispatched, consumes saia_turn, SAIA
+        # Run 2: resume. Loop is re-dispatched, consumes paused_turn, SAIA
         # completes non-paused, chain moves on to after_step.
         halt2 = asyncio.Event()
         ff2 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
@@ -753,14 +753,14 @@ class TestSaiaTurnTraceRef:
         assert after_calls == [1]
         assert result == "ran-after"
 
-    async def test_resume_restores_saved_task_from_saia_turn_envelope(self) -> None:
+    async def test_resume_restores_saved_task_from_paused_turn_envelope(self) -> None:
         """Loop._consume_resume_entry decodes both task and conversation from the envelope."""
         from dataclasses import dataclass, field
         from types import SimpleNamespace
 
         from llm_gent.flow import Loop, Role
         from llm_gent.flow.state.cas import canonical_json
-        from llm_gent.flow.state.saia_turn import ResumeSaiaTurns
+        from llm_gent.flow.state.paused_turn import ResumePausedTurns
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -783,17 +783,17 @@ class TestSaiaTurnTraceRef:
         node_id = "node-abc"
         loop = Loop(role, conversation_factory=_ConvFactory())
 
-        # Seed a runtime resume-map with a saia_turn envelope carrying BOTH the
+        # Seed a runtime resume-map with a paused_turn envelope carrying BOTH the
         # task and the conversation state. This is exactly the shape
-        # _hydrate_resume_state populates from a halt commit's saia_turn blob.
-        resume_turns = ResumeSaiaTurns()
+        # _hydrate_resume_state populates from a halt commit's paused_turn blob.
+        resume_turns = ResumePausedTurns()
         resume_turns.add(
             node_id,
             canonical_json(
                 {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
             ),
         )
-        env = SimpleNamespace(resume_saia_turns=resume_turns)
+        env = SimpleNamespace(resume_paused_turns=resume_turns)
         ctx = SimpleNamespace(_env=env, _node_id=node_id)
 
         task, conversation, is_resume = loop._consume_resume_entry(ctx)  # type: ignore[arg-type]
@@ -1076,7 +1076,7 @@ class TestSaveOnHaltIterate:
             halt=halt,
             halt_after_iteration=999,  # internal halt_check never fires; halt is pre-set externally.
             store=store,
-            trajectory_id="halt-iter-0",
+            client_flow_id="halt-iter-0",
         ).run()
 
         halted_hash = store.resolve_ref("halt-iter-0")
@@ -1088,7 +1088,7 @@ class TestSaveOnHaltIterate:
         # Resume with halt cleared — completes the full iterate.
         halt.clear()
         result = await build_canonical_flow(
-            make_test_logger(), max_iters=5, store=store, trajectory_id="halt-iter-0"
+            make_test_logger(), max_iters=5, store=store, client_flow_id="halt-iter-0"
         ).run(resume=True)
         assert result["iterations_completed"] == 5
 
@@ -1105,7 +1105,7 @@ class TestSaveOnHaltIterate:
             halt=halt,
             halt_after_iteration=2,
             store=store,
-            trajectory_id="halt-iter-mid",
+            client_flow_id="halt-iter-mid",
         ).run()
 
         halted_hash = store.resolve_ref("halt-iter-mid")
@@ -1119,7 +1119,7 @@ class TestSaveOnHaltIterate:
         # Resume completes the remaining iterations.
         halt.clear()
         result = await build_canonical_flow(
-            make_test_logger(), max_iters=5, store=store, trajectory_id="halt-iter-mid"
+            make_test_logger(), max_iters=5, store=store, client_flow_id="halt-iter-mid"
         ).run(resume=True)
         assert result["iterations_completed"] == 5
 
@@ -1137,7 +1137,7 @@ class TestResumeDeterminism:
             store,
             halt_after_iteration=2,
             max_iters=5,
-            trajectory_id="determinism-1",
+            client_flow_id="determinism-1",
         )
         # Final iterations_completed reflects the full max_iters run.
         assert final["iterations_completed"] == 5
@@ -1145,9 +1145,9 @@ class TestResumeDeterminism:
     async def test_resume_with_no_prior_checkpoint_starts_fresh(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """resume=True on a trajectory with no ref falls back to a fresh run."""
+        """resume=True on a history with no ref falls back to a fresh run."""
         flow = build_canonical_flow(
-            make_test_logger(), max_iters=2, store=store, trajectory_id="never-saved"
+            make_test_logger(), max_iters=2, store=store, client_flow_id="never-saved"
         )
         result = await flow.run(resume=True)
         assert result["iterations_completed"] == 2
@@ -1188,7 +1188,7 @@ class TestResumeDeterminism:
         await _flow().run()
         assert tail_calls == [3]
         # Resume after completion — should be a no-op (fresh run since the
-        # trajectory is marked complete). Tail runs ONCE more from the
+        # history is marked complete). Tail runs ONCE more from the
         # fresh state, not twice from the resumed one.
         await _flow().run(resume=True)
         assert tail_calls == [3, 3], f"tail should have fired only twice total; got {tail_calls}"
@@ -1196,13 +1196,13 @@ class TestResumeDeterminism:
     async def test_multiple_resume_boundaries(self, store: JsonFileCheckpointStore) -> None:
         """Interrupt at different iterations, resume each — final state matches uninterrupted."""
         for cut_at in (1, 2, 3, 4):
-            traj = f"multi-cut-{cut_at}"
+            cfid = f"multi-cut-{cut_at}"
             final = await assert_resume_determinism(
                 make_test_logger(),
                 store,
                 halt_after_iteration=cut_at,
                 max_iters=5,
-                trajectory_id=traj,
+                client_flow_id=cfid,
             )
             assert final["iterations_completed"] == 5
 
@@ -1221,7 +1221,7 @@ class TestResumeErrorPaths:
         store.put_ref("orphan-ref", "some/node", 0, "0" * 64)
         # No corresponding commit object was ever put — resume falls back.
         flow = build_canonical_flow(
-            make_test_logger(), max_iters=1, store=store, trajectory_id="orphan-ref"
+            make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-ref"
         )
         result = await flow.run(resume=True)
         assert result["iterations_completed"] == 1
@@ -1243,7 +1243,7 @@ class TestResumeErrorPaths:
             produced_by=ProducedBy(node_id="x", verb_name=None, role=None, result_hash=None),
             trace_ref=(),
             outcome="ok",
-            flow_root_id="orphan-tree",
+            flow_root_hash="orphan-tree",
             timestamp_iso="1970-01-01T00:00:00+00:00",
             framework_version="test",
         )
@@ -1252,7 +1252,7 @@ class TestResumeErrorPaths:
         store.put_ref("orphan-tree", "root", 0, commit.content_hash)
         # Tree object missing → resume falls back.
         flow = build_canonical_flow(
-            make_test_logger(), max_iters=1, store=store, trajectory_id="orphan-tree"
+            make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-tree"
         )
         result = await flow.run(resume=True)
         assert result["iterations_completed"] == 1
@@ -1279,7 +1279,7 @@ class TestResumeErrorPaths:
             produced_by=ProducedBy(node_id="x", verb_name=None, role=None, result_hash=None),
             trace_ref=(),
             outcome="ok",
-            flow_root_id="orphan-blob",
+            flow_root_hash="orphan-blob",
             timestamp_iso="1970-01-01T00:00:00+00:00",
             framework_version="test",
         )
@@ -1289,7 +1289,7 @@ class TestResumeErrorPaths:
         store.put_ref("orphan-blob", "root", 0, commit.content_hash)
         # Blob missing → resume falls back.
         flow = build_canonical_flow(
-            make_test_logger(), max_iters=1, store=store, trajectory_id="orphan-blob"
+            make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-blob"
         )
         result = await flow.run(resume=True)
         assert result["iterations_completed"] == 1
@@ -1327,7 +1327,7 @@ class TestResumeErrorPaths:
             produced_by=ProducedBy(node_id="x", verb_name=None, role=None, result_hash=None),
             trace_ref=(),
             outcome="ok",
-            flow_root_id="stale-1",
+            flow_root_hash="stale-1",
             timestamp_iso="1970-01-01T00:00:00+00:00",
             framework_version="test",
         )
@@ -1335,7 +1335,7 @@ class TestResumeErrorPaths:
         store.put_object("stale-1", "commit", commit.content_hash, commit.to_bytes())
         store.put_ref("stale-1", stale_path, 2, commit.content_hash)
         flow = build_canonical_flow(
-            make_test_logger(), max_iters=3, store=store, trajectory_id="stale-1"
+            make_test_logger(), max_iters=3, store=store, client_flow_id="stale-1"
         )
         with pytest.raises(RuntimeError) as excinfo:
             await flow.run(resume=True)
@@ -1579,14 +1579,14 @@ class TestAsyncStore:
                 await asyncio.sleep(0)
                 return self._inner.resolve_ref(*a, **kw)
 
-            async def gc_trajectory(self, *a: Any, **kw: Any) -> None:
+            async def gc_history(self, *a: Any, **kw: Any) -> None:
                 await asyncio.sleep(0)
-                self._inner.gc_trajectory(*a, **kw)
+                self._inner.gc_history(*a, **kw)
 
         inner = _Sync(make_test_logger(), tmp_path / "cp")
         wrap = _AsyncWrap(inner)
         # Sanity: every method IS async.
-        for m in ("put_object", "get_object", "put_ref", "resolve_ref", "gc_trajectory"):
+        for m in ("put_object", "get_object", "put_ref", "resolve_ref", "gc_history"):
             assert inspect.iscoroutinefunction(getattr(wrap, m))
 
         # Round-trip via the canonical flow: fresh save + resume.
@@ -1597,12 +1597,12 @@ class TestAsyncStore:
             halt=halt,
             halt_after_iteration=2,
             store=wrap,
-            trajectory_id="async-round-trip",
+            client_flow_id="async-round-trip",
         ).run()
         resumed = await build_canonical_flow(
             make_test_logger(),
             max_iters=5,
             store=wrap,
-            trajectory_id="async-round-trip",
+            client_flow_id="async-round-trip",
         ).run(resume=True)
         assert resumed["iterations_completed"] == 5

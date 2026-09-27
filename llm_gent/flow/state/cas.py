@@ -4,12 +4,12 @@
 """Content-addressed state model — the CAS substrate.
 
 Blob / Tree / Commit form a Git-shaped provenance store for gent
-trajectories. State at every save-point becomes a :class:`Blob` keyed by
+histories. State at every save-point becomes a :class:`Blob` keyed by
 its content hash; an ordered :class:`Tree` of scope entries binds those
 blobs to the state stack; a :class:`Commit` stamps the tree with its
-position in the trajectory (``client_flow_id``, ``node_path``,
+position in the history (``client_flow_id``, ``node_path``,
 ``iteration``) and provenance metadata (``produced_by``, ``trace_ref``,
-``outcome``, ``flow_root_id``).
+``outcome``, ``flow_root_hash``).
 
 This module ships only the object model and the hash discipline.
 Persistence (the :class:`CheckpointStore` Protocol redesign) and the
@@ -19,8 +19,8 @@ Hash discipline
 ---------------
 - All content hashes are :func:`blake2b` with ``digest_size=32``.
 - Content-only — no ``client_flow_id`` / ``node_path`` / ``iteration``
-  salt in the hash. Two identical byte payloads across trajectories
-  produce the same blob hash; cross-trajectory diff depends on this.
+  salt in the hash. Two identical byte payloads across histories
+  produce the same blob hash; cross-history diff depends on this.
 - Canonical serialization is versioned via
   :attr:`CommitMeta.framework_version` so a canonicalization change in a
   later gent version does not invalidate prior blobs — old commits stay
@@ -28,7 +28,7 @@ Hash discipline
 
 Direct-save commits (consumer sites that save state outside a Flow
 iterate boundary — e.g. an initial-plan write) use a ``$external/*``
-prefix on :attr:`ProducedBy.node_id` so a downstream trajectory-walker
+prefix on :attr:`ProducedBy.node_id` so a downstream history-walker
 can filter without a schema-aware parser.
 """
 
@@ -52,7 +52,7 @@ def content_hash(data: bytes) -> str:
     """Return the blake2b hex digest of ``data`` at :data:`_DIGEST_SIZE`.
 
     Deterministic on ``data`` alone; no salt, no keying. Same bytes → same
-    hash across trajectories, which is the invariant cross-trajectory
+    hash across histories, which is the invariant cross-history
     diff depends on.
     """
     return blake2b(data, digest_size=_DIGEST_SIZE).hexdigest()
@@ -183,7 +183,7 @@ class ProducedBy:
     commit came from an in-flow verb; ``None`` for direct saves.
 
     :attr:`role` is the verb's bound role, per-commit (not per-
-    trajectory) — a run that dispatches multiple verbs under different
+    history) — a run that dispatches multiple verbs under different
     roles attributes each commit to the role that owned that verb.
 
     :attr:`result_hash` is :func:`content_hash` of the verb's serialized
@@ -240,17 +240,20 @@ class CommitMeta:
     produced_by: ProducedBy
     trace_ref: tuple[TraceRef, ...]
     outcome: CommitOutcome
-    flow_root_id: str
+    flow_root_hash: str
+    """Structure hash of the flow definition (the composition tree) —
+    identical for every history running the same flow code. Empty until
+    the framework computes it."""
     timestamp_iso: str
     framework_version: str
 
 
 @dataclass(frozen=True)
 class Commit:
-    """A trajectory timepoint — root tree, parent chain, provenance meta.
+    """One point in a flow's history — root tree, parent chain, provenance meta.
 
     :attr:`parent_hashes` is single-parent (linear history) in the common
-    case; a multi-parent tuple is reserved for a future merge/branch
+    case; a multi-parent tuple is reserved for a future fork/merge
     surface and unused today.
 
     Build only via :meth:`build` so :attr:`content_hash` stays consistent
@@ -325,7 +328,7 @@ def _parse_commit_meta(meta_body: dict[str, Any]) -> CommitMeta:
             TraceRef(kind=r["kind"], id=r["id"]) for r in meta_body.get("trace_ref", [])
         ),
         outcome=meta_body["outcome"],
-        flow_root_id=meta_body["flow_root_id"],
+        flow_root_hash=meta_body["flow_root_hash"],
         timestamp_iso=meta_body["timestamp_iso"],
         framework_version=meta_body["framework_version"],
     )
@@ -368,7 +371,7 @@ def _meta_body(meta: CommitMeta) -> dict[str, Any]:
         },
         "trace_ref": [{"kind": r.kind, "id": r.id} for r in meta.trace_ref],
         "outcome": meta.outcome,
-        "flow_root_id": meta.flow_root_id,
+        "flow_root_hash": meta.flow_root_hash,
         "timestamp_iso": meta.timestamp_iso,
         "framework_version": meta.framework_version,
     }

@@ -46,7 +46,7 @@ def _meta(
     result_hash: str | None = None,
     trace_ref: tuple[TraceRef, ...] = (),
     outcome: str = "ok",
-    flow_root_id: str = "root-hash-xx",
+    flow_root_hash: str = "root-hash-xx",
     timestamp_iso: str = "2026-09-22T00:00:00+00:00",
     framework_version: str = "0.4.0",
 ) -> CommitMeta:
@@ -63,7 +63,7 @@ def _meta(
         ),
         trace_ref=trace_ref,
         outcome=outcome,  # type: ignore[arg-type]
-        flow_root_id=flow_root_id,
+        flow_root_hash=flow_root_hash,
         timestamp_iso=timestamp_iso,
         framework_version=framework_version,
     )
@@ -293,11 +293,11 @@ class InMemoryObjectStore:
     """Dict-backed :class:`CheckpointStore` for testing.
 
     Implements the full Protocol surface — object store (put/get/has),
-    ref store (put_ref / resolve_ref), gc_trajectory, and the retention
+    ref store (put_ref / resolve_ref), gc_history, and the retention
     attribute — so tests can wire it in place of a real store without
     touching the filesystem.
 
-    Objects and refs are trajectory-scoped by ``client_flow_id`` under
+    Objects and refs are history-scoped by ``client_flow_id`` under
     the same keyspace policy as the reference stores. ``resolve_ref``
     with both filters ``None`` returns the latest ref by insertion order
     (matches Postgres's ``ORDER BY created_at DESC LIMIT 1`` semantics).
@@ -356,108 +356,108 @@ class InMemoryObjectStore:
                 best_hash = h
         return best_hash
 
-    def gc_trajectory(self, client_flow_id: str) -> None:
+    def gc_history(self, client_flow_id: str) -> None:
         self._objects = {k: v for k, v in self._objects.items() if k[0] != client_flow_id}
         self._refs = {k: v for k, v in self._refs.items() if k[0] != client_flow_id}
         self._ref_order = [k for k in self._ref_order if k[0] != client_flow_id]
 
 
 class TestInMemoryObjectStore:
-    """Object surface — trajectory-scoped keyspace + idempotency + dedup."""
+    """Object surface — history-scoped keyspace + idempotency + dedup."""
 
     def test_put_get_round_trip(self) -> None:
         store = InMemoryObjectStore()
         blob = Blob.from_bytes(b"payload")
-        store.put_object("traj-1", "blob", blob.content_hash, blob.payload)
-        assert store.get_object("traj-1", "blob", blob.content_hash) == b"payload"
+        store.put_object("history-1", "blob", blob.content_hash, blob.payload)
+        assert store.get_object("history-1", "blob", blob.content_hash) == b"payload"
 
     def test_has_object_reflects_presence(self) -> None:
         store = InMemoryObjectStore()
-        assert not store.has_object("traj-1", "blob", "missing")
+        assert not store.has_object("history-1", "blob", "missing")
         blob = Blob.from_bytes(b"x")
-        store.put_object("traj-1", "blob", blob.content_hash, blob.payload)
-        assert store.has_object("traj-1", "blob", blob.content_hash)
+        store.put_object("history-1", "blob", blob.content_hash, blob.payload)
+        assert store.has_object("history-1", "blob", blob.content_hash)
 
     def test_put_idempotent_same_bytes(self) -> None:
         store = InMemoryObjectStore()
         blob = Blob.from_bytes(b"x")
-        store.put_object("traj-1", "blob", blob.content_hash, blob.payload)
-        store.put_object("traj-1", "blob", blob.content_hash, blob.payload)  # no raise
-        assert store.get_object("traj-1", "blob", blob.content_hash) == b"x"
+        store.put_object("history-1", "blob", blob.content_hash, blob.payload)
+        store.put_object("history-1", "blob", blob.content_hash, blob.payload)  # no raise
+        assert store.get_object("history-1", "blob", blob.content_hash) == b"x"
 
     def test_kind_scopes_the_keyspace(self) -> None:
         """Same hash under different kind slots does not collide."""
         store = InMemoryObjectStore()
-        store.put_object("traj-1", "blob", "h", b"blob-bytes")
-        store.put_object("traj-1", "tree", "h", b"tree-bytes")
-        assert store.get_object("traj-1", "blob", "h") == b"blob-bytes"
-        assert store.get_object("traj-1", "tree", "h") == b"tree-bytes"
+        store.put_object("history-1", "blob", "h", b"blob-bytes")
+        store.put_object("history-1", "tree", "h", b"tree-bytes")
+        assert store.get_object("history-1", "blob", "h") == b"blob-bytes"
+        assert store.get_object("history-1", "tree", "h") == b"tree-bytes"
 
     def test_client_flow_id_scopes_the_keyspace(self) -> None:
-        """Same (kind, hash) under two trajectories store separately."""
+        """Same (kind, hash) under two histories store separately."""
         store = InMemoryObjectStore()
-        store.put_object("traj-a", "blob", "h", b"a-bytes")
-        store.put_object("traj-b", "blob", "h", b"b-bytes")
-        assert store.get_object("traj-a", "blob", "h") == b"a-bytes"
-        assert store.get_object("traj-b", "blob", "h") == b"b-bytes"
+        store.put_object("history-a", "blob", "h", b"a-bytes")
+        store.put_object("history-b", "blob", "h", b"b-bytes")
+        assert store.get_object("history-a", "blob", "h") == b"a-bytes"
+        assert store.get_object("history-b", "blob", "h") == b"b-bytes"
 
 
 class TestInMemoryRefStore:
-    """Ref surface — exact / by-node_path / latest-across-trajectory lookups."""
+    """Ref surface — exact / by-node_path / latest-across-history lookups."""
 
     def test_put_resolve_exact_key(self) -> None:
         store = InMemoryObjectStore()
-        store.put_ref("traj-1", "node/x", 5, "commit-hash-5")
-        assert store.resolve_ref("traj-1", "node/x", 5) == "commit-hash-5"
+        store.put_ref("history-1", "node/x", 5, "commit-hash-5")
+        assert store.resolve_ref("history-1", "node/x", 5) == "commit-hash-5"
 
     def test_resolve_none_when_absent(self) -> None:
         store = InMemoryObjectStore()
-        assert store.resolve_ref("traj-1") is None
-        assert store.resolve_ref("traj-1", "node/x", 5) is None
+        assert store.resolve_ref("history-1") is None
+        assert store.resolve_ref("history-1", "node/x", 5) is None
 
-    def test_resolve_latest_across_trajectory(self) -> None:
+    def test_resolve_latest_across_history(self) -> None:
         """Both filters None → newest ref by insertion order."""
         store = InMemoryObjectStore()
-        store.put_ref("traj-1", "node/a", 1, "hash-1")
-        store.put_ref("traj-1", "node/b", 1, "hash-2")
-        assert store.resolve_ref("traj-1") == "hash-2"
+        store.put_ref("history-1", "node/a", 1, "hash-1")
+        store.put_ref("history-1", "node/b", 1, "hash-2")
+        assert store.resolve_ref("history-1") == "hash-2"
 
     def test_resolve_latest_under_node_path(self) -> None:
         """node_path only → highest iteration under that path."""
         store = InMemoryObjectStore()
-        store.put_ref("traj-1", "node/x", 1, "hash-1")
-        store.put_ref("traj-1", "node/x", 3, "hash-3")
-        store.put_ref("traj-1", "node/x", 2, "hash-2")
-        assert store.resolve_ref("traj-1", "node/x") == "hash-3"
+        store.put_ref("history-1", "node/x", 1, "hash-1")
+        store.put_ref("history-1", "node/x", 3, "hash-3")
+        store.put_ref("history-1", "node/x", 2, "hash-2")
+        assert store.resolve_ref("history-1", "node/x") == "hash-3"
 
     def test_resolve_iteration_without_node_path_raises(self) -> None:
         store = InMemoryObjectStore()
         with pytest.raises(ValueError, match="iteration requires node_path"):
-            store.resolve_ref("traj-1", None, 5)
+            store.resolve_ref("history-1", None, 5)
 
     def test_put_ref_overwrites_same_key(self) -> None:
         store = InMemoryObjectStore()
-        store.put_ref("traj-1", "node/x", 5, "hash-first")
-        store.put_ref("traj-1", "node/x", 5, "hash-second")
-        assert store.resolve_ref("traj-1", "node/x", 5) == "hash-second"
+        store.put_ref("history-1", "node/x", 5, "hash-first")
+        store.put_ref("history-1", "node/x", 5, "hash-second")
+        assert store.resolve_ref("history-1", "node/x", 5) == "hash-second"
 
 
-class TestInMemoryGcTrajectory:
+class TestInMemoryGcHistory:
     def test_removes_all_objects_and_refs(self) -> None:
         store = InMemoryObjectStore()
-        store.put_object("traj-1", "blob", "h1", b"payload")
-        store.put_ref("traj-1", "node/x", 1, "commit-h")
-        store.gc_trajectory("traj-1")
-        assert store.get_object("traj-1", "blob", "h1") is None
-        assert store.resolve_ref("traj-1", "node/x", 1) is None
+        store.put_object("history-1", "blob", "h1", b"payload")
+        store.put_ref("history-1", "node/x", 1, "commit-h")
+        store.gc_history("history-1")
+        assert store.get_object("history-1", "blob", "h1") is None
+        assert store.resolve_ref("history-1", "node/x", 1) is None
 
-    def test_leaves_other_trajectories_intact(self) -> None:
+    def test_leaves_other_histories_intact(self) -> None:
         store = InMemoryObjectStore()
-        store.put_object("traj-a", "blob", "h", b"a-bytes")
-        store.put_object("traj-b", "blob", "h", b"b-bytes")
-        store.gc_trajectory("traj-a")
-        assert store.get_object("traj-a", "blob", "h") is None
-        assert store.get_object("traj-b", "blob", "h") == b"b-bytes"
+        store.put_object("history-a", "blob", "h", b"a-bytes")
+        store.put_object("history-b", "blob", "h", b"b-bytes")
+        store.gc_history("history-a")
+        assert store.get_object("history-a", "blob", "h") is None
+        assert store.get_object("history-b", "blob", "h") == b"b-bytes"
 
 
 class TestInMemoryRetention:
