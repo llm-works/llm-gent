@@ -32,7 +32,8 @@ The store is a Protocol with five surfaces:
   commit hash. ``put_ref`` records "this history reached this commit
   at this iterate boundary"; ``resolve_ref`` returns the commit hash for
   a full or partial key (``node_path=None, iteration=None`` returns the
-  latest commit across the history — the resume entry point).
+  latest commit across the history — the head, where resume starts
+  walking back from).
 
 - **Tags** — :meth:`put_tag` / :meth:`resolve_tag` point a named label
   under ``flow_id`` at a commit hash. A tag moves when re-put. On a clean
@@ -69,7 +70,7 @@ The reference stores accept a ``retention`` argument at construction:
   behavior for consumers who don't want the history to accumulate.
 
 Halt / cancellation / unhandled exceptions preserve the history
-regardless of retention so a later ``resume=True`` run can pick up.
+regardless of retention so a later resuming run can pick up.
 """
 
 from __future__ import annotations
@@ -108,10 +109,43 @@ head is at this path is complete.
 """
 
 
-FRAMEWORK_PRODUCER = "$framework/completion"
-"""``produced_by.node_id`` of commits the framework writes itself (the
-:data:`END_NODE_PATH` final-state commit) — no node produced them. Follows
-the ``$external/*`` convention for producers that are not flow nodes.
+FAILED_NODE_PATH = "$failed"
+"""Reserved ``node_path`` of the commit written when a top-level run raises.
+
+Records the root state at the moment of failure (``outcome="failed"``)
+for inspection. It is never a starting point: that state may be
+half-updated, so both ``resume="replay"`` and ``resume="restart"`` skip
+such commits and start from the last commit before them.
+"""
+
+
+COMPLETION_PRODUCER = "$framework/completion"
+"""``produced_by.node_id`` of the :data:`END_NODE_PATH` final-state commit."""
+
+
+FAILURE_PRODUCER = "$framework/failure"
+"""``produced_by.node_id`` of the :data:`FAILED_NODE_PATH` commit.
+
+The framework writes both itself — no node produced them — following the
+``$external/*`` convention for producers that are not flow nodes.
+"""
+
+
+ResumeMode = Literal["off", "replay", "restart"]
+"""How :meth:`Flow.run` starts from a checkpointed history.
+
+- ``"off"`` — run from ``state=`` as given; new commits still append to
+  the history.
+- ``"replay"`` — positional resume: rebuild the scope tree of the last save
+  point and fast-forward to it. Starts from ``state=`` when the history is
+  empty or complete; raises :class:`~llm_gent.flow.history.HistoryCorrupt`
+  on a corrupt history.
+- ``"restart"`` — run from the first node with the root state of the
+  newest commit that has usable state (halted, ok or final; ``$failed``
+  and stateless commits are skipped). Child scopes are not restored,
+  iterate counters start at zero, and paused turns are not offered.
+  Starts from ``state=`` when the history is empty; raises
+  :class:`~llm_gent.flow.history.HistoryCorrupt` on a corrupt history.
 """
 
 
@@ -132,7 +166,7 @@ class CheckpointPolicy:
       fires whenever the executor observes the halt event set at
       any of its save sites (iterate boundary, chain between-step,
       chain tail), provided a checkpointer is wired. This is the durability guarantee that makes
-      ``run(resume=True)`` reach a halted history.
+      ``run(resume="replay")`` reach a halted history.
     - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires
       regardless of policy; when the verb asks to save, we save.
 
@@ -338,7 +372,7 @@ class CheckpointStore(Protocol):
 
         - Both ``None`` (default) — return the latest commit across every
           ``node_path`` under ``flow_id``. This is what
-          :meth:`Flow.run` ``resume=True`` calls to find the resume
+          :meth:`Flow.run` ``resume=`` calls to find the resume
           entry point.
         - ``node_path`` set, ``iteration=None`` — latest iteration under
           that specific ``node_path``.

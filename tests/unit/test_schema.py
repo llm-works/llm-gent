@@ -48,4 +48,4 @@ class TestKeltCoexistenceInvariants:
 
         assert _VERSION_TABLE_NAME != KELT_TABLE
         assert _VERSION_TABLE_NAME != "alembic_version"
-        assert "llm_gent" in _VERSION_TABLE_NAME
+        assert _VERSION_TABLE_NAME == "alembic_version_gent"

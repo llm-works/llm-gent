@@ -125,7 +125,7 @@ class FlowFactory:
                 entire agent shape.
             state_factory: Optional :class:`StateFactory` threaded into
                 every :class:`Flow`'s ``state_factory=`` slot. Consumed by
-                :meth:`Flow.run` ``resume=True`` to reconstruct
+                :meth:`Flow.run` ``resume="replay"``/``"restart"`` to reconstruct
                 ``ctx.state.data`` from a loaded checkpoint via
                 ``state_factory.restore(...)``. Wrap a stateless type in
                 :class:`TypeStateFactory`; implement :class:`StateFactory`

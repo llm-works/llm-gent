@@ -37,7 +37,7 @@ async def _run(store: JsonFileCheckpointStore, name: str, *, halt_at: int | None
         halt_after_iteration=halt_at,
         store=store,
         client_flow_id=name,
-    ).run(resume=True)
+    ).run(resume="replay")
 
 
 async def _all(history: History) -> list[Commit]:
@@ -51,6 +51,7 @@ class TestEmptyHistory:
         assert await history.head() is None
         assert await history.last_complete() is None
         assert not await history.is_complete()
+        assert await history.replay_point() is None
         assert await _all(history) == []
 
 
@@ -63,6 +64,7 @@ class TestCompletedHistory:
         assert head is not None
         assert History.is_final_state(head)
         assert await history.is_complete()
+        assert await history.replay_point() is None
         assert await history.last_complete() == head
         assert head.meta.flow_id == await history.flow_id()
 
@@ -120,33 +122,25 @@ class TestCorruptHistory:
         with pytest.raises(HistoryCorrupt):
             await history.head()
 
-    async def test_resume_on_corrupt_history_warns_and_starts_fresh(
-        self, store: JsonFileCheckpointStore, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_replay_on_corrupt_history_raises(self, store: JsonFileCheckpointStore) -> None:
+        """Replay stops on store damage instead of starting over from ``state=``."""
         await _run(store, "torn-resume", halt_at=2)
         head = await History(store, "torn-resume").head()
         assert head is not None
         (self._objects(store, head.meta.flow_id, "commit") / head.content_hash).unlink()
 
-        lg = make_test_logger()
-        warnings: list[str] = []
-        monkeypatch.setattr(lg, "warning", lambda msg, *_a, **_kw: warnings.append(msg))
-        result = await build_canonical_flow(
-            lg,
+        flow = build_canonical_flow(
+            make_test_logger(),
             state=CanonicalCounter(n=100),
             max_iters=4,
             store=store,
             client_flow_id="torn-resume",
-        ).run(resume=True)
-
-        assert result["log"][0] == 101  # fresh from the fallback state, not resumed
-        assert any("corrupt" in w for w in warnings)
-        # The fresh run's commits form a new, fully readable chain.
-        history = History(store, "torn-resume")
-        chain = await _all(history)
-        assert chain[0].meta.node_path == "$end"
-        assert chain[-1].parent_hashes == ()
-        assert {c.meta.flow_id for c in chain} == {await history.flow_id()}
+        )
+        with pytest.raises(HistoryCorrupt):
+            await flow.run(resume="replay")
+        # Nothing was written past the damage: the ref still names the missing commit.
+        with pytest.raises(HistoryCorrupt):
+            await History(store, "torn-resume").head()
 
 
 class TestHistoryAcrossRuns:
@@ -160,6 +154,7 @@ class TestHistoryAcrossRuns:
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
         assert not await history.is_complete()
+        assert await history.replay_point() == head
         assert await history.last_complete() == first_end
         chain = await _all(history)
         assert chain[0] == head

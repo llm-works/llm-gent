@@ -1,34 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Resume protocol: read-side hydration + write-side completion commit.
+"""Resume protocol: read-side hydration + write-side framework commits.
 
-Read side — :class:`Resume` is constructed per ``run(resume=True)``
-call with the flow being resumed; its public :meth:`hydrate` returns
-the ``(State, _ResumeReplay | None)`` pair the executor threads
-through the walk. It reads the history through the public
-:class:`~llm_gent.flow.history.History` API: (a) the head commit,
-(b) its per-scope JSON payloads, then (c) hydrates the top-level
-:class:`State` from the root scope and (d) hands every non-root
-scope payload to ``_ResumeReplay.intermediate_scope_data`` so
-descent sites (``_consume_scope_data``) can restore their own scope
-in order.
+Read side — :class:`Resume` is constructed per resuming ``run()`` with
+the flow being resumed, and reads the history through the public
+:class:`~llm_gent.flow.history.History` API:
+
+- :meth:`Resume.replay` (``resume="replay"``) returns the
+  ``(State, _ResumeReplay | None)`` pair the executor threads through the
+  walk: the last save point's root scope hydrates the top-level
+  :class:`State`, every non-root scope payload rides on
+  ``_ResumeReplay.intermediate_scope_data`` so descent sites
+  (``_consume_scope_data``) restore their own scope in order.
+- :meth:`Resume.restart` (``resume="restart"``) returns only the root
+  :class:`State` of the newest commit with usable state; the run starts
+  at the first node.
 
 Write side — :func:`apply_clean_exit_retention` and
-:func:`commit_completion` commit the final state on clean exit and
-move the ``complete`` tag to it; a head at that final-state commit is
-what :meth:`Resume.hydrate` treats as a finished history.
-:func:`assert_replay_consumed` is the belt-and-suspenders check called
-after a resume run to fail-fast when the save-point iterate was never
-found.
+:func:`commit_completion` commit the final state on clean exit and move
+the ``complete`` tag to it; :func:`commit_failure` commits the state at
+the moment a run raised. :func:`assert_replay_consumed` is the
+belt-and-suspenders check called after a replay run to fail-fast when
+the save-point iterate was never found.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import COMPLETE_TAG, END_NODE_PATH
-from .history import History, HistoryCorrupt
+from .checkpoint import COMPLETE_TAG
+from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
 
@@ -39,80 +41,101 @@ if TYPE_CHECKING:
 
 
 class Resume:
-    """Hydrate initial state + replay plan for a ``run(resume=True)`` call.
+    """Hydrate the initial state (and replay plan) for a resuming ``run()``.
 
-    Constructed with the flow being resumed. Caller invokes
-    :meth:`hydrate` with the fallback :class:`State` (the wrapped
-    ``run(state=...)`` payload) and receives the hydrated state +
-    replay tuple. On a fresh run (no commit yet, or the history is
-    complete), returns ``(fallback, None)`` so the caller falls through
-    to a normal fresh run — whose commits still append to the same
-    history.
+    Constructed with a flow that has a checkpointer. Both entry points take
+    the fallback :class:`State` (the wrapped ``run(state=...)`` payload)
+    and return it unchanged when there is nothing to resume, so the caller
+    falls through to a fresh run — whose commits still append to the same
+    history. Both raise :class:`~llm_gent.flow.history.HistoryCorrupt` on a
+    corrupt history rather than silently starting over from ``fallback``.
     """
 
     def __init__(self, flow: Flow) -> None:
-        self.flow = flow
-
-    async def hydrate(self, fallback: State[Any]) -> tuple[State[Any], _ResumeReplay | None]:
-        """Load the latest commit and reconstruct state + replay context.
-
-        Sequence:
-
-        1. :meth:`History.head` returns the latest commit across
-           every ``node_path``, or ``None`` (fresh run — no prior
-           checkpoint). A final-state head is a finished run: fresh
-           run. That holds even if the ``complete`` tag write after
-           it never landed.
-        2. :meth:`History.scopes` walks the commit's tree to one
-           JSON payload per scope, root → leaf via the zero-padded
-           ``scope_id`` (canonical sort).
-        3. The commit's ``paused_turn`` trace refs load as resume
-           entries for the Loops that paused.
-        4. The root scope's payload rehydrates the top-level
-           :class:`State` (via ``state_factory.restore`` when
-           bound, passthrough otherwise). The leaf scope's payload
-           rides on the :class:`_ResumeReplay` as
-           ``child_state_data`` for the save-point iterate to
-           restore its own scope.
-        5. ``node_path`` splits on ``"/"`` back into the ancestor
-           chain the executor's head-pop replay expects. blake2b
-           hex has no slashes, so the round-trip is exact.
-
-        Returns ``(fallback, None)`` when no commit exists yet or
-        the history is complete.
-        """
-        flow = self.flow
         ctx = flow._checkpoint_ctx
         assert ctx is not None
-        loaded = await self._read_head(History(ctx.store, ctx.client_flow_id))
-        if loaded is None:
-            return fallback, None
-        head, scope_data = loaded
-        await flow._resume_paused_turns.load_from_commit(ctx, head)
-        return self._split_scopes(head, scope_data)
+        self.flow = flow
+        self._ctx = ctx
+        self._history = History(ctx.store, ctx.client_flow_id)
 
-    async def _read_head(self, history: History) -> tuple[Commit, list[Any]] | None:
-        """Head commit and its scope payloads, or ``None`` when there is nothing to resume.
+    async def replay(self, fallback: State[Any]) -> tuple[State[Any], _ResumeReplay | None]:
+        """Replay: rebuild the last save point's scope tree and replay context.
 
-        Nothing to resume: an empty or complete history, or a corrupt one —
-        a missing commit, tree or blob falls through to a fresh run, with a
-        warning so the damage is not silent. The fresh run's commits then
-        start a new root rather than parenting on the unreadable head.
+        1. :meth:`History.replay_point` picks the resume commit: the head, or the
+           newest commit before a run of ``$failed`` commits. A final-state
+           commit there is a finished run: fresh run (even if the
+           ``complete`` tag write after it never landed).
+        2. :meth:`History.scopes` walks the commit's tree to one JSON
+           payload per scope, root → leaf via the zero-padded ``scope_id``.
+        3. The commit's ``paused_turn`` trace refs load as resume entries
+           for the Loops that paused.
+        4. The root scope's payload rehydrates the top-level
+           :class:`State`; every non-root scope rides on the
+           :class:`_ResumeReplay` for its descent site to restore.
+        5. ``node_path`` splits on ``"/"`` back into the ancestor chain the
+           executor's head-pop replay expects. blake2b hex has no slashes,
+           so the round-trip is exact.
+
+        Returns ``(fallback, None)`` when there is nothing to replay.
         """
-        try:
-            head = await history.head()
-            if head is None or History.is_final_state(head):
-                return None
-            return head, await history.scopes(head)
-        except HistoryCorrupt as e:
+        commit = await self._history.replay_point()
+        if commit is None:
+            return fallback, None
+        scope_data = await self._history.scopes(commit)
+        await self.flow._resume_paused_turns.load_from_commit(self._ctx, commit)
+        return self._split_scopes(commit, scope_data)
+
+    async def restart(self, fallback: State[Any]) -> State[Any]:
+        """Restart: the root state of the newest commit that has usable state.
+
+        Walks back from the head past ``$failed`` commits (the state at a
+        failure may be half-updated) and commits with an empty tree (state
+        that could not be serialized). The run then starts at the first
+        node: child scopes are not restored and no replay context is built,
+        so iterate counters start at zero. Paused turns are not offered —
+        a step's node id does not identify a map item across runs.
+
+        Skipping is logged: the restored state may predate the head by
+        whole runs (a stateless ``$end`` sends the walk into the previous
+        run). Returns ``fallback`` when the history is empty or holds no
+        commit with usable state (warning in the latter case).
+        """
+        skipped: list[str] = []
+        async for commit in self._history.commits():
+            scope_data = [] if History.is_failed(commit) else await self._history.scopes(commit)
+            if scope_data:
+                if skipped:
+                    self._warn_restart_skipped(skipped, commit)
+                return self._root_state(scope_data[0])
+            skipped.append(commit.meta.node_path)
+        if skipped:
             self.flow._lg.warning(
-                "checkpoint history is corrupt; starting a fresh run",
-                extra={"exception": e, "client_flow_id": history.client_flow_id},
+                "no commit with usable state to restart from; starting from state=",
+                extra={"client_flow_id": self._history.client_flow_id, "skipped": skipped},
             )
-            ctx = self.flow._checkpoint_ctx
-            assert ctx is not None
-            ctx.discard_head()
-            return None
+        return fallback
+
+    def _warn_restart_skipped(self, skipped: list[str], restored: Commit) -> None:
+        """Log the ``$failed`` / stateless commits restart walked past, and where it landed."""
+        self.flow._lg.warning(
+            "restart skipped commits without usable state",
+            extra={
+                "client_flow_id": self._history.client_flow_id,
+                "skipped": skipped,
+                "restored_commit": restored.content_hash,
+                "restored_node_path": restored.meta.node_path,
+            },
+        )
+
+    def _root_state(self, root_raw: Any) -> State[Any]:
+        """Top-level :class:`State` from a stored root payload (factory-restored when bound)."""
+        factory = self.flow._state_factory
+        data = (
+            root_raw
+            if factory is None or root_raw is None
+            else restore_state_data(factory, root_raw)
+        )
+        return State(data=data, _factory=factory)
 
     def _split_scopes(
         self, commit: Commit, scope_data: list[Any]
@@ -130,17 +153,11 @@ class Resume:
         """
         from .nodes import _ResumeReplay
 
-        flow = self.flow
         root_raw = scope_data[0] if scope_data else None
-        hydrated_root = (
-            root_raw
-            if flow._state_factory is None or root_raw is None
-            else restore_state_data(flow._state_factory, root_raw)
-        )
         intermediate_raw = tuple(scope_data[1:])
         path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
         return (
-            State(data=hydrated_root, _factory=flow._state_factory),
+            self._root_state(root_raw),
             _ResumeReplay(
                 remaining_path=path_tuple,
                 full_path=path_tuple,
@@ -157,7 +174,7 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
     Halt-triggered exits preserve the history regardless of policy.
     On a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the
     record and commits ``final_state`` tagged ``complete`` so a
-    subsequent ``run(resume=True)`` doesn't replay the last save point
+    subsequent ``run(resume="replay")`` doesn't replay the last save point
     and re-execute chain steps after it.
     """
     if (
@@ -179,7 +196,7 @@ async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
     The commit holds the top-level state, so the history's head always
     carries the state the last run ended with — even when no save point
     fired during the run. It is attributed to the framework
-    (:data:`FRAMEWORK_PRODUCER`), not to a node.
+    (:data:`~llm_gent.flow.checkpoint.COMPLETION_PRODUCER`), not to a node.
 
     A final state that cannot be serialized (live handles, non-JSON
     values) must not fail a run whose work is done: the commit is then
@@ -188,14 +205,39 @@ async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
     """
     ctx = flow._checkpoint_ctx
     assert ctx is not None
-    if _serializable(flow, final_state):
-        tree = await ctx.put_state_tree(final_state)
-    else:
-        tree = Tree.from_entries([])
-        await ctx.put_tree(tree)
-    commit = await ctx.save_framework_commit(END_NODE_PATH, tree)
+    tree = await _put_root_tree(flow, final_state)
+    commit = await ctx.save_completion_commit(tree)
     await ctx.put_tag(COMPLETE_TAG, commit.content_hash)
     return commit
+
+
+async def commit_failure(flow: Flow, failed_state: State[Any]) -> None:
+    """Commit the root state at ``$failed`` after the run raised.
+
+    Called from :meth:`Flow.run`'s exception path before the original
+    exception is re-raised. Any error while writing is logged at warning
+    level and swallowed, so it never replaces the exception that ended the
+    run. A no-op without a checkpointer.
+    """
+    ctx = flow._checkpoint_ctx
+    if ctx is None:
+        return
+    try:
+        tree = await _put_root_tree(flow, failed_state)
+        await ctx.save_failure_commit(tree)
+    except Exception as e:
+        flow._lg.warning("failure commit could not be written", extra={"exception": e})
+
+
+async def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
+    """Put ``state``'s scope tree, or an empty tree when it cannot be serialized."""
+    ctx = flow._checkpoint_ctx
+    assert ctx is not None
+    if _serializable(flow, state):
+        return await ctx.put_state_tree(state)
+    tree = Tree.from_entries([])
+    await ctx.put_tree(tree)
+    return tree
 
 
 def _serializable(flow: Flow, state: State[Any]) -> bool:
@@ -204,7 +246,7 @@ def _serializable(flow: Flow, state: State[Any]) -> bool:
         canonical_json(serialize_state_data(state.data))
     except (TypeError, ValueError) as e:
         flow._lg.warning(
-            "final state is not serializable; completion commit carries no state",
+            "run state is not serializable; framework commit carries no state",
             extra={"exception": e},
         )
         return False

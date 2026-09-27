@@ -171,7 +171,7 @@ Rubric for picking a channel when only one consumer needs the value:
 
 ### Verb idempotency and resume
 
-Verbs may re-run on `run(resume=True)` when the process terminates
+Verbs may re-run on `run(resume="replay")` when the process terminates
 mid-execution. The checkpoint records the last completed boundary
 (iteration or chain step); work after that boundary re-runs on resume:
 
@@ -235,19 +235,49 @@ policy governs only implicit auto-saves.
 
 On a clean exit under the default `retain` retention, the framework also
 commits the run's final state and moves the `complete` tag to it. A
-history whose head is that commit is complete: `run(resume=True)` starts
+history whose head is that commit is complete: `run(resume="replay")` starts
 fresh, and the new run's commits extend the same history. The tag stays
 on the last finished run's final state when a later run halts past it.
 A final state that cannot be serialized is committed without state (and
 a warning is logged) rather than failing the finished run.
 
+A run whose nodes raise commits its root state at `$failed` (outcome
+`failed`) before the exception propagates. Errors raised before the first
+node runs (invalid arguments, a corrupt history) or after the last one
+(the post-run replay check, the final-state commit) write nothing extra,
+and neither does cancellation.
+
+### Resume modes
+
+`run(resume=...)` selects how a run starts from the history:
+
+- `"off"` (default) — start from `state=` as given; commits still append
+  to the history.
+- `"replay"` — positional resume: rebuild the last save point's scope tree
+  and fast-forward to it. Iteration bounds are cumulative across runs. A
+  complete history starts fresh.
+- `"restart"` — start at the first node with the root state of the newest
+  commit that has usable state (halted, ok or final). Child scopes are not
+  restored, iterate counters start at zero, and paused turns are not
+  offered. Commits walked past to reach it are logged at warning level.
+  Suits long-lived agents that re-enter their flow each session, and
+  survives changes to the flow's structure that would break replay.
+
+`$failed` commits record the state at a failure but are never a starting
+point: both replay and restart resume from the last commit before them.
+A corrupt history (a commit, tree or state blob missing from the store)
+raises `HistoryCorrupt` in either mode rather than starting over.
+
+Per-session adjustments to the restored state belong in the flow's first
+step.
+
 ### Reading a history
 
 A history is the chain of commits one `client_flow_id` accumulates across
 runs: each commit's parent is the previous head, in time order. A run
-ends in a `halted` commit (halt) or the `$end` final-state commit (clean
-exit), which is where the next run's commits pick up; a run that raises
-leaves no closing commit. `History` reads it:
+ends in a `halted` commit (halt), the `$end` final-state commit (clean
+exit) or a `$failed` commit (raised), which is where the next run's
+commits pick up. `History` reads it:
 
 ```python
 from llm_gent.flow import History, TypeStateFactory
@@ -257,7 +287,10 @@ head = await history.head()  # latest commit, or None
 if await history.is_complete():  # last run finished
     state = await history.root_state(head, TypeStateFactory(MyState))
 done = await history.last_complete()  # final state of the last finished run
+point = await history.replay_point()  # where resume="replay" starts; None = fresh
 async for commit in history.commits():  # newest first, via parent links
+    if History.is_failed(commit):  # a run that raised
+        ...
     print(commit.meta.node_path, commit.meta.outcome, commit.meta.timestamp_iso)
 ```
 

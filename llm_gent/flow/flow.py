@@ -55,7 +55,7 @@ Buildable materializer :func:`_materialize`.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, get_args
 
 from appinfra.log import Logger
 
@@ -64,9 +64,14 @@ from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext
 from ._node_id import flow_root_hash, iter_flows
-from ._resume import Resume, apply_clean_exit_retention, assert_replay_consumed
+from ._resume import (
+    Resume,
+    apply_clean_exit_retention,
+    assert_replay_consumed,
+    commit_failure,
+)
 from ._validation import _materialize, _require_state_for_merge, _validate_target
-from .checkpoint import CheckpointPolicy, CheckpointStore
+from .checkpoint import CheckpointPolicy, CheckpointStore, ResumeMode
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -142,7 +147,7 @@ class Flow:
                 internal handoff, so mounting on the top-level flow is
                 enough to reach every nested dispatch.
             state_factory: A :class:`StateFactory` the framework calls on
-                :meth:`run` ``resume=True`` to reconstruct ``ctx.state.data``
+                :meth:`run` ``resume="replay"``/``"restart"`` to reconstruct ``ctx.state.data``
                 from the loaded checkpoint: ``state_factory.restore(...)``.
                 For state that carries no runtime handles wrap the type in
                 :class:`TypeStateFactory`; for state that binds a Logger /
@@ -737,7 +742,7 @@ class Flow:
         """Attach a :class:`CheckpointStore` + agent-owned ``client_flow_id``.
 
         Wires save-at-``.iterate``-boundary saves and, on
-        :meth:`run` ``resume=True``, a load-at-start that hydrates the
+        :meth:`run` ``resume="replay"``, a load-at-start that hydrates the
         run's payload before the first node dispatches. On fully
         successful :meth:`run` completion the framework calls
         :meth:`CheckpointStore.gc_history` when the store's
@@ -858,7 +863,7 @@ class Flow:
         self,
         *args: Any,
         state: Any = UNSET,
-        resume: bool = False,
+        resume: ResumeMode = "off",
         extra: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -893,58 +898,92 @@ class Flow:
                 the caller re-supplies at :meth:`run`; identity across
                 resume is not preserved. ``None`` (default) yields a
                 fresh empty dict at the verb.
-            resume: When ``True`` and :meth:`with_checkpointer` is wired,
-                the framework reads the history's head (latest commit) at
-                start and, unless the history is empty or complete (head
-                is the final-state commit of a finished run), reconstructs
-                the scope tree and replaces ``state`` with the hydrated
-                payload. A flow with a bound ``state_factory=``
-                reconstructs the payload via ``state_factory.restore``; a
-                flow without ``state_factory`` treats the stored payload as
-                a plain dict. On an empty or complete history the run
-                proceeds with ``state`` as given, appending to the same
-                history. On fully successful completion the history is
-                gc'd when the store's ``retention`` is ``"gc_on_success"``;
-                under ``"retain"`` the final state is committed and tagged
-                ``complete``. Requires :meth:`with_checkpointer` to be
-                wired; raises otherwise. Bound parameter: not forwarded to
-                the first node.
+            resume: How to start from the checkpointed history
+                (:data:`~llm_gent.flow.checkpoint.ResumeMode`).
+                ``"off"`` (default) runs from ``state`` as given.
+                ``"replay"`` reads the last save point (skipping ``$failed``
+                commits) and, unless the history is empty or complete,
+                reconstructs the scope tree, replaces ``state`` with the
+                hydrated payload and fast-forwards to the save point.
+                ``"restart"`` replaces ``state`` with the root state of the
+                newest commit with usable state (skipping ``$failed`` and
+                stateless commits) and runs from the first node; paused
+                turns are not offered. Payloads are rebuilt via
+                ``state_factory`` when bound, else used as plain dicts. On an
+                empty history (or nothing to replay) the run proceeds with
+                ``state`` as given, appending to the same history; a corrupt
+                history raises :class:`HistoryCorrupt` in either mode. Anything other than
+                ``"off"`` requires :meth:`with_checkpointer`. Bound
+                parameter: not forwarded to the first node.
             **kwargs: Keyword inputs to the first node.
 
+        With a checkpointer wired, a fully successful run under
+        ``retention="retain"`` commits its final state (tagged
+        ``complete``); ``"gc_on_success"`` deletes the history instead. An
+        exception raised while the nodes run commits the root state at
+        ``$failed`` before it propagates. Errors raised before the walk
+        starts (argument checks, loading the history) or after it ends
+        (:func:`assert_replay_consumed`, the final-state commit) write
+        nothing extra, and neither does cancellation.
+
         Raises:
-            RuntimeError: The flow has no nodes to run, OR ``resume=True``
+            RuntimeError: The flow has no nodes to run, OR a resume mode
                 was requested without :meth:`with_checkpointer` wired.
                 Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
+            ValueError: ``resume`` is not a :data:`ResumeMode` value.
         """
-        if resume and self._checkpoint_ctx is None:
-            label = self._name or "<anonymous>"
-            raise RuntimeError(
-                f"Flow {label!r} was run with resume=True but has no "
-                f"checkpointer — call .with_checkpointer(store, client_flow_id) first"
-            )
-        active_state = self._wrap_top_state(state)
-        replay: _ResumeReplay | None = None
+        self._check_run_args(resume)
         self._begin_checkpoint_run()
         self._resume_paused_turns.clear()
-        if resume:
-            active_state, replay = await Resume(self).hydrate(active_state)
+        active_state, replay = await self._start_state(self._wrap_top_state(state), resume)
         self._replay_consumed = False
         self._halt_saved = False
         self._pending_paused_turns.clear()
-        result = await self._run_as_subflow(
-            *args,
-            state=active_state,
-            runtime=self,
-            parent_replay=replay,
-            parent_extra=extra,
-            **kwargs,
-        )
+        try:
+            result = await self._run_as_subflow(
+                *args,
+                state=active_state,
+                runtime=self,
+                parent_replay=replay,
+                parent_extra=extra,
+                **kwargs,
+            )
+        except Exception:
+            await commit_failure(self, active_state)
+            raise
         assert_replay_consumed(self, replay)
         await apply_clean_exit_retention(self, active_state)
         return result
+
+    def _check_run_args(self, resume: ResumeMode) -> None:
+        """Reject an empty flow, an unknown mode, or a resume mode without a checkpointer.
+
+        Runs before the failure-commit boundary, so a misconfigured run
+        leaves no ``$failed`` commit (or new history) behind.
+        """
+        if not self._nodes:
+            raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
+        if resume not in get_args(ResumeMode):
+            raise ValueError(f"resume must be one of {get_args(ResumeMode)}; got {resume!r}")
+        if resume != "off" and self._checkpoint_ctx is None:
+            label = self._name or "<anonymous>"
+            raise RuntimeError(
+                f"Flow {label!r} was run with resume={resume!r} but has no "
+                f"checkpointer — call .with_checkpointer(store, client_flow_id) first"
+            )
+
+    async def _start_state(
+        self, fallback: State[Any], resume: ResumeMode
+    ) -> tuple[State[Any], _ResumeReplay | None]:
+        """The run's initial state (and replay plan) for ``resume``."""
+        if resume == "replay":
+            return await Resume(self).replay(fallback)
+        if resume == "restart":
+            return await Resume(self).restart(fallback), None
+        return fallback, None
 
     async def _run_as_subflow(
         self,
@@ -983,7 +1022,7 @@ class Flow:
         from root down to the ``_Node`` whose descent entered this Flow;
         it grows by one on every recursion. ``parent_replay`` carries a
         pending checkpoint replay when :meth:`run` was invoked with
-        ``resume=True``; ``None`` for a fresh run.
+        ``resume="replay"``; ``None`` otherwise.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")

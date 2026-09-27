@@ -11,7 +11,7 @@ Verifies Flow's checkpoint + mid-SAIA-turn pause + resume story
 end-to-end. Structurally exercises every save site: iterate
 boundary, halt-observation mid-turn, ``paused_turn`` trace_ref on
 the CAS commit, :class:`JsonFileCheckpointStore` persistence, and
-:meth:`Flow.run(resume=True)` hydration on a subsequent process.
+:meth:`Flow.run(resume="replay")` hydration on a subsequent process.
 
 Backend modes:
 
@@ -31,7 +31,7 @@ first tool call sets a shared :class:`asyncio.Event` and the
 subsequent SAIA iteration's LLM call catches it via
 ``abort_signal``, returns ``TaskResult(paused=True)``, and Flow
 captures the conversation onto the CAS halt commit for a later
-``resume=True`` to re-arm.
+``resume="replay"`` to re-arm.
 
 Layout
 ------
@@ -51,7 +51,7 @@ Layout
   verb run inside ``.iterate(until=<queue empty>)``; each
   completed iteration pops one topic and appends its summary, a
   paused one leaves state untouched for resume.
-- :func:`_invoke` — one invocation: always ``run(resume=True)``,
+- :func:`_invoke` — one invocation: always ``run(resume="replay")``,
   halt armed only when that run will start fresh
   (:func:`_resume_pending`).
 - :func:`main` — real mode runs one :func:`_invoke` per process
@@ -445,14 +445,15 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
 
 
 async def _resume_pending(history: History) -> bool:
-    """True when ``run(resume=True)`` will resume rather than start fresh.
+    """True when ``run(resume="replay")`` will resume rather than start fresh.
 
-    Same rule as :meth:`Resume.hydrate`: resume from the head unless the
-    history is empty or complete (the head is the final-state commit the
-    default ``retain`` policy writes on clean exit). This flow writes no
-    ``ok`` iterate commits, so a pending resume here is always a halt.
+    :meth:`History.replay_point` is the rule replay applies: fresh on an
+    empty history or when the newest non-``$failed`` commit is the
+    final-state commit the default ``retain`` policy writes on clean exit.
+    This flow writes no ``ok`` iterate commits, so a pending resume here
+    is always a halt.
     """
-    return await history.head() is not None and not await history.is_complete()
+    return await history.replay_point() is not None
 
 
 async def _paused_turn_saved(history: History) -> bool:
@@ -464,10 +465,10 @@ async def _paused_turn_saved(history: History) -> bool:
 async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> tuple[Digest, bool]:
     """One process-level invocation; return ``(final state, halted)``.
 
-    Always runs with ``resume=True`` and lets the framework pick
-    the path: empty or complete history → fresh run, any other
-    head → resume. The halt is armed only on a fresh run so the
-    resumed turn completes.
+    Always runs with ``resume="replay"`` and lets the framework pick
+    the path: no replay point (empty or complete history) → fresh
+    run, otherwise → resume. The halt is armed only on a fresh run so
+    the resumed turn completes.
     """
     store = JsonFileCheckpointStore(lg, store_dir)
     history = History(store, CLIENT_FLOW_ID)
@@ -481,7 +482,7 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     )
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
-    final: Digest = await _build_flow(lg, ff, halt).run(resume=True)
+    final: Digest = await _build_flow(lg, ff, halt).run(resume="replay")
     halted = await _resume_pending(history)
     await _report(history, store_dir, final, halted)
     return final, halted

@@ -5,16 +5,18 @@
 
 llm-gent owns one alembic tree at :mod:`llm_gent.migrations` covering
 every framework-level persistent table this package ships (currently
-``llm_gent_flow_object`` and ``llm_gent_flow_ref``; more revisions
-land here as future subsystems add persistence). Model classes live
-near their consumers (e.g. :class:`llm_gent.flow.stores.postgres.FlowObject`,
+the flow checkpoint tables ``gent_flow_name``, ``gent_flow_object``,
+``gent_flow_ref`` and ``gent_flow_tag``; more revisions land here as
+future subsystems add persistence). Tables are prefixed ``gent_``.
+Model classes live near their consumers (e.g.
+:class:`llm_gent.flow.stores.postgres.FlowObject`,
 :class:`llm_gent.flow.stores.postgres.FlowRef`) but share the
 :class:`Base` defined here so ``Base.metadata`` sees every table
 alembic needs to autogenerate against.
 
 The pattern mirrors llm-kelt's ``SchemaManager`` — one advisory-lock-guarded
 ``ensure_schema`` per package, a namespaced version table
-(``alembic_version_llm_gent``) so llm-gent's history coexists cleanly
+(``alembic_version_gent``) so llm-gent's history coexists cleanly
 with kelt's own alembic in the same Postgres schema.
 
 Public entry points:
@@ -59,7 +61,7 @@ _ADVISORY_LOCK_KEY = 4923108657234587123
 # Namespaced alembic bookkeeping table. Coexists with kelt's
 # ``alembic_version_kelt`` (and any other component's namespaced version
 # row) in the same Postgres schema without collision.
-_VERSION_TABLE_NAME = "alembic_version_llm_gent"
+_VERSION_TABLE_NAME = "alembic_version_gent"
 
 _SCHEMA_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 

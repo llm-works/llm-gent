@@ -188,7 +188,7 @@ def store(tmp_path: Path) -> JsonFileCheckpointStore:
 
 
 async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore) -> None:
-    """Real SAIA halts mid-turn on run 1; run 2 with resume=True completes the turn."""
+    """Real SAIA halts mid-turn on run 1; run 2 with resume="replay" completes the turn."""
     role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
     # ---- Run 1: SAIA's first chat() sets halt + raises PauseRequested.
@@ -251,7 +251,7 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     )
     caller_conv = _SerializableConv(messages=[Message(role="user", content="CALLER_CONV_MARKER")])
     await flow2.run(
-        resume=True,
+        resume="replay",
         # Caller supplies a DIFFERENT task + conv to prove the resume path
         # forwards the SAVED values from the envelope, not the caller's.
         extra={"task": "caller-task", "conv": caller_conv},

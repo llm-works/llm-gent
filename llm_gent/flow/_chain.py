@@ -152,7 +152,7 @@ class Chain:
         first iteration of this walk, so resume runs at least the
         halted step), if ``env.halt`` is set, stamp a halted commit
         at the not-yet-run step's position and break. On a subsequent
-        ``run(resume=True)``, that ref resolves to this commit and
+        ``run(resume="replay")``, that ref resolves to this commit and
         the walk restarts at the halted step.
         """
         result: Any = UNSET
