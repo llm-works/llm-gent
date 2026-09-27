@@ -22,8 +22,9 @@ python -m llm_gent.examples.flow.durable_resume --smoke
 
 The two real invocations must be separate processes — that is the point. The store lives at
 `~/.cache/llm-gent-durable-resume`. Every invocation calls `flow.run(resume=True)`; the framework
-starts fresh on an empty store or when the `complete` tag points at the latest commit, and otherwise
-resumes from the latest commit (here always the halt commit). A third invocation therefore starts
+starts fresh on an empty store or when the latest commit is the final-state commit of a finished
+run, and otherwise resumes from the latest commit (here always the halt commit). A third invocation
+therefore starts
 a new cycle on the same history; `--reset` wipes the store first.
 
 ## The flow
@@ -132,12 +133,13 @@ histories/
 ```
 
 `client_flow_id` is the agent's name for the history; the store keys everything by the internal
-`flow_id` it maps to. The name is looked up once per process, and the first save of a new history
-binds a fresh UUID to it. The `flow_id` and every commit hash therefore differ between runs.
+`flow_id` it maps to. The name is looked up at the start of each run, and the first save of a new
+history binds a fresh UUID to it; later runs under the same name reuse it, as run 1 and run 2 do
+here. The UUID and every commit hash differ from one history to the next, so the ones shown here
+will not match a local run.
 
 Only `refs/` and `tags/` are mutable. Everything under `objects/` is immutable and named by the hash
-of its
-bytes; identical content is stored once. If resume finds the commit, tree, or a state blob
+of its bytes; identical content is stored once. If resume finds the commit, tree, or a state blob
 missing, it falls back to a fresh run; a missing `paused_turn` blob makes only that Loop restart its
 turn from the task.
 
@@ -180,8 +182,8 @@ next run resumes.
 - `iteration: 1` — the iterate counter at halt. The paused pass counted as an iteration, which is
   why the flow bounds `max_iters` at `len(TOPICS) + 1` and terminates on `until` instead.
 - `outcome: "halted"` — written by the halt-observation site. Resume does not branch on it: any
-  latest commit the `complete` tag does not point at is resumed, and the script applies the same
-  rule to decide whether to arm the halt on the next invocation.
+  latest commit other than a final-state commit is resumed, and the script applies the same rule
+  (`History.is_complete()`) to decide whether to arm the halt on the next invocation.
 - `trace_ref` — one entry per paused dispatch, `"<step node id>:<blob hash>"`. Resume hands the
   blob back to the Loop called from that step. The key is per step, not per Loop: a verb that
   calls two Loops that can pause would have them overwrite each other's entry, so keep one
@@ -245,9 +247,12 @@ run 2 read the head from the store before its first commit and parented on it.
 Written on clean exit when the store's retention is `retain` (the `JsonFileCheckpointStore`
 default). It is an ordinary scope commit of the top-level state at the reserved `node_path` `$end`,
 so the head always holds the state the last run ended with, even when no save point fired during
-the run. The `complete` tag moves to it. `run(resume=True)` treats a history whose latest commit
-carries the tag as a fresh start instead of replaying the old halt commit; the fresh run's commits
-extend the same history, and its first one leaves the tag behind. With
+the run. `run(resume=True)` treats a history whose latest commit is a final-state commit as a fresh
+start instead of replaying the old halt commit; the fresh run's commits extend the same history.
+The `complete` tag moves to each final-state commit and stays on it while later runs append past
+it, so `History.last_complete()` finds the last finished run's state even when the head is a
+newer halt. If the final state cannot be serialized, the commit is written with an empty tree and
+a warning is logged: the history is still complete, but carries no final state. With
 `retention="gc_on_success"` the history is deleted instead.
 
 ## Save sites

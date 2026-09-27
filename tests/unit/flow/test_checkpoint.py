@@ -1290,15 +1290,74 @@ class TestFlowRootHash:
         assert resumed.root_hash() == flow.root_hash()
 
 
+class TestRunScopedCache:
+    async def test_reused_flow_sees_external_gc(self, store: JsonFileCheckpointStore) -> None:
+        """A Flow reused after someone else collected its history writes a new, named history."""
+        from llm_gent.flow import History
+
+        halt = asyncio.Event()
+        flow = build_canonical_flow(
+            make_test_logger(),
+            max_iters=4,
+            halt=halt,
+            halt_after_iteration=2,
+            store=store,
+            client_flow_id="reused",
+        )
+        await flow.run()
+        old_flow_id = store.get_flow_id("reused")
+        assert old_flow_id is not None
+        store.gc_history(old_flow_id)
+
+        halt.clear()
+        await flow.run()  # halts again, into a fresh history
+
+        history = History(store, "reused")
+        new_flow_id = await history.flow_id()
+        assert new_flow_id is not None and new_flow_id != old_flow_id
+        head = await history.head()
+        assert head is not None and head.meta.outcome == "halted"
+        chain = [c async for c in history.commits()]
+        assert {c.meta.flow_id for c in chain} == {new_flow_id}
+        assert chain[-1].parent_hashes == ()
+        assert not store._history_dir(old_flow_id).exists()
+
+
 class TestCompletionTag:
     """Clean exit commits the final state at ``$end`` and moves the ``complete`` tag to it."""
+
+    async def test_unserializable_final_state_still_completes(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A finished run whose state can't be serialized returns normally; no state is kept."""
+        from llm_gent.flow import Context, FlowFactory, History, verb
+
+        @verb
+        async def attach(ctx: Context[dict[str, Any]], _prev: Any = None) -> str:
+            ctx.state.data["handle"] = object()
+            return "done"
+
+        result = await (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpointer(store, "opaque-state")
+            .call(attach)
+            .run()
+        )
+
+        assert result == "done"
+        history = History(store, "opaque-state")
+        head = await history.head()
+        assert head is not None and History.is_final_state(head)
+        assert await history.is_complete()
+        assert await history.scopes(head) == []
 
     async def test_final_state_commit_is_tagged_head(self, store: JsonFileCheckpointStore) -> None:
         """A halt-only run with no save points still leaves its final state at the head."""
         import json
 
         from llm_gent.flow import Context, FlowFactory, verb
-        from llm_gent.flow.checkpoint import COMPLETE_TAG
+        from llm_gent.flow.checkpoint import COMPLETE_TAG, FRAMEWORK_PRODUCER
         from llm_gent.flow.state.cas import Tree
 
         @verb
@@ -1320,6 +1379,7 @@ class TestCompletionTag:
         assert store.resolve_tag(flow_id, COMPLETE_TAG) == head
         (commit,) = _chain_from_head(store, "final-state")
         assert commit.meta.node_path == "$end"
+        assert commit.meta.produced_by.node_id == FRAMEWORK_PRODUCER
         tree = Tree.from_bytes(store.get_object(flow_id, "tree", commit.root_tree_hash) or b"")
         (entry,) = tree.entries
         blob = store.get_object(flow_id, "blob", entry.child_hash) or b""
@@ -1391,7 +1451,8 @@ class TestCompletionTag:
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
         ctx = CheckpointContext(store, "torn-completion", lambda: "")
-        await ctx.save_scope_commit((), 0, END_NODE_PATH, State(data={"n": 7}), "ok")
+        tree = await ctx.put_state_tree(State(data={"n": 7}))
+        await ctx.save_framework_commit(END_NODE_PATH, tree)
         assert store.resolve_tag(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
 
         result = await build_canonical_flow(
@@ -1866,9 +1927,9 @@ class TestAsyncStore:
                 await asyncio.sleep(0)
                 return self._inner.get_flow_id(*a, **kw)
 
-            async def put_flow_id(self, *a: Any, **kw: Any) -> None:
+            async def bind_flow_id(self, *a: Any, **kw: Any) -> str:
                 await asyncio.sleep(0)
-                self._inner.put_flow_id(*a, **kw)
+                return self._inner.bind_flow_id(*a, **kw)
 
             async def put_object(self, *a: Any, **kw: Any) -> None:
                 await asyncio.sleep(0)
@@ -1907,7 +1968,7 @@ class TestAsyncStore:
         # Sanity: every method IS async.
         for m in (
             "get_flow_id",
-            "put_flow_id",
+            "bind_flow_id",
             "put_object",
             "get_object",
             "put_ref",

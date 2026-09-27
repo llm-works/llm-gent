@@ -175,9 +175,10 @@ class ProducedBy:
     """Provenance attribution on one commit — which verb wrote this state.
 
     :attr:`node_id` is the content-addressed id of the scope-defining
-    node whose body produced the commit, or a ``$external/*`` prefix for
+    node whose body produced the commit, a ``$external/*`` prefix for
     consumer-driven direct saves (e.g. an initial-plan write) that
-    happen outside an iterate boundary.
+    happen outside an iterate boundary, or ``$framework/*`` for commits
+    the framework writes itself (the final-state commit on clean exit).
 
     :attr:`verb_name` is the ``@verb`` callable's ``__name__`` when the
     commit came from an in-flow verb; ``None`` for direct saves.
@@ -256,9 +257,13 @@ class CommitMeta:
 class Commit:
     """One point in a flow's history — root tree, parent chain, provenance meta.
 
-    :attr:`parent_hashes` is single-parent (linear history) in the common
-    case; a multi-parent tuple is reserved for a future fork/merge
-    surface and unused today.
+    :attr:`parent_hashes` holds the history's previous head — the commit
+    written immediately before this one, in time order — or is empty for
+    a history's first commit. It records sequence, not derivation: a run
+    started without ``resume=True`` still parents on the previous head.
+    A run ends in a ``halted`` or ``$end`` commit, so run boundaries are
+    read from those. A multi-parent tuple is reserved for a future
+    fork/merge surface and unused today.
 
     Build only via :meth:`build` so :attr:`content_hash` stays consistent
     with the canonical serialization of the body.

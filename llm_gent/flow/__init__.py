@@ -37,7 +37,8 @@ Public surface:
   composition-graph state at ``.iterate`` boundaries and mid-SAIA-turn
   state at halt observation
 - :class:`History` — read API over one checkpointed history: head, last
-  completed run, commit chain, per-commit state
+  completed run, commit chain, per-commit state; :class:`HistoryCorrupt`
+  when a referenced object is missing from the store
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
 - :class:`Skipped` — sentinel returned for an item gated out by
   ``Flow.guard`` on a ``Flow.map`` node
@@ -61,7 +62,7 @@ from .checkpoint import CheckpointPolicy, CheckpointStore
 from .context import Context
 from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
-from .history import History
+from .history import History, HistoryCorrupt
 from .loop import Loop, LoopFactory
 from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
@@ -79,6 +80,7 @@ __all__ = [
     "Flow",
     "FlowFactory",
     "History",
+    "HistoryCorrupt",
     "Loop",
     "LoopFactory",
     "Panel",

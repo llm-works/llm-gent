@@ -9,6 +9,12 @@ internal ``flow_id`` and exposes the history as data: its head, the last
 completed run, the commit chain, and the state each commit holds. It
 never writes; the framework owns every write.
 
+``None`` means absent — no history under the name, no commit yet, no
+completed run. A hash the history holds (ref, tag, parent, tree entry)
+that points at an object missing from the store raises
+:class:`HistoryCorrupt` instead, so a damaged history never reads as a
+shorter or empty one.
+
 Every method works with sync and async stores alike.
 """
 
@@ -18,12 +24,22 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any, TypeVar
 
-from .checkpoint import COMPLETE_TAG, END_NODE_PATH, CheckpointStore, maybe_await
-from .state import StateFactory
+from .checkpoint import COMPLETE_TAG, END_NODE_PATH, CheckpointStore, Kind, maybe_await
+from .state import StateFactory, restore_state_data
 from .state.cas import Commit, Tree
 
 
 T = TypeVar("T")
+
+
+class HistoryCorrupt(ValueError):
+    """A hash in the history points at an object the store does not hold."""
+
+    def __init__(self, flow_id: str, kind: Kind, content_hash: str) -> None:
+        super().__init__(f"history {flow_id}: {kind} {content_hash} is missing from the store")
+        self.flow_id = flow_id
+        self.kind = kind
+        self.content_hash = content_hash
 
 
 class History:
@@ -43,7 +59,7 @@ class History:
         return result
 
     async def head(self) -> Commit | None:
-        """Latest commit, or ``None`` for an empty (or unreadable) history."""
+        """Latest commit, or ``None`` for an empty history."""
         flow_id = await self.flow_id()
         if flow_id is None:
             return None
@@ -79,7 +95,8 @@ class History:
     async def commits(self) -> AsyncIterator[Commit]:
         """Walk the chain from the head through parent links, newest first.
 
-        Stops early if a parent object is missing from the store.
+        Parents are in write order across runs; a run's commits end at a
+        ``halted`` or ``$end`` commit.
         """
         commit = await self.head()
         while commit is not None:
@@ -88,39 +105,40 @@ class History:
                 return
             commit = await self._commit(commit.meta.flow_id, commit.parent_hashes[0])
 
-    async def scopes(self, commit: Commit) -> list[Any] | None:
+    async def scopes(self, commit: Commit) -> list[Any]:
         """State payloads ``commit`` holds, root scope first, as stored (JSON).
 
-        One entry per state scope on the path to the save point. ``None``
-        when the tree or a blob is missing.
+        One entry per state scope on the path to the save point; empty for
+        a commit that carries no state.
         """
         flow_id = commit.meta.flow_id
-        tree_bytes = await maybe_await(
-            self.store.get_object(flow_id, "tree", commit.root_tree_hash)
-        )
-        if tree_bytes is None:
-            return None
+        tree = Tree.from_bytes(await self._object(flow_id, "tree", commit.root_tree_hash))
         payloads: list[Any] = []
-        for entry in Tree.from_bytes(tree_bytes).entries:
-            blob = await maybe_await(self.store.get_object(flow_id, "blob", entry.child_hash))
-            if blob is None:
-                return None
+        for entry in tree.entries:
+            blob = await self._object(flow_id, "blob", entry.child_hash)
             payloads.append(json.loads(blob.decode("utf-8")))
         return payloads
 
     async def root_state(self, commit: Commit, factory: StateFactory[T]) -> T | None:
         """Top-level state ``commit`` holds, restored through ``factory``.
 
-        ``None`` when the commit's objects are missing. For dict-state flows,
+        ``None`` for a commit that carries no state. For dict-state flows,
         read ``(await scopes(commit))[0]`` instead.
         """
         payloads = await self.scopes(commit)
         if not payloads:
             return None
-        root = payloads[0]
-        return factory.restore(root if isinstance(root, dict) else {})
+        return restore_state_data(factory, payloads[0])
 
-    async def _commit(self, flow_id: str, commit_hash: str) -> Commit | None:
-        """Load and parse one commit object, or ``None`` when absent."""
-        payload = await maybe_await(self.store.get_object(flow_id, "commit", commit_hash))
-        return None if payload is None else Commit.from_bytes(payload)
+    async def _commit(self, flow_id: str, commit_hash: str) -> Commit:
+        """Load and parse one commit object."""
+        return Commit.from_bytes(await self._object(flow_id, "commit", commit_hash))
+
+    async def _object(self, flow_id: str, kind: Kind, content_hash: str) -> bytes:
+        """Load one object the history references; :class:`HistoryCorrupt` if absent."""
+        payload: bytes | None = await maybe_await(
+            self.store.get_object(flow_id, kind, content_hash)
+        )
+        if payload is None:
+            raise HistoryCorrupt(flow_id, kind, content_hash)
+        return payload

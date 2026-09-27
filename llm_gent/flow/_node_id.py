@@ -141,6 +141,20 @@ def _flow_structure(flow: Any, ancestors: tuple[int, ...]) -> Any:
     ]
 
 
+def iter_flows(root: Any) -> list[Any]:
+    """Every distinct Flow in ``root``'s composition tree, ``root`` first."""
+    seen: dict[int, Any] = {}
+    stack = [root]
+    while stack:
+        flow = stack.pop()
+        if id(flow) in seen:
+            continue
+        seen[id(flow)] = flow
+        for node in flow._nodes:
+            stack.extend(child for _, child in _child_flows(node))
+    return list(seen.values())
+
+
 def _child_flows(node: _Node) -> list[tuple[str, Any]]:
     """``(boundary, Flow)`` pairs a chain step descends into, as named by the executor."""
     from .flow import Flow

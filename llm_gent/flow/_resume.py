@@ -28,9 +28,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .checkpoint import COMPLETE_TAG, END_NODE_PATH
-from .history import History
-from .state import State
-from .state.cas import Commit
+from .history import History, HistoryCorrupt
+from .state import State, restore_state_data, serialize_state_data
+from .state.cas import Commit, Tree, canonical_json
 
 
 if TYPE_CHECKING:
@@ -84,17 +84,31 @@ class Resume:
         flow = self.flow
         ctx = flow._checkpoint_ctx
         assert ctx is not None
-        history = History(ctx.store, ctx.client_flow_id)
-        # A missing commit, tree or blob anywhere below is "no resumable
-        # checkpoint": fall through to a fresh run.
-        head = await history.head()
-        if head is None or History.is_final_state(head):
+        loaded = await self._read_head(History(ctx.store, ctx.client_flow_id))
+        if loaded is None:
             return fallback, None
-        scope_data = await history.scopes(head)
-        if scope_data is None:
-            return fallback, None
+        head, scope_data = loaded
         await flow._resume_paused_turns.load_from_commit(ctx, head)
         return self._split_scopes(head, scope_data)
+
+    async def _read_head(self, history: History) -> tuple[Commit, list[Any]] | None:
+        """Head commit and its scope payloads, or ``None`` when there is nothing to resume.
+
+        Nothing to resume: an empty or complete history, or a corrupt one —
+        a missing commit, tree or blob falls through to a fresh run, with a
+        warning so the damage is not silent.
+        """
+        try:
+            head = await history.head()
+            if head is None or History.is_final_state(head):
+                return None
+            return head, await history.scopes(head)
+        except HistoryCorrupt as e:
+            self.flow._lg.warning(
+                "checkpoint history is corrupt; starting a fresh run",
+                extra={"exception": e, "client_flow_id": history.client_flow_id},
+            )
+            return None
 
     def _split_scopes(
         self, commit: Commit, scope_data: list[Any]
@@ -117,7 +131,7 @@ class Resume:
         hydrated_root = (
             root_raw
             if flow._state_factory is None or root_raw is None
-            else flow._state_factory.restore(root_raw if isinstance(root_raw, dict) else {})
+            else restore_state_data(flow._state_factory, root_raw)
         )
         intermediate_raw = tuple(scope_data[1:])
         path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
@@ -158,15 +172,39 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
 async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
     """Commit the run's final state at ``$end`` and move the ``complete`` tag to it.
 
-    The commit is an ordinary scope commit of the top-level state, so the
-    history's head always carries the state the last run ended with —
-    even when no save point fired during the run.
+    The commit holds the top-level state, so the history's head always
+    carries the state the last run ended with — even when no save point
+    fired during the run. It is attributed to the framework
+    (:data:`FRAMEWORK_PRODUCER`), not to a node.
+
+    A final state that cannot be serialized (live handles, non-JSON
+    values) must not fail a run whose work is done: the commit is then
+    written with an empty tree, which still marks the history complete
+    but carries no state.
     """
     ctx = flow._checkpoint_ctx
     assert ctx is not None
-    commit = await ctx.save_scope_commit((), 0, END_NODE_PATH, final_state, "ok")
+    if _serializable(flow, final_state):
+        tree = await ctx.put_state_tree(final_state)
+    else:
+        tree = Tree.from_entries([])
+        await ctx.put_tree(tree)
+    commit = await ctx.save_framework_commit(END_NODE_PATH, tree)
     await ctx.put_tag(COMPLETE_TAG, commit.content_hash)
     return commit
+
+
+def _serializable(flow: Flow, state: State[Any]) -> bool:
+    """True when ``state`` can be checkpointed; warn and return False otherwise."""
+    try:
+        canonical_json(serialize_state_data(state.data))
+    except (TypeError, ValueError) as e:
+        flow._lg.warning(
+            "final state is not serializable; completion commit carries no state",
+            extra={"exception": e},
+        )
+        return False
+    return True
 
 
 def assert_replay_consumed(flow: Flow, replay: _ResumeReplay | None) -> None:

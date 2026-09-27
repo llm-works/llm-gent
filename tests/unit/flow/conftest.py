@@ -29,10 +29,7 @@ def flow_id_for(store: Any, client_flow_id: str) -> str:
     objects / refs under a name before any flow ran. Stores key every
     object and ref by ``flow_id``; tests address histories by name.
     """
-    flow_id: str | None = store.get_flow_id(client_flow_id)
-    if flow_id is None:
-        flow_id = str(uuid.uuid4())
-        store.put_flow_id(client_flow_id, flow_id)
+    flow_id: str = store.bind_flow_id(client_flow_id, str(uuid.uuid4()))
     return flow_id
 
 

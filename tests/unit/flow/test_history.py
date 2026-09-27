@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_gent.flow import History, TypeStateFactory
+from llm_gent.flow import History, HistoryCorrupt, TypeStateFactory
 from llm_gent.flow.state.cas import Commit
 from llm_gent.flow.stores import JsonFileCheckpointStore
 from llm_gent.flow.testing.checkpoint import CanonicalCounter, build_canonical_flow
@@ -79,6 +79,68 @@ class TestCompletedHistory:
         assert state.iterations_completed == 4
         scopes = await history.scopes(head)
         assert scopes is not None and scopes[0] == state.to_dict()
+
+
+class TestCorruptHistory:
+    """A hash pointing at a missing object raises instead of reading as a shorter history."""
+
+    def _objects(self, store: JsonFileCheckpointStore, flow_id: str, kind: str) -> Path:
+        return store._history_dir(flow_id) / "objects" / kind
+
+    async def test_missing_parent_raises_in_walk(self, store: JsonFileCheckpointStore) -> None:
+        await _run(store, "torn-chain")
+        history = History(store, "torn-chain")
+        head = await history.head()
+        assert head is not None and head.parent_hashes
+        flow_id = head.meta.flow_id
+        (self._objects(store, flow_id, "commit") / head.parent_hashes[0]).unlink()
+
+        with pytest.raises(HistoryCorrupt) as err:
+            await _all(history)
+        assert (err.value.kind, err.value.content_hash) == ("commit", head.parent_hashes[0])
+
+    async def test_missing_blob_raises_in_scopes(self, store: JsonFileCheckpointStore) -> None:
+        await _run(store, "torn-state")
+        history = History(store, "torn-state")
+        head = await history.head()
+        assert head is not None
+        for blob in self._objects(store, head.meta.flow_id, "blob").iterdir():
+            blob.unlink()
+
+        with pytest.raises(HistoryCorrupt, match="blob"):
+            await history.scopes(head)
+
+    async def test_ref_to_missing_commit_raises(self, store: JsonFileCheckpointStore) -> None:
+        await _run(store, "torn-head")
+        history = History(store, "torn-head")
+        head = await history.head()
+        assert head is not None
+        (self._objects(store, head.meta.flow_id, "commit") / head.content_hash).unlink()
+
+        with pytest.raises(HistoryCorrupt):
+            await history.head()
+
+    async def test_resume_on_corrupt_history_warns_and_starts_fresh(
+        self, store: JsonFileCheckpointStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await _run(store, "torn-resume", halt_at=2)
+        head = await History(store, "torn-resume").head()
+        assert head is not None
+        (self._objects(store, head.meta.flow_id, "commit") / head.content_hash).unlink()
+
+        lg = make_test_logger()
+        warnings: list[str] = []
+        monkeypatch.setattr(lg, "warning", lambda msg, *_a, **_kw: warnings.append(msg))
+        result = await build_canonical_flow(
+            lg,
+            state=CanonicalCounter(n=100),
+            max_iters=4,
+            store=store,
+            client_flow_id="torn-resume",
+        ).run(resume=True)
+
+        assert result["log"][0] == 101  # fresh from the fallback state, not resumed
+        assert any("corrupt" in w for w in warnings)
 
 
 class TestHistoryAcrossRuns:

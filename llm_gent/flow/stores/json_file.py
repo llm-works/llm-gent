@@ -76,6 +76,26 @@ def _atomic_write_text(target: Path, text: str) -> None:
         raise
 
 
+def _create_exclusive_text(target: Path, text: str) -> bool:
+    """Create ``target`` holding ``text`` only if absent; ``False`` when it already exists.
+
+    Writes a ``.tmp`` sibling, then ``os.link`` — an atomic create-if-absent:
+    of concurrent creators exactly one wins, and readers never see a
+    partially written file.
+    """
+    fd, tmp_path = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.link(tmp_path, target)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
 class JsonFileCheckpointStore:
     """File-per-object :class:`CheckpointStore` under a caller-owned root.
 
@@ -120,20 +140,40 @@ class JsonFileCheckpointStore:
         except FileNotFoundError:
             return None
 
-    def put_flow_id(self, client_flow_id: str, flow_id: str) -> None:
-        """Bind ``client_flow_id`` → ``flow_id``; raise if the name is already bound.
+    def bind_flow_id(self, client_flow_id: str, flow_id: str) -> str:
+        """Bind ``client_flow_id`` → ``flow_id`` unless already bound; return the bound id.
 
-        Also records the name inside the history directory so
-        :meth:`gc_history` can drop the binding from the ``flow_id`` side.
+        The history directory and its ``_client_flow_id`` record (which lets
+        :meth:`gc_history` drop the binding from the ``flow_id`` side) are
+        written first; the name file is then created exclusively. A losing
+        concurrent bind removes its unused directory and returns the winner.
         """
+        existing = self.get_flow_id(client_flow_id)
+        if existing is not None:
+            return existing
+        history_dir = self._claim_history_dir(flow_id, client_flow_id)
         name_file = self._name_file(client_flow_id)
-        if name_file.exists():
-            raise ValueError(f"client_flow_id {client_flow_id!r} is already bound")
-        history_dir = self._history_dir(flow_id)
-        history_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(history_dir / "_client_flow_id", client_flow_id)
         name_file.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(name_file, flow_id)
+        if _create_exclusive_text(name_file, flow_id):
+            return flow_id
+        winner = self.get_flow_id(client_flow_id)
+        if winner is None:
+            raise RuntimeError(f"binding for {client_flow_id!r} vanished during bind")
+        if winner != flow_id:
+            shutil.rmtree(history_dir, ignore_errors=True)
+        return winner
+
+    def _claim_history_dir(self, flow_id: str, client_flow_id: str) -> Path:
+        """Create ``flow_id``'s directory recording its name; reject a ``flow_id`` owned elsewhere."""
+        history_dir = self._history_dir(flow_id)
+        record = history_dir / "_client_flow_id"
+        if record.is_file():
+            owner = record.read_text(encoding="utf-8")
+            if owner != client_flow_id:
+                raise ValueError(f"flow_id {flow_id!r} already names {owner!r}")
+        history_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(record, client_flow_id)
+        return history_dir
 
     # ------------------------------------------------------------------
     # Object store
@@ -216,9 +256,8 @@ class JsonFileCheckpointStore:
         """Write ``refs/{node_path}/{iteration}.json`` with the commit hash.
 
         Also stamps a strictly-increasing per-history sequence number
-        (``seq``) into the JSON so :meth:`_latest_across_history` can
-        pick the newest ref deterministically without relying on mtime
-        ties or clock adjustments.
+        (``seq``) into the JSON so :meth:`_latest_across_history` picks
+        the newest ref by write order, independent of mtimes and clocks.
         """
         ref_dir = self._refs_dir(flow_id, node_path)
         ref_dir.mkdir(parents=True, exist_ok=True)
@@ -282,10 +321,6 @@ class JsonFileCheckpointStore:
             return None
 
         if node_path is None:
-            by_seq = self._latest_across_history_by_seq(history_refs)
-            if by_seq is not None:
-                return by_seq
-            # Fallback for legacy refs without a persisted seq.
             return self._latest_across_history(history_refs)
 
         ref_dir = self._refs_dir(flow_id, node_path)
@@ -319,11 +354,23 @@ class JsonFileCheckpointStore:
     # ------------------------------------------------------------------
 
     def gc_history(self, flow_id: str) -> None:
-        """Remove the history directory and its name binding. Idempotent."""
+        """Remove the history directory and its name binding. Idempotent.
+
+        Order: history contents, then the name binding, then the directory
+        with its ``_client_flow_id`` record. A gc that fails partway leaves
+        the name (and the record naming it) in place, so it can be retried.
+        """
         history_dir = self._history_dir(flow_id)
         if not history_dir.is_dir():
             return
         name_record = history_dir / "_client_flow_id"
+        for child in history_dir.iterdir():
+            if child == name_record:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
         if name_record.is_file():
             name_file = self._name_file(name_record.read_text(encoding="utf-8"))
             with contextlib.suppress(FileNotFoundError):
@@ -395,32 +442,10 @@ class JsonFileCheckpointStore:
     # ------------------------------------------------------------------
 
     def _latest_across_history(self, history_refs: Path) -> str | None:
-        """Return the newest ref (by mtime) across every ``node_path``."""
-        newest_path: Path | None = None
-        newest_mtime = -1.0
-        for node_dir in history_refs.iterdir():
-            if not node_dir.is_dir():
-                continue
-            for entry in node_dir.iterdir():
-                if not _ITER_RE.match(entry.name):
-                    continue
-                try:
-                    mtime = entry.stat().st_mtime
-                except OSError:
-                    continue
-                if mtime > newest_mtime:
-                    newest_mtime = mtime
-                    newest_path = entry
-        if newest_path is None:
-            return None
-        return self._read_ref(newest_path)
-
-    def _latest_across_history_by_seq(self, history_refs: Path) -> str | None:
         """Return the ref with the highest persisted ``seq`` under a history.
 
-        Falls back to :meth:`_latest_across_history` (mtime-based) when
-        no ref in the history carries a ``seq`` — e.g., pre-``seq``
-        refs written before this change.
+        Ref files whose ``seq`` is missing or unreadable are skipped;
+        ``None`` when no ref in the history has one.
         """
         best_seq = -1
         best_path: Path | None = None

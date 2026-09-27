@@ -12,9 +12,10 @@ Four tables:
   content-hashing guarantees same-hash → same bytes, so a re-put is a
   no-op.
 - :class:`FlowRef` — ``(flow_id, node_path, iteration)`` PK,
-  ``VARCHAR(64) commit_hash``, ``TIMESTAMPTZ created_at``. Idempotent
-  overwrite via ``ON CONFLICT DO UPDATE`` refreshing ``created_at`` so
-  the latest ref is discoverable by ``ORDER BY created_at DESC``.
+  ``VARCHAR(64) commit_hash``, ``BIGINT seq``, ``TIMESTAMPTZ
+  created_at``. Idempotent overwrite via ``ON CONFLICT DO UPDATE``
+  drawing a new ``seq`` from a database sequence, so the latest ref is
+  ``ORDER BY seq DESC`` — write order independent of writer clocks.
 - :class:`FlowTag` — ``(flow_id, name)`` PK → ``commit_hash``. Upsert
   moves the tag.
 
@@ -35,14 +36,17 @@ from datetime import UTC, datetime
 from appinfra.db.pg import PG
 from appinfra.log import Logger
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     Integer,
     LargeBinary,
+    Sequence,
     String,
     delete,
     select,
 )
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from llm_gent.schema import Base
@@ -52,6 +56,9 @@ from ..checkpoint import Kind, Retention
 
 _FLOW_ID_LEN = 36
 """Length of a ``flow_id`` column — a canonical UUID string."""
+
+_REF_SEQ = Sequence("llm_gent_flow_ref_seq", metadata=Base.metadata)
+"""Sequence feeding :attr:`FlowRef.seq` (write order of refs)."""
 
 
 class FlowName(Base):
@@ -89,9 +96,9 @@ class FlowObject(Base):
 class FlowRef(Base):
     """One row = one ``(flow_id, node_path, iteration)`` → commit_hash.
 
-    ``created_at`` is refreshed on every put so :meth:`resolve_ref` can
-    return the newest ref across a history via ``ORDER BY created_at
-    DESC``.
+    ``seq`` is drawn from :data:`_REF_SEQ` on insert and redrawn on every
+    re-put, so :meth:`resolve_ref` returns the newest ref across a history
+    via ``ORDER BY seq DESC`` — database write order, not writer clocks.
     """
 
     __tablename__ = "llm_gent_flow_ref"
@@ -100,6 +107,9 @@ class FlowRef(Base):
     node_path: Mapped[str] = mapped_column(String(1024), primary_key=True)
     iteration: Mapped[int] = mapped_column(Integer, primary_key=True)
     commit_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    seq: Mapped[int] = mapped_column(
+        BigInteger, _REF_SEQ, nullable=False, server_default=_REF_SEQ.next_value()
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -155,11 +165,27 @@ class PgCheckpointStore:
             row = session.execute(stmt).first()
         return None if row is None else str(row[0])
 
-    def put_flow_id(self, client_flow_id: str, flow_id: str) -> None:
-        """Bind ``client_flow_id`` → ``flow_id``; a second bind of the name raises (PK)."""
-        stmt = insert(FlowName).values(client_flow_id=client_flow_id, flow_id=flow_id)
-        with self._pg.session() as session:
-            session.execute(stmt)
+    def bind_flow_id(self, client_flow_id: str, flow_id: str) -> str:
+        """Bind ``client_flow_id`` → ``flow_id`` unless already bound; return the bound id.
+
+        ``ON CONFLICT (client_flow_id) DO NOTHING`` waits for a concurrent
+        binder to commit, so the follow-up read returns the winner. A
+        ``flow_id`` already naming another history violates its unique
+        constraint and raises :class:`ValueError`.
+        """
+        stmt = (
+            insert(FlowName)
+            .values(client_flow_id=client_flow_id, flow_id=flow_id)
+            .on_conflict_do_nothing(index_elements=["client_flow_id"])
+        )
+        query = select(FlowName.flow_id).where(FlowName.client_flow_id == client_flow_id)
+        try:
+            with self._pg.session() as session:
+                session.execute(stmt)
+                bound = session.execute(query).scalar_one()
+        except IntegrityError as e:
+            raise ValueError(f"flow_id {flow_id!r} already names another history") from e
+        return str(bound)
 
     # ------------------------------------------------------------------
     # Object store
@@ -225,7 +251,7 @@ class PgCheckpointStore:
         iteration: int,
         commit_hash: str,
     ) -> None:
-        """Idempotent overwrite — refreshes ``created_at`` on re-put."""
+        """Idempotent overwrite — a re-put draws a new ``seq`` and refreshes ``created_at``."""
         stmt = insert(FlowRef).values(
             flow_id=flow_id,
             node_path=node_path,
@@ -234,7 +260,11 @@ class PgCheckpointStore:
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["flow_id", "node_path", "iteration"],
-            set_={"commit_hash": stmt.excluded.commit_hash, "created_at": datetime.now(UTC)},
+            set_={
+                "commit_hash": stmt.excluded.commit_hash,
+                "seq": _REF_SEQ.next_value(),
+                "created_at": datetime.now(UTC),
+            },
         )
         with self._pg.session() as session:
             session.execute(stmt)
@@ -262,8 +292,8 @@ class PgCheckpointStore:
             # the Protocol contract.
             stmt = stmt.order_by(FlowRef.iteration.desc()).limit(1)
         else:
-            # Latest across the whole history = newest write.
-            stmt = stmt.order_by(FlowRef.created_at.desc()).limit(1)
+            # Latest across the whole history = newest write, by database sequence.
+            stmt = stmt.order_by(FlowRef.seq.desc()).limit(1)
         with self._pg.session() as session:
             row = session.execute(stmt).first()
         return None if row is None else str(row[0])

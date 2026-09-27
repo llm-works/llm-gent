@@ -236,12 +236,18 @@ policy governs only implicit auto-saves.
 On a clean exit under the default `retain` retention, the framework also
 commits the run's final state and moves the `complete` tag to it. A
 history whose head is that commit is complete: `run(resume=True)` starts
-fresh, and the new run's commits extend the same history.
+fresh, and the new run's commits extend the same history. The tag stays
+on the last finished run's final state when a later run halts past it.
+A final state that cannot be serialized is committed without state (and
+a warning is logged) rather than failing the finished run.
 
 ### Reading a history
 
 A history is the chain of commits one `client_flow_id` accumulates across
-runs: each commit's parent is the previous head. `History` reads it:
+runs: each commit's parent is the previous head, in time order. A run
+ends in a `halted` commit (halt) or the `$end` final-state commit (clean
+exit), which is where the next run's commits pick up; a run that raises
+leaves no closing commit. `History` reads it:
 
 ```python
 from llm_gent.flow import History, TypeStateFactory

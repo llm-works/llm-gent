@@ -15,8 +15,9 @@ it:
 
 The store is a Protocol with five surfaces:
 
-- **Name map** — :meth:`get_flow_id` / :meth:`put_flow_id` map a
-  ``client_flow_id`` to its ``flow_id``. At most one history per name.
+- **Name map** — :meth:`get_flow_id` / :meth:`bind_flow_id` map a
+  ``client_flow_id`` to its ``flow_id``. At most one history per name;
+  binding is atomic bind-if-absent, so concurrent first saves agree.
 
 - **Object store** — content-addressed put / get / has for opaque bytes,
   keyed by ``(flow_id, kind, content_hash)``. ``kind`` is one of
@@ -34,10 +35,11 @@ The store is a Protocol with five surfaces:
   latest commit across the history — the resume entry point).
 
 - **Tags** — :meth:`put_tag` / :meth:`resolve_tag` point a named label
-  under ``flow_id`` at a commit hash. A tag moves when re-put. The
-  framework maintains ``"complete"``: on a clean exit it commits the
-  final state and tags it; the history is complete while that tag
-  points at the latest commit.
+  under ``flow_id`` at a commit hash. A tag moves when re-put. On a clean
+  exit the framework commits the final state at :data:`END_NODE_PATH`
+  and moves ``"complete"`` to it. The history is complete while its
+  latest commit is that final-state commit; the tag keeps pointing at
+  the last finished run's final state after later runs append past it.
 
 - **History cleanup** — :meth:`gc_history` removes every object, ref,
   tag and the name mapping of one ``flow_id``. The framework calls it on a
@@ -103,6 +105,13 @@ END_NODE_PATH = "$end"
 Not a node id: the commit sits after the last top-level node, and the
 ``$`` prefix cannot collide with a blake2b hex node id. A history whose
 head is at this path is complete.
+"""
+
+
+FRAMEWORK_PRODUCER = "$framework/completion"
+"""``produced_by.node_id`` of commits the framework writes itself (the
+:data:`END_NODE_PATH` final-state commit) — no node produced them. Follows
+the ``$external/*`` convention for producers that are not flow nodes.
 """
 
 
@@ -233,13 +242,15 @@ class CheckpointStore(Protocol):
         """
         ...
 
-    def put_flow_id(self, client_flow_id: str, flow_id: str) -> None | Awaitable[None]:
-        """Record that ``client_flow_id`` names the history ``flow_id``.
+    def bind_flow_id(self, client_flow_id: str, flow_id: str) -> str | Awaitable[str]:
+        """Bind ``client_flow_id`` to ``flow_id`` unless already bound; return the bound id.
 
-        Called once per history, by the framework, on its first save —
-        after :meth:`get_flow_id` returned ``None``. Under the
-        single-writer contract a name is never bound twice concurrently;
-        implementations MAY raise if the name is already bound.
+        Called by the framework on a history's first save, with a fresh
+        ``flow_id``. MUST be atomic: of concurrent binds of one name exactly
+        one wins, and every caller gets the winner's ``flow_id`` back (the
+        losers then write into the winner's history). A ``flow_id`` names
+        at most one ``client_flow_id``; binding it to a second name raises
+        :class:`ValueError`.
 
         May be declared ``async def``.
         """
@@ -336,9 +347,11 @@ class CheckpointStore(Protocol):
         ``iteration`` without ``node_path`` is invalid — implementations
         raise :class:`ValueError`.
 
-        "Latest" is by save order — implementations use their
-        write-order signal (Postgres row created_at, JsonFile ref
-        directory mtime).
+        "Latest" is by save order, and a re-put counts as a new save.
+        Implementations need a write-order signal that does not depend on
+        writer clocks (Postgres: a database sequence; JsonFile: a per-history
+        counter). The framework uses it to pick a commit's parent and the
+        resume point.
 
         May be declared ``async def``.
         """

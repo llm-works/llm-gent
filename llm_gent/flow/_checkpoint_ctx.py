@@ -30,7 +30,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import CheckpointStore, Kind, Retention, maybe_await
+from .checkpoint import FRAMEWORK_PRODUCER, CheckpointStore, Kind, Retention, maybe_await
 from .state import serialize_state_data
 from .state.cas import (
     Blob,
@@ -59,10 +59,11 @@ class CheckpointContext:
     Owns the ``(store, client_flow_id)`` pair unambiguously (both
     fields are always populated once the context exists — the
     Optional lives at the context level, not per-field) and caches
-    the history's ``flow_id`` once resolved. Exposes the put-object
-    triad, ref put/resolve, get_object, gc_history, and the compound
-    :meth:`save_scope_commit` that assembles a Blob→Tree→Commit chain
-    and refs it at the boundary.
+    the history's ``flow_id`` and head within one run
+    (:meth:`begin_run` drops them). Exposes the put-object triad, ref
+    put/resolve, get_object, put_tag, gc_history, :meth:`append_commit`,
+    and the compound :meth:`save_scope_commit` that assembles a
+    Blob→Tree→Commit chain and refs it at the boundary.
     """
 
     def __init__(
@@ -73,18 +74,35 @@ class CheckpointContext:
     ) -> None:
         """Bind the store and name; ``root_hash`` yields the owning flow's structure hash.
 
-        ``root_hash`` is called per commit rather than once, so nodes added
-        to the flow after ``with_checkpointer`` are reflected.
+        ``root_hash`` is evaluated once per run, at the run's first commit,
+        so nodes added to the flow after ``with_checkpointer`` are reflected
+        and every commit of a run records the same structure hash.
         """
         self.store = store
         self.client_flow_id = client_flow_id
         self._root_hash = root_hash
+        self._run_root_hash: str | None = None
         self._flow_id: str | None = None
         self._flow_id_lock = asyncio.Lock()
         # Head of the history: the newest commit, parent of the next one.
         # Loaded from the store on first append, then maintained here —
-        # the context assumes it is the history's single writer.
+        # the context assumes it is the history's single writer for the run.
         self._head: str | None = None
+        self._head_loaded = False
+        self._commit_lock = asyncio.Lock()
+
+    def begin_run(self) -> None:
+        """Drop the cached ``flow_id``, head and root hash, and create fresh locks.
+
+        Called at the start of every top-level run so each run re-reads
+        the store: a history collected (or advanced) by someone else between
+        runs is observed instead of written into under a stale id or head.
+        Fresh locks keep a Flow reusable across event loops.
+        """
+        self._run_root_hash = None
+        self._flow_id = None
+        self._flow_id_lock = asyncio.Lock()
+        self._head = None
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
 
@@ -104,15 +122,16 @@ class CheckpointContext:
     async def ensure_flow_id(self) -> str:
         """Return this history's ``flow_id``, creating the history on first call.
 
-        Serialized so concurrent first saves (parallel map items) bind
-        exactly one ``flow_id`` to the name.
+        The lock keeps parallel map items in this process to one bind; the
+        store's atomic bind-if-absent settles races with other processes.
         """
         async with self._flow_id_lock:
             flow_id = await self.lookup_flow_id()
             if flow_id is None:
-                flow_id = str(uuid.uuid4())
-                await maybe_await(self.store.put_flow_id(self.client_flow_id, flow_id))
-                self._flow_id = flow_id
+                bound: str = await maybe_await(
+                    self.store.bind_flow_id(self.client_flow_id, str(uuid.uuid4()))
+                )
+                self._flow_id = flow_id = bound
             return flow_id
 
     # --- store passthrough (kind-specific put_object variants) ---
@@ -163,14 +182,18 @@ class CheckpointContext:
         await maybe_await(self.store.put_tag(flow_id, name, commit_hash))
 
     async def gc_history(self) -> None:
-        """Remove this history (objects, refs, name mapping); the next save starts a new one."""
+        """Remove this history (objects, refs, tags, name mapping); the next save starts a new one."""
         flow_id = await self.lookup_flow_id()
         if flow_id is None:
             return
-        await maybe_await(self.store.gc_history(flow_id))
-        self._flow_id = None
-        self._head = None
-        self._head_loaded = False
+        try:
+            await maybe_await(self.store.gc_history(flow_id))
+        finally:
+            # Also on a failed gc: the next access re-reads the name binding
+            # instead of trusting a flow_id the store may have half-removed.
+            self._flow_id = None
+            self._head = None
+            self._head_loaded = False
 
     # --- history: append a commit on top of the head ---
 
@@ -234,13 +257,26 @@ class CheckpointContext:
         successful iterate boundary, ``"halted"`` when the
         halt-observation site triggered the save.
         """
-        scopes = self._collect_scope_stack(current_state)
-        entries = await self._put_scope_blobs(scopes)
-        tree = Tree.from_entries(entries)
-        await self.put_tree(tree)
+        tree = await self.put_state_tree(current_state)
         node_path = "/".join(ancestor_chain + (node_id,))
         flow_id = await self.ensure_flow_id()
         meta = self._build_commit_meta(flow_id, node_path, iteration, node_id, outcome, trace_ref)
+        return await self.append_commit(tree.content_hash, meta)
+
+    async def put_state_tree(self, current_state: State[Any]) -> Tree:
+        """Put one blob per scope from run root to ``current_state`` and their Tree."""
+        entries = await self._put_scope_blobs(self._collect_scope_stack(current_state))
+        tree = Tree.from_entries(entries)
+        await self.put_tree(tree)
+        return tree
+
+    async def save_framework_commit(self, node_path: str, tree: Tree) -> Commit:
+        """Commit an already-put ``tree`` at a reserved ``node_path`` the framework owns.
+
+        No node produced it: ``produced_by.node_id`` is :data:`FRAMEWORK_PRODUCER`.
+        """
+        flow_id = await self.ensure_flow_id()
+        meta = self._build_commit_meta(flow_id, node_path, 0, FRAMEWORK_PRODUCER, "ok", ())
         return await self.append_commit(tree.content_hash, meta)
 
     # --- private helpers used by save_scope_commit ---
@@ -286,10 +322,12 @@ class CheckpointContext:
         ``produced_by`` records the node's ``node_id`` — verb-level
         attribution (``verb_name`` / ``role`` / ``result_hash``)
         lands with the SAIA-verb-wrapper wiring. ``flow_root_hash`` is
-        the owning flow's structure hash at the time of the commit.
+        the owning flow's structure hash, computed once per run.
         """
         from llm_gent import __version__
 
+        if self._run_root_hash is None:
+            self._run_root_hash = self._root_hash()
         return CommitMeta(
             flow_id=flow_id,
             node_path=node_path,
@@ -297,7 +335,7 @@ class CheckpointContext:
             produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
             trace_ref=trace_ref,
             outcome=outcome,
-            flow_root_hash=self._root_hash(),
+            flow_root_hash=self._run_root_hash,
             timestamp_iso=datetime.now(UTC).isoformat(),
             framework_version=__version__,
         )
