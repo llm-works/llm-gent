@@ -63,6 +63,7 @@ from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext
+from ._node_id import flow_root_hash
 from ._resume import Resume, apply_clean_exit_retention, assert_replay_consumed
 from ._validation import _materialize, _require_state_for_merge, _validate_target
 from .checkpoint import CheckpointPolicy, CheckpointStore
@@ -773,8 +774,19 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
-        self._checkpoint_ctx = CheckpointContext(store, client_flow_id)
+        self._checkpoint_ctx = CheckpointContext(store, client_flow_id, self.root_hash)
         return self
+
+    def root_hash(self) -> str:
+        """Structure hash of this flow's composition tree.
+
+        Recorded as ``flow_root_hash`` on every commit this flow writes.
+        Equal hashes mean every chain step gets the same node id, so a
+        checkpoint written by one flow can be resumed by the other.
+        Covers step kinds, positions, targets and nested flows — not
+        parameters such as ``max_iters`` or predicates.
+        """
+        return flow_root_hash(self)
 
     def with_checkpoint_policy(
         self,

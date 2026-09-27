@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -64,9 +65,20 @@ class CheckpointContext:
     and refs it at the boundary.
     """
 
-    def __init__(self, store: CheckpointStore, client_flow_id: str) -> None:
+    def __init__(
+        self,
+        store: CheckpointStore,
+        client_flow_id: str,
+        root_hash: Callable[[], str],
+    ) -> None:
+        """Bind the store and name; ``root_hash`` yields the owning flow's structure hash.
+
+        ``root_hash`` is called per commit rather than once, so nodes added
+        to the flow after ``with_checkpointer`` are reflected.
+        """
         self.store = store
         self.client_flow_id = client_flow_id
+        self._root_hash = root_hash
         self._flow_id: str | None = None
         self._flow_id_lock = asyncio.Lock()
         # Head of the history: the newest commit, parent of the next one.
@@ -268,8 +280,8 @@ class CheckpointContext:
             )
         return entries
 
-    @staticmethod
     def _build_commit_meta(
+        self,
         flow_id: str,
         node_path: str,
         iteration: int,
@@ -282,8 +294,7 @@ class CheckpointContext:
         ``produced_by`` records the node's ``node_id`` — verb-level
         attribution (``verb_name`` / ``role`` / ``result_hash``)
         lands with the SAIA-verb-wrapper wiring. ``flow_root_hash`` is
-        left empty until the framework computes the composition-tree
-        structure hash.
+        the owning flow's structure hash at the time of the commit.
         """
         from llm_gent import __version__
 
@@ -294,7 +305,7 @@ class CheckpointContext:
             produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
             trace_ref=trace_ref,
             outcome=outcome,
-            flow_root_hash="",
+            flow_root_hash=self._root_hash(),
             timestamp_iso=datetime.now(UTC).isoformat(),
             framework_version=__version__,
         )

@@ -244,8 +244,10 @@ class CommitMeta:
     outcome: CommitOutcome
     flow_root_hash: str
     """Structure hash of the flow definition (the composition tree) —
-    identical for every history running the same flow code. Empty until
-    the framework computes it."""
+    identical for every history running the same flow code. Equal
+    hashes guarantee identical node ids, so a ``node_path`` saved under
+    one resolves under the other. Computed by the framework on every
+    commit; empty only in hand-built commits."""
     timestamp_iso: str
     framework_version: str
 

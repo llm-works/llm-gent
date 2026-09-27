@@ -179,3 +179,45 @@ def test_verb_body_edit_preserves_id() -> None:
     a = _mkflow().call(verb_alpha).then(verb_beta)
     b = _mkflow().call(verb_alpha).then(verb_beta)
     assert _chain_step_ids(a) == _chain_step_ids(b)
+
+
+# -----------------------------------------------------------------------------
+# Flow root hash — the whole composition tree
+# -----------------------------------------------------------------------------
+
+
+def test_root_hash_is_deterministic_cas_hash() -> None:
+    """Same composition → same 64-hex root hash (blake2b-256, like CAS objects)."""
+    a = _mkflow().call(verb_alpha).iterate(_mkflow().call(verb_beta), max_iters=3)
+    b = _mkflow().call(verb_alpha).iterate(_mkflow().call(verb_beta), max_iters=3)
+    assert a.root_hash() == b.root_hash()
+    assert len(a.root_hash()) == 64
+
+
+def test_root_hash_sees_nested_changes() -> None:
+    """A different verb deep inside an iterate body changes the root hash."""
+    a = _mkflow().call(verb_alpha).iterate(_mkflow().call(verb_beta), max_iters=3)
+    b = _mkflow().call(verb_alpha).iterate(_mkflow().call(verb_gamma), max_iters=3)
+    assert a.root_hash() != b.root_hash()
+
+
+def test_root_hash_distinguishes_branch_arms() -> None:
+    """Swapping the then / else arms changes the root hash."""
+    then_flow, else_flow = _mkflow().call(verb_alpha), _mkflow().call(verb_beta)
+    a = _mkflow().branch(when=lambda *_: True, then=then_flow, else_=else_flow)
+    b = _mkflow().branch(when=lambda *_: True, then=else_flow, else_=then_flow)
+    assert a.root_hash() != b.root_hash()
+
+
+def test_root_hash_ignores_node_parameters() -> None:
+    """Parameters that don't enter node ids (max_iters) don't enter the root hash."""
+    a = _mkflow().iterate(_mkflow().call(verb_beta), max_iters=3)
+    b = _mkflow().iterate(_mkflow().call(verb_beta), max_iters=10)
+    assert a.root_hash() == b.root_hash()
+
+
+def test_root_hash_terminates_on_recursive_flow() -> None:
+    """A flow that re-enters itself through a branch arm hashes without recursing forever."""
+    recursive = _mkflow().call(verb_alpha)
+    recursive.branch(when=lambda *_: False, then=recursive)
+    assert len(recursive.root_hash()) == 64

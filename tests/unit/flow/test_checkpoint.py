@@ -1242,7 +1242,7 @@ class TestHistoryLineage:
         from llm_gent.flow._checkpoint_ctx import CheckpointContext
         from llm_gent.flow.state.cas import Tree
 
-        ctx = CheckpointContext(store, "lineage-gc")
+        ctx = CheckpointContext(store, "lineage-gc", lambda: "")
         tree = Tree.from_entries([])
         await ctx.put_tree(tree)
 
@@ -1261,6 +1261,33 @@ class TestHistoryLineage:
         await ctx.put_tree(tree)
         restarted = await _append(0)
         assert restarted.parent_hashes == ()
+
+
+class TestFlowRootHash:
+    async def test_every_commit_records_the_flow_root_hash(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Halt, iterate-boundary and final-state commits all carry the flow's structure hash."""
+        halt = asyncio.Event()
+        flow = build_canonical_flow(
+            make_test_logger(),
+            max_iters=4,
+            halt=halt,
+            halt_after_iteration=2,
+            store=store,
+            client_flow_id="root-hash",
+        )
+        await flow.run()
+        halt.clear()
+        resumed = build_canonical_flow(
+            make_test_logger(), max_iters=4, store=store, client_flow_id="root-hash"
+        )
+        await resumed.run(resume=True)
+
+        chain = _chain_from_head(store, "root-hash")
+        assert {c.meta.outcome for c in chain} == {"ok", "halted"}
+        assert {c.meta.flow_root_hash for c in chain} == {flow.root_hash()}
+        assert resumed.root_hash() == flow.root_hash()
 
 
 class TestCompletionTag:
@@ -1364,7 +1391,7 @@ class TestCompletionTag:
         from llm_gent.flow.state import State
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
-        ctx = CheckpointContext(store, "torn-completion")
+        ctx = CheckpointContext(store, "torn-completion", lambda: "")
         await ctx.save_scope_commit((), 0, END_NODE_PATH, State(data={"n": 7}), "ok")
         assert store.resolve_tag(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
 
