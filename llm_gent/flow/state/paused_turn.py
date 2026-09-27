@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Framework state for SAIA turn pause/resume.
+"""Framework state for paused turns — SAIA turns stopped mid-turn, saved, and resumed.
 
 Groups three concerns the halt-save + resume path shares across
 ``Flow`` / ``Loop`` / executor: the pending-side dict pair keyed by
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class PendingPausedTurns:
-    """Paused SAIA turns awaiting a halt-save.
+    """Paused turns awaiting a halt-save.
 
     :class:`Loop` deposits an entry via :meth:`add` on pause; the
     halt-observation site drains via :meth:`snapshot` +
@@ -94,7 +94,7 @@ class PendingPausedTurns:
         """Persist a snapshot via ``ctx``; return TraceRefs + stashed node_ids.
 
         Each entry becomes a standalone :class:`Blob` under the
-        branch and yields one
+        history and yields one
         ``TraceRef(kind="paused_turn", id=f"{node_id}:{blob_hash}")``
         for the caller to stamp on the halt commit's meta; the
         compound id lets the resume side route each blob back to the
@@ -123,10 +123,10 @@ class PendingPausedTurns:
 
 @dataclass
 class ResumePausedTurns:
-    """Reconstructed SAIA turn payloads awaiting Loop pickup on resume.
+    """Reconstructed paused-turn payloads awaiting Loop pickup on resume.
 
-    :meth:`Flow._load_resume_paused_turn_bytes` populates via :meth:`add`
-    from the halt commit's ``paused_turn`` :class:`TraceRef` entries;
+    :meth:`load_from_commit` (called from ``Resume.hydrate``) populates
+    via :meth:`add` from the halt commit's ``paused_turn`` :class:`TraceRef` entries;
     :class:`Loop` reads via :meth:`load` at dispatch and drops via
     :meth:`release` only after ``saia.complete`` returns (so a
     rescue-then-iterate-retry re-consumes the same envelope).

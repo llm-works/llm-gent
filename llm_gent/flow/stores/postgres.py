@@ -14,9 +14,9 @@ Two tables, one row per object / ref respectively:
   overwrite via ``ON CONFLICT DO UPDATE`` refreshing ``created_at`` so
   the latest ref is discoverable by ``ORDER BY created_at DESC``.
 
-Both tables scope everything by ``client_flow_id`` — branch-scoped
-storage, matching the arc's non-goal on cross-branch blob sharing.
-:meth:`gc_branch` is two DELETE statements.
+Both tables scope everything by ``client_flow_id`` — history-scoped
+storage; blobs are deliberately not shared across histories.
+:meth:`gc_history` is two DELETE statements.
 
 Schema is not managed by the store. Consumers call
 :func:`llm_gent.ensure_schema` (or :class:`llm_gent.schema.SchemaManager`
@@ -47,7 +47,7 @@ from ..checkpoint import Kind, Retention
 
 
 class FlowObject(Base):
-    """One row = one content-addressed object under a branch.
+    """One row = one content-addressed object under a history.
 
     Kept in sync with :mod:`llm_gent.migrations.versions.001_initial_flow_checkpoint`
     (which owns the DDL). Any schema change lands as both a new alembic
@@ -66,7 +66,7 @@ class FlowRef(Base):
     """One row = one ``(client_flow_id, node_path, iteration)`` → commit_hash.
 
     ``created_at`` is refreshed on every put so :meth:`resolve_ref` can
-    return the newest ref across a branch via ``ORDER BY created_at
+    return the newest ref across a history via ``ORDER BY created_at
     DESC``.
     """
 
@@ -100,8 +100,8 @@ class PgCheckpointStore:
             pg: :class:`appinfra.db.pg.PG` handle. The store issues all
                 statements against this handle's bound schema.
             retention: ``"retain"`` (default) keeps successful
-                branches in place; ``"gc_on_success"`` calls
-                :meth:`gc_branch` on clean run completion.
+                histories in place; ``"gc_on_success"`` calls
+                :meth:`gc_history` on clean run completion.
         """
         self._lg = lg
         self._pg = pg
@@ -193,7 +193,7 @@ class PgCheckpointStore:
         node_path: str | None = None,
         iteration: int | None = None,
     ) -> str | None:
-        """Return the commit hash for the branch key, or ``None``.
+        """Return the commit hash for the history key, or ``None``.
 
         See :class:`~llm_gent.flow.checkpoint.CheckpointStore.resolve_ref`.
         """
@@ -210,17 +210,17 @@ class PgCheckpointStore:
             # the Protocol contract.
             stmt = stmt.order_by(FlowRef.iteration.desc()).limit(1)
         else:
-            # Latest across the whole branch = newest write.
+            # Latest across the whole history = newest write.
             stmt = stmt.order_by(FlowRef.created_at.desc()).limit(1)
         with self._pg.session() as session:
             row = session.execute(stmt).first()
         return None if row is None else str(row[0])
 
     # ------------------------------------------------------------------
-    # Branch cleanup
+    # History cleanup
     # ------------------------------------------------------------------
 
-    def gc_branch(self, client_flow_id: str) -> None:
+    def gc_history(self, client_flow_id: str) -> None:
         """Delete every object and ref under ``client_flow_id``. Idempotent."""
         with self._pg.session() as session:
             session.execute(delete(FlowRef).where(FlowRef.client_flow_id == client_flow_id))

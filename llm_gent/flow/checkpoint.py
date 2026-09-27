@@ -1,32 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""CheckpointStore — content-addressed persistence for Flow branches.
+"""CheckpointStore — content-addressed persistence for Flow histories.
 
 The store is a two-surface Protocol:
 
 - **Object store** — content-addressed put / get / has for opaque bytes,
   keyed by ``(client_flow_id, kind, content_hash)``. ``kind`` is one of
   ``"blob"`` / ``"tree"`` / ``"commit"``, the object triad from
-  :mod:`llm_gent.flow.state.cas`. Objects are branch-scoped: each
-  ``client_flow_id`` owns its objects, so gc at branch boundaries is
-  self-contained. Content-addressing still holds within a branch —
+  :mod:`llm_gent.flow.state.cas`. Objects are history-scoped: each
+  ``client_flow_id`` owns its objects, so gc at history boundaries is
+  self-contained. Content-addressing still holds within a history —
   identical byte payloads produce identical blob hashes, so a resume's
   reconstruction is byte-exact.
 
 - **Ref store** — points ``(client_flow_id, node_path, iteration)`` at a
-  commit hash. ``put_ref`` records "this branch reached this commit
+  commit hash. ``put_ref`` records "this history reached this commit
   at this iterate boundary"; ``resolve_ref`` returns the commit hash for
   a full or partial key (``node_path=None, iteration=None`` returns the
-  latest commit across the branch — the resume entry point).
+  latest commit across the history — the resume entry point).
 
-- **Branch cleanup** — :meth:`gc_branch` removes every object
+- **History cleanup** — :meth:`gc_history` removes every object
   and ref under one ``client_flow_id``. The framework calls it on a
   fully successful :meth:`Flow.run` when the store's retention policy is
   ``"gc_on_success"``; the default ``"retain"`` keeps successful
-  branches on disk for audit, cross-run diff, and downstream
+  histories on disk for audit, cross-run diff, and downstream
   provenance exporters. Consumers who need explicit cleanup call
-  :meth:`gc_branch` themselves.
+  :meth:`gc_history` themselves.
 
 Every method may be declared ``def`` (returning the value directly) or
 ``async def`` (returning a coroutine). The framework awaits the return
@@ -39,14 +39,14 @@ Retention policy
 The reference stores accept a ``retention`` argument at construction:
 
 - ``"retain"`` (default): a successful :meth:`Flow.run` does NOT call
-  :meth:`gc_branch`. Provenance framing — the successful record is
+  :meth:`gc_history`. Provenance framing — the successful record is
   the one most often needed for audit, cross-run diff, and motif
   extraction across good runs.
 - ``"gc_on_success"``: on a fully successful run the framework calls
-  :meth:`gc_branch`, matching the pre-CAS delete-on-clean-exit
-  behavior for consumers who don't want the branch to accumulate.
+  :meth:`gc_history`, matching the pre-CAS delete-on-clean-exit
+  behavior for consumers who don't want the history to accumulate.
 
-Halt / cancellation / unhandled exceptions preserve the branch
+Halt / cancellation / unhandled exceptions preserve the history
 regardless of retention so a later ``resume=True`` run can pick up.
 """
 
@@ -87,7 +87,7 @@ class CheckpointPolicy:
       any of its save sites (iterate boundary, chain between-step,
       chain tail), provided a checkpointer + client_flow_id are
       wired. This is the durability guarantee that makes
-      ``run(resume=True)`` reach a halted branch.
+      ``run(resume=True)`` reach a halted history.
     - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires
       regardless of policy; when the verb asks to save, we save.
 
@@ -95,7 +95,7 @@ class CheckpointPolicy:
     points that would otherwise fire per composition step:
 
     - :attr:`on_iterate` — save at every successful iterate body
-      boundary. Off by default; halt-only branches skip every
+      boundary. Off by default; halt-only histories skip every
       per-iteration commit and only stamp on halt + on explicit
       calls.
 
@@ -159,11 +159,11 @@ async def maybe_await(value: Any) -> Any:
 
 
 class CheckpointStore(Protocol):
-    """Content-addressed persistence for Flow branches.
+    """Content-addressed persistence for Flow histories.
 
     Two surfaces on one Protocol: object store (put / get / has for
     opaque bytes keyed by content hash) and ref store (points a
-    branch key at a commit hash). See the module docstring for the
+    history key at a commit hash). See the module docstring for the
     object model and retention policy.
 
     Each method may be declared ``def`` (returning its value directly)
@@ -180,7 +180,7 @@ class CheckpointStore(Protocol):
     """Store's retention policy for successful runs.
 
     Read by :meth:`Flow.run`'s clean-exit path to decide whether to call
-    :meth:`gc_branch`. Set at store construction; the Protocol does
+    :meth:`gc_history`. Set at store construction; the Protocol does
     not dictate the construction shape but every reference implementation
     accepts a ``retention=`` keyword argument.
     """
@@ -261,7 +261,7 @@ class CheckpointStore(Protocol):
         node_path: str | None = None,
         iteration: int | None = None,
     ) -> str | None | Awaitable[str | None]:
-        """Return the ``commit_hash`` for the branch key, or ``None``.
+        """Return the ``commit_hash`` for the history key, or ``None``.
 
         Argument combinations:
 
@@ -284,15 +284,15 @@ class CheckpointStore(Protocol):
         """
         ...
 
-    # Branch cleanup
+    # History cleanup
 
-    def gc_branch(self, client_flow_id: str) -> None | Awaitable[None]:
+    def gc_history(self, client_flow_id: str) -> None | Awaitable[None]:
         """Remove every object and ref under ``client_flow_id``.
 
         Idempotent: absence is not an error. Called by :meth:`Flow.run`'s
         clean-exit path when :attr:`retention` is ``"gc_on_success"``;
         also callable directly by consumers who want to prune a
-        branch.
+        history.
 
         May be declared ``async def``.
         """

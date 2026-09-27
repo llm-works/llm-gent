@@ -564,7 +564,7 @@ async def _persist_halt(
     node_id: str,
     current_state: State[Any],
 ) -> tuple[str, ...]:
-    """Stash pending SAIA turns + save the halted commit; return stashed node_ids."""
+    """Stash pending paused turns + save the halted commit; return stashed node_ids."""
     assert env.checkpoint_ctx is not None
     try:
         trace_ref, stashed_ids = await env.pending_paused_turns.stash_to_ctx(env.checkpoint_ctx)

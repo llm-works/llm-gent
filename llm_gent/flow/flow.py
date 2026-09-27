@@ -739,14 +739,14 @@ class Flow:
         :meth:`run` ``resume=True``, a load-at-start that hydrates the
         run's payload before the first node dispatches. On fully
         successful :meth:`run` completion the framework calls
-        :meth:`CheckpointStore.gc_branch` when the store's
+        :meth:`CheckpointStore.gc_history` when the store's
         ``retention`` is ``"gc_on_success"``; the default ``"retain"``
-        keeps the branch for audit. Cancellation, halt exits, and
+        keeps the history for audit. Cancellation, halt exits, and
         unhandled exceptions preserve the checkpoint regardless of
         retention so a subsequent resume can pick up.
 
         Both arguments bind together — the ``client_flow_id`` scopes every
-        save/load/delete call and identifies the resumable branch. It
+        save/load/delete call and identifies the resumable history. It
         is agent-owned: the framework never assigns one automatically.
 
         A subflow inherits the outer runtime's checkpointer + id
@@ -880,7 +880,7 @@ class Flow:
                 ``state_factory.restore``; a flow without ``state_factory``
                 treats the stored payload as a plain dict. Absent-checkpoint
                 resume is a no-op — the run proceeds with ``state`` as given.
-                On fully successful completion the branch is gc'd when
+                On fully successful completion the history is gc'd when
                 the store's ``retention`` is ``"gc_on_success"``. Requires
                 :meth:`with_checkpointer` to be wired; raises otherwise.
                 Bound parameter: not forwarded to the first node.

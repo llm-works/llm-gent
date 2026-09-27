@@ -9,7 +9,7 @@
 
 Verifies Flow's checkpoint + mid-SAIA-turn pause + resume story
 end-to-end. Structurally exercises every save site: iterate
-boundary, halt-observation mid-turn, ``$paused_turn`` trace_ref on
+boundary, halt-observation mid-turn, ``paused_turn`` trace_ref on
 the CAS commit, :class:`JsonFileCheckpointStore` persistence, and
 :meth:`Flow.run(resume=True)` hydration on a subsequent process.
 
@@ -129,7 +129,7 @@ STORE_DIR = Path.home() / ".cache" / "llm-gent-durable-resume"
 """On-disk store path — stable across process invocations so run 2 finds run 1's commit."""
 
 CLIENT_FLOW_ID = "durable-resume-demo"
-"""Branch id — the resume path reads back commits under this key."""
+"""Client flow id naming this example's history — the resume path reads back commits under it."""
 
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 """Cheap, tool-capable Anthropic model. Override with ``--model``."""
@@ -445,7 +445,7 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
 
 
 def _latest_commit(store: JsonFileCheckpointStore) -> Commit | None:
-    """Return the branch's latest commit, or ``None`` for an empty store."""
+    """Return the history's latest commit, or ``None`` for an empty store."""
     head = store.resolve_ref(CLIENT_FLOW_ID)
     if head is None:
         return None

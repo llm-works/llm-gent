@@ -170,7 +170,7 @@ def build_canonical_flow(
             Requires ``halt``.
         store: Optional :class:`CheckpointStore`. Wires
             ``.with_checkpointer(store, client_flow_id)`` when present.
-        client_flow_id: Checkpoint branch identifier.
+        client_flow_id: Checkpoint history identifier.
 
     Raises:
         ValueError: When exactly one of ``halt`` / ``halt_after_iteration``
@@ -225,7 +225,7 @@ async def assert_resume_determinism(
         store: Checkpoint store for the interrupt and resume runs.
         halt_after_iteration: Iteration at which to fire halt (default 2).
         max_iters: Total iterations for the flow (default 5).
-        client_flow_id: Checkpoint branch identifier.
+        client_flow_id: Checkpoint history identifier.
 
     Returns:
         The final state dict (``CanonicalCounter.to_dict()``).
@@ -330,7 +330,7 @@ def resume_in_subprocess(
         flow_builder: Builder function name inside that module. Must
             accept ``(lg, *, store, client_flow_id, **kwargs) -> Flow``.
         flow_builder_kwargs: Additional kwargs passed to the flow builder.
-        client_flow_id: Checkpoint branch identifier — must match the
+        client_flow_id: Checkpoint history identifier — must match the
             id used by the interrupt run that wrote the checkpoint.
         subprocess_timeout: Wall-clock cap on the subprocess in seconds.
 

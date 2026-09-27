@@ -10,7 +10,7 @@ iterated) through a real :class:`JsonFileCheckpointStore` and asserts:
 - resume from a mid-run halt reaches the same final state as an
   uninterrupted run (determinism);
 - the retention policy toggles gc-on-clean-exit;
-- halt-triggered exit always preserves the branch.
+- halt-triggered exit always preserves the history.
 
 Direct-Protocol tests (put/get/put_ref/resolve_ref/gc) live in
 :mod:`tests.unit.flow.test_stores_json` (and the PG equivalent in
@@ -59,13 +59,13 @@ class TestFreshRunSaves:
         await build_canonical_flow(
             make_test_logger(), max_iters=3, store=store, client_flow_id="freshrun"
         ).run()
-        # A resolvable ref exists — the branch reached at least one commit.
+        # A resolvable ref exists — the history reached at least one commit.
         assert store.resolve_ref("freshrun") is not None
 
-    async def test_default_retention_keeps_branch_on_success(
+    async def test_default_retention_keeps_history_on_success(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """retention="retain" (default): clean-exit does NOT gc the branch."""
+        """retention="retain" (default): clean-exit does NOT gc the history."""
         await build_canonical_flow(
             make_test_logger(), max_iters=2, store=store, client_flow_id="retain-1"
         ).run()
@@ -80,7 +80,7 @@ class TestFreshRunSaves:
 
 class TestRetention:
     async def test_gc_on_success_prunes(self, tmp_path: Path) -> None:
-        """retention="gc_on_success": clean-exit removes the branch."""
+        """retention="gc_on_success": clean-exit removes the history."""
         store = JsonFileCheckpointStore(
             make_test_logger(), tmp_path / "cp", retention="gc_on_success"
         )
@@ -89,8 +89,8 @@ class TestRetention:
         ).run()
         assert store.resolve_ref("gc-1") is None
 
-    async def test_halt_preserves_branch_regardless_of_retention(self, tmp_path: Path) -> None:
-        """A halt-triggered exit preserves the branch even under gc_on_success —
+    async def test_halt_preserves_history_regardless_of_retention(self, tmp_path: Path) -> None:
+        """A halt-triggered exit preserves the history even under gc_on_success —
         the framework only prunes on fully successful runs.
         """
         store = JsonFileCheckpointStore(
@@ -1145,7 +1145,7 @@ class TestResumeDeterminism:
     async def test_resume_with_no_prior_checkpoint_starts_fresh(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """resume=True on a branch with no ref falls back to a fresh run."""
+        """resume=True on a history with no ref falls back to a fresh run."""
         flow = build_canonical_flow(
             make_test_logger(), max_iters=2, store=store, client_flow_id="never-saved"
         )
@@ -1188,7 +1188,7 @@ class TestResumeDeterminism:
         await _flow().run()
         assert tail_calls == [3]
         # Resume after completion — should be a no-op (fresh run since the
-        # branch is marked complete). Tail runs ONCE more from the
+        # history is marked complete). Tail runs ONCE more from the
         # fresh state, not twice from the resumed one.
         await _flow().run(resume=True)
         assert tail_calls == [3, 3], f"tail should have fired only twice total; got {tail_calls}"
@@ -1579,14 +1579,14 @@ class TestAsyncStore:
                 await asyncio.sleep(0)
                 return self._inner.resolve_ref(*a, **kw)
 
-            async def gc_branch(self, *a: Any, **kw: Any) -> None:
+            async def gc_history(self, *a: Any, **kw: Any) -> None:
                 await asyncio.sleep(0)
-                self._inner.gc_branch(*a, **kw)
+                self._inner.gc_history(*a, **kw)
 
         inner = _Sync(make_test_logger(), tmp_path / "cp")
         wrap = _AsyncWrap(inner)
         # Sanity: every method IS async.
-        for m in ("put_object", "get_object", "put_ref", "resolve_ref", "gc_branch"):
+        for m in ("put_object", "get_object", "put_ref", "resolve_ref", "gc_history"):
             assert inspect.iscoroutinefunction(getattr(wrap, m))
 
         # Round-trip via the canonical flow: fresh save + resume.

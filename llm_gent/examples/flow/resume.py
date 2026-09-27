@@ -105,7 +105,7 @@ def _build_flow(
 
     Each call returns a fresh :class:`~llm_gent.flow.Flow`, so the two
     demo runs can operate on independent halt events while pointing at
-    the same checkpoint branch. The halt and checkpointer bindings
+    the same checkpoint history. The halt and checkpointer bindings
     ride on :meth:`FlowFactory.create` kwargs so this reads as a single
     construction step rather than a chain of ``.with_*`` setters.
     """

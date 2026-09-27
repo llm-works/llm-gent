@@ -4,10 +4,10 @@
 """Content-addressed state model — the CAS substrate.
 
 Blob / Tree / Commit form a Git-shaped provenance store for gent
-branches. State at every save-point becomes a :class:`Blob` keyed by
+histories. State at every save-point becomes a :class:`Blob` keyed by
 its content hash; an ordered :class:`Tree` of scope entries binds those
 blobs to the state stack; a :class:`Commit` stamps the tree with its
-position in the branch (``client_flow_id``, ``node_path``,
+position in the history (``client_flow_id``, ``node_path``,
 ``iteration``) and provenance metadata (``produced_by``, ``trace_ref``,
 ``outcome``, ``flow_root_hash``).
 
@@ -19,8 +19,8 @@ Hash discipline
 ---------------
 - All content hashes are :func:`blake2b` with ``digest_size=32``.
 - Content-only — no ``client_flow_id`` / ``node_path`` / ``iteration``
-  salt in the hash. Two identical byte payloads across branches
-  produce the same blob hash; cross-branch diff depends on this.
+  salt in the hash. Two identical byte payloads across histories
+  produce the same blob hash; cross-history diff depends on this.
 - Canonical serialization is versioned via
   :attr:`CommitMeta.framework_version` so a canonicalization change in a
   later gent version does not invalidate prior blobs — old commits stay
@@ -28,7 +28,7 @@ Hash discipline
 
 Direct-save commits (consumer sites that save state outside a Flow
 iterate boundary — e.g. an initial-plan write) use a ``$external/*``
-prefix on :attr:`ProducedBy.node_id` so a downstream branch-walker
+prefix on :attr:`ProducedBy.node_id` so a downstream history-walker
 can filter without a schema-aware parser.
 """
 
@@ -52,7 +52,7 @@ def content_hash(data: bytes) -> str:
     """Return the blake2b hex digest of ``data`` at :data:`_DIGEST_SIZE`.
 
     Deterministic on ``data`` alone; no salt, no keying. Same bytes → same
-    hash across branches, which is the invariant cross-branch
+    hash across histories, which is the invariant cross-history
     diff depends on.
     """
     return blake2b(data, digest_size=_DIGEST_SIZE).hexdigest()
@@ -183,7 +183,7 @@ class ProducedBy:
     commit came from an in-flow verb; ``None`` for direct saves.
 
     :attr:`role` is the verb's bound role, per-commit (not per-
-    branch) — a run that dispatches multiple verbs under different
+    history) — a run that dispatches multiple verbs under different
     roles attributes each commit to the role that owned that verb.
 
     :attr:`result_hash` is :func:`content_hash` of the verb's serialized
@@ -241,16 +241,19 @@ class CommitMeta:
     trace_ref: tuple[TraceRef, ...]
     outcome: CommitOutcome
     flow_root_hash: str
+    """Structure hash of the flow definition (the composition tree) —
+    identical for every history running the same flow code. Empty until
+    the framework computes it."""
     timestamp_iso: str
     framework_version: str
 
 
 @dataclass(frozen=True)
 class Commit:
-    """A branch timepoint — root tree, parent chain, provenance meta.
+    """One point in a flow's history — root tree, parent chain, provenance meta.
 
     :attr:`parent_hashes` is single-parent (linear history) in the common
-    case; a multi-parent tuple is reserved for a future merge/branch
+    case; a multi-parent tuple is reserved for a future fork/merge
     surface and unused today.
 
     Build only via :meth:`build` so :attr:`content_hash` stays consistent

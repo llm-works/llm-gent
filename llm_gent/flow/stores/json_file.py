@@ -18,11 +18,11 @@ so arbitrary caller strings survive round-trip as single directory names.
 ``.`` and ``..`` are rejected up front; a resolved-path containment check
 locks the invariant as defense in depth.
 
-Objects are branch-scoped — each ``client_flow_id`` owns its own
-``objects/`` tree. Same content bytes across two branches store
-twice; the trade-off buys trivial :meth:`gc_branch` (a single
-``shutil.rmtree`` of the branch directory) and matches the arc's
-non-goal on cross-branch blob sharing.
+Objects are history-scoped — each ``client_flow_id`` owns its own
+``objects/`` tree. Same content bytes across two histories store
+twice; the trade-off buys trivial :meth:`gc_history` (a single
+``shutil.rmtree`` of the history directory); blobs are deliberately
+not shared across histories.
 
 Writes are atomic within a filesystem (write to ``.tmp`` sibling, then
 ``os.replace``); a partial write cannot leave a truncated file the next
@@ -31,7 +31,7 @@ load would misread. Puts are idempotent — the same
 file already exists with the same bytes.
 
 Concurrent access safety is left to the caller: a single-writer
-contract per branch holds at the framework level. Intended for
+contract per history holds at the framework level. Intended for
 local dev / small-scale ops; for a shared-fleet setup use
 :class:`llm_gent.flow.stores.PgCheckpointStore`.
 """
@@ -75,12 +75,12 @@ class JsonFileCheckpointStore:
         Args:
             lg: Logger for load-time diagnostics (unreadable file
                 warnings).
-            root: Directory to place per-branch subdirectories
+            root: Directory to place per-history subdirectories
                 under. Created lazily on first put; not required to
                 exist at construction time.
             retention: ``"retain"`` (default) keeps successful
-                branches on disk for audit / diff / provenance;
-                ``"gc_on_success"`` calls :meth:`gc_branch` on a
+                histories on disk for audit / diff / provenance;
+                ``"gc_on_success"`` calls :meth:`gc_history` on a
                 fully-successful :meth:`Flow.run` completion.
         """
         self._lg = lg
@@ -103,7 +103,7 @@ class JsonFileCheckpointStore:
         Idempotent — a same-hash re-put of the same bytes is a no-op.
         Atomic via write-to-``.tmp`` + ``os.replace``.
 
-        Concurrency: single-writer per branch (see module docstring).
+        Concurrency: single-writer per history (see module docstring).
         No ``fcntl.flock`` — the framework's CheckpointStore contract is
         single-writer, and content-addressed puts are naturally idempotent
         under same-hash re-puts. A caller that lets two processes save
@@ -167,8 +167,8 @@ class JsonFileCheckpointStore:
     ) -> None:
         """Write ``refs/{node_path}/{iteration}.json`` with the commit hash.
 
-        Also stamps a strictly-increasing per-branch sequence number
-        (``seq``) into the JSON so :meth:`_latest_across_branch` can
+        Also stamps a strictly-increasing per-history sequence number
+        (``seq``) into the JSON so :meth:`_latest_across_history` can
         pick the newest ref deterministically without relying on mtime
         ties or clock adjustments.
         """
@@ -188,15 +188,15 @@ class JsonFileCheckpointStore:
             raise
 
     def _next_ref_seq(self, client_flow_id: str) -> int:
-        """Return the next per-branch ref sequence.
+        """Return the next per-history ref sequence.
 
-        Single-writer contract per branch (see module docstring), so
+        Single-writer contract per history (see module docstring), so
         read+increment+write without file locking is safe. The seq
-        counter file lives at ``<branch>/_seq``.
+        counter file lives at ``<history>/_seq``.
         """
-        branch_dir = self._branch_dir(client_flow_id)
-        branch_dir.mkdir(parents=True, exist_ok=True)
-        seq_file = branch_dir / "_seq"
+        history_dir = self._history_dir(client_flow_id)
+        history_dir.mkdir(parents=True, exist_ok=True)
+        seq_file = history_dir / "_seq"
         current = 0
         if seq_file.is_file():
             try:
@@ -204,7 +204,7 @@ class JsonFileCheckpointStore:
             except (OSError, ValueError):
                 current = 0
         next_seq = current + 1
-        fd, tmp_path = tempfile.mkstemp(dir=branch_dir, prefix="_seq.", suffix=".tmp")
+        fd, tmp_path = tempfile.mkstemp(dir=history_dir, prefix="_seq.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(str(next_seq))
@@ -221,7 +221,7 @@ class JsonFileCheckpointStore:
         node_path: str | None = None,
         iteration: int | None = None,
     ) -> str | None:
-        """Return the commit hash for the branch key, or ``None``.
+        """Return the commit hash for the history key, or ``None``.
 
         See :class:`~llm_gent.flow.checkpoint.CheckpointStore.resolve_ref`
         for the (``None``, ``iteration``) contract — invalid, raises
@@ -229,16 +229,16 @@ class JsonFileCheckpointStore:
         """
         if node_path is None and iteration is not None:
             raise ValueError("iteration requires node_path; use both or neither")
-        branch_refs = self._branch_dir(client_flow_id) / "refs"
-        if not branch_refs.is_dir():
+        history_refs = self._history_dir(client_flow_id) / "refs"
+        if not history_refs.is_dir():
             return None
 
         if node_path is None:
-            by_seq = self._latest_across_branch_by_seq(branch_refs)
+            by_seq = self._latest_across_history_by_seq(history_refs)
             if by_seq is not None:
                 return by_seq
             # Fallback for legacy refs without a persisted seq.
-            return self._latest_across_branch(branch_refs)
+            return self._latest_across_history(history_refs)
 
         ref_dir = self._refs_dir(client_flow_id, node_path)
         if not ref_dir.is_dir():
@@ -250,20 +250,20 @@ class JsonFileCheckpointStore:
         return self._latest_under_node_path(ref_dir)
 
     # ------------------------------------------------------------------
-    # Branch cleanup
+    # History cleanup
     # ------------------------------------------------------------------
 
-    def gc_branch(self, client_flow_id: str) -> None:
-        """Remove the branch directory and everything under it. Idempotent."""
-        branch_dir = self._branch_dir(client_flow_id)
-        if branch_dir.is_dir():
-            shutil.rmtree(branch_dir)
+    def gc_history(self, client_flow_id: str) -> None:
+        """Remove the history directory and everything under it. Idempotent."""
+        history_dir = self._history_dir(client_flow_id)
+        if history_dir.is_dir():
+            shutil.rmtree(history_dir)
 
     # ------------------------------------------------------------------
     # Path helpers + traversal guards
     # ------------------------------------------------------------------
 
-    def _branch_dir(self, client_flow_id: str) -> Path:
+    def _history_dir(self, client_flow_id: str) -> Path:
         """URL-encode the id so arbitrary caller strings are path-safe.
 
         :func:`urllib.parse.quote` encodes every path-relevant char that
@@ -280,11 +280,11 @@ class JsonFileCheckpointStore:
         return self._checked(candidate, self._root, "client_flow_id", client_flow_id)
 
     def _objects_dir(self, client_flow_id: str, kind: Kind) -> Path:
-        """Return ``<branch>/objects/<kind>`` (``kind`` is a fixed enum, no encode)."""
-        return self._branch_dir(client_flow_id) / "objects" / kind
+        """Return ``<history>/objects/<kind>`` (``kind`` is a fixed enum, no encode)."""
+        return self._history_dir(client_flow_id) / "objects" / kind
 
     def _refs_dir(self, client_flow_id: str, node_path: str) -> Path:
-        """Return ``<branch>/refs/<encoded-node-path>``.
+        """Return ``<history>/refs/<encoded-node-path>``.
 
         ``node_path`` is the ``"/"``-joined content-addressed node-id chain from
         the run root down to the saving iterate. Encode it as a single directory
@@ -294,9 +294,9 @@ class JsonFileCheckpointStore:
             raise ValueError("node_path must not be empty")
         if node_path in (".", ".."):
             raise ValueError(f"node_path must not be {node_path!r} (path-traversal risk)")
-        branch_refs = self._branch_dir(client_flow_id) / "refs"
-        candidate = branch_refs / quote(node_path, safe="")
-        return self._checked(candidate, branch_refs, "node_path", node_path)
+        history_refs = self._history_dir(client_flow_id) / "refs"
+        candidate = history_refs / quote(node_path, safe="")
+        return self._checked(candidate, history_refs, "node_path", node_path)
 
     @staticmethod
     def _checked(candidate: Path, base: Path, field_name: str, raw: str) -> Path:
@@ -311,11 +311,11 @@ class JsonFileCheckpointStore:
     # Ref resolution helpers
     # ------------------------------------------------------------------
 
-    def _latest_across_branch(self, branch_refs: Path) -> str | None:
+    def _latest_across_history(self, history_refs: Path) -> str | None:
         """Return the newest ref (by mtime) across every ``node_path``."""
         newest_path: Path | None = None
         newest_mtime = -1.0
-        for node_dir in branch_refs.iterdir():
+        for node_dir in history_refs.iterdir():
             if not node_dir.is_dir():
                 continue
             for entry in node_dir.iterdir():
@@ -332,16 +332,16 @@ class JsonFileCheckpointStore:
             return None
         return self._read_ref(newest_path)
 
-    def _latest_across_branch_by_seq(self, branch_refs: Path) -> str | None:
-        """Return the ref with the highest persisted ``seq`` under a branch.
+    def _latest_across_history_by_seq(self, history_refs: Path) -> str | None:
+        """Return the ref with the highest persisted ``seq`` under a history.
 
-        Falls back to :meth:`_latest_across_branch` (mtime-based) when
-        no ref in the branch carries a ``seq`` — e.g., pre-``seq``
+        Falls back to :meth:`_latest_across_history` (mtime-based) when
+        no ref in the history carries a ``seq`` — e.g., pre-``seq``
         refs written before this change.
         """
         best_seq = -1
         best_path: Path | None = None
-        for node_dir in branch_refs.iterdir():
+        for node_dir in history_refs.iterdir():
             if not node_dir.is_dir():
                 continue
             for entry in node_dir.iterdir():

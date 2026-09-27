@@ -204,7 +204,7 @@ class Chain:
         just_completed = self.ids[index - 1]
         halt_node_id = (
             just_completed
-            if _just_completed_owns_pending_saia(env, just_completed)
+            if _just_completed_owns_paused_turn(env, just_completed)
             else self.ids[index]
         )
         return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
@@ -216,7 +216,7 @@ class Chain:
         halt was signaled during the final step's dispatch, no next
         step exists to save at and the walker just returns — losing
         the paused turn on resume. This mirror observes halt at the
-        trailing edge and, when the last step owns pending SAIA-turn
+        trailing edge and, when the last step owns pending paused-turn
         bytes, saves at its node so resume re-dispatches it and the
         Loop consumes the paused_turn entry.
 
@@ -233,12 +233,12 @@ class Chain:
         ):
             return
         last = self.ids[-1]
-        if not _just_completed_owns_pending_saia(env, last):
+        if not _just_completed_owns_paused_turn(env, last):
             return
         await HaltSaveObserver.save_if_signaled(env, 0, last, env.state)
 
 
-def _just_completed_owns_pending_saia(env: _RunEnv, node_id: str) -> bool:
+def _just_completed_owns_paused_turn(env: _RunEnv, node_id: str) -> bool:
     """True when ``node_id`` is a pending Loop's own id or an ancestor of one.
 
     Direct match covers the ``.call(loop_verb)`` case (Loop's

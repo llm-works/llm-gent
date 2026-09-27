@@ -269,7 +269,7 @@ class _RunEnv:
 
     @property
     def pending_paused_turns(self) -> PendingPausedTurns:
-        """Typed accessor for the runtime's pending SAIA turn container.
+        """Typed accessor for the runtime's pending paused-turn container.
 
         Callers use this instead of reaching through
         ``env.runtime._pending_paused_turns``. The container itself lives
@@ -281,7 +281,7 @@ class _RunEnv:
 
     @property
     def resume_paused_turns(self) -> ResumePausedTurns:
-        """Typed accessor for the runtime's resume SAIA turn container.
+        """Typed accessor for the runtime's resume paused-turn container.
 
         Companion to :attr:`pending_paused_turns` on the read side.
         """

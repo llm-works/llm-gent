@@ -7,7 +7,7 @@ Two turnkey implementations of the content-addressed object + ref store
 Protocol:
 
 - :class:`JsonFileCheckpointStore` — file-per-object under a
-  caller-owned root, atomic writes, trivial :meth:`gc_branch` via
+  caller-owned root, atomic writes, trivial :meth:`gc_history` via
   ``rmtree``, no external dependency.
 - :class:`PgCheckpointStore` — Postgres via :class:`appinfra.db.pg.PG`,
   ``ON CONFLICT DO NOTHING`` for object puts, ``ON CONFLICT DO UPDATE``

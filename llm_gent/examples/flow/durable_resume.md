@@ -183,7 +183,7 @@ The tree holds one blob per state scope, keyed by two-digit depth. This flow has
 scope. The state blob is `Digest.to_dict()` as canonical JSON — both topics pending, no summaries:
 the paused pass did not mutate state.
 
-### paused_turn blob
+### Paused-turn blob
 
 ```json
 {
@@ -207,8 +207,8 @@ after. `conversation` is the `to_dict()` payload of the conversation class the L
 `ConversationFactory` produces (`llm_kelt.conversation.Conversation` here); the same factory's
 `create_from_state` rebuilds it on resume.
 
-The state blob and the paused_turn blob are separate on purpose: state is the flow's data at the
-save site; the paused_turn blob is the in-flight model turn. Resume needs both.
+The state blob and the paused-turn blob are separate on purpose: state is the flow's data at the
+save site; the paused-turn blob is the in-flight model turn. Resume needs both.
 
 ### Completion marker
 
@@ -218,8 +218,8 @@ save site; the paused_turn blob is the in-flight model turn. Resume needs both.
 ```
 
 Stamped on clean exit when the store's retention is `retain` (the `JsonFileCheckpointStore`
-default). `run(resume=True)` treats a branch whose latest commit is this marker as a fresh
-start instead of replaying the old halt commit. With `retention="gc_on_success"` the branch is
+default). `run(resume=True)` treats a history whose latest commit is this marker as a fresh
+start instead of replaying the old halt commit. With `retention="gc_on_success"` the history is
 deleted instead.
 
 ## Save sites
