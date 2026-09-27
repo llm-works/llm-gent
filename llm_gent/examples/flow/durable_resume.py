@@ -447,12 +447,13 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
 async def _resume_pending(history: History) -> bool:
     """True when ``run(resume="replay")`` will resume rather than start fresh.
 
-    Same rule as :meth:`Resume.hydrate`: resume from the head unless the
-    history is empty or complete (the head is the final-state commit the
-    default ``retain`` policy writes on clean exit). This flow writes no
-    ``ok`` iterate commits, so a pending resume here is always a halt.
+    :meth:`History.replay_point` is the rule replay applies: fresh on an
+    empty history or when the newest non-``$failed`` commit is the
+    final-state commit the default ``retain`` policy writes on clean exit.
+    This flow writes no ``ok`` iterate commits, so a pending resume here
+    is always a halt.
     """
-    return await history.head() is not None and not await history.is_complete()
+    return await history.replay_point() is not None
 
 
 async def _paused_turn_saved(history: History) -> bool:
@@ -465,9 +466,9 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     """One process-level invocation; return ``(final state, halted)``.
 
     Always runs with ``resume="replay"`` and lets the framework pick
-    the path: empty or complete history → fresh run, any other
-    head → resume. The halt is armed only on a fresh run so the
-    resumed turn completes.
+    the path: no replay point (empty or complete history) → fresh
+    run, otherwise → resume. The halt is armed only on a fresh run so
+    the resumed turn completes.
     """
     store = JsonFileCheckpointStore(lg, store_dir)
     history = History(store, CLIENT_FLOW_ID)

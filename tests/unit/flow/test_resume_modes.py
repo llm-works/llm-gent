@@ -3,10 +3,11 @@
 
 """``Flow.run(resume=...)`` modes: restart, the failure commit, and replay past it.
 
-``"restart"`` runs from the first node with the head commit's root state,
-whatever the head's outcome; ``"replay"`` fast-forwards to the last save
-point and skips ``$failed`` commits. A run that raises commits its root
-state at ``$failed`` before the exception propagates.
+``"restart"`` runs from the first node with the root state of the newest
+commit that has usable state, skipping ``$failed`` and stateless commits;
+``"replay"`` fast-forwards to the last save point and skips ``$failed``
+commits. A run that raises commits its root state at ``$failed`` before
+the exception propagates.
 """
 
 from __future__ import annotations
@@ -253,6 +254,34 @@ class TestReplayPastFailure:
         # Save point after n=2 → three remaining iterations up to the cumulative bound.
         # Restarting from the $failed state (n=3) would have ended at n=8.
         assert result == 5
+
+    async def test_replay_point_skips_failed_head(self, store: JsonFileCheckpointStore) -> None:
+        with pytest.raises(RuntimeError):
+            await _counting_flow(store, "point", max_iters=5, fail_at=3, on_iterate=True).run()
+
+        history = History(store, "point")
+        chain = [c async for c in history.commits()]
+        assert History.is_failed(chain[0])
+        assert await history.replay_point() == chain[1]
+
+    async def test_failure_after_completion_replays_fresh(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """``$end`` then ``$failed``: no replay point, so replay starts from ``state=``."""
+        await _counting_flow(store, "end-then-fail", max_iters=2).run()
+        with pytest.raises(RuntimeError):
+            await _counting_flow(store, "end-then-fail", max_iters=5, fail_at=1).run()
+
+        history = History(store, "end-then-fail")
+        head = await history.head()
+        assert head is not None and History.is_failed(head)
+        assert not await history.is_complete()
+        assert await history.replay_point() is None
+
+        result = await _counting_flow(store, "end-then-fail", max_iters=1).run(
+            state={"n": 10}, resume="replay"
+        )
+        assert result == 11
 
 
 class TestResumeModeValidation:

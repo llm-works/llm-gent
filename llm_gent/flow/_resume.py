@@ -63,7 +63,7 @@ class Resume:
     async def hydrate(self, fallback: State[Any]) -> tuple[State[Any], _ResumeReplay | None]:
         """Replay: rebuild the last save point's scope tree and replay context.
 
-        1. :meth:`_replay_point` picks the resume commit: the head, or the
+        1. :meth:`History.replay_point` picks the resume commit: the head, or the
            newest commit before a run of ``$failed`` commits. A final-state
            commit there is a finished run: fresh run (even if the
            ``complete`` tag write after it never landed).
@@ -131,7 +131,7 @@ class Resume:
         assert ctx is not None
         history = History(ctx.store, ctx.client_flow_id)
         try:
-            commit = await self._replay_point(history)
+            commit = await history.replay_point()
             return None if commit is None else (commit, await history.scopes(commit))
         except HistoryCorrupt as e:
             self.flow._lg.warning(
@@ -140,14 +140,6 @@ class Resume:
             )
             ctx.discard_head()
             return None
-
-    @staticmethod
-    async def _replay_point(history: History) -> Commit | None:
-        """Newest commit that is not a failure; ``None`` if it is final or absent."""
-        async for commit in history.commits():
-            if not History.is_failed(commit):
-                return None if History.is_final_state(commit) else commit
-        return None
 
     def _root_state(self, root_raw: Any) -> State[Any]:
         """Top-level :class:`State` from a stored root payload (factory-restored when bound)."""

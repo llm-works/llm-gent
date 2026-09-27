@@ -32,7 +32,8 @@ The store is a Protocol with five surfaces:
   commit hash. ``put_ref`` records "this history reached this commit
   at this iterate boundary"; ``resolve_ref`` returns the commit hash for
   a full or partial key (``node_path=None, iteration=None`` returns the
-  latest commit across the history — the resume entry point).
+  latest commit across the history — the head, where resume starts
+  walking back from).
 
 - **Tags** — :meth:`put_tag` / :meth:`resolve_tag` point a named label
   under ``flow_id`` at a commit hash. A tag moves when re-put. On a clean

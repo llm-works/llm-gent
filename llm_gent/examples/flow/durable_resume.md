@@ -22,11 +22,10 @@ python -m llm_gent.examples.flow.durable_resume --smoke
 
 The two real invocations must be separate processes — that is the point. The store lives at
 `~/.cache/llm-gent-durable-resume`. Every invocation calls `flow.run(resume="replay")`; the
-framework
-starts fresh on an empty store or when the latest commit is the final-state commit of a finished
-run, and otherwise resumes from the latest commit (here always the halt commit). A third invocation
-therefore starts
-a new cycle on the same history; `--reset` wipes the store first.
+framework skips `$failed` commits (left by a run that raised), starts fresh on an empty store or
+when the newest remaining commit is the final-state commit of a finished run, and otherwise resumes
+from that commit (here always the halt commit). A third invocation therefore starts a new cycle on
+the same history; `--reset` wipes the store first.
 
 ## The flow
 
@@ -155,7 +154,7 @@ A ref maps `(node_path, iteration)` to a commit. `node_path` is the `/`-joined c
 from the run root to the save site; here the save site is the top-level iterate, so it is one id.
 `resolve_ref(flow_id)` returns the ref with the highest `seq`, which is how resume picks the latest
 commit — the head of the history. The script reads it through `History(store, CLIENT_FLOW_ID)`
-rather than the store: `head()` for the paused-turn check, `is_complete()` to decide whether the
+rather than the store: `head()` for the paused-turn check, `replay_point()` to decide whether the
 next run resumes.
 
 ### Halt commit
@@ -182,9 +181,10 @@ next run resumes.
   parent is the commit that was head when it was written.
 - `iteration: 1` — the iterate counter at halt. The paused pass counted as an iteration, which is
   why the flow bounds `max_iters` at `len(TOPICS) + 1` and terminates on `until` instead.
-- `outcome: "halted"` — written by the halt-observation site. Resume does not branch on it: any
-  latest commit other than a final-state commit is resumed, and the script applies the same rule
-  (`History.is_complete()`) to decide whether to arm the halt on the next invocation.
+- `outcome: "halted"` — written by the halt-observation site. Resume does not branch on it: the
+  newest commit that is neither `$failed` nor a final-state commit is resumed, and the script
+  applies the same rule (`History.replay_point()`) to decide whether to arm the halt on the next
+  invocation.
 - `trace_ref` — one entry per paused dispatch, `"<step node id>:<blob hash>"`. Resume hands the
   blob back to the Loop called from that step. The key is per step, not per Loop: a verb that
   calls two Loops that can pause would have them overwrite each other's entry, so keep one
@@ -249,8 +249,8 @@ Written on clean exit when the store's retention is `retain` (the `JsonFileCheck
 default). It is an ordinary scope commit of the top-level state at the reserved `node_path` `$end`,
 so the head always holds the state the last run ended with, even when no save point fired during
 the run. `run(resume="replay")` treats a history whose latest commit is a final-state commit as a
-fresh
-start instead of replaying the old halt commit; the fresh run's commits extend the same history.
+fresh start instead of replaying the old halt commit; the fresh run's commits extend the same
+history.
 The `complete` tag moves to each final-state commit and stays on it while later runs append past
 it, so `History.last_complete()` finds the last finished run's state even when the head is a
 newer halt. If the final state cannot be serialized, the commit is written with an empty tree and

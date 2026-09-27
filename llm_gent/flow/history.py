@@ -76,11 +76,24 @@ class History:
     async def is_complete(self) -> bool:
         """True when the last run finished: the head is its final-state commit.
 
-        ``run(resume="replay")`` on a complete history starts fresh; otherwise
-        it resumes from the head.
+        A history whose head is a ``$failed`` commit is not complete, yet
+        replay may still start fresh on it — :meth:`replay_point` is the
+        rule ``run(resume="replay")`` applies.
         """
         head = await self.head()
         return head is not None and self.is_final_state(head)
+
+    async def replay_point(self) -> Commit | None:
+        """Commit ``run(resume="replay")`` resumes from, or ``None`` for a fresh run.
+
+        The newest commit that is not a ``$failed`` commit (the state at a
+        failure may be half-updated); ``None`` when that commit is a
+        final-state commit (the run finished) or the history holds none.
+        """
+        async for commit in self.commits():
+            if not self.is_failed(commit):
+                return None if self.is_final_state(commit) else commit
+        return None
 
     @staticmethod
     def is_final_state(commit: Commit) -> bool:

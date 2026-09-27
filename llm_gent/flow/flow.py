@@ -926,11 +926,11 @@ class Flow:
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode
                 was requested without :meth:`with_checkpointer` wired.
-            ValueError: ``resume`` is not a :data:`ResumeMode` value.
                 Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
+            ValueError: ``resume`` is not a :data:`ResumeMode` value.
         """
         self._check_resume_mode(resume)
         self._begin_checkpoint_run()

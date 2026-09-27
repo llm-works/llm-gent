@@ -270,9 +270,9 @@ step.
 
 A history is the chain of commits one `client_flow_id` accumulates across
 runs: each commit's parent is the previous head, in time order. A run
-ends in a `halted` commit (halt) or the `$end` final-state commit (clean
-exit), which is where the next run's commits pick up; a run that raises
-leaves no closing commit. `History` reads it:
+ends in a `halted` commit (halt), the `$end` final-state commit (clean
+exit) or a `$failed` commit (raised), which is where the next run's
+commits pick up. `History` reads it:
 
 ```python
 from llm_gent.flow import History, TypeStateFactory
@@ -282,7 +282,10 @@ head = await history.head()  # latest commit, or None
 if await history.is_complete():  # last run finished
     state = await history.root_state(head, TypeStateFactory(MyState))
 done = await history.last_complete()  # final state of the last finished run
+point = await history.replay_point()  # where resume="replay" starts; None = fresh
 async for commit in history.commits():  # newest first, via parent links
+    if History.is_failed(commit):  # a run that raised
+        ...
     print(commit.meta.node_path, commit.meta.outcome, commit.meta.timestamp_iso)
 ```
 
