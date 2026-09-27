@@ -1146,6 +1146,123 @@ class TestSaveOnHaltIterate:
 
 
 # ---------------------------------------------------------------------------
+# History lineage — every commit's parent is the previous head
+# ---------------------------------------------------------------------------
+
+
+def _chain_from_head(store: JsonFileCheckpointStore, client_flow_id: str) -> list[Any]:
+    """Walk parent links from the newest ref; return commits newest-first."""
+    from llm_gent.flow.state.cas import Commit
+
+    flow_id = flow_id_for(store, client_flow_id)
+    chain: list[Commit] = []
+    commit_hash = store.resolve_ref(flow_id)
+    while commit_hash is not None:
+        commit = Commit.from_bytes(store.get_object(flow_id, "commit", commit_hash) or b"")
+        chain.append(commit)
+        assert len(commit.parent_hashes) <= 1
+        commit_hash = commit.parent_hashes[0] if commit.parent_hashes else None
+    return chain
+
+
+def _stored_commit_hashes(store: JsonFileCheckpointStore, client_flow_id: str) -> set[str]:
+    """Every commit object on disk under the history."""
+    commits_dir = store._history_dir(flow_id_for(store, client_flow_id)) / "objects" / "commit"
+    return {f.name for f in commits_dir.iterdir()}
+
+
+class TestHistoryLineage:
+    async def test_iterate_commits_form_one_chain(self, store: JsonFileCheckpointStore) -> None:
+        """Per-iteration commits chain onto each other; the completion marker is the head."""
+        await build_canonical_flow(
+            make_test_logger(), max_iters=3, store=store, client_flow_id="lineage-iter"
+        ).run()
+
+        chain = _chain_from_head(store, "lineage-iter")
+        assert chain[0].meta.node_path == "$complete"
+        assert chain[-1].parent_hashes == ()
+        # Every stored commit is reachable from the head — no orphaned siblings.
+        assert {c.content_hash for c in chain} == _stored_commit_hashes(store, "lineage-iter")
+        assert len(chain) == 4
+
+    async def test_concurrent_map_items_chain_linearly(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Parallel map-item saves serialize into one chain, not siblings of one parent."""
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        @verb
+        async def touch(ctx: Context[dict[str, Any]], item: int) -> int:
+            await asyncio.sleep(0)
+            return item * 2
+
+        body = FlowFactory(make_test_logger()).create()
+        body.call(touch)
+        outer = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpointer(store, "lineage-map")
+            .with_checkpoint_policy(on_map_item=True)
+            .map(body, items=lambda _p, _c: [1, 2, 3, 4])
+        )
+        await outer.run()
+
+        chain = _chain_from_head(store, "lineage-map")
+        assert {c.content_hash for c in chain} == _stored_commit_hashes(store, "lineage-map")
+        assert len(chain) == 5
+        assert sorted(c.meta.iteration for c in chain[1:]) == [0, 1, 2, 3]
+
+    async def test_resume_continues_the_same_history(self, store: JsonFileCheckpointStore) -> None:
+        """A resumed run's first commit takes the halted run's last commit as parent."""
+        halt = asyncio.Event()
+        await build_canonical_flow(
+            make_test_logger(),
+            max_iters=5,
+            halt=halt,
+            halt_after_iteration=2,
+            store=store,
+            client_flow_id="lineage-resume",
+        ).run()
+        halted_head = store.resolve_ref(flow_id_for(store, "lineage-resume"))
+        assert halted_head is not None
+
+        halt.clear()
+        await build_canonical_flow(
+            make_test_logger(), max_iters=5, store=store, client_flow_id="lineage-resume"
+        ).run(resume=True)
+
+        chain = _chain_from_head(store, "lineage-resume")
+        assert halted_head in {c.content_hash for c in chain[1:]}
+        assert {c.content_hash for c in chain} == _stored_commit_hashes(store, "lineage-resume")
+        assert sum(1 for c in chain if not c.parent_hashes) == 1
+
+    async def test_gc_history_restarts_the_chain(self, store: JsonFileCheckpointStore) -> None:
+        """After gc_history the next commit starts a new history with no parent."""
+        from llm_gent.flow._checkpoint_ctx import CheckpointContext
+        from llm_gent.flow.state.cas import Tree
+
+        ctx = CheckpointContext(store, "lineage-gc")
+        tree = Tree.from_entries([])
+        await ctx.put_tree(tree)
+
+        async def _append(iteration: int) -> Any:
+            meta = ctx._build_commit_meta(
+                await ctx.ensure_flow_id(), "node", iteration, "node", "ok", ()
+            )
+            return await ctx.append_commit(tree.content_hash, meta)
+
+        first = await _append(0)
+        second = await _append(1)
+        assert first.parent_hashes == ()
+        assert second.parent_hashes == (first.content_hash,)
+
+        await ctx.gc_history()
+        await ctx.put_tree(tree)
+        restarted = await _append(0)
+        assert restarted.parent_hashes == ()
+
+
+# ---------------------------------------------------------------------------
 # Resume determinism — baseline vs interrupt+resume must reach same final state
 # ---------------------------------------------------------------------------
 

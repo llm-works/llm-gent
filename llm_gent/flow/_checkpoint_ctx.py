@@ -69,6 +69,12 @@ class CheckpointContext:
         self.client_flow_id = client_flow_id
         self._flow_id: str | None = None
         self._flow_id_lock = asyncio.Lock()
+        # Head of the history: the newest commit, parent of the next one.
+        # Loaded from the store on first append, then maintained here —
+        # the context assumes it is the history's single writer.
+        self._head: str | None = None
+        self._head_loaded = False
+        self._commit_lock = asyncio.Lock()
 
     @property
     def retention(self) -> Retention:
@@ -146,6 +152,37 @@ class CheckpointContext:
             return
         await maybe_await(self.store.gc_history(flow_id))
         self._flow_id = None
+        self._head = None
+        self._head_loaded = False
+
+    # --- history: append a commit on top of the head ---
+
+    async def append_commit(self, root_tree_hash: str, meta: CommitMeta) -> Commit:
+        """Build a commit whose parent is the current head, store it, and ref it.
+
+        The ref goes to ``(meta.node_path, meta.iteration)``; the new commit
+        becomes the head. Serialized so concurrent saves (parallel map items)
+        form one linear history rather than sibling commits sharing a parent.
+        The first commit of a history has no parent.
+        """
+        async with self._commit_lock:
+            parent = await self._load_head()
+            commit = Commit.build(
+                root_tree_hash=root_tree_hash,
+                parent_hashes=() if parent is None else (parent,),
+                meta=meta,
+            )
+            await self.put_commit(commit)
+            await self.put_ref(meta.node_path, meta.iteration, commit.content_hash)
+            self._head = commit.content_hash
+            return commit
+
+    async def _load_head(self) -> str | None:
+        """Return the cached head, reading the newest ref on first use."""
+        if not self._head_loaded:
+            self._head = await self.resolve_ref()
+            self._head_loaded = True
+        return self._head
 
     # --- compound: save a scope commit ---
 
@@ -169,8 +206,8 @@ class CheckpointContext:
         two-digit ``scope_id``). Wrap the Tree in a Commit whose
         :class:`CommitMeta` pins ``(flow_id, node_path,
         iteration)`` and the provenance triple (``produced_by``,
-        ``trace_ref``, ``outcome``). Finally :meth:`put_ref` points
-        this boundary at the commit hash.
+        ``trace_ref``, ``outcome``). Finally :meth:`append_commit`
+        chains it onto the head and points this boundary at it.
 
         ``node_path`` is the ``"/"``-joined ancestor chain (from run
         root to this node, inclusive). blake2b hex has no ``"/"``,
@@ -187,9 +224,7 @@ class CheckpointContext:
         node_path = "/".join(ancestor_chain + (node_id,))
         flow_id = await self.ensure_flow_id()
         meta = self._build_commit_meta(flow_id, node_path, iteration, node_id, outcome, trace_ref)
-        commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
-        await self.put_commit(commit)
-        await self.put_ref(node_path, iteration, commit.content_hash)
+        await self.append_commit(tree.content_hash, meta)
 
     # --- private helpers used by save_scope_commit ---
 

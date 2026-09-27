@@ -196,10 +196,8 @@ async def stamp_completion_marker(flow: Flow) -> None:
     ctx = flow._checkpoint_ctx
     empty_tree = Tree.from_entries([])
     meta = _build_completion_marker_meta(await ctx.ensure_flow_id())
-    commit = Commit.build(root_tree_hash=empty_tree.content_hash, parent_hashes=(), meta=meta)
     await ctx.put_tree(empty_tree)
-    await ctx.put_commit(commit)
-    await ctx.put_ref("$complete", 0, commit.content_hash)
+    await ctx.append_commit(empty_tree.content_hash, meta)
 
 
 def _build_completion_marker_meta(flow_id: str) -> CommitMeta:
