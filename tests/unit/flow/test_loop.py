@@ -415,14 +415,49 @@ class TestPausedCapture:
         assert loop._paused_bytes is None
 
     @pytest.mark.asyncio
-    async def test_paused_without_conversation_no_capture(self) -> None:
-        """No conversation object → _paused_bytes stays None."""
+    async def test_paused_without_caller_conversation_captures_factory_created(self) -> None:
+        """No caller conversation + factory → the factory-created conversation is captured."""
+        from llm_gent.flow.state.cas import canonical_json
+
         factory = _CompleteFactory(result=_StubResult(paused=True))
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
         await flow.dispatch("loop", "t")
-        assert loop._paused_bytes is None
+        assert loop._paused_bytes == canonical_json(
+            {"task": "t", "conversation": {"messages": [], "n": 0}}
+        )
+
+    @pytest.mark.asyncio
+    async def test_factory_conversation_handed_to_saia_when_caller_passes_none(self) -> None:
+        """SAIA receives the factory-created conversation, so it can append the turn."""
+        factory = _CompleteFactory()
+        loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t")
+        assert isinstance(factory.built[-1].calls[0]["conversation"], _StubConversation)
+
+    @pytest.mark.asyncio
+    async def test_caller_conversation_wins_over_factory(self) -> None:
+        """A caller-supplied conversation is passed through, not replaced by a fresh one."""
+        conv = _StubConversation(messages=["mine"])
+        factory = _CompleteFactory()
+        loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t", conversation=conv)
+        assert factory.built[-1].calls[0]["conversation"] is conv
+
+    @pytest.mark.asyncio
+    async def test_no_factory_passes_no_conversation(self) -> None:
+        """Without a factory SAIA gets ``conversation=None`` (it keeps history internally)."""
+        factory = _CompleteFactory()
+        loop = Loop(ROLE_A)
+        flow = make_ff(saia_factory=factory).create()
+        flow.register(loop, name="loop")
+        await flow.dispatch("loop", "t")
+        assert factory.built[-1].calls[0]["conversation"] is None
 
     @pytest.mark.asyncio
     async def test_non_paused_no_capture(self) -> None:

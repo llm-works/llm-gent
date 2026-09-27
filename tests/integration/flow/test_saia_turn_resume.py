@@ -23,7 +23,7 @@ from llm_saia.core.backend import Backend
 from llm_saia.core.config import CallOptions, Config
 from llm_saia.core.errors import PauseRequested
 from llm_saia.core.logger import NullLogger
-from llm_saia.core.types import ChatResponse, Message, ToolDef
+from llm_saia.core.types import ChatResponse, Message, ToolCall, ToolDef
 
 from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
@@ -126,6 +126,62 @@ class _SaiaFactory:
         return SAIA(config)
 
 
+class _ToolThenPauseBackend(Backend):
+    """Returns one tool call, then honors ``abort_signal`` on the follow-up chat.
+
+    Pairs with :class:`_HaltingSaiaFactory`, whose executor sets the
+    halt while running that tool call — the pause lands between a
+    model tool_call and its follow-up completion.
+    """
+
+    async def chat(
+        self,
+        messages: list[Message],
+        system: str | None = None,
+        tools: list[ToolDef] | None = None,
+        response_schema: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        context: dict[str, Any] | None = None,
+        abort_signal: asyncio.Event | None = None,
+    ) -> ChatResponse:
+        if response_schema is not None:
+            return ChatResponse(
+                content=json.dumps({"category": "completed", "confidence": 0.9, "reason": "test"}),
+                tool_calls=[],
+                finish_reason="end_turn",
+            )
+        if abort_signal is not None and abort_signal.is_set():
+            raise PauseRequested()
+        call = ToolCall(id="call-1", name="lookup", arguments={"term": "cas"})
+        return ChatResponse(content="", tool_calls=[call], finish_reason="tool_use")
+
+
+class _HaltingSaiaFactory:
+    """SAIAFactory whose ``lookup`` tool sets ``halt`` as it returns its result."""
+
+    def __init__(self, backend: Backend, halt: asyncio.Event) -> None:
+        self._backend = backend
+        self._halt = halt
+
+    def build(self, role: Role) -> SAIA:
+        async def _executor(name: str, args: dict[str, Any]) -> str:
+            self._halt.set()
+            return "LOOKUP_RESULT"
+
+        tools = [
+            ToolDef(name="lookup", description="look up a term", parameters={"type": "object"})
+        ]
+        config = Config(
+            lg=NullLogger(),
+            backend=self._backend,
+            tools=tools,
+            executor=_executor,
+            call=CallOptions(max_iterations=3),
+        )
+        return SAIA(config)
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> JsonFileCheckpointStore:
     return JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
@@ -223,3 +279,52 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
         f"resumed dispatch must NOT carry the caller's conversation "
         f"(CALLER_CONV_MARKER); got {contents}"
     )
+
+
+async def test_loop_without_caller_conversation_persists_paused_turn(
+    store: JsonFileCheckpointStore,
+) -> None:
+    """``loop(ctx, task)`` with no conversation still lands the paused turn on the halt commit.
+
+    The Loop hands SAIA a factory-created conversation, SAIA appends
+    the user task + tool call + tool result to it, and the halt pauses
+    the follow-up chat. The halt commit's saia_turn blob must carry
+    that whole prefix — otherwise resume re-runs the turn from scratch.
+    """
+    from llm_gent.flow.state.cas import Commit
+    from llm_gent.flow.state.saia_turn import SaiaTurnEnvelope
+
+    role = Role(name="r", backend="openai", model="gpt-4o-mini")
+    halt = asyncio.Event()
+    loop = Loop(role, conversation_factory=_ConvFactory())
+
+    @verb(role=role)
+    async def run_loop(ctx: Context, _prev: Any = None) -> Any:
+        return await loop(ctx, "look up cas")
+
+    body = FlowFactory(make_test_logger()).create().call(run_loop)
+    saia_factory = _HaltingSaiaFactory(_ToolThenPauseBackend(), halt)
+    flow = (
+        FlowFactory(make_test_logger(), saia_factory=saia_factory)
+        .create(state={})
+        .with_checkpointer(store, "no-caller-conv")
+        .with_halt(halt)
+        .iterate(body, max_iters=2)
+    )
+    await flow.run()
+
+    head = store.resolve_ref("no-caller-conv")
+    assert head is not None
+    commit = Commit.from_bytes(store.get_object("no-caller-conv", "commit", head) or b"")
+    assert commit.meta.outcome == "halted"
+    saia_refs = [r for r in commit.meta.trace_ref if r.kind == "saia_turn"]
+    assert len(saia_refs) == 1
+    _node_id, _, blob_hash = saia_refs[0].id.partition(":")
+    envelope = SaiaTurnEnvelope.from_bytes(
+        store.get_object("no-caller-conv", "blob", blob_hash) or b""
+    )
+    assert envelope.task == "look up cas"
+    msgs = [Message.from_dict(m) for m in envelope.conversation["messages"]]
+    assert [m.role for m in msgs] == ["user", "assistant", "tool"], msgs
+    assert msgs[1].tool_calls and msgs[1].tool_calls[0].name == "lookup"
+    assert msgs[2].content == "LOOKUP_RESULT"
