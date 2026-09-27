@@ -52,8 +52,8 @@ Layout
   completed iteration pops one topic and appends its summary, a
   paused one leaves state untouched for resume.
 - :func:`_invoke` — one invocation: always ``run(resume=True)``,
-  halt armed only when the store holds no pending halt commit
-  (:func:`_halt_pending`).
+  halt armed only when that run will start fresh
+  (:func:`_resume_pending`).
 - :func:`main` — real mode runs one :func:`_invoke` per process
   against a fixed on-disk store; ``--smoke`` runs both phases in
   one process against a temp store and fails on a broken
@@ -96,6 +96,7 @@ import asyncio
 import os
 import shutil
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -172,7 +173,9 @@ DONE_TOOL = ToolDef(
 )
 
 
-def _make_tool_executor(halt_event: asyncio.Event, arm_halt: bool) -> Any:
+def _make_tool_executor(
+    halt_event: asyncio.Event, arm_halt: bool
+) -> Callable[[str, dict[str, Any]], Awaitable[str]]:
     """Return a SAIA tool executor closed over ``halt_event``.
 
     ``arm_halt=True`` (the fresh invocation): the FIRST successful
@@ -293,7 +296,8 @@ def _build_real_backend(lg: Logger, base_url: str | None, model: str | None) -> 
 
 def _first_served_model(factory: LLMInferFactory, base_url: str) -> str:
     """Return the first model the endpoint lists on ``/v1/models``."""
-    models = factory.openai(base_url=base_url).backend.list_models()
+    with factory.openai(base_url=base_url) as probe:
+        models = probe.backend.list_models()
     if not models:
         raise RuntimeError(f"{base_url} lists no models; pass --model")
     return models[0]
@@ -301,8 +305,8 @@ def _first_served_model(factory: LLMInferFactory, base_url: str) -> str:
 
 SUMMARIZE_ROLE = Role(
     name="summarizer",
-    backend="anthropic",
-    model=ANTHROPIC_MODEL,
+    backend="runtime",
+    model="runtime",
     style=(
         "You are a terse technical writer. For each term, call "
         "`lookup_reference` exactly once, read the returned blurb, then "
@@ -310,6 +314,8 @@ SUMMARIZE_ROLE = Role(
         "Do not call any tool more than once."
     ),
 )
+"""Role identity + system prompt. ``_SAIAFactory`` reads only ``style``;
+the backend and model are chosen at runtime by ``--base-url`` / ``--model``."""
 
 
 class _SAIAFactory:
@@ -345,7 +351,7 @@ class _SAIAFactory:
         return builder.build()
 
 
-def _make_summarize(loop: Loop) -> Any:
+def _make_summarize(loop: Loop) -> Callable[[Context[Digest]], Awaitable[Digest]]:
     """Return the role-bound ``summarize`` verb, closed over ``loop``.
 
     Role-bound so the flow's :class:`SAIAFactory` populates
@@ -446,16 +452,17 @@ def _latest_commit(store: JsonFileCheckpointStore) -> Commit | None:
     return Commit.from_bytes(store.get_object(CLIENT_FLOW_ID, "commit", head) or b"")
 
 
-def _halt_pending(store: JsonFileCheckpointStore) -> bool:
-    """True when the trajectory's latest commit is a halt awaiting resume.
+def _resume_pending(store: JsonFileCheckpointStore) -> bool:
+    """True when ``run(resume=True)`` will resume rather than start fresh.
 
-    ``False`` for an empty store and for a completed trajectory —
-    the default ``retain`` policy stamps a ``$complete`` marker
-    (``outcome="ok"``) on clean exit, which ``run(resume=True)``
-    treats as a fresh start.
+    Mirrors the rule in :meth:`Resume.hydrate`: resume from the
+    latest commit unless the store is empty or that commit is the
+    ``$complete`` marker the default ``retain`` policy stamps on
+    clean exit. This flow writes no ``ok`` iterate commits, so a
+    pending resume here is always a halt.
     """
     commit = _latest_commit(store)
-    return commit is not None and commit.meta.outcome == "halted"
+    return commit is not None and commit.meta.node_path != "$complete"
 
 
 def _paused_turn_saved(store: JsonFileCheckpointStore) -> bool:
@@ -469,11 +476,11 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
 
     Always runs with ``resume=True`` and lets the framework pick
     the path: no commit or a ``$complete`` marker → fresh run,
-    halt commit → resume. The halt is armed only on a fresh run so
-    the resumed turn completes.
+    any other latest commit → resume. The halt is armed only on a
+    fresh run so the resumed turn completes.
     """
     store = JsonFileCheckpointStore(lg, store_dir)
-    resuming = _halt_pending(store)
+    resuming = _resume_pending(store)
     halt = asyncio.Event()
     ff = FlowFactory(
         lg,
@@ -484,7 +491,7 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
     final: Digest = await _build_flow(lg, ff, halt).run(resume=True)
-    halted = _halt_pending(store)
+    halted = _resume_pending(store)
     _report(store, store_dir, final, halted)
     return final, halted
 

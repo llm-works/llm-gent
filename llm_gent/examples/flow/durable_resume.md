@@ -22,8 +22,9 @@ python -m llm_gent.examples.flow.durable_resume --smoke
 
 The two real invocations must be separate processes — that is the point. The store lives at
 `~/.cache/llm-gent-durable-resume`. Every invocation calls `flow.run(resume=True)`; the framework
-starts fresh on an empty store or a completed trajectory and resumes on a halt commit. A third
-invocation therefore starts a new cycle; `--reset` wipes the store first.
+starts fresh on an empty store or when the latest commit is the `$complete` marker, and otherwise
+resumes from the latest commit (here always the halt commit). A third invocation therefore starts
+a new cycle; `--reset` wipes the store first.
 
 ## The flow
 
@@ -65,8 +66,8 @@ Sequence inside the process:
    `conversation_factory`. SAIA appends each message of the turn to it.
 2. The model calls `lookup_reference`; the executor returns the blurb and sets halt.
 3. SAIA's follow-up `chat` raises `PauseRequested`; `saia.complete` returns paused.
-4. `Loop` serializes `{"task", "conversation"}` and stashes it on the runtime, keyed by its node
-   id (`0b799bf8f1f3498c`).
+4. `Loop` serializes `{"task", "conversation"}` and stashes it on the runtime, keyed by the node
+   id of the step that dispatched it (`0b799bf8f1f3498c`, the `.call(summarize)` step).
 5. `summarize` sees `result.paused` and returns with state untouched.
 6. The iterate body finishes; `IterateRunner` increments its counter to 1, checks `until` (topics
    remain), then observes halt at the top of the next pass and writes the halt commit — draining
@@ -92,7 +93,7 @@ run 2 is the one run 1 never got to make. Sequence:
 
 1. `Resume.hydrate` resolves the latest commit (the halt commit), restores `Digest` from its tree
    through `TypeStateFactory(Digest)`, and loads each `saia_turn` blob as a resume entry keyed by
-   Loop node id.
+   the dispatching step's node id.
 2. `IterateRunner` sees it is the save-point leaf and fast-forwards its counter to 1.
 3. `summarize` runs for `pending[0]` — still the halted topic, because run 1 left state untouched.
 4. `Loop` finds its resume entry, rebuilds the conversation with
@@ -160,10 +161,13 @@ latest commit.
 
 - `iteration: 1` — the iterate counter at halt. The paused pass counted as an iteration, which is
   why the flow bounds `max_iters` at `len(TOPICS) + 1` and terminates on `until` instead.
-- `outcome: "halted"` — written by the halt-observation site. The script reads this field to
-  decide whether to arm the halt on the next invocation.
-- `trace_ref` — one entry per paused Loop, `"<loop node id>:<blob hash>"`. Resume uses the node id
-  to hand the blob back to the right Loop.
+- `outcome: "halted"` — written by the halt-observation site. Resume does not branch on it: any
+  latest commit other than `$complete` is resumed, and the script applies the same rule
+  (`node_path != "$complete"`) to decide whether to arm the halt on the next invocation.
+- `trace_ref` — one entry per paused dispatch, `"<step node id>:<blob hash>"`. Resume hands the
+  blob back to the Loop called from that step. The key is per step, not per Loop: a verb that
+  calls two Loops that can pause would have them overwrite each other's entry, so keep one
+  resumable Loop per step.
 
 ### Tree and state blob
 
