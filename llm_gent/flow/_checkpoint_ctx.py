@@ -106,6 +106,16 @@ class CheckpointContext:
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
 
+    def discard_head(self) -> None:
+        """Make the next append start a new root commit instead of chaining on the head.
+
+        Used when the head points at a commit the store no longer holds: a
+        fresh run then writes a readable chain rather than parenting on a
+        missing object.
+        """
+        self._head = None
+        self._head_loaded = True
+
     @property
     def retention(self) -> Retention:
         """The store's retention mode (``"retain"`` or ``"gc_on_success"``)."""

@@ -96,7 +96,8 @@ class Resume:
 
         Nothing to resume: an empty or complete history, or a corrupt one —
         a missing commit, tree or blob falls through to a fresh run, with a
-        warning so the damage is not silent.
+        warning so the damage is not silent. The fresh run's commits then
+        start a new root rather than parenting on the unreadable head.
         """
         try:
             head = await history.head()
@@ -108,6 +109,9 @@ class Resume:
                 "checkpoint history is corrupt; starting a fresh run",
                 extra={"exception": e, "client_flow_id": history.client_flow_id},
             )
+            ctx = self.flow._checkpoint_ctx
+            assert ctx is not None
+            ctx.discard_head()
             return None
 
     def _split_scopes(

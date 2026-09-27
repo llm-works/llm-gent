@@ -141,6 +141,12 @@ class TestCorruptHistory:
 
         assert result["log"][0] == 101  # fresh from the fallback state, not resumed
         assert any("corrupt" in w for w in warnings)
+        # The fresh run's commits form a new, fully readable chain.
+        history = History(store, "torn-resume")
+        chain = await _all(history)
+        assert chain[0].meta.node_path == "$end"
+        assert chain[-1].parent_hashes == ()
+        assert {c.meta.flow_id for c in chain} == {await history.flow_id()}
 
 
 class TestHistoryAcrossRuns:
