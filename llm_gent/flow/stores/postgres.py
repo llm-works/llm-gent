@@ -57,7 +57,7 @@ from ..checkpoint import Kind, Retention
 _FLOW_ID_LEN = 36
 """Length of a ``flow_id`` column — a canonical UUID string."""
 
-_REF_SEQ = Sequence("llm_gent_flow_ref_seq", metadata=Base.metadata)
+_REF_SEQ = Sequence("gent_flow_ref_seq", metadata=Base.metadata)
 """Sequence feeding :attr:`FlowRef.seq` (write order of refs)."""
 
 
@@ -68,7 +68,7 @@ class FlowName(Base):
     (which owns the DDL), like the other models below.
     """
 
-    __tablename__ = "llm_gent_flow_name"
+    __tablename__ = "gent_flow_name"
 
     client_flow_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), nullable=False, unique=True)
@@ -85,7 +85,7 @@ class FlowObject(Base):
     revision and a matching model edit.
     """
 
-    __tablename__ = "llm_gent_flow_object"
+    __tablename__ = "gent_flow_object"
 
     flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
     kind: Mapped[str] = mapped_column(String(16), primary_key=True)
@@ -101,7 +101,7 @@ class FlowRef(Base):
     via ``ORDER BY seq DESC`` — database write order, not writer clocks.
     """
 
-    __tablename__ = "llm_gent_flow_ref"
+    __tablename__ = "gent_flow_ref"
 
     flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
     node_path: Mapped[str] = mapped_column(String(1024), primary_key=True)
@@ -118,7 +118,7 @@ class FlowRef(Base):
 class FlowTag(Base):
     """One row = one named tag ``(flow_id, name)`` → commit_hash; re-put moves it."""
 
-    __tablename__ = "llm_gent_flow_tag"
+    __tablename__ = "gent_flow_tag"
 
     flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), primary_key=True)

@@ -61,7 +61,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     """Emit SQL without connecting (``alembic upgrade --sql``)."""
-    version_table = config.get_main_option("version_table") or "alembic_version_llm_gent"
+    version_table = config.get_main_option("version_table") or "alembic_version_gent"
     _lg.info("running offline llm-gent migration")
     context.configure(
         url=_get_database_url(),
@@ -85,7 +85,7 @@ def run_migrations_online() -> None:  # cq: exempt
 
     url = _get_database_url()
     schema_name = config.get_main_option("version_table_schema") or "public"
-    version_table = config.get_main_option("version_table") or "alembic_version_llm_gent"
+    version_table = config.get_main_option("version_table") or "alembic_version_gent"
     _lg.info("starting online llm-gent migration", extra={"schema": schema_name})
 
     engine = create_engine(url)

@@ -6,17 +6,17 @@
 Creates the content-addressed persistence tables backing
 :class:`llm_gent.flow.stores.PgCheckpointStore`:
 
-- ``llm_gent_flow_name`` — one row per agent-chosen ``client_flow_id``,
+- ``gent_flow_name`` — one row per agent-chosen ``client_flow_id``,
   bound to its history's gent-generated ``flow_id`` (unique).
-- ``llm_gent_flow_object`` — one row per
+- ``gent_flow_object`` — one row per
   ``(flow_id, kind, content_hash)`` with a ``BYTEA payload``.
   ``kind`` is one of ``"blob"`` / ``"tree"`` / ``"commit"`` (see
   :mod:`llm_gent.flow.state.cas`).
-- ``llm_gent_flow_ref`` — one row per
+- ``gent_flow_ref`` — one row per
   ``(flow_id, node_path, iteration)`` pointing at a
   ``commit_hash``, with a sequence-assigned ``seq`` for latest-ref lookup
   and a ``created_at`` timestamp for inspection.
-- ``llm_gent_flow_tag`` — one row per ``(flow_id, name)`` pointing at a
+- ``gent_flow_tag`` — one row per ``(flow_id, name)`` pointing at a
   ``commit_hash``; re-put moves the tag.
 
 Objects, refs and tags are history-scoped by ``flow_id``; blobs are
@@ -42,8 +42,8 @@ depends_on: str | Sequence[str] | None = None
 _FLOW_ID_LEN = 36
 """``flow_id`` column length — a canonical UUID string."""
 
-_REF_SEQ = "llm_gent_flow_ref_seq"
-"""Sequence feeding ``llm_gent_flow_ref.seq`` (write order of refs)."""
+_REF_SEQ = "gent_flow_ref_seq"
+"""Sequence feeding ``gent_flow_ref.seq`` (write order of refs)."""
 
 
 def upgrade() -> None:
@@ -52,14 +52,14 @@ def upgrade() -> None:
     _create_object_table()
     op.execute(sa.schema.CreateSequence(sa.Sequence(_REF_SEQ)))
     _create_ref_table()
-    op.create_index("ix_flow_ref_flow_seq", "llm_gent_flow_ref", ["flow_id", sa.text("seq DESC")])
+    op.create_index("ix_flow_ref_flow_seq", "gent_flow_ref", ["flow_id", sa.text("seq DESC")])
     _create_tag_table()
 
 
 def _create_name_table() -> None:
-    """Create ``llm_gent_flow_name`` — ``client_flow_id`` → ``flow_id`` bindings."""
+    """Create ``gent_flow_name`` — ``client_flow_id`` → ``flow_id`` bindings."""
     op.create_table(
-        "llm_gent_flow_name",
+        "gent_flow_name",
         sa.Column("client_flow_id", sa.String(length=255), nullable=False),
         sa.Column("flow_id", sa.String(length=_FLOW_ID_LEN), nullable=False),
         sa.Column(
@@ -74,9 +74,9 @@ def _create_name_table() -> None:
 
 
 def _create_object_table() -> None:
-    """Create ``llm_gent_flow_object`` — content-addressed object rows."""
+    """Create ``gent_flow_object`` — content-addressed object rows."""
     op.create_table(
-        "llm_gent_flow_object",
+        "gent_flow_object",
         sa.Column("flow_id", sa.String(length=_FLOW_ID_LEN), nullable=False),
         sa.Column("kind", sa.String(length=16), nullable=False),
         sa.Column("content_hash", sa.String(length=64), nullable=False),
@@ -91,7 +91,7 @@ def _create_object_table() -> None:
 
 
 def _create_ref_table() -> None:
-    """Create ``llm_gent_flow_ref`` — history-keyed pointers at commit hashes.
+    """Create ``gent_flow_ref`` — history-keyed pointers at commit hashes.
 
     ``seq`` is drawn from a database sequence on every insert and re-put,
     so "latest ref" is write order as the database saw it — independent
@@ -99,7 +99,7 @@ def _create_ref_table() -> None:
     this table and the ``(flow_id, seq DESC)`` index after it.
     """
     op.create_table(
-        "llm_gent_flow_ref",
+        "gent_flow_ref",
         sa.Column("flow_id", sa.String(length=_FLOW_ID_LEN), nullable=False),
         sa.Column("node_path", sa.String(length=1024), nullable=False),
         sa.Column("iteration", sa.Integer(), nullable=False),
@@ -126,9 +126,9 @@ def _create_ref_table() -> None:
 
 
 def _create_tag_table() -> None:
-    """Create ``llm_gent_flow_tag`` — named, movable pointers at commit hashes."""
+    """Create ``gent_flow_tag`` — named, movable pointers at commit hashes."""
     op.create_table(
-        "llm_gent_flow_tag",
+        "gent_flow_tag",
         sa.Column("flow_id", sa.String(length=_FLOW_ID_LEN), nullable=False),
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column("commit_hash", sa.String(length=64), nullable=False),
@@ -144,9 +144,9 @@ def _create_tag_table() -> None:
 
 def downgrade() -> None:
     """Drop the tag, ref, object and name tables."""
-    op.drop_table("llm_gent_flow_tag")
-    op.drop_index("ix_flow_ref_flow_seq", table_name="llm_gent_flow_ref")
-    op.drop_table("llm_gent_flow_ref")
+    op.drop_table("gent_flow_tag")
+    op.drop_index("ix_flow_ref_flow_seq", table_name="gent_flow_ref")
+    op.drop_table("gent_flow_ref")
     op.execute(sa.schema.DropSequence(sa.Sequence(_REF_SEQ)))
-    op.drop_table("llm_gent_flow_object")
-    op.drop_table("llm_gent_flow_name")
+    op.drop_table("gent_flow_object")
+    op.drop_table("gent_flow_name")
