@@ -185,7 +185,10 @@ class Loop:
                 :class:`~llm_saia.core.conversation.ConversationFactory`.
                 When wired, a dispatch without a caller-supplied
                 ``conversation`` gets a fresh
-                :meth:`ConversationFactory.create` one, and a paused
+                :meth:`ConversationFactory.create` one — the
+                conversation the model runs on, so the factory's
+                configuration applies to the live turn, not only to the
+                saved snapshot — and a paused
                 result triggers the framework to capture the
                 conversation's :meth:`to_dict` payload as canonical
                 bytes on :attr:`_paused_bytes` for the halt-observation
@@ -373,7 +376,8 @@ class Loop:
         :meth:`_consume_resume_entry` restore both when a direct
         :class:`Loop` chain step resumes at index > 0 with empty
         ``node_args``. Capture is a no-op when no factory is wired
-        or when no conversation object flowed through this dispatch.
+        (with one wired, :meth:`_prepare_dispatch` always supplies a
+        conversation) or when the conversation has no ``to_dict``.
 
         Returns the value from ``on_paused`` / ``on_complete`` when
         the hook returned non-``None`` — :meth:`__call__` uses it to
@@ -590,6 +594,10 @@ class LoopFactory:
                 factory unless per-call overridden. Wire once at the
                 app boundary so every Loop this factory builds captures
                 paused conversations into the Flow's CAS halt commit.
+                Each built Loop also runs any dispatch without a
+                caller-supplied conversation on a conversation from this
+                factory, so the factory's configuration (e.g. size
+                limit, compaction) governs those turns.
         """
         self._lg = lg
         self._saia_factory = saia_factory

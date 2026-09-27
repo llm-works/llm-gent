@@ -471,6 +471,34 @@ class TestPausedCapture:
         assert loop._paused_bytes is None
 
     @pytest.mark.asyncio
+    async def test_dispatch_start_clears_stale_pending_turn(self) -> None:
+        """An uncapturable pause must not leave the previous pass's turn pending.
+
+        Pass 1 pauses and captures; halt is never set, so nothing drains
+        the runtime's pending entry. Pass 2 pauses with a conversation
+        that has no ``to_dict`` (capture no-op). Only the dispatch-start
+        clear removes pass 1's entry — without it a later halt commit
+        would stamp pass 1's stale conversation.
+        """
+
+        class _NoDictConversation:
+            pass
+
+        convs: list[Any] = [_StubConversation(messages=["pass-1"]), _NoDictConversation()]
+        factory = _CompleteFactory(result=_StubResult(paused=True))
+        loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
+
+        @verb(role=ROLE_A)
+        async def body_verb(ctx: Context, _prev: Any = None) -> Any:
+            return await loop(ctx, "t", conversation=convs.pop(0))
+
+        flow = make_ff(saia_factory=factory).create()
+        flow.iterate(lambda body: body.call(body_verb), max_iters=2)
+        await flow.run()
+        assert not convs, "both passes should have dispatched"
+        assert flow._pending_saia_turns.snapshot() == []
+
+    @pytest.mark.asyncio
     async def test_paused_bytes_reset_per_dispatch(self) -> None:
         """A subsequent non-paused dispatch clears bytes captured earlier."""
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
