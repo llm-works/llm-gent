@@ -52,7 +52,7 @@ def upgrade() -> None:
     _create_object_table()
     op.execute(sa.schema.CreateSequence(sa.Sequence(_REF_SEQ)))
     _create_ref_table()
-    op.create_index("ix_flow_ref_flow_seq", "gent_flow_ref", ["flow_id", sa.text("seq DESC")])
+    op.create_index("ix_gent_flow_ref_flow_seq", "gent_flow_ref", ["flow_id", sa.text("seq DESC")])
     _create_tag_table()
 
 
@@ -68,8 +68,8 @@ def _create_name_table() -> None:
             server_default=sa.func.now(),
             nullable=False,
         ),
-        sa.PrimaryKeyConstraint("client_flow_id", name="pk_flow_name"),
-        sa.UniqueConstraint("flow_id", name="uq_flow_name_flow_id"),
+        sa.PrimaryKeyConstraint("client_flow_id", name="pk_gent_flow_name"),
+        sa.UniqueConstraint("flow_id", name="uq_gent_flow_name_flow_id"),
     )
 
 
@@ -85,7 +85,7 @@ def _create_object_table() -> None:
             "flow_id",
             "kind",
             "content_hash",
-            name="pk_flow_object",
+            name="pk_gent_flow_object",
         ),
     )
 
@@ -120,7 +120,7 @@ def _create_ref_table() -> None:
             "flow_id",
             "node_path",
             "iteration",
-            name="pk_flow_ref",
+            name="pk_gent_flow_ref",
         ),
     )
 
@@ -138,14 +138,14 @@ def _create_tag_table() -> None:
             server_default=sa.func.now(),
             nullable=False,
         ),
-        sa.PrimaryKeyConstraint("flow_id", "name", name="pk_flow_tag"),
+        sa.PrimaryKeyConstraint("flow_id", "name", name="pk_gent_flow_tag"),
     )
 
 
 def downgrade() -> None:
     """Drop the tag, ref, object and name tables."""
     op.drop_table("gent_flow_tag")
-    op.drop_index("ix_flow_ref_flow_seq", table_name="gent_flow_ref")
+    op.drop_index("ix_gent_flow_ref_flow_seq", table_name="gent_flow_ref")
     op.drop_table("gent_flow_ref")
     op.execute(sa.schema.DropSequence(sa.Sequence(_REF_SEQ)))
     op.drop_table("gent_flow_object")

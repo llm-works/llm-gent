@@ -1456,13 +1456,13 @@ class TestCompletionTag:
     ) -> None:
         """A crash between the $end commit and the tag write must not replay "$end"."""
         from llm_gent.flow._checkpoint_ctx import CheckpointContext
-        from llm_gent.flow.checkpoint import COMPLETE_TAG, COMPLETION_PRODUCER, END_NODE_PATH
+        from llm_gent.flow.checkpoint import COMPLETE_TAG
         from llm_gent.flow.state import State
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
         ctx = CheckpointContext(store, "torn-completion", lambda: "")
         tree = await ctx.put_state_tree(State(data={"n": 7}))
-        await ctx.save_framework_commit(END_NODE_PATH, COMPLETION_PRODUCER, "ok", tree)
+        await ctx.save_completion_commit(tree)
         assert store.resolve_tag(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
 
         result = await build_canonical_flow(
@@ -1564,23 +1564,25 @@ class TestResumeDeterminism:
 
 
 class TestResumeErrorPaths:
-    async def test_resume_falls_through_when_commit_object_missing(
+    async def test_resume_raises_when_commit_object_missing(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """Ref points at a commit that isn't stored → treated as absent, fresh run."""
+        """Ref points at a commit that isn't stored → HistoryCorrupt, not a fresh run."""
+        from llm_gent.flow import HistoryCorrupt
+
         # Seed a ref pointing at a non-existent commit hash.
         store.put_ref(flow_id_for(store, "orphan-ref"), "some/node", 0, "0" * 64)
-        # No corresponding commit object was ever put — resume falls back.
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-ref"
         )
-        result = await flow.run(resume="replay")
-        assert result["iterations_completed"] == 1
+        with pytest.raises(HistoryCorrupt, match="commit"):
+            await flow.run(resume="replay")
 
-    async def test_resume_falls_through_when_tree_object_missing(
+    async def test_resume_raises_when_tree_object_missing(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """Commit points at a tree that isn't stored → treated as absent, fresh run."""
+        """Commit points at a tree that isn't stored → HistoryCorrupt, not a fresh run."""
+        from llm_gent.flow import HistoryCorrupt
         from llm_gent.flow.state.cas import (
             Commit,
             CommitMeta,
@@ -1603,17 +1605,15 @@ class TestResumeErrorPaths:
             flow_id_for(store, "orphan-tree"), "commit", commit.content_hash, commit.to_bytes()
         )
         store.put_ref(flow_id_for(store, "orphan-tree"), "root", 0, commit.content_hash)
-        # Tree object missing → resume falls back.
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-tree"
         )
-        result = await flow.run(resume="replay")
-        assert result["iterations_completed"] == 1
+        with pytest.raises(HistoryCorrupt, match="tree"):
+            await flow.run(resume="replay")
 
-    async def test_resume_falls_through_when_blob_missing(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        """Tree entry references a blob that isn't stored → fresh run."""
+    async def test_resume_raises_when_blob_missing(self, store: JsonFileCheckpointStore) -> None:
+        """Tree entry references a blob that isn't stored → HistoryCorrupt, not a fresh run."""
+        from llm_gent.flow import HistoryCorrupt
         from llm_gent.flow.state.cas import (
             Commit,
             CommitMeta,
@@ -1644,12 +1644,11 @@ class TestResumeErrorPaths:
             flow_id_for(store, "orphan-blob"), "commit", commit.content_hash, commit.to_bytes()
         )
         store.put_ref(flow_id_for(store, "orphan-blob"), "root", 0, commit.content_hash)
-        # Blob missing → resume falls back.
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-blob"
         )
-        result = await flow.run(resume="replay")
-        assert result["iterations_completed"] == 1
+        with pytest.raises(HistoryCorrupt, match="blob"):
+            await flow.run(resume="replay")
 
     async def test_resume_with_stale_node_path_raises_structural_change(
         self, store: JsonFileCheckpointStore

@@ -125,7 +125,7 @@ class PendingPausedTurns:
 class ResumePausedTurns:
     """Reconstructed paused-turn payloads awaiting Loop pickup on resume.
 
-    :meth:`load_from_commit` (called from ``Resume.hydrate``) populates
+    :meth:`load_from_commit` (called from ``Resume.replay``) populates
     via :meth:`add` from the halt commit's ``paused_turn`` :class:`TraceRef` entries;
     :class:`Loop` reads via :meth:`load` at dispatch and drops via
     :meth:`release` only after ``saia.complete`` returns (so a

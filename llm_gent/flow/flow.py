@@ -908,20 +908,23 @@ class Flow:
                 ``"restart"`` replaces ``state`` with the root state of the
                 newest commit with usable state (skipping ``$failed`` and
                 stateless commits) and runs from the first node; paused
-                turns are not offered, and a corrupt history raises
-                :class:`HistoryCorrupt`. Payloads are rebuilt via ``state_factory``
-                when bound, else used as plain dicts. On an empty history
-                (or nothing to replay) the run proceeds with ``state`` as
-                given, appending to the same history. Anything other than
+                turns are not offered. Payloads are rebuilt via
+                ``state_factory`` when bound, else used as plain dicts. On an
+                empty history (or nothing to replay) the run proceeds with
+                ``state`` as given, appending to the same history; a corrupt
+                history raises :class:`HistoryCorrupt` in either mode. Anything other than
                 ``"off"`` requires :meth:`with_checkpointer`. Bound
                 parameter: not forwarded to the first node.
             **kwargs: Keyword inputs to the first node.
 
         With a checkpointer wired, a fully successful run under
         ``retention="retain"`` commits its final state (tagged
-        ``complete``); ``"gc_on_success"`` deletes the history instead. A
-        run that raises commits the root state at ``$failed`` before the
-        exception propagates; cancellation writes nothing extra.
+        ``complete``); ``"gc_on_success"`` deletes the history instead. An
+        exception raised while the nodes run commits the root state at
+        ``$failed`` before it propagates. Errors raised before the walk
+        starts (argument checks, loading the history) or after it ends
+        (:func:`assert_replay_consumed`, the final-state commit) write
+        nothing extra, and neither does cancellation.
 
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode
@@ -932,7 +935,7 @@ class Flow:
                 can run under a factoryless flow.
             ValueError: ``resume`` is not a :data:`ResumeMode` value.
         """
-        self._check_resume_mode(resume)
+        self._check_run_args(resume)
         self._begin_checkpoint_run()
         self._resume_paused_turns.clear()
         active_state, replay = await self._start_state(self._wrap_top_state(state), resume)
@@ -955,8 +958,14 @@ class Flow:
         await apply_clean_exit_retention(self, active_state)
         return result
 
-    def _check_resume_mode(self, resume: ResumeMode) -> None:
-        """Reject an unknown mode, or a resume mode without a checkpointer."""
+    def _check_run_args(self, resume: ResumeMode) -> None:
+        """Reject an empty flow, an unknown mode, or a resume mode without a checkpointer.
+
+        Runs before the failure-commit boundary, so a misconfigured run
+        leaves no ``$failed`` commit (or new history) behind.
+        """
+        if not self._nodes:
+            raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
         if resume not in get_args(ResumeMode):
             raise ValueError(f"resume must be one of {get_args(ResumeMode)}; got {resume!r}")
         if resume != "off" and self._checkpoint_ctx is None:
@@ -971,7 +980,7 @@ class Flow:
     ) -> tuple[State[Any], _ResumeReplay | None]:
         """The run's initial state (and replay plan) for ``resume``."""
         if resume == "replay":
-            return await Resume(self).hydrate(fallback)
+            return await Resume(self).replay(fallback)
         if resume == "restart":
             return await Resume(self).restart(fallback), None
         return fallback, None

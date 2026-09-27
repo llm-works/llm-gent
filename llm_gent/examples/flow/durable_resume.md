@@ -92,7 +92,7 @@ Sequence inside the process:
 The first topic is summarized with no `lookup_reference` line: the model's first completion in
 run 2 is the one run 1 never got to make. Sequence:
 
-1. `Resume.hydrate` resolves the latest commit (the halt commit), restores `Digest` from its tree
+1. `Resume.replay` resolves the latest commit (the halt commit), restores `Digest` from its tree
    through `TypeStateFactory(Digest)`, and loads each `paused_turn` blob as a resume entry keyed by
    the dispatching step's node id.
 2. `IterateRunner` sees it is the save-point leaf and fast-forwards its counter to 1.
@@ -140,7 +140,7 @@ will not match a local run.
 
 Only `refs/` and `tags/` are mutable. Everything under `objects/` is immutable and named by the hash
 of its bytes; identical content is stored once. If resume finds the commit, tree, or a state blob
-missing, it falls back to a fresh run; a missing `paused_turn` blob makes only that Loop restart its
+missing, it raises `HistoryCorrupt`; a missing `paused_turn` blob makes only that Loop restart its
 turn from the task.
 
 ### Refs

@@ -34,7 +34,7 @@ from typing import Any
 
 from appinfra.log import Logger
 
-from ..checkpoint import CheckpointStore
+from ..checkpoint import CheckpointStore, ResumeMode
 from ..context import Context
 from ..factory import FlowFactory
 from ..flow import Flow
@@ -301,6 +301,7 @@ def resume_in_subprocess(
     flow_builder: str = "build_canonical_flow",
     flow_builder_kwargs: dict[str, Any] | None = None,
     client_flow_id: str = "canonical-multi-stage",
+    resume: ResumeMode = "replay",
     subprocess_timeout: float = 30.0,
 ) -> dict[str, Any]:
     """Spawn a fresh Python process, resume the Flow from checkpoint, return final state.
@@ -310,7 +311,7 @@ def resume_in_subprocess(
     (a class or a function) and calling it as
     ``store_factory(lg, **store_kwargs)``, resolves and calls the flow
     builder with ``store=<instance>, client_flow_id=<>, **flow_builder_kwargs``,
-    invokes ``await flow.run(resume="replay")``, and prints the return value
+    invokes ``await flow.run(resume=resume)``, and prints the return value
     as JSON to stdout. The parent parses and returns it.
 
     Every value in ``store_kwargs`` must be JSON-serializable (paths as
@@ -333,18 +334,24 @@ def resume_in_subprocess(
         flow_builder_kwargs: Additional kwargs passed to the flow builder.
         client_flow_id: Checkpoint history identifier — must match the
             id used by the interrupt run that wrote the checkpoint.
+        resume: The :data:`~llm_gent.flow.checkpoint.ResumeMode` the
+            subprocess runs with (``"off"`` is rejected: nothing to resume).
         subprocess_timeout: Wall-clock cap on the subprocess in seconds.
 
     Returns:
         The final state dict — whatever the flow's tail node returned.
 
     Raises:
+        ValueError: ``resume`` is ``"off"``.
         subprocess.CalledProcessError: The subprocess exited non-zero.
             The stderr is included in the exception.
         subprocess.TimeoutExpired: The subprocess ran past ``subprocess_timeout``.
         json.JSONDecodeError: The subprocess's stdout was not valid JSON.
     """
+    if resume == "off":
+        raise ValueError('resume_in_subprocess needs a resume mode; got "off"')
     payload = {
+        "resume": resume,
         "store_module": store_module,
         "store_factory": store_factory,
         "store_kwargs": store_kwargs,

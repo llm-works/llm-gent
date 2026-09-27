@@ -241,8 +241,11 @@ on the last finished run's final state when a later run halts past it.
 A final state that cannot be serialized is committed without state (and
 a warning is logged) rather than failing the finished run.
 
-A run that raises commits its root state at `$failed` (outcome `failed`)
-before the exception propagates; cancellation writes nothing extra.
+A run whose nodes raise commits its root state at `$failed` (outcome
+`failed`) before the exception propagates. Errors raised before the first
+node runs (invalid arguments, a corrupt history) or after the last one
+(the post-run replay check, the final-state commit) write nothing extra,
+and neither does cancellation.
 
 ### Resume modes
 
@@ -252,16 +255,18 @@ before the exception propagates; cancellation writes nothing extra.
   to the history.
 - `"replay"` — positional resume: rebuild the last save point's scope tree
   and fast-forward to it. Iteration bounds are cumulative across runs. A
-  complete or corrupt history starts fresh (the latter with a warning).
+  complete history starts fresh.
 - `"restart"` — start at the first node with the root state of the newest
   commit that has usable state (halted, ok or final). Child scopes are not
   restored, iterate counters start at zero, and paused turns are not
-  offered. A corrupt history raises `HistoryCorrupt` rather than starting
-  over. Suits long-lived agents that re-enter their flow each session, and
+  offered. Commits walked past to reach it are logged at warning level.
+  Suits long-lived agents that re-enter their flow each session, and
   survives changes to the flow's structure that would break replay.
 
 `$failed` commits record the state at a failure but are never a starting
 point: both replay and restart resume from the last commit before them.
+A corrupt history (a commit, tree or state blob missing from the store)
+raises `HistoryCorrupt` in either mode rather than starting over.
 
 Per-session adjustments to the restored state belong in the flow's first
 step.

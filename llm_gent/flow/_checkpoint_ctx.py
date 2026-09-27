@@ -30,7 +30,16 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import CheckpointStore, Kind, Retention, maybe_await
+from .checkpoint import (
+    COMPLETION_PRODUCER,
+    END_NODE_PATH,
+    FAILED_NODE_PATH,
+    FAILURE_PRODUCER,
+    CheckpointStore,
+    Kind,
+    Retention,
+    maybe_await,
+)
 from .state import serialize_state_data
 from .state.cas import (
     Blob,
@@ -105,16 +114,6 @@ class CheckpointContext:
         self._head = None
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
-
-    def discard_head(self) -> None:
-        """Make the next append start a new root commit instead of chaining on the head.
-
-        Used when the head points at a commit the store no longer holds: a
-        fresh run then writes a readable chain rather than parenting on a
-        missing object.
-        """
-        self._head = None
-        self._head_loaded = True
 
     @property
     def retention(self) -> Retention:
@@ -280,14 +279,20 @@ class CheckpointContext:
         await self.put_tree(tree)
         return tree
 
-    async def save_framework_commit(
+    async def save_completion_commit(self, tree: Tree) -> Commit:
+        """Commit an already-put ``tree`` as the final-state commit (``$end``, outcome ``ok``)."""
+        return await self._save_framework_commit(END_NODE_PATH, COMPLETION_PRODUCER, "ok", tree)
+
+    async def save_failure_commit(self, tree: Tree) -> Commit:
+        """Commit an already-put ``tree`` as the failure commit (``$failed``, outcome ``failed``)."""
+        return await self._save_framework_commit(FAILED_NODE_PATH, FAILURE_PRODUCER, "failed", tree)
+
+    async def _save_framework_commit(
         self, node_path: str, producer: str, outcome: CommitOutcome, tree: Tree
     ) -> Commit:
-        """Commit an already-put ``tree`` at a reserved ``node_path`` the framework owns.
+        """Commit ``tree`` at a reserved ``node_path`` the framework owns.
 
-        No node produced it: ``producer`` is a ``$framework/*`` pseudo node id
-        (:data:`~llm_gent.flow.checkpoint.COMPLETION_PRODUCER`,
-        :data:`~llm_gent.flow.checkpoint.FAILURE_PRODUCER`).
+        No node produced it: ``producer`` is a ``$framework/*`` pseudo node id.
         """
         flow_id = await self.ensure_flow_id()
         meta = self._build_commit_meta(flow_id, node_path, 0, producer, outcome, ())

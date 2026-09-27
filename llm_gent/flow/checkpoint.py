@@ -138,7 +138,8 @@ ResumeMode = Literal["off", "replay", "restart"]
   the history.
 - ``"replay"`` — positional resume: rebuild the scope tree of the last save
   point and fast-forward to it. Starts from ``state=`` when the history is
-  empty or complete.
+  empty or complete; raises :class:`~llm_gent.flow.history.HistoryCorrupt`
+  on a corrupt history.
 - ``"restart"`` — run from the first node with the root state of the
   newest commit that has usable state (halted, ok or final; ``$failed``
   and stateless commits are skipped). Child scopes are not restored,

@@ -31,7 +31,7 @@ def _resolve(module: str, attr: str) -> Any:
 
 
 async def _run(payload: dict[str, Any]) -> Any:
-    """Reconstruct store + Flow from the payload and drive ``run(resume="replay")``."""
+    """Reconstruct store + Flow from the payload and drive ``run(resume=payload["resume"])``."""
     lg = quick_console_logger("resume-helper", config={"level": "error"})
     store_factory = _resolve(payload["store_module"], payload["store_factory"])
     store = store_factory(lg, **payload["store_kwargs"])
@@ -42,7 +42,7 @@ async def _run(payload: dict[str, Any]) -> Any:
         client_flow_id=payload["client_flow_id"],
         **payload["flow_builder_kwargs"],
     )
-    return await flow.run(resume="replay")
+    return await flow.run(resume=payload["resume"])
 
 
 def main() -> None:

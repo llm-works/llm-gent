@@ -7,7 +7,7 @@ Read side — :class:`Resume` is constructed per resuming ``run()`` with
 the flow being resumed, and reads the history through the public
 :class:`~llm_gent.flow.history.History` API:
 
-- :meth:`Resume.hydrate` (``resume="replay"``) returns the
+- :meth:`Resume.replay` (``resume="replay"``) returns the
   ``(State, _ResumeReplay | None)`` pair the executor threads through the
   walk: the last save point's root scope hydrates the top-level
   :class:`State`, every non-root scope payload rides on
@@ -29,14 +29,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import (
-    COMPLETE_TAG,
-    COMPLETION_PRODUCER,
-    END_NODE_PATH,
-    FAILED_NODE_PATH,
-    FAILURE_PRODUCER,
-)
-from .history import History, HistoryCorrupt
+from .checkpoint import COMPLETE_TAG
+from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
 
@@ -49,18 +43,22 @@ if TYPE_CHECKING:
 class Resume:
     """Hydrate the initial state (and replay plan) for a resuming ``run()``.
 
-    Constructed with the flow being resumed. Both entry points take the
-    fallback :class:`State` (the wrapped ``run(state=...)`` payload) and
-    return it unchanged when there is nothing to resume, so the caller
+    Constructed with a flow that has a checkpointer. Both entry points take
+    the fallback :class:`State` (the wrapped ``run(state=...)`` payload)
+    and return it unchanged when there is nothing to resume, so the caller
     falls through to a fresh run — whose commits still append to the same
-    history. Replay treats a corrupt history as nothing to resume; restart
-    raises instead.
+    history. Both raise :class:`~llm_gent.flow.history.HistoryCorrupt` on a
+    corrupt history rather than silently starting over from ``fallback``.
     """
 
     def __init__(self, flow: Flow) -> None:
+        ctx = flow._checkpoint_ctx
+        assert ctx is not None
         self.flow = flow
+        self._ctx = ctx
+        self._history = History(ctx.store, ctx.client_flow_id)
 
-    async def hydrate(self, fallback: State[Any]) -> tuple[State[Any], _ResumeReplay | None]:
+    async def replay(self, fallback: State[Any]) -> tuple[State[Any], _ResumeReplay | None]:
         """Replay: rebuild the last save point's scope tree and replay context.
 
         1. :meth:`History.replay_point` picks the resume commit: the head, or the
@@ -80,13 +78,11 @@ class Resume:
 
         Returns ``(fallback, None)`` when there is nothing to replay.
         """
-        loaded = await self._load_replay_point()
-        if loaded is None:
+        commit = await self._history.replay_point()
+        if commit is None:
             return fallback, None
-        commit, scope_data = loaded
-        ctx = self.flow._checkpoint_ctx
-        assert ctx is not None
-        await self.flow._resume_paused_turns.load_from_commit(ctx, commit)
+        scope_data = await self._history.scopes(commit)
+        await self.flow._resume_paused_turns.load_from_commit(self._ctx, commit)
         return self._split_scopes(commit, scope_data)
 
     async def restart(self, fallback: State[Any]) -> State[Any]:
@@ -99,47 +95,37 @@ class Resume:
         so iterate counters start at zero. Paused turns are not offered —
         a step's node id does not identify a map item across runs.
 
-        Returns ``fallback`` when the history is empty or holds no commit
-        with usable state (warning in the latter case). A corrupt history
-        raises :class:`HistoryCorrupt` instead of silently starting over.
+        Skipping is logged: the restored state may predate the head by
+        whole runs (a stateless ``$end`` sends the walk into the previous
+        run). Returns ``fallback`` when the history is empty or holds no
+        commit with usable state (warning in the latter case).
         """
-        ctx = self.flow._checkpoint_ctx
-        assert ctx is not None
-        history = History(ctx.store, ctx.client_flow_id)
-        async for commit in history.commits():
-            if History.is_failed(commit):
-                continue
-            scope_data = await history.scopes(commit)
+        skipped: list[str] = []
+        async for commit in self._history.commits():
+            scope_data = [] if History.is_failed(commit) else await self._history.scopes(commit)
             if scope_data:
+                if skipped:
+                    self._warn_restart_skipped(skipped, commit)
                 return self._root_state(scope_data[0])
-        if await history.head() is not None:
+            skipped.append(commit.meta.node_path)
+        if skipped:
             self.flow._lg.warning(
                 "no commit with usable state to restart from; starting from state=",
-                extra={"client_flow_id": history.client_flow_id},
+                extra={"client_flow_id": self._history.client_flow_id, "skipped": skipped},
             )
         return fallback
 
-    async def _load_replay_point(self) -> tuple[Commit, list[Any]] | None:
-        """The replay commit and its scope payloads, or ``None`` when there is nothing to replay.
-
-        A corrupt history — a missing commit, tree or blob — falls through
-        to a fresh run, with a warning so the damage is not silent. The
-        fresh run's commits then start a new root rather than parenting on
-        the unreadable head.
-        """
-        ctx = self.flow._checkpoint_ctx
-        assert ctx is not None
-        history = History(ctx.store, ctx.client_flow_id)
-        try:
-            commit = await history.replay_point()
-            return None if commit is None else (commit, await history.scopes(commit))
-        except HistoryCorrupt as e:
-            self.flow._lg.warning(
-                "checkpoint history is corrupt; starting a fresh run",
-                extra={"exception": e, "client_flow_id": history.client_flow_id},
-            )
-            ctx.discard_head()
-            return None
+    def _warn_restart_skipped(self, skipped: list[str], restored: Commit) -> None:
+        """Log the ``$failed`` / stateless commits restart walked past, and where it landed."""
+        self.flow._lg.warning(
+            "restart skipped commits without usable state",
+            extra={
+                "client_flow_id": self._history.client_flow_id,
+                "skipped": skipped,
+                "restored_commit": restored.content_hash,
+                "restored_node_path": restored.meta.node_path,
+            },
+        )
 
     def _root_state(self, root_raw: Any) -> State[Any]:
         """Top-level :class:`State` from a stored root payload (factory-restored when bound)."""
@@ -210,7 +196,7 @@ async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
     The commit holds the top-level state, so the history's head always
     carries the state the last run ended with — even when no save point
     fired during the run. It is attributed to the framework
-    (:data:`COMPLETION_PRODUCER`), not to a node.
+    (:data:`~llm_gent.flow.checkpoint.COMPLETION_PRODUCER`), not to a node.
 
     A final state that cannot be serialized (live handles, non-JSON
     values) must not fail a run whose work is done: the commit is then
@@ -220,7 +206,7 @@ async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
     ctx = flow._checkpoint_ctx
     assert ctx is not None
     tree = await _put_root_tree(flow, final_state)
-    commit = await ctx.save_framework_commit(END_NODE_PATH, COMPLETION_PRODUCER, "ok", tree)
+    commit = await ctx.save_completion_commit(tree)
     await ctx.put_tag(COMPLETE_TAG, commit.content_hash)
     return commit
 
@@ -238,7 +224,7 @@ async def commit_failure(flow: Flow, failed_state: State[Any]) -> None:
         return
     try:
         tree = await _put_root_tree(flow, failed_state)
-        await ctx.save_framework_commit(FAILED_NODE_PATH, FAILURE_PRODUCER, "failed", tree)
+        await ctx.save_failure_commit(tree)
     except Exception as e:
         flow._lg.warning("failure commit could not be written", extra={"exception": e})
 
