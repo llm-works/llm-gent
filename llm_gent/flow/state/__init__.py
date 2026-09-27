@@ -53,6 +53,16 @@ def serialize_state_data(data: object) -> object:
     )
 
 
+def restore_state_data(factory: StateFactory[T], payload: object) -> T:
+    """Rebuild state data from a checkpointed ``payload`` via ``factory``.
+
+    Inverse of :func:`serialize_state_data` for factory-bound state. A
+    payload that is not a dict (``None`` from an empty scope, or a stored
+    non-dict) restores as ``factory.restore({})`` — the factory's empty state.
+    """
+    return factory.restore(payload if isinstance(payload, dict) else {})
+
+
 __all__ = [
     "State",
     "StateData",
@@ -61,6 +71,7 @@ __all__ = [
     "T",
     "T_co",
     "TypeStateFactory",
+    "restore_state_data",
     "serialize_state_data",
     "state_converter",
 ]

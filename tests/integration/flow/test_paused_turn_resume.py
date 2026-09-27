@@ -28,7 +28,7 @@ from llm_saia.core.types import ChatResponse, Message, ToolCall, ToolDef
 from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
-from ...unit.flow.conftest import make_test_logger
+from ...unit.flow.conftest import flow_id_for, make_test_logger
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -222,9 +222,11 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     # that encodes the paused task + conversation-state envelope.
     from llm_gent.flow.state.cas import Commit
 
-    halted_hash = store.resolve_ref("real-saia-resume")
+    halted_hash = store.resolve_ref(flow_id_for(store, "real-saia-resume"))
     assert halted_hash is not None
-    commit = Commit.from_bytes(store.get_object("real-saia-resume", "commit", halted_hash) or b"")
+    commit = Commit.from_bytes(
+        store.get_object(flow_id_for(store, "real-saia-resume"), "commit", halted_hash) or b""
+    )
     assert commit.meta.outcome == "halted"
     saia_refs = [r for r in commit.meta.trace_ref if r.kind == "paused_turn"]
     assert len(saia_refs) == 1
@@ -313,15 +315,17 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
     )
     await flow.run()
 
-    head = store.resolve_ref("no-caller-conv")
+    head = store.resolve_ref(flow_id_for(store, "no-caller-conv"))
     assert head is not None
-    commit = Commit.from_bytes(store.get_object("no-caller-conv", "commit", head) or b"")
+    commit = Commit.from_bytes(
+        store.get_object(flow_id_for(store, "no-caller-conv"), "commit", head) or b""
+    )
     assert commit.meta.outcome == "halted"
     saia_refs = [r for r in commit.meta.trace_ref if r.kind == "paused_turn"]
     assert len(saia_refs) == 1
     _node_id, _, blob_hash = saia_refs[0].id.partition(":")
     envelope = PausedTurnEnvelope.from_bytes(
-        store.get_object("no-caller-conv", "blob", blob_hash) or b""
+        store.get_object(flow_id_for(store, "no-caller-conv"), "blob", blob_hash) or b""
     )
     assert envelope.task == "look up cas"
     msgs = [Message.from_dict(m) for m in envelope.conversation["messages"]]

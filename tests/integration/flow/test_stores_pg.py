@@ -3,8 +3,8 @@
 
 """Integration tests for :class:`llm_gent.flow.stores.PgCheckpointStore`.
 
-Real Postgres round-trip against the migrated schema (object + ref
-tables). Same surface as :mod:`tests.unit.flow.test_stores_json` — the
+Real Postgres round-trip against the migrated schema (name, object,
+ref and tag tables). Same surface as :mod:`tests.unit.flow.test_stores_json` — the
 two implementations should behave identically at the Protocol level.
 """
 
@@ -18,7 +18,7 @@ from appinfra.log import Logger
 from sqlalchemy import delete
 
 from llm_gent.flow.stores import PgCheckpointStore
-from llm_gent.flow.stores.postgres import FlowObject, FlowRef
+from llm_gent.flow.stores.postgres import FlowName, FlowObject, FlowRef, FlowTag
 
 
 @pytest.fixture
@@ -27,20 +27,23 @@ def store(pg_migrated: PG, pg_test_logger: Logger) -> PgCheckpointStore:
     return PgCheckpointStore(pg_test_logger, pg_migrated)
 
 
+def _wipe(pg: PG) -> None:
+    """Delete every row from the store's tables."""
+    with pg.session() as session:
+        for model in (FlowTag, FlowRef, FlowObject, FlowName):
+            session.execute(delete(model))
+
+
 @pytest.fixture(autouse=True)
 def clean_tables(pg_migrated: PG) -> Generator[None, None, None]:
-    """Wipe the object + ref tables before and after every test.
+    """Wipe the store's tables before and after every test.
 
     Fixtures run in module scope so state leaks between tests without
     this. Autouse keeps every test independent.
     """
-    with pg_migrated.session() as session:
-        session.execute(delete(FlowRef))
-        session.execute(delete(FlowObject))
+    _wipe(pg_migrated)
     yield
-    with pg_migrated.session() as session:
-        session.execute(delete(FlowRef))
-        session.execute(delete(FlowObject))
+    _wipe(pg_migrated)
 
 
 # ---------------------------------------------------------------------------
@@ -96,10 +99,34 @@ class TestRefStore:
         assert store.resolve_ref("history-1") is None
 
     def test_resolve_latest_across_node_paths(self, store: PgCheckpointStore) -> None:
-        """resolve_ref with both None → latest by created_at."""
+        """resolve_ref with both None → latest by database sequence."""
         store.put_ref("history-1", "node/a", 1, "hash-1")
         store.put_ref("history-1", "node/b", 1, "hash-2")
         assert store.resolve_ref("history-1") == "hash-2"
+
+    def test_latest_ignores_writer_clock(self, store: PgCheckpointStore, pg_migrated: PG) -> None:
+        """A ref written later wins even if its writer's clock stamped an earlier created_at."""
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import update
+
+        store.put_ref("history-1", "node/a", 1, "hash-first")
+        store.put_ref("history-1", "node/b", 1, "hash-second")
+        # Simulate the second writer's clock lagging by an hour.
+        with pg_migrated.session() as session:
+            session.execute(
+                update(FlowRef)
+                .where(FlowRef.commit_hash == "hash-second")
+                .values(created_at=datetime.now(UTC) - timedelta(hours=1))
+            )
+        assert store.resolve_ref("history-1") == "hash-second"
+
+    def test_re_put_becomes_latest(self, store: PgCheckpointStore) -> None:
+        """Re-putting an existing key draws a new seq, so it becomes the head again."""
+        store.put_ref("history-1", "node/a", 1, "hash-a")
+        store.put_ref("history-1", "node/b", 1, "hash-b")
+        store.put_ref("history-1", "node/a", 1, "hash-a2")
+        assert store.resolve_ref("history-1") == "hash-a2"
 
     def test_resolve_latest_under_node_path(self, store: PgCheckpointStore) -> None:
         store.put_ref("history-1", "node/x", 1, "hash-1")
@@ -112,7 +139,7 @@ class TestRefStore:
             store.resolve_ref("history-1", None, 5)
 
     def test_put_ref_overwrites_same_key(self, store: PgCheckpointStore) -> None:
-        """ON CONFLICT DO UPDATE — same PK re-put refreshes commit_hash + created_at."""
+        """ON CONFLICT DO UPDATE — same PK re-put refreshes commit_hash, seq and created_at."""
         store.put_ref("history-1", "node/x", 5, "hash-first")
         store.put_ref("history-1", "node/x", 5, "hash-second")
         assert store.resolve_ref("history-1", "node/x", 5) == "hash-second"
@@ -122,6 +149,66 @@ class TestRefStore:
         store.put_ref("history-b", "node/x", 1, "hash-b")
         assert store.resolve_ref("history-a", "node/x", 1) == "hash-a"
         assert store.resolve_ref("history-b", "node/x", 1) == "hash-b"
+
+
+# ---------------------------------------------------------------------------
+# Name map
+# ---------------------------------------------------------------------------
+
+
+class TestNameMap:
+    def test_bind_get_round_trip(self, store: PgCheckpointStore) -> None:
+        assert store.bind_flow_id("campaign-1", "history-1") == "history-1"
+        assert store.get_flow_id("campaign-1") == "history-1"
+
+    def test_get_returns_none_when_unbound(self, store: PgCheckpointStore) -> None:
+        assert store.get_flow_id("campaign-1") is None
+
+    def test_second_bind_returns_existing(self, store: PgCheckpointStore) -> None:
+        """ON CONFLICT DO NOTHING on client_flow_id — the first binding wins."""
+        store.bind_flow_id("campaign-1", "history-1")
+        assert store.bind_flow_id("campaign-1", "history-2") == "history-1"
+        assert store.get_flow_id("campaign-1") == "history-1"
+
+    def test_flow_id_cannot_name_two_histories(self, store: PgCheckpointStore) -> None:
+        store.bind_flow_id("campaign-1", "history-1")
+        with pytest.raises(ValueError, match="already names"):
+            store.bind_flow_id("campaign-2", "history-1")
+
+    def test_concurrent_binds_agree_on_one_winner(self, store: PgCheckpointStore) -> None:
+        """Racing binds with distinct ids, each on its own connection, all return one id."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(
+                pool.map(lambda i: store.bind_flow_id("campaign-1", f"history-{i}"), range(16))
+            )
+        assert len(set(results)) == 1
+        assert store.get_flow_id("campaign-1") == results[0]
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+
+class TestTags:
+    def test_put_resolve_round_trip(self, store: PgCheckpointStore) -> None:
+        store.put_tag("history-1", "complete", "commit-h")
+        assert store.resolve_tag("history-1", "complete") == "commit-h"
+
+    def test_resolve_returns_none_when_absent(self, store: PgCheckpointStore) -> None:
+        assert store.resolve_tag("history-1", "complete") is None
+
+    def test_re_put_moves_the_tag(self, store: PgCheckpointStore) -> None:
+        """ON CONFLICT DO UPDATE — same (flow_id, name) re-put moves the tag."""
+        store.put_tag("history-1", "complete", "commit-1")
+        store.put_tag("history-1", "complete", "commit-2")
+        assert store.resolve_tag("history-1", "complete") == "commit-2"
+
+    def test_tags_do_not_leak_across_histories(self, store: PgCheckpointStore) -> None:
+        store.put_tag("history-a", "complete", "hash-a")
+        assert store.resolve_tag("history-b", "complete") is None
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +223,15 @@ class TestGcHistory:
         store.gc_history("history-1")
         assert store.get_object("history-1", "blob", "h1") is None
         assert store.resolve_ref("history-1", "node/x", 1) is None
+
+    def test_removes_tags_and_name_binding(self, store: PgCheckpointStore) -> None:
+        store.bind_flow_id("campaign-1", "history-1")
+        store.put_tag("history-1", "complete", "commit-h")
+        store.gc_history("history-1")
+        assert store.resolve_tag("history-1", "complete") is None
+        assert store.get_flow_id("campaign-1") is None
+        store.bind_flow_id("campaign-1", "history-2")  # name is free again
+        assert store.get_flow_id("campaign-1") == "history-2"
 
     def test_idempotent_when_absent(self, store: PgCheckpointStore) -> None:
         store.gc_history("never-existed")

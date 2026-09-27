@@ -1,36 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Resume protocol: read-side hydration + write-side completion marker.
+"""Resume protocol: read-side hydration + write-side completion commit.
 
 Read side — :class:`Resume` is constructed per ``run(resume=True)``
 call with the flow being resumed; its public :meth:`hydrate` returns
 the ``(State, _ResumeReplay | None)`` pair the executor threads
-through the walk. The flow provides the checkpointer +
-``client_flow_id`` + state factory; :class:`Resume` (a) fetches the
-latest commit under the history ref, (b) walks its tree to
-collect one JSON payload per scope, (c) hydrates the top-level
-:class:`State` from the root scope, and (d) hands every non-root
+through the walk. It reads the history through the public
+:class:`~llm_gent.flow.history.History` API: (a) the head commit,
+(b) its per-scope JSON payloads, then (c) hydrates the top-level
+:class:`State` from the root scope and (d) hands every non-root
 scope payload to ``_ResumeReplay.intermediate_scope_data`` so
 descent sites (``_consume_scope_data``) can restore their own scope
 in order.
 
 Write side — :func:`apply_clean_exit_retention` and
-:func:`stamp_completion_marker` write the sentinel commit that
-:meth:`Resume.hydrate` reads to detect an already-completed
-history. :func:`assert_replay_consumed` is the belt-and-
-suspenders check called after a resume run to fail-fast when the
-save-point iterate was never found.
+:func:`commit_completion` commit the final state on clean exit and
+move the ``complete`` tag to it; a head at that final-state commit is
+what :meth:`Resume.hydrate` treats as a finished history.
+:func:`assert_replay_consumed` is the belt-and-suspenders check called
+after a resume run to fail-fast when the save-point iterate was never
+found.
 """
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .state import State
-from .state.cas import Commit, CommitMeta, ProducedBy, Tree
+from .checkpoint import COMPLETE_TAG, END_NODE_PATH
+from .history import History, HistoryCorrupt
+from .state import State, restore_state_data, serialize_state_data
+from .state.cas import Commit, Tree, canonical_json
 
 
 if TYPE_CHECKING:
@@ -44,9 +44,10 @@ class Resume:
     Constructed with the flow being resumed. Caller invokes
     :meth:`hydrate` with the fallback :class:`State` (the wrapped
     ``run(state=...)`` payload) and receives the hydrated state +
-    replay tuple. On a fresh run (no commit yet, or the history
-    already stamped a ``$complete`` marker), returns ``(fallback,
-    None)`` so the caller falls through to a normal fresh run.
+    replay tuple. On a fresh run (no commit yet, or the history is
+    complete), returns ``(fallback, None)`` so the caller falls through
+    to a normal fresh run — whose commits still append to the same
+    history.
     """
 
     def __init__(self, flow: Flow) -> None:
@@ -57,18 +58,16 @@ class Resume:
 
         Sequence:
 
-        1. :meth:`CheckpointStore.resolve_ref` under
-           :attr:`Flow._client_flow_id` returns the latest commit
-           hash across every ``node_path``, or ``None`` (fresh run
-           — no prior checkpoint).
-        2. :meth:`CheckpointStore.get_object` fetches the commit
-           bytes; :meth:`Commit.from_bytes` re-derives
-           :class:`CommitMeta` + :class:`ProducedBy` +
-           :class:`TraceRef`.
-        3. The commit's ``root_tree_hash`` fetches the
-           :class:`Tree`; each :class:`TreeEntry` fetches its Blob.
-           Scope order is root → leaf via the zero-padded
+        1. :meth:`History.head` returns the latest commit across
+           every ``node_path``, or ``None`` (fresh run — no prior
+           checkpoint). A final-state head is a finished run: fresh
+           run. That holds even if the ``complete`` tag write after
+           it never landed.
+        2. :meth:`History.scopes` walks the commit's tree to one
+           JSON payload per scope, root → leaf via the zero-padded
            ``scope_id`` (canonical sort).
+        3. The commit's ``paused_turn`` trace refs load as resume
+           entries for the Loops that paused.
         4. The root scope's payload rehydrates the top-level
            :class:`State` (via ``state_factory.restore`` when
            bound, passthrough otherwise). The leaf scope's payload
@@ -80,51 +79,40 @@ class Resume:
            hex has no slashes, so the round-trip is exact.
 
         Returns ``(fallback, None)`` when no commit exists yet or
-        the history has a completion marker.
+        the history is complete.
         """
         flow = self.flow
-        assert flow._checkpoint_ctx is not None
-        loaded = await self._load_latest_commit_scopes()
+        ctx = flow._checkpoint_ctx
+        assert ctx is not None
+        loaded = await self._read_head(History(ctx.store, ctx.client_flow_id))
         if loaded is None:
             return fallback, None
-        commit, scope_data = loaded
-        # A completion marker (stamped on clean exit under "retain") means
-        # the history finished successfully — do not replay.
-        if commit.meta.node_path == "$complete":
-            return fallback, None
-        await flow._resume_paused_turns.load_from_commit(flow._checkpoint_ctx, commit)
-        return self._split_scopes(commit, scope_data)
+        head, scope_data = loaded
+        await flow._resume_paused_turns.load_from_commit(ctx, head)
+        return self._split_scopes(head, scope_data)
 
-    async def _load_latest_commit_scopes(self) -> tuple[Commit, list[Any]] | None:
-        """Resolve the latest commit and walk its tree.
+    async def _read_head(self, history: History) -> tuple[Commit, list[Any]] | None:
+        """Head commit and its scope payloads, or ``None`` when there is nothing to resume.
 
-        Returns ``(Commit, scope_data)`` where ``scope_data`` is
-        root → leaf JSON payloads (one per :class:`Tree` entry).
-        Returns ``None`` when the ref, commit, tree, or any blob is
-        missing — the caller treats each miss as "no resumable
-        checkpoint" and falls through to a fresh run.
+        Nothing to resume: an empty or complete history, or a corrupt one —
+        a missing commit, tree or blob falls through to a fresh run, with a
+        warning so the damage is not silent. The fresh run's commits then
+        start a new root rather than parenting on the unreadable head.
         """
-        flow = self.flow
-        assert flow._checkpoint_ctx is not None
-        ctx = flow._checkpoint_ctx
-        commit_hash = await ctx.resolve_ref()
-        if commit_hash is None:
-            return None
-        commit_bytes = await ctx.get_object("commit", commit_hash)
-        if commit_bytes is None:
-            return None
-        commit = Commit.from_bytes(commit_bytes)
-        tree_bytes = await ctx.get_object("tree", commit.root_tree_hash)
-        if tree_bytes is None:
-            return None
-        tree = Tree.from_bytes(tree_bytes)
-        scope_data: list[Any] = []
-        for entry in tree.entries:
-            blob = await ctx.get_object("blob", entry.child_hash)
-            if blob is None:
+        try:
+            head = await history.head()
+            if head is None or History.is_final_state(head):
                 return None
-            scope_data.append(json.loads(blob.decode("utf-8")))
-        return commit, scope_data
+            return head, await history.scopes(head)
+        except HistoryCorrupt as e:
+            self.flow._lg.warning(
+                "checkpoint history is corrupt; starting a fresh run",
+                extra={"exception": e, "client_flow_id": history.client_flow_id},
+            )
+            ctx = self.flow._checkpoint_ctx
+            assert ctx is not None
+            ctx.discard_head()
+            return None
 
     def _split_scopes(
         self, commit: Commit, scope_data: list[Any]
@@ -147,7 +135,7 @@ class Resume:
         hydrated_root = (
             root_raw
             if flow._state_factory is None or root_raw is None
-            else flow._state_factory.restore(root_raw if isinstance(root_raw, dict) else {})
+            else restore_state_data(flow._state_factory, root_raw)
         )
         intermediate_raw = tuple(scope_data[1:])
         path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
@@ -163,14 +151,14 @@ class Resume:
         )
 
 
-async def apply_clean_exit_retention(flow: Flow) -> None:
+async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:
     """Apply the store's retention policy on the clean-exit path.
 
     Halt-triggered exits preserve the history regardless of policy.
     On a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the
-    record and stamps a completion marker so a subsequent
-    ``run(resume=True)`` doesn't replay the final iterate commit and
-    re-execute chain steps after the iterate.
+    record and commits ``final_state`` tagged ``complete`` so a
+    subsequent ``run(resume=True)`` doesn't replay the last save point
+    and re-execute chain steps after it.
     """
     if (
         flow._checkpoint_ctx is None
@@ -182,41 +170,45 @@ async def apply_clean_exit_retention(flow: Flow) -> None:
     if ctx.retention == "gc_on_success":
         await ctx.gc_history()
     else:
-        await stamp_completion_marker(flow)
+        await commit_completion(flow, final_state)
 
 
-async def stamp_completion_marker(flow: Flow) -> None:
-    """Write a sentinel commit + ref marking the history complete.
+async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
+    """Commit the run's final state at ``$end`` and move the ``complete`` tag to it.
 
-    The marker uses a reserved ``node_path="$complete"`` and
-    ``produced_by.node_id="$complete"``; :meth:`Resume.hydrate`
-    detects it and returns a fresh-run replay context.
+    The commit holds the top-level state, so the history's head always
+    carries the state the last run ended with — even when no save point
+    fired during the run. It is attributed to the framework
+    (:data:`FRAMEWORK_PRODUCER`), not to a node.
+
+    A final state that cannot be serialized (live handles, non-JSON
+    values) must not fail a run whose work is done: the commit is then
+    written with an empty tree, which still marks the history complete
+    but carries no state.
     """
-    assert flow._checkpoint_ctx is not None
     ctx = flow._checkpoint_ctx
-    empty_tree = Tree.from_entries([])
-    meta = _build_completion_marker_meta(ctx.client_flow_id)
-    commit = Commit.build(root_tree_hash=empty_tree.content_hash, parent_hashes=(), meta=meta)
-    await ctx.put_tree(empty_tree)
-    await ctx.put_commit(commit)
-    await ctx.put_ref("$complete", 0, commit.content_hash)
+    assert ctx is not None
+    if _serializable(flow, final_state):
+        tree = await ctx.put_state_tree(final_state)
+    else:
+        tree = Tree.from_entries([])
+        await ctx.put_tree(tree)
+    commit = await ctx.save_framework_commit(END_NODE_PATH, tree)
+    await ctx.put_tag(COMPLETE_TAG, commit.content_hash)
+    return commit
 
 
-def _build_completion_marker_meta(client_flow_id: str) -> CommitMeta:
-    """Build :class:`CommitMeta` for the completion sentinel."""
-    from llm_gent import __version__
-
-    return CommitMeta(
-        client_flow_id=client_flow_id,
-        node_path="$complete",
-        iteration=0,
-        produced_by=ProducedBy(node_id="$complete", verb_name=None, role=None, result_hash=None),
-        trace_ref=(),
-        outcome="ok",
-        flow_root_hash="",
-        timestamp_iso=datetime.now(UTC).isoformat(),
-        framework_version=__version__,
-    )
+def _serializable(flow: Flow, state: State[Any]) -> bool:
+    """True when ``state`` can be checkpointed; warn and return False otherwise."""
+    try:
+        canonical_json(serialize_state_data(state.data))
+    except (TypeError, ValueError) as e:
+        flow._lg.warning(
+            "final state is not serializable; completion commit carries no state",
+            extra={"exception": e},
+        )
+        return False
+    return True
 
 
 def assert_replay_consumed(flow: Flow, replay: _ResumeReplay | None) -> None:

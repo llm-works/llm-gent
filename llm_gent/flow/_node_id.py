@@ -11,6 +11,10 @@ iterate-body descents extend ``chain_context`` via
 :func:`_descend_context` so a shared subflow used at two call sites
 produces two distinct IDs for the same underlying ``_Node``.
 
+:func:`flow_root_hash` hashes the same inputs over the whole static
+composition tree: one hash per flow definition, recorded on every
+commit a history writes.
+
 The :class:`Flow` isinstance check in :func:`_target_qualname`
 resolves through a localized late import to break the circular
 dependency between this module and :mod:`.flow`.
@@ -94,6 +98,78 @@ def _compute_node_id(chain_context: str, node: _Node, position: int) -> str:
     """
     payload = f"{chain_context}|{_node_kind(node)}|{position}|{_target_qualname(node.target)}"
     return hashlib.blake2b(payload.encode("utf-8"), digest_size=_NODE_ID_DIGEST_SIZE).hexdigest()
+
+
+def flow_root_hash(flow: Any) -> str:
+    """Structure hash of ``flow``'s composition tree — the commit meta's ``flow_root_hash``.
+
+    Hashes (CAS :func:`content_hash` over canonical JSON) exactly the
+    inputs :func:`_compute_node_id` and :func:`_descend_context` consume:
+    every chain step's kind, position and target qualname, and every
+    Flow it descends into under its boundary name. Two flows with equal
+    hashes therefore assign identical node ids to every step, so a
+    ``node_path`` saved under one resolves under the other.
+
+    Node parameters (``max_iters``, predicates, projections) do not
+    enter node ids and do not enter this hash. A Flow that re-enters
+    itself (recursion through a branch arm) is recorded as a back
+    reference to its depth on the descent path.
+    """
+    from .state.cas import canonical_json, content_hash
+
+    return content_hash(canonical_json(_flow_structure(flow, ())))
+
+
+def _flow_structure(flow: Any, ancestors: tuple[int, ...]) -> Any:
+    """Canonical-JSON-ready description of ``flow``'s chain, one entry per step.
+
+    ``ancestors`` holds the ``id()`` of every Flow on the descent path
+    from the root; only its positions reach the output, never the ids.
+    """
+    if id(flow) in ancestors:
+        return {"cycle": ancestors.index(id(flow))}
+    inner = ancestors + (id(flow),)
+    return [
+        {
+            "kind": _node_kind(node),
+            "target": _target_qualname(node.target),
+            "children": {
+                boundary: _flow_structure(child, inner) for boundary, child in _child_flows(node)
+            },
+        }
+        for node in flow._nodes
+    ]
+
+
+def iter_flows(root: Any) -> list[Any]:
+    """Every distinct Flow in ``root``'s composition tree, ``root`` first."""
+    seen: dict[int, Any] = {}
+    stack = [root]
+    while stack:
+        flow = stack.pop()
+        if id(flow) in seen:
+            continue
+        seen[id(flow)] = flow
+        for node in flow._nodes:
+            stack.extend(child for _, child in _child_flows(node))
+    return list(seen.values())
+
+
+def _child_flows(node: _Node) -> list[tuple[str, Any]]:
+    """``(boundary, Flow)`` pairs a chain step descends into, as named by the executor."""
+    from .flow import Flow
+
+    target = node.target
+    if isinstance(target, _Branch):
+        arms = [("then", target.then_flow)]
+        return arms + ([("else", target.else_flow)] if target.else_flow is not None else [])
+    if isinstance(target, _Iterate):
+        return [("body", target.body)]
+    if isinstance(target, _Map):
+        return [("map", target.body)]
+    if isinstance(target, Flow):
+        return [("call", target)]
+    return []
 
 
 def _descend_context(parent_node_id: str, boundary: str) -> str:

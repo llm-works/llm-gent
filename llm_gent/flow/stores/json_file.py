@@ -5,20 +5,28 @@
 
 Layout under the caller-owned root::
 
-    <root>/<encoded-client-flow-id>/
-      objects/
-        blob/<content_hash>       # raw payload bytes
-        tree/<content_hash>       # canonical JSON bytes
-        commit/<content_hash>     # canonical JSON bytes
-      refs/
-        <encoded-node-path>/<iteration>.json    # {"commit_hash": "..."}
+    <root>/
+      names/
+        <encoded-client-flow-id>          # text: the history's flow_id
+      histories/<encoded-flow-id>/
+        _client_flow_id                   # text: the name bound to this history
+        _seq                              # ref sequence counter
+        objects/
+          blob/<content_hash>             # raw payload bytes
+          tree/<content_hash>             # canonical JSON bytes
+          commit/<content_hash>           # canonical JSON bytes
+        refs/
+          <encoded-node-path>/<iteration>.json    # {"commit_hash": "...", "seq": N}
+        tags/
+          <encoded-tag-name>              # text: commit hash
 
-``client_flow_id`` and ``node_path`` are URL-quoted (``quote(..., safe="")``)
-so arbitrary caller strings survive round-trip as single directory names.
+``client_flow_id``, ``flow_id``, ``node_path`` and tag names are URL-quoted
+(``quote(..., safe="")``) so arbitrary strings survive round-trip as
+single directory / file names.
 ``.`` and ``..`` are rejected up front; a resolved-path containment check
 locks the invariant as defense in depth.
 
-Objects are history-scoped — each ``client_flow_id`` owns its own
+Objects are history-scoped — each ``flow_id`` owns its own
 ``objects/`` tree. Same content bytes across two histories store
 twice; the trade-off buys trivial :meth:`gc_history` (a single
 ``shutil.rmtree`` of the history directory); blobs are deliberately
@@ -27,7 +35,7 @@ not shared across histories.
 Writes are atomic within a filesystem (write to ``.tmp`` sibling, then
 ``os.replace``); a partial write cannot leave a truncated file the next
 load would misread. Puts are idempotent — the same
-``(client_flow_id, kind, content_hash)`` re-put is a no-op when the
+``(flow_id, kind, content_hash)`` re-put is a no-op when the
 file already exists with the same bytes.
 
 Concurrent access safety is left to the caller: a single-writer
@@ -53,6 +61,39 @@ from ..checkpoint import Kind, Retention
 
 
 _ITER_RE = re.compile(r"^(\d+)\.json$")
+
+
+def _atomic_write_text(target: Path, text: str) -> None:
+    """Write ``text`` to ``target`` via a ``.tmp`` sibling + ``os.replace``."""
+    fd, tmp_path = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp_path, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _create_exclusive_text(target: Path, text: str) -> bool:
+    """Create ``target`` holding ``text`` only if absent; ``False`` when it already exists.
+
+    Writes a ``.tmp`` sibling, then ``os.link`` — an atomic create-if-absent:
+    of concurrent creators exactly one wins, and readers never see a
+    partially written file.
+    """
+    fd, tmp_path = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.link(tmp_path, target)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
 
 
 class JsonFileCheckpointStore:
@@ -88,12 +129,59 @@ class JsonFileCheckpointStore:
         self.retention = retention
 
     # ------------------------------------------------------------------
+    # Name map
+    # ------------------------------------------------------------------
+
+    def get_flow_id(self, client_flow_id: str) -> str | None:
+        """Return the ``flow_id`` bound to ``client_flow_id``, or ``None``."""
+        path = self._name_file(client_flow_id)
+        try:
+            return path.read_text(encoding="utf-8").strip() or None
+        except FileNotFoundError:
+            return None
+
+    def bind_flow_id(self, client_flow_id: str, flow_id: str) -> str:
+        """Bind ``client_flow_id`` → ``flow_id`` unless already bound; return the bound id.
+
+        The history directory and its ``_client_flow_id`` record (which lets
+        :meth:`gc_history` drop the binding from the ``flow_id`` side) are
+        written first; the name file is then created exclusively. A losing
+        concurrent bind removes its unused directory and returns the winner.
+        """
+        existing = self.get_flow_id(client_flow_id)
+        if existing is not None:
+            return existing
+        history_dir = self._claim_history_dir(flow_id, client_flow_id)
+        name_file = self._name_file(client_flow_id)
+        name_file.parent.mkdir(parents=True, exist_ok=True)
+        if _create_exclusive_text(name_file, flow_id):
+            return flow_id
+        winner = self.get_flow_id(client_flow_id)
+        if winner is None:
+            raise RuntimeError(f"binding for {client_flow_id!r} vanished during bind")
+        if winner != flow_id:
+            shutil.rmtree(history_dir, ignore_errors=True)
+        return winner
+
+    def _claim_history_dir(self, flow_id: str, client_flow_id: str) -> Path:
+        """Create ``flow_id``'s directory recording its name; reject a ``flow_id`` owned elsewhere."""
+        history_dir = self._history_dir(flow_id)
+        record = history_dir / "_client_flow_id"
+        if record.is_file():
+            owner = record.read_text(encoding="utf-8")
+            if owner != client_flow_id:
+                raise ValueError(f"flow_id {flow_id!r} already names {owner!r}")
+        history_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(record, client_flow_id)
+        return history_dir
+
+    # ------------------------------------------------------------------
     # Object store
     # ------------------------------------------------------------------
 
     def put_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
         payload: bytes,
@@ -107,11 +195,11 @@ class JsonFileCheckpointStore:
         No ``fcntl.flock`` — the framework's CheckpointStore contract is
         single-writer, and content-addressed puts are naturally idempotent
         under same-hash re-puts. A caller that lets two processes save
-        into the same ``client_flow_id`` is violating the contract; the
+        into the same ``flow_id`` is violating the contract; the
         physical atomic write here prevents torn files but the caller
         remains responsible for keyspace ordering.
         """
-        obj_dir = self._objects_dir(client_flow_id, kind)
+        obj_dir = self._objects_dir(flow_id, kind)
         obj_dir.mkdir(parents=True, exist_ok=True)
         target = obj_dir / content_hash
         if target.exists():
@@ -128,12 +216,12 @@ class JsonFileCheckpointStore:
 
     def get_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
     ) -> bytes | None:
         """Return the payload bytes for the object, or ``None`` on miss."""
-        path = self._objects_dir(client_flow_id, kind) / content_hash
+        path = self._objects_dir(flow_id, kind) / content_hash
         try:
             return path.read_bytes()
         except FileNotFoundError:
@@ -147,12 +235,12 @@ class JsonFileCheckpointStore:
 
     def has_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
     ) -> bool:
         """Return ``True`` when the object file exists on disk."""
-        return (self._objects_dir(client_flow_id, kind) / content_hash).is_file()
+        return (self._objects_dir(flow_id, kind) / content_hash).is_file()
 
     # ------------------------------------------------------------------
     # Ref store
@@ -160,7 +248,7 @@ class JsonFileCheckpointStore:
 
     def put_ref(
         self,
-        client_flow_id: str,
+        flow_id: str,
         node_path: str,
         iteration: int,
         commit_hash: str,
@@ -168,13 +256,12 @@ class JsonFileCheckpointStore:
         """Write ``refs/{node_path}/{iteration}.json`` with the commit hash.
 
         Also stamps a strictly-increasing per-history sequence number
-        (``seq``) into the JSON so :meth:`_latest_across_history` can
-        pick the newest ref deterministically without relying on mtime
-        ties or clock adjustments.
+        (``seq``) into the JSON so :meth:`_latest_across_history` picks
+        the newest ref by write order, independent of mtimes and clocks.
         """
-        ref_dir = self._refs_dir(client_flow_id, node_path)
+        ref_dir = self._refs_dir(flow_id, node_path)
         ref_dir.mkdir(parents=True, exist_ok=True)
-        seq = self._next_ref_seq(client_flow_id)
+        seq = self._next_ref_seq(flow_id)
         target = ref_dir / f"{iteration}.json"
         payload = json.dumps({"commit_hash": commit_hash, "seq": seq})
         fd, tmp_path = tempfile.mkstemp(dir=ref_dir, prefix=f"{iteration}.", suffix=".tmp")
@@ -187,14 +274,14 @@ class JsonFileCheckpointStore:
                 os.unlink(tmp_path)
             raise
 
-    def _next_ref_seq(self, client_flow_id: str) -> int:
+    def _next_ref_seq(self, flow_id: str) -> int:
         """Return the next per-history ref sequence.
 
         Single-writer contract per history (see module docstring), so
         read+increment+write without file locking is safe. The seq
         counter file lives at ``<history>/_seq``.
         """
-        history_dir = self._history_dir(client_flow_id)
+        history_dir = self._history_dir(flow_id)
         history_dir.mkdir(parents=True, exist_ok=True)
         seq_file = history_dir / "_seq"
         current = 0
@@ -217,7 +304,7 @@ class JsonFileCheckpointStore:
 
     def resolve_ref(
         self,
-        client_flow_id: str,
+        flow_id: str,
         node_path: str | None = None,
         iteration: int | None = None,
     ) -> str | None:
@@ -229,18 +316,14 @@ class JsonFileCheckpointStore:
         """
         if node_path is None and iteration is not None:
             raise ValueError("iteration requires node_path; use both or neither")
-        history_refs = self._history_dir(client_flow_id) / "refs"
+        history_refs = self._history_dir(flow_id) / "refs"
         if not history_refs.is_dir():
             return None
 
         if node_path is None:
-            by_seq = self._latest_across_history_by_seq(history_refs)
-            if by_seq is not None:
-                return by_seq
-            # Fallback for legacy refs without a persisted seq.
             return self._latest_across_history(history_refs)
 
-        ref_dir = self._refs_dir(client_flow_id, node_path)
+        ref_dir = self._refs_dir(flow_id, node_path)
         if not ref_dir.is_dir():
             return None
 
@@ -250,21 +333,65 @@ class JsonFileCheckpointStore:
         return self._latest_under_node_path(ref_dir)
 
     # ------------------------------------------------------------------
+    # Tags
+    # ------------------------------------------------------------------
+
+    def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None:
+        """Point tag ``name`` at ``commit_hash`` (atomic overwrite)."""
+        tag_file = self._tag_file(flow_id, name)
+        tag_file.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(tag_file, commit_hash)
+
+    def resolve_tag(self, flow_id: str, name: str) -> str | None:
+        """Return the commit hash tag ``name`` points at, or ``None``."""
+        try:
+            return self._tag_file(flow_id, name).read_text(encoding="utf-8").strip() or None
+        except FileNotFoundError:
+            return None
+
+    # ------------------------------------------------------------------
     # History cleanup
     # ------------------------------------------------------------------
 
-    def gc_history(self, client_flow_id: str) -> None:
-        """Remove the history directory and everything under it. Idempotent."""
-        history_dir = self._history_dir(client_flow_id)
-        if history_dir.is_dir():
-            shutil.rmtree(history_dir)
+    def gc_history(self, flow_id: str) -> None:
+        """Remove the history directory and its name binding. Idempotent.
+
+        Order: history contents, then the name binding, then the directory
+        with its ``_client_flow_id`` record. A gc that fails partway leaves
+        the name (and the record naming it) in place, so it can be retried.
+        """
+        history_dir = self._history_dir(flow_id)
+        if not history_dir.is_dir():
+            return
+        name_record = history_dir / "_client_flow_id"
+        for child in history_dir.iterdir():
+            if child == name_record:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        if name_record.is_file():
+            name_file = self._name_file(name_record.read_text(encoding="utf-8"))
+            with contextlib.suppress(FileNotFoundError):
+                if name_file.read_text(encoding="utf-8").strip() == flow_id:
+                    name_file.unlink()
+        shutil.rmtree(history_dir)
 
     # ------------------------------------------------------------------
     # Path helpers + traversal guards
     # ------------------------------------------------------------------
 
-    def _history_dir(self, client_flow_id: str) -> Path:
-        """URL-encode the id so arbitrary caller strings are path-safe.
+    def _history_dir(self, flow_id: str) -> Path:
+        """Return ``<root>/histories/<encoded-flow-id>``."""
+        return self._encoded_child(self._root / "histories", flow_id, "flow_id")
+
+    def _name_file(self, client_flow_id: str) -> Path:
+        """Return ``<root>/names/<encoded-client-flow-id>``."""
+        return self._encoded_child(self._root / "names", client_flow_id, "client_flow_id")
+
+    def _encoded_child(self, base: Path, raw: str, field_name: str) -> Path:
+        """URL-encode ``raw`` into one path segment under ``base``, path-safely.
 
         :func:`urllib.parse.quote` encodes every path-relevant char that
         isn't in the RFC-3986 unreserved set (alphanum + ``-._~``). The
@@ -272,18 +399,21 @@ class JsonFileCheckpointStore:
         them up front. A resolved-path containment check locks the
         invariant in as defense in depth.
         """
-        if not client_flow_id:
-            raise ValueError("client_flow_id must not be empty")
-        if client_flow_id in (".", ".."):
-            raise ValueError(f"client_flow_id must not be {client_flow_id!r} (path-traversal risk)")
-        candidate = self._root / quote(client_flow_id, safe="")
-        return self._checked(candidate, self._root, "client_flow_id", client_flow_id)
+        if not raw:
+            raise ValueError(f"{field_name} must not be empty")
+        if raw in (".", ".."):
+            raise ValueError(f"{field_name} must not be {raw!r} (path-traversal risk)")
+        return self._checked(base / quote(raw, safe=""), base, field_name, raw)
 
-    def _objects_dir(self, client_flow_id: str, kind: Kind) -> Path:
+    def _tag_file(self, flow_id: str, name: str) -> Path:
+        """Return ``<history>/tags/<encoded-name>``."""
+        return self._encoded_child(self._history_dir(flow_id) / "tags", name, "tag name")
+
+    def _objects_dir(self, flow_id: str, kind: Kind) -> Path:
         """Return ``<history>/objects/<kind>`` (``kind`` is a fixed enum, no encode)."""
-        return self._history_dir(client_flow_id) / "objects" / kind
+        return self._history_dir(flow_id) / "objects" / kind
 
-    def _refs_dir(self, client_flow_id: str, node_path: str) -> Path:
+    def _refs_dir(self, flow_id: str, node_path: str) -> Path:
         """Return ``<history>/refs/<encoded-node-path>``.
 
         ``node_path`` is the ``"/"``-joined content-addressed node-id chain from
@@ -294,7 +424,7 @@ class JsonFileCheckpointStore:
             raise ValueError("node_path must not be empty")
         if node_path in (".", ".."):
             raise ValueError(f"node_path must not be {node_path!r} (path-traversal risk)")
-        history_refs = self._history_dir(client_flow_id) / "refs"
+        history_refs = self._history_dir(flow_id) / "refs"
         candidate = history_refs / quote(node_path, safe="")
         return self._checked(candidate, history_refs, "node_path", node_path)
 
@@ -312,32 +442,10 @@ class JsonFileCheckpointStore:
     # ------------------------------------------------------------------
 
     def _latest_across_history(self, history_refs: Path) -> str | None:
-        """Return the newest ref (by mtime) across every ``node_path``."""
-        newest_path: Path | None = None
-        newest_mtime = -1.0
-        for node_dir in history_refs.iterdir():
-            if not node_dir.is_dir():
-                continue
-            for entry in node_dir.iterdir():
-                if not _ITER_RE.match(entry.name):
-                    continue
-                try:
-                    mtime = entry.stat().st_mtime
-                except OSError:
-                    continue
-                if mtime > newest_mtime:
-                    newest_mtime = mtime
-                    newest_path = entry
-        if newest_path is None:
-            return None
-        return self._read_ref(newest_path)
-
-    def _latest_across_history_by_seq(self, history_refs: Path) -> str | None:
         """Return the ref with the highest persisted ``seq`` under a history.
 
-        Falls back to :meth:`_latest_across_history` (mtime-based) when
-        no ref in the history carries a ``seq`` — e.g., pre-``seq``
-        refs written before this change.
+        Ref files whose ``seq`` is missing or unreadable are skipped;
+        ``None`` when no ref in the history has one.
         """
         best_seq = -1
         best_path: Path | None = None

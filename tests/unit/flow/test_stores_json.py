@@ -4,8 +4,8 @@
 """Unit tests for :class:`llm_gent.flow.stores.JsonFileCheckpointStore`.
 
 Direct surface tests: object put/get/has round-trip, ref put/resolve
-across the three key forms, gc_history idempotency, path-traversal
-guards, retention default. End-to-end resume behavior is covered in
+across the three key forms, name map, tags, gc_history idempotency,
+path-traversal guards, retention default. End-to-end resume behavior is covered in
 :mod:`tests.unit.flow.test_checkpoint`.
 """
 
@@ -123,6 +123,66 @@ class TestRefStore:
 
 
 # ---------------------------------------------------------------------------
+# Name map
+# ---------------------------------------------------------------------------
+
+
+class TestNameMap:
+    def test_bind_get_round_trip(self, store: JsonFileCheckpointStore) -> None:
+        assert store.bind_flow_id("campaign-1", "history-1") == "history-1"
+        assert store.get_flow_id("campaign-1") == "history-1"
+
+    def test_get_returns_none_when_unbound(self, store: JsonFileCheckpointStore) -> None:
+        assert store.get_flow_id("campaign-1") is None
+
+    def test_second_bind_returns_existing(self, store: JsonFileCheckpointStore) -> None:
+        store.bind_flow_id("campaign-1", "history-1")
+        assert store.bind_flow_id("campaign-1", "history-2") == "history-1"
+        assert store.get_flow_id("campaign-1") == "history-1"
+        assert not store._history_dir("history-2").exists()
+
+    def test_flow_id_cannot_name_two_histories(self, store: JsonFileCheckpointStore) -> None:
+        store.bind_flow_id("campaign-1", "history-1")
+        with pytest.raises(ValueError, match="already names"):
+            store.bind_flow_id("campaign-2", "history-1")
+
+    def test_concurrent_binds_agree_on_one_winner(self, store: JsonFileCheckpointStore) -> None:
+        """Racing binds with distinct ids all return one id; losers leave no directory."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            results = list(
+                pool.map(lambda i: store.bind_flow_id("campaign-1", f"history-{i}"), range(32))
+            )
+        assert len(set(results)) == 1
+        assert store.get_flow_id("campaign-1") == results[0]
+        assert [p.name for p in (store._root / "histories").iterdir()] == [results[0]]
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+
+class TestTags:
+    def test_put_resolve_round_trip(self, store: JsonFileCheckpointStore) -> None:
+        store.put_tag("history-1", "complete", "commit-h")
+        assert store.resolve_tag("history-1", "complete") == "commit-h"
+
+    def test_resolve_returns_none_when_absent(self, store: JsonFileCheckpointStore) -> None:
+        assert store.resolve_tag("history-1", "complete") is None
+
+    def test_re_put_moves_the_tag(self, store: JsonFileCheckpointStore) -> None:
+        store.put_tag("history-1", "complete", "commit-1")
+        store.put_tag("history-1", "complete", "commit-2")
+        assert store.resolve_tag("history-1", "complete") == "commit-2"
+
+    def test_tags_do_not_leak_across_histories(self, store: JsonFileCheckpointStore) -> None:
+        store.put_tag("history-a", "complete", "hash-a")
+        assert store.resolve_tag("history-b", "complete") is None
+
+
+# ---------------------------------------------------------------------------
 # gc_history
 # ---------------------------------------------------------------------------
 
@@ -134,6 +194,38 @@ class TestGcHistory:
         store.gc_history("history-1")
         assert store.get_object("history-1", "blob", "h1") is None
         assert store.resolve_ref("history-1", "node/x", 1) is None
+
+    def test_failed_gc_keeps_name_for_retry(
+        self, store: JsonFileCheckpointStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A gc that fails partway leaves the name bound, so the retry finds and finishes it."""
+        from llm_gent.flow.stores import json_file
+
+        store.bind_flow_id("campaign-1", "history-1")
+        store.put_object("history-1", "blob", "h1", b"payload")
+        real_rmtree = json_file.shutil.rmtree
+
+        def failing_rmtree(path: object, *args: object, **kwargs: object) -> None:
+            raise OSError("disk went away")
+
+        monkeypatch.setattr(json_file.shutil, "rmtree", failing_rmtree)
+        with pytest.raises(OSError):
+            store.gc_history("history-1")
+        assert store.get_flow_id("campaign-1") == "history-1"
+
+        monkeypatch.setattr(json_file.shutil, "rmtree", real_rmtree)
+        store.gc_history("history-1")
+        assert store.get_flow_id("campaign-1") is None
+        assert not store._history_dir("history-1").exists()
+
+    def test_removes_tags_and_name_binding(self, store: JsonFileCheckpointStore) -> None:
+        store.bind_flow_id("campaign-1", "history-1")
+        store.put_tag("history-1", "complete", "commit-h")
+        store.gc_history("history-1")
+        assert store.resolve_tag("history-1", "complete") is None
+        assert store.get_flow_id("campaign-1") is None
+        store.bind_flow_id("campaign-1", "history-2")  # name is free again
+        assert store.get_flow_id("campaign-1") == "history-2"
 
     def test_idempotent_when_absent(self, store: JsonFileCheckpointStore) -> None:
         store.gc_history("never-existed")  # no raise
@@ -186,6 +278,13 @@ class TestPathTraversalGuards:
     ) -> None:
         with pytest.raises(ValueError):
             store.put_ref("history-1", bad_path, 1, "hash")
+
+    @pytest.mark.parametrize("bad_name", ["", ".", ".."])
+    def test_rejects_adversarial_names(self, store: JsonFileCheckpointStore, bad_name: str) -> None:
+        with pytest.raises(ValueError):
+            store.put_tag("history-1", bad_name, "hash")
+        with pytest.raises(ValueError):
+            store.bind_flow_id(bad_name, "history-1")
 
     def test_slash_and_special_chars_supported(self, store: JsonFileCheckpointStore) -> None:
         """URL-quoting round-trips arbitrary caller strings through path segments."""

@@ -63,6 +63,7 @@ from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext
+from ._node_id import flow_root_hash, iter_flows
 from ._resume import Resume, apply_clean_exit_retention, assert_replay_consumed
 from ._validation import _materialize, _require_state_for_merge, _validate_target
 from .checkpoint import CheckpointPolicy, CheckpointStore
@@ -773,8 +774,29 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
-        self._checkpoint_ctx = CheckpointContext(store, client_flow_id)
+        self._checkpoint_ctx = CheckpointContext(store, client_flow_id, self.root_hash)
         return self
+
+    def _begin_checkpoint_run(self) -> None:
+        """Reset run-scoped caches on every checkpoint context in the tree.
+
+        Covers subflows wired with their own ``.with_checkpointer``, which
+        are entered per run through :meth:`_run_as_subflow`, not :meth:`run`.
+        """
+        for flow in iter_flows(self):
+            if flow._checkpoint_ctx is not None:
+                flow._checkpoint_ctx.begin_run()
+
+    def root_hash(self) -> str:
+        """Structure hash of this flow's composition tree.
+
+        Recorded as ``flow_root_hash`` on every commit this flow writes.
+        Equal hashes mean every chain step gets the same node id, so a
+        checkpoint written by one flow can be resumed by the other.
+        Covers step kinds, positions, targets and nested flows — not
+        parameters such as ``max_iters`` or predicates.
+        """
+        return flow_root_hash(self)
 
     def with_checkpoint_policy(
         self,
@@ -872,18 +894,21 @@ class Flow:
                 resume is not preserved. ``None`` (default) yields a
                 fresh empty dict at the verb.
             resume: When ``True`` and :meth:`with_checkpointer` is wired,
-                the framework resolves the latest commit via
-                :meth:`CheckpointStore.resolve_ref` at start and, if a
-                commit exists, reconstructs the scope tree and replaces
-                ``state`` with the hydrated payload. A flow with a bound
-                ``state_factory=`` reconstructs the payload via
-                ``state_factory.restore``; a flow without ``state_factory``
-                treats the stored payload as a plain dict. Absent-checkpoint
-                resume is a no-op — the run proceeds with ``state`` as given.
-                On fully successful completion the history is gc'd when
-                the store's ``retention`` is ``"gc_on_success"``. Requires
-                :meth:`with_checkpointer` to be wired; raises otherwise.
-                Bound parameter: not forwarded to the first node.
+                the framework reads the history's head (latest commit) at
+                start and, unless the history is empty or complete (head
+                is the final-state commit of a finished run), reconstructs
+                the scope tree and replaces ``state`` with the hydrated
+                payload. A flow with a bound ``state_factory=``
+                reconstructs the payload via ``state_factory.restore``; a
+                flow without ``state_factory`` treats the stored payload as
+                a plain dict. On an empty or complete history the run
+                proceeds with ``state`` as given, appending to the same
+                history. On fully successful completion the history is
+                gc'd when the store's ``retention`` is ``"gc_on_success"``;
+                under ``"retain"`` the final state is committed and tagged
+                ``complete``. Requires :meth:`with_checkpointer` to be
+                wired; raises otherwise. Bound parameter: not forwarded to
+                the first node.
             **kwargs: Keyword inputs to the first node.
 
         Raises:
@@ -902,6 +927,7 @@ class Flow:
             )
         active_state = self._wrap_top_state(state)
         replay: _ResumeReplay | None = None
+        self._begin_checkpoint_run()
         self._resume_paused_turns.clear()
         if resume:
             active_state, replay = await Resume(self).hydrate(active_state)
@@ -917,7 +943,7 @@ class Flow:
             **kwargs,
         )
         assert_replay_consumed(self, replay)
-        await apply_clean_exit_retention(self)
+        await apply_clean_exit_retention(self, active_state)
         return result
 
     async def _run_as_subflow(
