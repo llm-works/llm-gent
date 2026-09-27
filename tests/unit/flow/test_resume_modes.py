@@ -108,16 +108,74 @@ class TestRestart:
         # Replay would stop at the cumulative bound (5); restart runs max_iters=3 afresh.
         assert result["iterations_completed"] == 5
 
-    async def test_after_failure_continues_from_failed_state(
+    async def test_after_failure_continues_from_last_save_point(
         self, store: JsonFileCheckpointStore
     ) -> None:
+        """The $failed state may be half-updated; restart starts from the commit before it."""
         with pytest.raises(RuntimeError, match="boom at 3"):
-            await _counting_flow(store, "failed", max_iters=5, fail_at=3).run()
+            await _counting_flow(store, "failed", max_iters=5, fail_at=3, on_iterate=True).run()
 
         result = await _counting_flow(store, "failed", max_iters=2).run(
             state={"n": 100}, resume="restart"
         )
-        assert result == 5  # 3 at failure + 2
+        assert result == 4  # last save point n=2, then 2 more
+
+    async def test_failure_before_any_save_point_uses_given_state(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        with pytest.raises(RuntimeError):
+            await _counting_flow(store, "failed-early", max_iters=5, fail_at=2).run()
+
+        lg = make_test_logger()
+        warnings: list[str] = []
+        lg.warning = lambda msg, *_a, **_kw: warnings.append(msg)  # type: ignore[method-assign]
+        result = await _counting_flow(store, "failed-early", max_iters=1, lg=lg).run(
+            state={"n": 10}, resume="restart"
+        )
+        assert result == 11
+        assert any("no commit with usable state" in w for w in warnings)
+
+    async def test_skips_stateless_final_commit(self, store: JsonFileCheckpointStore) -> None:
+        """A final commit without state (unserializable) is walked past, not a reason to reset."""
+
+        @verb
+        async def bump(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            ctx.state.data["n"] = ctx.state.data.get("n", 0) + 1
+            ctx.state.data.pop("handle", None)
+            return ctx.state.data["n"]
+
+        @verb
+        async def attach(ctx: Context[dict[str, Any]], _prev: Any = None) -> int:
+            ctx.state.data["handle"] = object()
+            return ctx.state.data["n"]
+
+        def _flow() -> Any:
+            return (
+                FlowFactory(make_test_logger())
+                .create(state={})
+                .with_checkpointer(store, "stateless-end")
+                .with_checkpoint_policy(on_iterate=True)
+                .iterate(lambda body: body.call(bump), max_iters=2)
+                .call(attach)
+            )
+
+        await _flow().run()
+        head, scopes = await _head(store, "stateless-end")
+        assert History.is_final_state(head) and scopes == []
+
+        result = await _flow().run(state={"n": 100}, resume="restart")
+        assert result == 4  # restored n=2 from the last iterate commit, then 2 more
+
+    async def test_corrupt_history_raises(self, store: JsonFileCheckpointStore) -> None:
+        from llm_gent.flow import HistoryCorrupt
+
+        await _counting_flow(store, "corrupt", max_iters=2).run()
+        head, _ = await _head(store, "corrupt")
+        commits_dir = store._history_dir(head.meta.flow_id) / "objects" / "commit"
+        (commits_dir / head.content_hash).unlink()
+
+        with pytest.raises(HistoryCorrupt):
+            await _counting_flow(store, "corrupt", max_iters=1).run(resume="restart")
 
     async def test_empty_history_uses_given_state(self, store: JsonFileCheckpointStore) -> None:
         result = await _counting_flow(store, "empty", max_iters=1).run(

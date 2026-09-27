@@ -251,14 +251,17 @@ before the exception propagates; cancellation writes nothing extra.
 - `"off"` (default) — start from `state=` as given; commits still append
   to the history.
 - `"replay"` — positional resume: rebuild the last save point's scope tree
-  and fast-forward to it (skipping `$failed` commits). Iteration bounds
-  are cumulative across runs. A complete history starts fresh.
-- `"restart"` — start at the first node with the root state of the head
-  commit, whatever its outcome (halted, ok, final, failed). Child scopes
-  are not restored and iterate counters start at zero; paused turns on the
-  head are offered to the steps that paused. Suits long-lived agents that
-  re-enter their flow each session, and survives changes to the flow's
-  structure that would break replay.
+  and fast-forward to it. Iteration bounds are cumulative across runs. A
+  complete or corrupt history starts fresh (the latter with a warning).
+- `"restart"` — start at the first node with the root state of the newest
+  commit that has usable state (halted, ok or final). Child scopes are not
+  restored, iterate counters start at zero, and paused turns are not
+  offered. A corrupt history raises `HistoryCorrupt` rather than starting
+  over. Suits long-lived agents that re-enter their flow each session, and
+  survives changes to the flow's structure that would break replay.
+
+`$failed` commits record the state at a failure but are never a starting
+point: both replay and restart resume from the last commit before them.
 
 Per-session adjustments to the restored state belong in the flow's first
 step.

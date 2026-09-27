@@ -906,9 +906,10 @@ class Flow:
                 reconstructs the scope tree, replaces ``state`` with the
                 hydrated payload and fast-forwards to the save point.
                 ``"restart"`` replaces ``state`` with the root state of the
-                head commit — whatever its outcome — and runs from the first
-                node; paused turns on the head are offered to the steps
-                that paused. Payloads are rebuilt via ``state_factory``
+                newest commit with usable state (skipping ``$failed`` and
+                stateless commits) and runs from the first node; paused
+                turns are not offered, and a corrupt history raises
+                :class:`HistoryCorrupt`. Payloads are rebuilt via ``state_factory``
                 when bound, else used as plain dicts. On an empty history
                 (or nothing to replay) the run proceeds with ``state`` as
                 given, appending to the same history. Anything other than

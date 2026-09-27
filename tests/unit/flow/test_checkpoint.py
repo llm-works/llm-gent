@@ -527,11 +527,10 @@ class TestPausedTurnTraceRef:
     async def test_resume_round_trip_hands_reconstructed_conv_and_resume_true(
         self, store: JsonFileCheckpointStore, mode: str
     ) -> None:
-        """Halt mid-Loop-turn on run 1 → run 2 dispatches SAIA with resume=True + rebuilt conv.
+        """Halt mid-Loop-turn on run 1 → replay dispatches SAIA with resume=True + rebuilt conv.
 
-        Both resume modes offer the head's paused turns by step node id:
-        replay re-runs the paused iteration, restart re-enters the iterate
-        at iteration 0 — the same body step either way.
+        Restart does not offer paused turns (a step's node id does not
+        identify a map item across runs): its Loop dispatches start fresh.
         """
         from dataclasses import dataclass, field
 
@@ -643,15 +642,16 @@ class TestPausedTurnTraceRef:
         )
 
         resume_calls = [c for c in complete_calls if c["phase"] == "resume"]
-        # Replay resumes at the halted iteration with max_iters cumulative (one
-        # pass left); restart starts the counter at 0 (two passes). Either way
-        # the first dispatch is the resumed turn and the entry is consumed once.
-        assert len(resume_calls) == (1 if mode == "replay" else 2)
+        if mode == "restart":
+            # Counter starts at 0 (two passes); neither dispatch resumes a turn.
+            assert [c["resume"] for c in resume_calls] == [False, False]
+            return
+        # Replay resumes at the halted iteration with max_iters cumulative.
+        assert len(resume_calls) == 1
         resumed = resume_calls[0]
         assert resumed["resume"] is True
         assert isinstance(resumed["conversation"], _Conv)
         assert resumed["conversation"].messages == ["from-turn-1"]
-        assert all(c["resume"] is False for c in resume_calls[1:])
 
     async def test_chain_resume_re_dispatches_paused_loop_verb(
         self, store: JsonFileCheckpointStore

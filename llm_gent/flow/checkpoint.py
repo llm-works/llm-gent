@@ -111,9 +111,10 @@ head is at this path is complete.
 FAILED_NODE_PATH = "$failed"
 """Reserved ``node_path`` of the commit written when a top-level run raises.
 
-Holds the root state at the moment of failure (``outcome="failed"``) so a
-later ``run(resume="restart")`` continues from it. ``resume="replay"``
-skips such commits and resumes from the last save point before them.
+Records the root state at the moment of failure (``outcome="failed"``)
+for inspection. It is never a starting point: that state may be
+half-updated, so both ``resume="replay"`` and ``resume="restart"`` skip
+such commits and start from the last commit before them.
 """
 
 
@@ -138,9 +139,11 @@ ResumeMode = Literal["off", "replay", "restart"]
   point and fast-forward to it. Starts from ``state=`` when the history is
   empty or complete.
 - ``"restart"`` — run from the first node with the root state of the
-  history's head, whatever its outcome (halted, ok, final, failed); child
-  scopes are not restored and iterate counters start at zero. Starts from
-  ``state=`` when the history is empty.
+  newest commit that has usable state (halted, ok or final; ``$failed``
+  and stateless commits are skipped). Child scopes are not restored,
+  iterate counters start at zero, and paused turns are not offered.
+  Starts from ``state=`` when the history is empty; raises
+  :class:`~llm_gent.flow.history.HistoryCorrupt` on a corrupt history.
 """
 
 

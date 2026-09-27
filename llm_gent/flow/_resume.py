@@ -14,7 +14,8 @@ the flow being resumed, and reads the history through the public
   ``_ResumeReplay.intermediate_scope_data`` so descent sites
   (``_consume_scope_data``) restore their own scope in order.
 - :meth:`Resume.restart` (``resume="restart"``) returns only the root
-  :class:`State` of the head commit; the run starts at the first node.
+  :class:`State` of the newest commit with usable state; the run starts
+  at the first node.
 
 Write side — :func:`apply_clean_exit_retention` and
 :func:`commit_completion` commit the final state on clean exit and move
@@ -26,7 +27,6 @@ the save-point iterate was never found.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from .checkpoint import (
@@ -46,10 +46,6 @@ if TYPE_CHECKING:
     from .nodes import _ResumeReplay
 
 
-_Pick = Callable[[History], Awaitable[Commit | None]]
-"""Chooses the commit a resume starts from; ``None`` → nothing to resume."""
-
-
 class Resume:
     """Hydrate the initial state (and replay plan) for a resuming ``run()``.
 
@@ -57,7 +53,8 @@ class Resume:
     fallback :class:`State` (the wrapped ``run(state=...)`` payload) and
     return it unchanged when there is nothing to resume, so the caller
     falls through to a fresh run — whose commits still append to the same
-    history.
+    history. Replay treats a corrupt history as nothing to resume; restart
+    raises instead.
     """
 
     def __init__(self, flow: Flow) -> None:
@@ -83,32 +80,47 @@ class Resume:
 
         Returns ``(fallback, None)`` when there is nothing to replay.
         """
-        loaded = await self._load(self._replay_point)
+        loaded = await self._load_replay_point()
         if loaded is None:
             return fallback, None
         commit, scope_data = loaded
-        await self._offer_paused_turns(commit)
+        ctx = self.flow._checkpoint_ctx
+        assert ctx is not None
+        await self.flow._resume_paused_turns.load_from_commit(ctx, commit)
         return self._split_scopes(commit, scope_data)
 
     async def restart(self, fallback: State[Any]) -> State[Any]:
-        """Restart: the root state of the head commit, whatever its outcome.
+        """Restart: the root state of the newest commit that has usable state.
 
-        The run then starts at the first node: child scopes are not
-        restored and no replay context is built, so iterate counters start
-        at zero. Paused turns recorded on the head are offered by step node
-        id — a Loop at the same step resumes its turn; entries whose step no
-        longer exists are never claimed. Returns ``fallback`` for an empty
-        or corrupt history, or a head that carries no state.
+        Walks back from the head past ``$failed`` commits (the state at a
+        failure may be half-updated) and commits with an empty tree (state
+        that could not be serialized). The run then starts at the first
+        node: child scopes are not restored and no replay context is built,
+        so iterate counters start at zero. Paused turns are not offered —
+        a step's node id does not identify a map item across runs.
+
+        Returns ``fallback`` when the history is empty or holds no commit
+        with usable state (warning in the latter case). A corrupt history
+        raises :class:`HistoryCorrupt` instead of silently starting over.
         """
-        loaded = await self._load(lambda history: history.head())
-        if loaded is None or not loaded[1]:
-            return fallback
-        head, scope_data = loaded
-        await self._offer_paused_turns(head)
-        return self._root_state(scope_data[0])
+        ctx = self.flow._checkpoint_ctx
+        assert ctx is not None
+        history = History(ctx.store, ctx.client_flow_id)
+        async for commit in history.commits():
+            if History.is_failed(commit):
+                continue
+            scope_data = await history.scopes(commit)
+            if scope_data:
+                return self._root_state(scope_data[0])
+        if await history.head() is not None:
+            self.flow._lg.warning(
+                "no commit with usable state to restart from; starting from state=",
+                extra={"client_flow_id": history.client_flow_id},
+            )
+        return fallback
 
-    async def _load(self, pick: _Pick) -> tuple[Commit, list[Any]] | None:
-        """The picked commit and its scope payloads, or ``None`` when there is nothing to resume.
+    async def _load_replay_point(self) -> tuple[Commit, list[Any]] | None:
+        """The replay commit and its scope payloads, or ``None`` when there is nothing to replay.
 
         A corrupt history — a missing commit, tree or blob — falls through
         to a fresh run, with a warning so the damage is not silent. The
@@ -119,7 +131,7 @@ class Resume:
         assert ctx is not None
         history = History(ctx.store, ctx.client_flow_id)
         try:
-            commit = await pick(history)
+            commit = await self._replay_point(history)
             return None if commit is None else (commit, await history.scopes(commit))
         except HistoryCorrupt as e:
             self.flow._lg.warning(
@@ -136,12 +148,6 @@ class Resume:
             if not History.is_failed(commit):
                 return None if History.is_final_state(commit) else commit
         return None
-
-    async def _offer_paused_turns(self, commit: Commit) -> None:
-        """Load ``commit``'s paused turns as resume entries keyed by step node id."""
-        ctx = self.flow._checkpoint_ctx
-        assert ctx is not None
-        await self.flow._resume_paused_turns.load_from_commit(ctx, commit)
 
     def _root_state(self, root_raw: Any) -> State[Any]:
         """Top-level :class:`State` from a stored root payload (factory-restored when bound)."""
