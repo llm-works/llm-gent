@@ -194,6 +194,7 @@ def _make_tool_executor(halt_event: asyncio.Event, arm_halt: bool) -> Any:
         nonlocal fired
         if name == "lookup_reference":
             term = args.get("term", "<missing>")
+            print(f"  tool: lookup_reference({term!r})")
             result = f"'{term}' is a foundational concept in modern systems software."
             if arm_halt and not fired:
                 fired = True
@@ -219,10 +220,14 @@ class _FakeBackend(Backend):
     Cooperates with ``abort_signal`` — checks it at entry and raises
     :class:`PauseRequested`, matching the real
     :class:`SAIAAdapter._chat_with_abort` contract.
+
+    :attr:`lookups` counts ``lookup_reference`` calls issued — the
+    smoke check uses it to tell a resumed turn from a restarted one.
     """
 
     def __init__(self) -> None:
         self._call = 0
+        self.lookups = 0
 
     async def chat(
         self,
@@ -243,6 +248,7 @@ class _FakeBackend(Backend):
             summary = "A concise concept from systems research."
             return self._tool_call("submit_summary", {"summary": summary})
         term = self._extract_term(last.content if last else "")
+        self.lookups += 1
         return self._tool_call("lookup_reference", {"term": term})
 
     def _tool_call(self, name: str, arguments: dict[str, Any]) -> ChatResponse:
@@ -431,6 +437,14 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
     return flow
 
 
+def _latest_commit(store: JsonFileCheckpointStore) -> Commit | None:
+    """Return the trajectory's latest commit, or ``None`` for an empty store."""
+    head = store.resolve_ref(CLIENT_FLOW_ID)
+    if head is None:
+        return None
+    return Commit.from_bytes(store.get_object(CLIENT_FLOW_ID, "commit", head) or b"")
+
+
 def _halt_pending(store: JsonFileCheckpointStore) -> bool:
     """True when the trajectory's latest commit is a halt awaiting resume.
 
@@ -439,11 +453,14 @@ def _halt_pending(store: JsonFileCheckpointStore) -> bool:
     (``outcome="ok"``) on clean exit, which ``run(resume=True)``
     treats as a fresh start.
     """
-    head = store.resolve_ref(CLIENT_FLOW_ID)
-    if head is None:
-        return False
-    commit = Commit.from_bytes(store.get_object(CLIENT_FLOW_ID, "commit", head) or b"")
-    return commit.meta.outcome == "halted"
+    commit = _latest_commit(store)
+    return commit is not None and commit.meta.outcome == "halted"
+
+
+def _paused_turn_saved(store: JsonFileCheckpointStore) -> bool:
+    """True when the latest commit carries a ``saia_turn`` trace ref (the paused conversation)."""
+    commit = _latest_commit(store)
+    return commit is not None and any(r.kind == "saia_turn" for r in commit.meta.trace_ref)
 
 
 async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> tuple[Digest, bool]:
@@ -467,18 +484,19 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     print(f"  store: {store_dir}")
     final: Digest = await _build_flow(lg, ff, halt).run(resume=True)
     halted = _halt_pending(store)
-    _report(store_dir, final, halted)
+    _report(store, store_dir, final, halted)
     return final, halted
 
 
-def _report(store_dir: Path, final: Digest, halted: bool) -> None:
+def _report(store: JsonFileCheckpointStore, store_dir: Path, final: Digest, halted: bool) -> None:
     """Print the post-run state and the ref files the store holds."""
     refs = sorted(str(p.relative_to(store_dir)) for p in store_dir.rglob("*.json"))
     print(f"  pending: {final.pending}")
     print(f"  summaries: {final.summaries}")
     print(f"  ref files: {refs}")
     if halted:
-        print("  halted mid-turn — invoke again to resume")
+        saved = "saia_turn saved" if _paused_turn_saved(store) else "NO saia_turn on halt commit"
+        print(f"  halted mid-turn ({saved}) — invoke again to resume")
     else:
         print("  complete — $complete marker stamped; next invocation starts fresh")
 
@@ -491,23 +509,29 @@ async def _run_smoke(lg: Logger) -> int:
     disk.
     """
     store_dir = Path(tempfile.mkdtemp(prefix="gent-example-durable-resume-"))
+    resumed_backend = _FakeBackend()
     try:
         first, halted = await _invoke(lg, store_dir, _FakeBackend(), "smoke")
+        turn_saved = _paused_turn_saved(JsonFileCheckpointStore(lg, store_dir))
         print()
-        final, still_halted = await _invoke(lg, store_dir, _FakeBackend(), "smoke")
+        final, still_halted = await _invoke(lg, store_dir, resumed_backend, "smoke")
     finally:
         shutil.rmtree(store_dir, ignore_errors=True)
-    ok = (
-        halted
-        and first.pending == list(TOPICS)
-        and not still_halted
+    # One lookup in phase 2 = topic 2 only; the halted topic-1 turn resumed past
+    # its tool call instead of restarting from the task.
+    checks = {
+        "halted with state untouched": halted and first.pending == list(TOPICS),
+        "halt commit carries saia_turn": turn_saved,
+        "resume continued the paused turn": resumed_backend.lookups == len(TOPICS) - 1,
+        "full drain": not still_halted
         and not final.pending
         and len(final.summaries) == len(TOPICS)
-        and all(final.summaries)
-    )
-    if not ok:
-        print("SMOKE FAILED: expected halt with state untouched, then full drain", file=sys.stderr)
-    return 0 if ok else 1
+        and all(final.summaries),
+    }
+    for name, passed in checks.items():
+        if not passed:
+            print(f"SMOKE FAILED: {name}", file=sys.stderr)
+    return 0 if all(checks.values()) else 1
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
