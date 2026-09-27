@@ -92,8 +92,17 @@ Values match :mod:`llm_gent.flow.state.cas`:
 COMPLETE_TAG = "complete"
 """Tag the framework moves to a history's final-state commit on clean exit.
 
-The history is complete while this tag points at its latest commit; any
-later commit (a new run appending to the history) leaves it behind.
+It always points at the final state of the most recent run that finished,
+including after a later run appended commits past it.
+"""
+
+
+END_NODE_PATH = "$end"
+"""Reserved ``node_path`` of the final-state commit written on clean exit.
+
+Not a node id: the commit sits after the last top-level node, and the
+``$`` prefix cannot collide with a blake2b hex node id. A history whose
+head is at this path is complete.
 """
 
 

@@ -233,6 +233,34 @@ flow = (
 Halt-save and `ctx.checkpoint()` are unaffected by the policy — the
 policy governs only implicit auto-saves.
 
+On a clean exit under the default `retain` retention, the framework also
+commits the run's final state and moves the `complete` tag to it. A
+history whose head is that commit is complete: `run(resume=True)` starts
+fresh, and the new run's commits extend the same history.
+
+### Reading a history
+
+A history is the chain of commits one `client_flow_id` accumulates across
+runs: each commit's parent is the previous head. `History` reads it:
+
+```python
+from llm_gent.flow import History, TypeStateFactory
+
+history = History(store, "history-42")
+head = await history.head()  # latest commit, or None
+if await history.is_complete():  # last run finished
+    state = await history.root_state(head, TypeStateFactory(MyState))
+done = await history.last_complete()  # final state of the last finished run
+async for commit in history.commits():  # newest first, via parent links
+    print(commit.meta.node_path, commit.meta.outcome, commit.meta.timestamp_iso)
+```
+
+Every commit's meta carries the internal `flow_id` (a UUID the store maps
+`client_flow_id` to), the `node_path` of its save point, and
+`flow_root_hash` — the structure hash of the flow that wrote it
+(`Flow.root_hash()`). Equal root hashes mean identical node ids, so a
+history written by one flow can be resumed by the other.
+
 ## Related Projects
 
 - [llm-infer](https://github.com/llm-works/llm-infer) - LLM inference server and client

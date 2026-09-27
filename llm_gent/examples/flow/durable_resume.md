@@ -151,7 +151,9 @@ turn from the task.
 A ref maps `(node_path, iteration)` to a commit. `node_path` is the `/`-joined chain of node ids
 from the run root to the save site; here the save site is the top-level iterate, so it is one id.
 `resolve_ref(flow_id)` returns the ref with the highest `seq`, which is how resume picks the latest
-commit — the head of the history.
+commit — the head of the history. The script reads it through `History(store, CLIENT_FLOW_ID)`
+rather than the store: `head()` for the paused-turn check, `is_complete()` to decide whether the
+next run resumes.
 
 ### Halt commit
 

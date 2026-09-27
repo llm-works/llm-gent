@@ -162,14 +162,6 @@ class CheckpointContext:
         flow_id = await self.ensure_flow_id()
         await maybe_await(self.store.put_tag(flow_id, name, commit_hash))
 
-    async def resolve_tag(self, name: str) -> str | None:
-        """Commit hash tag ``name`` points at, or ``None`` (incl. no history)."""
-        flow_id = await self.lookup_flow_id()
-        if flow_id is None:
-            return None
-        result: str | None = await maybe_await(self.store.resolve_tag(flow_id, name))
-        return result
-
     async def gc_history(self) -> None:
         """Remove this history (objects, refs, name mapping); the next save starts a new one."""
         flow_id = await self.lookup_flow_id()

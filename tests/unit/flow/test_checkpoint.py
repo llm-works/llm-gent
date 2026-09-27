@@ -1386,8 +1386,7 @@ class TestCompletionTag:
     ) -> None:
         """A crash between the $end commit and the tag write must not replay "$end"."""
         from llm_gent.flow._checkpoint_ctx import CheckpointContext
-        from llm_gent.flow._resume import END_NODE_PATH
-        from llm_gent.flow.checkpoint import COMPLETE_TAG
+        from llm_gent.flow.checkpoint import COMPLETE_TAG, END_NODE_PATH
         from llm_gent.flow.state import State
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 

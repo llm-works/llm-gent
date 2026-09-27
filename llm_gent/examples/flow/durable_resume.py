@@ -112,14 +112,13 @@ from llm_gent.flow import (
     Context,
     Flow,
     FlowFactory,
+    History,
     Loop,
     Role,
     StateDataclass,
     TypeStateFactory,
     verb,
 )
-from llm_gent.flow.checkpoint import COMPLETE_TAG
-from llm_gent.flow.state.cas import Commit
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 
@@ -445,47 +444,34 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
     return flow
 
 
-def _latest_commit(store: JsonFileCheckpointStore) -> Commit | None:
-    """Return the history's latest commit, or ``None`` for an empty store."""
-    flow_id = store.get_flow_id(CLIENT_FLOW_ID)
-    head = store.resolve_ref(flow_id) if flow_id is not None else None
-    if flow_id is None or head is None:
-        return None
-    return Commit.from_bytes(store.get_object(flow_id, "commit", head) or b"")
-
-
-def _resume_pending(store: JsonFileCheckpointStore) -> bool:
+async def _resume_pending(history: History) -> bool:
     """True when ``run(resume=True)`` will resume rather than start fresh.
 
-    Mirrors the rule in :meth:`Resume.hydrate`: resume from the
-    latest commit unless the store is empty or the ``complete`` tag
-    points at that commit (the default ``retain`` policy moves it to
-    the final-state commit on clean exit). This flow writes no ``ok``
-    iterate commits, so a pending resume here is always a halt.
+    Same rule as :meth:`Resume.hydrate`: resume from the head unless the
+    history is empty or complete (the head is the final-state commit the
+    default ``retain`` policy writes on clean exit). This flow writes no
+    ``ok`` iterate commits, so a pending resume here is always a halt.
     """
-    flow_id = store.get_flow_id(CLIENT_FLOW_ID)
-    head = store.resolve_ref(flow_id) if flow_id is not None else None
-    if flow_id is None or head is None:
-        return False
-    return store.resolve_tag(flow_id, COMPLETE_TAG) != head
+    return await history.head() is not None and not await history.is_complete()
 
 
-def _paused_turn_saved(store: JsonFileCheckpointStore) -> bool:
-    """True when the latest commit carries a ``paused_turn`` trace ref (the paused conversation)."""
-    commit = _latest_commit(store)
-    return commit is not None and any(r.kind == "paused_turn" for r in commit.meta.trace_ref)
+async def _paused_turn_saved(history: History) -> bool:
+    """True when the head carries a ``paused_turn`` trace ref (the paused conversation)."""
+    head = await history.head()
+    return head is not None and any(r.kind == "paused_turn" for r in head.meta.trace_ref)
 
 
 async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> tuple[Digest, bool]:
     """One process-level invocation; return ``(final state, halted)``.
 
     Always runs with ``resume=True`` and lets the framework pick
-    the path: no commit or a head tagged ``complete`` → fresh run,
-    any other latest commit → resume. The halt is armed only on a
-    fresh run so the resumed turn completes.
+    the path: empty or complete history → fresh run, any other
+    head → resume. The halt is armed only on a fresh run so the
+    resumed turn completes.
     """
     store = JsonFileCheckpointStore(lg, store_dir)
-    resuming = _resume_pending(store)
+    history = History(store, CLIENT_FLOW_ID)
+    resuming = await _resume_pending(history)
     halt = asyncio.Event()
     ff = FlowFactory(
         lg,
@@ -496,12 +482,12 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
     final: Digest = await _build_flow(lg, ff, halt).run(resume=True)
-    halted = _resume_pending(store)
-    _report(store, store_dir, final, halted)
+    halted = await _resume_pending(history)
+    await _report(history, store_dir, final, halted)
     return final, halted
 
 
-def _report(store: JsonFileCheckpointStore, store_dir: Path, final: Digest, halted: bool) -> None:
+async def _report(history: History, store_dir: Path, final: Digest, halted: bool) -> None:
     """Print the post-run state and the ref files the store holds."""
     refs = sorted(str(p.relative_to(store_dir)) for p in store_dir.rglob("*.json"))
     print(f"  pending: {final.pending}")
@@ -509,7 +495,9 @@ def _report(store: JsonFileCheckpointStore, store_dir: Path, final: Digest, halt
     print(f"  ref files: {refs}")
     if halted:
         saved = (
-            "paused_turn saved" if _paused_turn_saved(store) else "NO paused_turn on halt commit"
+            "paused_turn saved"
+            if await _paused_turn_saved(history)
+            else "NO paused_turn on halt commit"
         )
         print(f"  halted mid-turn ({saved}) — invoke again to resume")
     else:
@@ -527,7 +515,9 @@ async def _run_smoke(lg: Logger) -> int:
     resumed_backend = _FakeBackend()
     try:
         first, halted = await _invoke(lg, store_dir, _FakeBackend(), "smoke")
-        turn_saved = _paused_turn_saved(JsonFileCheckpointStore(lg, store_dir))
+        turn_saved = await _paused_turn_saved(
+            History(JsonFileCheckpointStore(lg, store_dir), CLIENT_FLOW_ID)
+        )
         print()
         final, still_halted = await _invoke(lg, store_dir, resumed_backend, "smoke")
     finally:

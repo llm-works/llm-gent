@@ -6,44 +6,36 @@
 Read side — :class:`Resume` is constructed per ``run(resume=True)``
 call with the flow being resumed; its public :meth:`hydrate` returns
 the ``(State, _ResumeReplay | None)`` pair the executor threads
-through the walk. The flow provides the checkpointer +
-``client_flow_id`` + state factory; :class:`Resume` (a) fetches the
-latest commit under the history ref, (b) walks its tree to
-collect one JSON payload per scope, (c) hydrates the top-level
-:class:`State` from the root scope, and (d) hands every non-root
+through the walk. It reads the history through the public
+:class:`~llm_gent.flow.history.History` API: (a) the head commit,
+(b) its per-scope JSON payloads, then (c) hydrates the top-level
+:class:`State` from the root scope and (d) hands every non-root
 scope payload to ``_ResumeReplay.intermediate_scope_data`` so
 descent sites (``_consume_scope_data``) can restore their own scope
 in order.
 
 Write side — :func:`apply_clean_exit_retention` and
 :func:`commit_completion` commit the final state on clean exit and
-move the ``complete`` tag to it; :meth:`Resume.hydrate` reads the tag
-to detect an already-completed history. :func:`assert_replay_consumed`
-is the belt-and-suspenders check called after a resume run to
-fail-fast when the save-point iterate was never found.
+move the ``complete`` tag to it; a head at that final-state commit is
+what :meth:`Resume.hydrate` treats as a finished history.
+:func:`assert_replay_consumed` is the belt-and-suspenders check called
+after a resume run to fail-fast when the save-point iterate was never
+found.
 """
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import COMPLETE_TAG
+from .checkpoint import COMPLETE_TAG, END_NODE_PATH
+from .history import History
 from .state import State
-from .state.cas import Commit, Tree
+from .state.cas import Commit
 
 
 if TYPE_CHECKING:
     from .flow import Flow
     from .nodes import _ResumeReplay
-
-
-END_NODE_PATH = "$end"
-"""Reserved ``node_path`` of the final-state commit written on clean exit.
-
-Not a node id: the commit sits after the last top-level node, and the
-``$`` prefix cannot collide with a blake2b hex node id.
-"""
 
 
 class Resume:
@@ -66,18 +58,16 @@ class Resume:
 
         Sequence:
 
-        1. :meth:`CheckpointStore.resolve_ref` returns the history's
-           head — the latest commit across every ``node_path`` — or
-           ``None`` (fresh run — no prior checkpoint). A head the
-           ``complete`` tag points at is a finished run: fresh run.
-        2. :meth:`CheckpointStore.get_object` fetches the commit
-           bytes; :meth:`Commit.from_bytes` re-derives
-           :class:`CommitMeta` + :class:`ProducedBy` +
-           :class:`TraceRef`.
-        3. The commit's ``root_tree_hash`` fetches the
-           :class:`Tree`; each :class:`TreeEntry` fetches its Blob.
-           Scope order is root → leaf via the zero-padded
+        1. :meth:`History.head` returns the latest commit across
+           every ``node_path``, or ``None`` (fresh run — no prior
+           checkpoint). A final-state head is a finished run: fresh
+           run. That holds even if the ``complete`` tag write after
+           it never landed.
+        2. :meth:`History.scopes` walks the commit's tree to one
+           JSON payload per scope, root → leaf via the zero-padded
            ``scope_id`` (canonical sort).
+        3. The commit's ``paused_turn`` trace refs load as resume
+           entries for the Loops that paused.
         4. The root scope's payload rehydrates the top-level
            :class:`State` (via ``state_factory.restore`` when
            bound, passthrough otherwise). The leaf scope's payload
@@ -94,49 +84,17 @@ class Resume:
         flow = self.flow
         ctx = flow._checkpoint_ctx
         assert ctx is not None
-        head = await ctx.resolve_ref()
-        # A head tagged "complete" (moved there on clean exit under
-        # "retain") means the last run finished — do not replay it.
-        if head is None or await ctx.resolve_tag(COMPLETE_TAG) == head:
+        history = History(ctx.store, ctx.client_flow_id)
+        # A missing commit, tree or blob anywhere below is "no resumable
+        # checkpoint": fall through to a fresh run.
+        head = await history.head()
+        if head is None or History.is_final_state(head):
             return fallback, None
-        loaded = await self._load_commit_scopes(head)
-        if loaded is None:
+        scope_data = await history.scopes(head)
+        if scope_data is None:
             return fallback, None
-        commit, scope_data = loaded
-        # The final-state commit and its tag are two writes; a process that
-        # died between them leaves an untagged $end head — still a finished run.
-        if commit.meta.node_path == END_NODE_PATH:
-            return fallback, None
-        await flow._resume_paused_turns.load_from_commit(ctx, commit)
-        return self._split_scopes(commit, scope_data)
-
-    async def _load_commit_scopes(self, commit_hash: str) -> tuple[Commit, list[Any]] | None:
-        """Load the commit ``commit_hash`` and walk its tree.
-
-        Returns ``(Commit, scope_data)`` where ``scope_data`` is
-        root → leaf JSON payloads (one per :class:`Tree` entry).
-        Returns ``None`` when the commit, tree, or any blob is
-        missing — the caller treats each miss as "no resumable
-        checkpoint" and falls through to a fresh run.
-        """
-        flow = self.flow
-        assert flow._checkpoint_ctx is not None
-        ctx = flow._checkpoint_ctx
-        commit_bytes = await ctx.get_object("commit", commit_hash)
-        if commit_bytes is None:
-            return None
-        commit = Commit.from_bytes(commit_bytes)
-        tree_bytes = await ctx.get_object("tree", commit.root_tree_hash)
-        if tree_bytes is None:
-            return None
-        tree = Tree.from_bytes(tree_bytes)
-        scope_data: list[Any] = []
-        for entry in tree.entries:
-            blob = await ctx.get_object("blob", entry.child_hash)
-            if blob is None:
-                return None
-            scope_data.append(json.loads(blob.decode("utf-8")))
-        return commit, scope_data
+        await flow._resume_paused_turns.load_from_commit(ctx, head)
+        return self._split_scopes(head, scope_data)
 
     def _split_scopes(
         self, commit: Commit, scope_data: list[Any]
