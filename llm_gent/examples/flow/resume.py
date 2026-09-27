@@ -14,7 +14,7 @@ Exercises the Flow-level checkpointer end-to-end without touching an LLM:
    The framework saves at every iterate boundary, preserves the checkpoint
    on halt exit, and returns.
 2. **Run 2** — a fresh :class:`~llm_gent.flow.Flow` (new halt event, same
-   checkpointer + client_flow_id) is called with ``resume=True``. The
+   checkpointer + client_flow_id) is called with ``resume="replay"``. The
    framework loads the latest checkpoint, reconstructs ``state.data`` via
    :meth:`Counter.from_dict`, restores the iteration counter, and runs
    the remaining passes.
@@ -66,7 +66,7 @@ class Counter(StateDataclass):
     Inherits :class:`~llm_gent.flow.StateDataclass` for ``to_dict`` /
     ``from_dict`` — flat dataclass, no override needed. Bound as
     ``state_factory=TypeStateFactory(Counter)`` on the :class:`~llm_gent.flow.FlowFactory` so
-    the framework calls :meth:`from_dict` on ``run(resume=True)`` to
+    the framework calls :meth:`from_dict` on ``run(resume="replay")`` to
     reconstruct an instance from the checkpoint payload.
     """
 
@@ -134,9 +134,9 @@ async def main() -> int:
         print(f"run 1 returned: count={result1}")
         print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
 
-        print(f"\n--- Run 2: resume=True (cumulative max_iters={MAX_ITERS}) ---")
+        print(f"\n--- Run 2: resume=replay (cumulative max_iters={MAX_ITERS}) ---")
         flow2 = _build_flow(ff, store, client_flow_id)
-        result2 = await flow2.run(resume=True)
+        result2 = await flow2.run(resume="replay")
         print(f"run 2 returned: count={result2}")
         print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
         print("(empty after run 2 because natural completion deletes the checkpoint)")

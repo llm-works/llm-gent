@@ -37,7 +37,7 @@ async def _run(store: JsonFileCheckpointStore, name: str, *, halt_at: int | None
         halt_after_iteration=halt_at,
         store=store,
         client_flow_id=name,
-    ).run(resume=True)
+    ).run(resume="replay")
 
 
 async def _all(history: History) -> list[Commit]:
@@ -137,7 +137,7 @@ class TestCorruptHistory:
             max_iters=4,
             store=store,
             client_flow_id="torn-resume",
-        ).run(resume=True)
+        ).run(resume="replay")
 
         assert result["log"][0] == 101  # fresh from the fallback state, not resumed
         assert any("corrupt" in w for w in warnings)

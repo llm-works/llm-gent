@@ -171,7 +171,7 @@ Rubric for picking a channel when only one consumer needs the value:
 
 ### Verb idempotency and resume
 
-Verbs may re-run on `run(resume=True)` when the process terminates
+Verbs may re-run on `run(resume="replay")` when the process terminates
 mid-execution. The checkpoint records the last completed boundary
 (iteration or chain step); work after that boundary re-runs on resume:
 
@@ -235,11 +235,33 @@ policy governs only implicit auto-saves.
 
 On a clean exit under the default `retain` retention, the framework also
 commits the run's final state and moves the `complete` tag to it. A
-history whose head is that commit is complete: `run(resume=True)` starts
+history whose head is that commit is complete: `run(resume="replay")` starts
 fresh, and the new run's commits extend the same history. The tag stays
 on the last finished run's final state when a later run halts past it.
 A final state that cannot be serialized is committed without state (and
 a warning is logged) rather than failing the finished run.
+
+A run that raises commits its root state at `$failed` (outcome `failed`)
+before the exception propagates; cancellation writes nothing extra.
+
+### Resume modes
+
+`run(resume=...)` selects how a run starts from the history:
+
+- `"off"` (default) — start from `state=` as given; commits still append
+  to the history.
+- `"replay"` — positional resume: rebuild the last save point's scope tree
+  and fast-forward to it (skipping `$failed` commits). Iteration bounds
+  are cumulative across runs. A complete history starts fresh.
+- `"restart"` — start at the first node with the root state of the head
+  commit, whatever its outcome (halted, ok, final, failed). Child scopes
+  are not restored and iterate counters start at zero; paused turns on the
+  head are offered to the steps that paused. Suits long-lived agents that
+  re-enter their flow each session, and survives changes to the flow's
+  structure that would break replay.
+
+Per-session adjustments to the restored state belong in the flow's first
+step.
 
 ### Reading a history
 

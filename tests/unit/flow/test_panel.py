@@ -294,7 +294,7 @@ class TestPanel:
                 .with_checkpointer(store, "nested-history")
                 .iterate(nested_bump, max_iters=5)
             )
-            result = await resumed.run(resume=True)
+            result = await resumed.run(resume="replay")
             nested_flow_result.append(result)
             return "done"
 
@@ -492,7 +492,7 @@ class TestPanelInsideIterateResumeBoundary:
         runs.clear()
 
         # Resume: iterate continues at iteration 3 with a fresh Panel each pass.
-        await build(with_halt=False).run(resume=True)
+        await build(with_halt=False).run(resume="replay")
 
         seen_iters = sorted({r[0] for r in runs})
         assert seen_iters == [3, 4, 5], "iteration 2's Panel must not re-dispatch"

@@ -24,7 +24,14 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any, TypeVar
 
-from .checkpoint import COMPLETE_TAG, END_NODE_PATH, CheckpointStore, Kind, maybe_await
+from .checkpoint import (
+    COMPLETE_TAG,
+    END_NODE_PATH,
+    FAILED_NODE_PATH,
+    CheckpointStore,
+    Kind,
+    maybe_await,
+)
 from .state import StateFactory, restore_state_data
 from .state.cas import Commit, Tree
 
@@ -69,7 +76,7 @@ class History:
     async def is_complete(self) -> bool:
         """True when the last run finished: the head is its final-state commit.
 
-        ``run(resume=True)`` on a complete history starts fresh; otherwise
+        ``run(resume="replay")`` on a complete history starts fresh; otherwise
         it resumes from the head.
         """
         head = await self.head()
@@ -79,6 +86,11 @@ class History:
     def is_final_state(commit: Commit) -> bool:
         """True for a final-state commit — written when a run finished cleanly."""
         return commit.meta.node_path == END_NODE_PATH
+
+    @staticmethod
+    def is_failed(commit: Commit) -> bool:
+        """True for a failure commit — written when a run raised."""
+        return commit.meta.node_path == FAILED_NODE_PATH
 
     async def last_complete(self) -> Commit | None:
         """Final-state commit of the most recent run that finished, or ``None``.
@@ -96,7 +108,7 @@ class History:
         """Walk the chain from the head through parent links, newest first.
 
         Parents are in write order across runs; a run's commits end at a
-        ``halted`` or ``$end`` commit.
+        ``halted``, ``$end`` or ``$failed`` commit.
         """
         commit = await self.head()
         while commit is not None:

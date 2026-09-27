@@ -58,7 +58,7 @@ mount them via the existing trait system.
 """
 
 from .archetypes import extractor, grader, planner, synthesizer
-from .checkpoint import CheckpointPolicy, CheckpointStore
+from .checkpoint import CheckpointPolicy, CheckpointStore, ResumeMode
 from .context import Context
 from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
@@ -84,6 +84,7 @@ __all__ = [
     "Loop",
     "LoopFactory",
     "Panel",
+    "ResumeMode",
     "Role",
     "SAIAFactory",
     "Skipped",

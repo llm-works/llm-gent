@@ -30,7 +30,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import FRAMEWORK_PRODUCER, CheckpointStore, Kind, Retention, maybe_await
+from .checkpoint import CheckpointStore, Kind, Retention, maybe_await
 from .state import serialize_state_data
 from .state.cas import (
     Blob,
@@ -280,13 +280,17 @@ class CheckpointContext:
         await self.put_tree(tree)
         return tree
 
-    async def save_framework_commit(self, node_path: str, tree: Tree) -> Commit:
+    async def save_framework_commit(
+        self, node_path: str, producer: str, outcome: CommitOutcome, tree: Tree
+    ) -> Commit:
         """Commit an already-put ``tree`` at a reserved ``node_path`` the framework owns.
 
-        No node produced it: ``produced_by.node_id`` is :data:`FRAMEWORK_PRODUCER`.
+        No node produced it: ``producer`` is a ``$framework/*`` pseudo node id
+        (:data:`~llm_gent.flow.checkpoint.COMPLETION_PRODUCER`,
+        :data:`~llm_gent.flow.checkpoint.FAILURE_PRODUCER`).
         """
         flow_id = await self.ensure_flow_id()
-        meta = self._build_commit_meta(flow_id, node_path, 0, FRAMEWORK_PRODUCER, "ok", ())
+        meta = self._build_commit_meta(flow_id, node_path, 0, producer, outcome, ())
         return await self.append_commit(tree.content_hash, meta)
 
     # --- private helpers used by save_scope_commit ---

@@ -524,7 +524,7 @@ async def _save_halt_checkpoint(
 
     Called from the executor's halt-observation sites — the between-
     iterations check in :meth:`IterateRunner.run` and the between-chain-
-    steps check in :meth:`Chain._walk_steps` — so a ``run(resume=True)``
+    steps check in :meth:`Chain._walk_steps` — so a ``run(resume="replay")``
     after a halted process restart resolves to this commit and re-
     enters at the halted position.
 

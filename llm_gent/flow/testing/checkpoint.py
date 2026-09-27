@@ -260,7 +260,7 @@ async def assert_resume_determinism(
         max_iters=max_iters,
         store=store,
         client_flow_id=client_flow_id,
-    ).run(resume=True)
+    ).run(resume="replay")
 
     assert resumed == baseline, (
         f"resumed state differs from baseline:\n  baseline={baseline}\n  resumed={resumed}"
@@ -310,7 +310,7 @@ def resume_in_subprocess(
     (a class or a function) and calling it as
     ``store_factory(lg, **store_kwargs)``, resolves and calls the flow
     builder with ``store=<instance>, client_flow_id=<>, **flow_builder_kwargs``,
-    invokes ``await flow.run(resume=True)``, and prints the return value
+    invokes ``await flow.run(resume="replay")``, and prints the return value
     as JSON to stdout. The parent parses and returns it.
 
     Every value in ``store_kwargs`` must be JSON-serializable (paths as

@@ -260,7 +260,7 @@ class Commit:
     :attr:`parent_hashes` holds the history's previous head — the commit
     written immediately before this one, in time order — or is empty for
     a history's first commit. It records sequence, not derivation: a run
-    started without ``resume=True`` still parents on the previous head.
+    started with ``resume="off"`` still parents on the previous head.
     A run ends in a ``halted`` or ``$end`` commit, so run boundaries are
     read from those. A multi-parent tuple is reserved for a future
     fork/merge surface and unused today.

@@ -21,7 +21,8 @@ python -m llm_gent.examples.flow.durable_resume --smoke
 ```
 
 The two real invocations must be separate processes — that is the point. The store lives at
-`~/.cache/llm-gent-durable-resume`. Every invocation calls `flow.run(resume=True)`; the framework
+`~/.cache/llm-gent-durable-resume`. Every invocation calls `flow.run(resume="replay")`; the
+framework
 starts fresh on an empty store or when the latest commit is the final-state commit of a finished
 run, and otherwise resumes from the latest commit (here always the halt commit). A third invocation
 therefore starts
@@ -247,7 +248,8 @@ run 2 read the head from the store before its first commit and parented on it.
 Written on clean exit when the store's retention is `retain` (the `JsonFileCheckpointStore`
 default). It is an ordinary scope commit of the top-level state at the reserved `node_path` `$end`,
 so the head always holds the state the last run ended with, even when no save point fired during
-the run. `run(resume=True)` treats a history whose latest commit is a final-state commit as a fresh
+the run. `run(resume="replay")` treats a history whose latest commit is a final-state commit as a
+fresh
 start instead of replaying the old halt commit; the fresh run's commits extend the same history.
 The `complete` tag moves to each final-state commit and stays on it while later runs append past
 it, so `History.last_complete()` finds the last finished run's state even when the head is a
