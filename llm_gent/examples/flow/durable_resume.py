@@ -79,7 +79,8 @@ Smoke (no network, both phases in one invocation)::
 
     python -m llm_gent.examples.flow.durable_resume --smoke
 
-See ``README.md`` next to this file for the on-disk-store walk.
+See ``durable_resume.md`` next to this file for a walk through a real
+run and the on-disk store it leaves.
 """
 
 from __future__ import annotations
