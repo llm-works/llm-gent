@@ -3,8 +3,8 @@
 
 """Integration tests for :class:`llm_gent.flow.stores.PgCheckpointStore`.
 
-Real Postgres round-trip against the migrated schema (object + ref
-tables). Same surface as :mod:`tests.unit.flow.test_stores_json` — the
+Real Postgres round-trip against the migrated schema (name, object,
+ref and tag tables). Same surface as :mod:`tests.unit.flow.test_stores_json` — the
 two implementations should behave identically at the Protocol level.
 """
 
@@ -18,7 +18,7 @@ from appinfra.log import Logger
 from sqlalchemy import delete
 
 from llm_gent.flow.stores import PgCheckpointStore
-from llm_gent.flow.stores.postgres import FlowObject, FlowRef
+from llm_gent.flow.stores.postgres import FlowName, FlowObject, FlowRef, FlowTag
 
 
 @pytest.fixture
@@ -27,20 +27,23 @@ def store(pg_migrated: PG, pg_test_logger: Logger) -> PgCheckpointStore:
     return PgCheckpointStore(pg_test_logger, pg_migrated)
 
 
+def _wipe(pg: PG) -> None:
+    """Delete every row from the store's tables."""
+    with pg.session() as session:
+        for model in (FlowTag, FlowRef, FlowObject, FlowName):
+            session.execute(delete(model))
+
+
 @pytest.fixture(autouse=True)
 def clean_tables(pg_migrated: PG) -> Generator[None, None, None]:
-    """Wipe the object + ref tables before and after every test.
+    """Wipe the store's tables before and after every test.
 
     Fixtures run in module scope so state leaks between tests without
     this. Autouse keeps every test independent.
     """
-    with pg_migrated.session() as session:
-        session.execute(delete(FlowRef))
-        session.execute(delete(FlowObject))
+    _wipe(pg_migrated)
     yield
-    with pg_migrated.session() as session:
-        session.execute(delete(FlowRef))
-        session.execute(delete(FlowObject))
+    _wipe(pg_migrated)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +128,53 @@ class TestRefStore:
 
 
 # ---------------------------------------------------------------------------
+# Name map
+# ---------------------------------------------------------------------------
+
+
+class TestNameMap:
+    def test_put_get_round_trip(self, store: PgCheckpointStore) -> None:
+        store.put_flow_id("campaign-1", "history-1")
+        assert store.get_flow_id("campaign-1") == "history-1"
+
+    def test_get_returns_none_when_unbound(self, store: PgCheckpointStore) -> None:
+        assert store.get_flow_id("campaign-1") is None
+
+    def test_rebinding_a_name_raises(self, store: PgCheckpointStore) -> None:
+        """PK on client_flow_id — a second bind of the same name fails."""
+        from sqlalchemy.exc import IntegrityError
+
+        store.put_flow_id("campaign-1", "history-1")
+        with pytest.raises(IntegrityError):
+            store.put_flow_id("campaign-1", "history-2")
+        assert store.get_flow_id("campaign-1") == "history-1"
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+
+class TestTags:
+    def test_put_resolve_round_trip(self, store: PgCheckpointStore) -> None:
+        store.put_tag("history-1", "complete", "commit-h")
+        assert store.resolve_tag("history-1", "complete") == "commit-h"
+
+    def test_resolve_returns_none_when_absent(self, store: PgCheckpointStore) -> None:
+        assert store.resolve_tag("history-1", "complete") is None
+
+    def test_re_put_moves_the_tag(self, store: PgCheckpointStore) -> None:
+        """ON CONFLICT DO UPDATE — same (flow_id, name) re-put moves the tag."""
+        store.put_tag("history-1", "complete", "commit-1")
+        store.put_tag("history-1", "complete", "commit-2")
+        assert store.resolve_tag("history-1", "complete") == "commit-2"
+
+    def test_tags_do_not_leak_across_histories(self, store: PgCheckpointStore) -> None:
+        store.put_tag("history-a", "complete", "hash-a")
+        assert store.resolve_tag("history-b", "complete") is None
+
+
+# ---------------------------------------------------------------------------
 # gc_history
 # ---------------------------------------------------------------------------
 
@@ -136,6 +186,15 @@ class TestGcHistory:
         store.gc_history("history-1")
         assert store.get_object("history-1", "blob", "h1") is None
         assert store.resolve_ref("history-1", "node/x", 1) is None
+
+    def test_removes_tags_and_name_binding(self, store: PgCheckpointStore) -> None:
+        store.put_flow_id("campaign-1", "history-1")
+        store.put_tag("history-1", "complete", "commit-h")
+        store.gc_history("history-1")
+        assert store.resolve_tag("history-1", "complete") is None
+        assert store.get_flow_id("campaign-1") is None
+        store.put_flow_id("campaign-1", "history-2")  # name is free again
+        assert store.get_flow_id("campaign-1") == "history-2"
 
     def test_idempotent_when_absent(self, store: PgCheckpointStore) -> None:
         store.gc_history("never-existed")

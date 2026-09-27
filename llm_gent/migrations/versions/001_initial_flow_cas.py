@@ -15,8 +15,10 @@ Creates the content-addressed persistence tables backing
 - ``llm_gent_flow_ref`` — one row per
   ``(flow_id, node_path, iteration)`` pointing at a
   ``commit_hash`` with a ``created_at`` timestamp for latest-ref lookup.
+- ``llm_gent_flow_tag`` — one row per ``(flow_id, name)`` pointing at a
+  ``commit_hash``; re-put moves the tag.
 
-Objects and refs are history-scoped by ``flow_id``; blobs are
+Objects, refs and tags are history-scoped by ``flow_id``; blobs are
 deliberately not shared across histories.
 
 Revision ID: 001
@@ -41,10 +43,11 @@ _FLOW_ID_LEN = 36
 
 
 def upgrade() -> None:
-    """Create the name, object and ref tables backing :class:`PgCheckpointStore`."""
+    """Create the name, object, ref and tag tables backing :class:`PgCheckpointStore`."""
     _create_name_table()
     _create_object_table()
     _create_ref_table()
+    _create_tag_table()
 
 
 def _create_name_table() -> None:
@@ -109,8 +112,26 @@ def _create_ref_table() -> None:
     )
 
 
+def _create_tag_table() -> None:
+    """Create ``llm_gent_flow_tag`` — named, movable pointers at commit hashes."""
+    op.create_table(
+        "llm_gent_flow_tag",
+        sa.Column("flow_id", sa.String(length=_FLOW_ID_LEN), nullable=False),
+        sa.Column("name", sa.String(length=255), nullable=False),
+        sa.Column("commit_hash", sa.String(length=64), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("flow_id", "name", name="pk_flow_tag"),
+    )
+
+
 def downgrade() -> None:
-    """Drop the name, object and ref tables."""
+    """Drop the tag, ref, object and name tables."""
+    op.drop_table("llm_gent_flow_tag")
     op.drop_index("ix_flow_ref_flow_created", table_name="llm_gent_flow_ref")
     op.drop_table("llm_gent_flow_ref")
     op.drop_table("llm_gent_flow_object")

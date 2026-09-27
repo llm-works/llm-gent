@@ -117,15 +117,15 @@ class TestRetention:
 class TestCheckpointPolicyIterate:
     """CheckpointPolicy.on_iterate gates the iterate-boundary auto-save."""
 
-    async def test_default_policy_writes_only_the_completion_marker(
+    async def test_default_policy_writes_only_the_final_state_commit(
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Default CheckpointPolicy (halt-only) skips per-iteration saves.
 
         Under the default policy an iterate that runs cleanly to
-        ``max_iters`` should leave the store with exactly one ref:
-        the ``$complete`` completion marker stamped by the clean-exit
-        retention path. No iterate-boundary ref should exist.
+        ``max_iters`` should leave the store with exactly one commit:
+        the ``$end`` final-state commit written by the clean-exit
+        retention path. No iterate-boundary commit should exist.
         """
         from llm_gent.flow import Context, FlowFactory, verb
         from llm_gent.flow.state.cas import Commit
@@ -146,8 +146,8 @@ class TestCheckpointPolicyIterate:
         )
         await outer.run()
 
-        # Every commit written during the run has node_path == "$complete"
-        # (only the clean-exit completion marker fires under the default
+        # Every commit written during the run has node_path == "$end"
+        # (only the clean-exit final-state commit fires under the default
         # policy). Walking the commit objects on disk reveals no iterate-
         # boundary commits.
         commits_dir = (
@@ -157,8 +157,8 @@ class TestCheckpointPolicyIterate:
         for f in commits_dir.iterdir():
             payload = f.read_bytes()
             node_paths.add(Commit.from_bytes(payload).meta.node_path)
-        assert node_paths == {"$complete"}, (
-            f"only the $complete completion marker should have been written; got {node_paths}"
+        assert node_paths == {"$end"}, (
+            f"only the $end final-state commit should have been written; got {node_paths}"
         )
 
     async def test_on_iterate_true_writes_per_iteration_commits(
@@ -167,7 +167,7 @@ class TestCheckpointPolicyIterate:
         """CheckpointPolicy(on_iterate=True) restores per-iteration saves.
 
         Opting in should produce an iterate-boundary ref alongside the
-        completion marker — the iterate's own node_path directory carries
+        final-state commit — the iterate's own node_path directory carries
         one ref per iteration.
         """
         from llm_gent.flow import Context, FlowFactory, verb
@@ -191,9 +191,9 @@ class TestCheckpointPolicyIterate:
         await outer.run()
 
         # Under on_iterate=True the iterate boundary emits a commit each
-        # iteration + a $complete marker on clean exit. Group commit
+        # iteration + a $end final-state commit on clean exit. Group commit
         # objects by node_path: 3 boundary commits share the iterate's
-        # node_path, plus one $complete marker.
+        # node_path, plus one $end commit.
         commits_dir = (
             store._history_dir(flow_id_for(store, "policy-on-iter")) / "objects" / "commit"
         )
@@ -201,8 +201,8 @@ class TestCheckpointPolicyIterate:
         for f in commits_dir.iterdir():
             commit = Commit.from_bytes(f.read_bytes())
             by_node_path[commit.meta.node_path] = by_node_path.get(commit.meta.node_path, 0) + 1
-        assert by_node_path["$complete"] == 1
-        iterate_paths = {p: n for p, n in by_node_path.items() if p != "$complete"}
+        assert by_node_path["$end"] == 1
+        iterate_paths = {p: n for p, n in by_node_path.items() if p != "$end"}
         assert len(iterate_paths) == 1, f"expected one iterate node_path; got {list(iterate_paths)}"
         # 3 iterate-boundary commits (one per iteration).
         assert next(iter(iterate_paths.values())) == 3
@@ -214,7 +214,7 @@ class TestCheckpointPolicyMap:
     async def test_default_policy_writes_no_map_item_commits(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """Under the default policy a completed map writes only the $complete marker."""
+        """Under the default policy a completed map writes only the $end final-state commit."""
         from llm_gent.flow import Context, FlowFactory, verb
         from llm_gent.flow.state.cas import Commit
 
@@ -237,8 +237,8 @@ class TestCheckpointPolicyMap:
         node_paths: set[str] = set()
         for f in commits_dir.iterdir():
             node_paths.add(Commit.from_bytes(f.read_bytes()).meta.node_path)
-        assert node_paths == {"$complete"}, (
-            f"only the $complete marker should exist under default policy; got {node_paths}"
+        assert node_paths == {"$end"}, (
+            f"only the $end commit should exist under default policy; got {node_paths}"
         )
 
     async def test_on_map_item_true_writes_per_item_commits(
@@ -247,8 +247,9 @@ class TestCheckpointPolicyMap:
         """CheckpointPolicy(on_map_item=True) saves after each successful item.
 
         Runs a 3-item map and asserts that three iteration-indexed
-        commits exist under the map's node_path plus the $complete
-        marker. Item order across saves is not asserted (concurrent).
+        commits exist under the map's node_path plus the $end
+        final-state commit. Item order across saves is not asserted
+        (concurrent).
         """
         from llm_gent.flow import Context, FlowFactory, verb
         from llm_gent.flow.state.cas import Commit
@@ -276,10 +277,10 @@ class TestCheckpointPolicyMap:
             iterations_at_map_path.setdefault(commit.meta.node_path, []).append(
                 commit.meta.iteration
             )
-        assert "$complete" in iterations_at_map_path
-        non_marker = {p: v for p, v in iterations_at_map_path.items() if p != "$complete"}
-        assert len(non_marker) == 1, f"expected one map node_path; got {list(non_marker)}"
-        iterations = sorted(next(iter(non_marker.values())))
+        assert "$end" in iterations_at_map_path
+        non_final = {p: v for p, v in iterations_at_map_path.items() if p != "$end"}
+        assert len(non_final) == 1, f"expected one map node_path; got {list(non_final)}"
+        iterations = sorted(next(iter(non_final.values())))
         assert iterations == [0, 1, 2], f"expected three item slots 0/1/2; got {iterations}"
 
 
@@ -290,7 +291,7 @@ class TestCtxCheckpoint:
         """A verb calling ``ctx.checkpoint()`` writes a commit at that step's node.
 
         Runs under the default (halt-only) policy so no iterate-
-        boundary save fires; the only non-completion-marker commit
+        boundary save fires; the only commit besides the final-state one
         that exists is the one the verb explicitly requested.
         """
         from llm_gent.flow import Context, FlowFactory, verb
@@ -311,15 +312,15 @@ class TestCtxCheckpoint:
         await outer.run()
 
         # Two commits total: one from the explicit ctx.checkpoint() (verb's
-        # chain-step node) + one $complete marker on clean exit.
+        # chain-step node) + one $end final-state commit on clean exit.
         commits_dir = store._history_dir(flow_id_for(store, "ctx-ckpt")) / "objects" / "commit"
         node_paths: list[str] = []
         for f in commits_dir.iterdir():
             node_paths.append(Commit.from_bytes(f.read_bytes()).meta.node_path)
-        assert "$complete" in node_paths
-        non_marker = [p for p in node_paths if p != "$complete"]
-        assert len(non_marker) == 1, (
-            f"expected exactly one explicit-checkpoint commit; got {non_marker}"
+        assert "$end" in node_paths
+        non_final = [p for p in node_paths if p != "$end"]
+        assert len(non_final) == 1, (
+            f"expected exactly one explicit-checkpoint commit; got {non_final}"
         )
 
     async def test_ctx_checkpoint_noop_without_checkpointer(self) -> None:
@@ -1173,13 +1174,13 @@ def _stored_commit_hashes(store: JsonFileCheckpointStore, client_flow_id: str) -
 
 class TestHistoryLineage:
     async def test_iterate_commits_form_one_chain(self, store: JsonFileCheckpointStore) -> None:
-        """Per-iteration commits chain onto each other; the completion marker is the head."""
+        """Per-iteration commits chain onto each other; the final-state commit is the head."""
         await build_canonical_flow(
             make_test_logger(), max_iters=3, store=store, client_flow_id="lineage-iter"
         ).run()
 
         chain = _chain_from_head(store, "lineage-iter")
-        assert chain[0].meta.node_path == "$complete"
+        assert chain[0].meta.node_path == "$end"
         assert chain[-1].parent_hashes == ()
         # Every stored commit is reachable from the head — no orphaned siblings.
         assert {c.content_hash for c in chain} == _stored_commit_hashes(store, "lineage-iter")
@@ -1260,6 +1261,121 @@ class TestHistoryLineage:
         await ctx.put_tree(tree)
         restarted = await _append(0)
         assert restarted.parent_hashes == ()
+
+
+class TestCompletionTag:
+    """Clean exit commits the final state at ``$end`` and moves the ``complete`` tag to it."""
+
+    async def test_final_state_commit_is_tagged_head(self, store: JsonFileCheckpointStore) -> None:
+        """A halt-only run with no save points still leaves its final state at the head."""
+        import json
+
+        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow.checkpoint import COMPLETE_TAG
+        from llm_gent.flow.state.cas import Tree
+
+        @verb
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["n"] += 1
+            return ctx.state.data["n"]
+
+        await (
+            FlowFactory(make_test_logger())
+            .create(state={"n": 0})
+            .with_checkpointer(store, "final-state")
+            .iterate(lambda body: body.call(bump), max_iters=3)
+            .run()
+        )
+
+        flow_id = flow_id_for(store, "final-state")
+        head = store.resolve_ref(flow_id)
+        assert head is not None
+        assert store.resolve_tag(flow_id, COMPLETE_TAG) == head
+        (commit,) = _chain_from_head(store, "final-state")
+        assert commit.meta.node_path == "$end"
+        tree = Tree.from_bytes(store.get_object(flow_id, "tree", commit.root_tree_hash) or b"")
+        (entry,) = tree.entries
+        blob = store.get_object(flow_id, "blob", entry.child_hash) or b""
+        assert json.loads(blob.decode()) == {"n": 3}
+
+    async def test_rerun_after_completion_appends_to_same_history(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """resume=True on a complete history runs fresh; its commits extend the history."""
+        from llm_gent.flow.checkpoint import COMPLETE_TAG
+
+        await build_canonical_flow(
+            make_test_logger(), max_iters=2, store=store, client_flow_id="rerun"
+        ).run()
+        flow_id = flow_id_for(store, "rerun")
+        first_end = store.resolve_ref(flow_id)
+
+        await build_canonical_flow(
+            make_test_logger(), max_iters=2, store=store, client_flow_id="rerun"
+        ).run(resume=True)
+
+        assert flow_id_for(store, "rerun") == flow_id
+        chain = _chain_from_head(store, "rerun")
+        assert store.resolve_tag(flow_id, COMPLETE_TAG) == chain[0].content_hash
+        assert first_end in {c.content_hash for c in chain[1:]}
+        assert [c.meta.node_path for c in chain].count("$end") == 2
+
+    async def test_commit_after_completion_makes_history_resumable(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A halt after a completed run leaves the tag behind; the next resume replays the halt."""
+        from llm_gent.flow.checkpoint import COMPLETE_TAG
+        from llm_gent.flow.testing.checkpoint import CanonicalCounter
+
+        await build_canonical_flow(
+            make_test_logger(), max_iters=2, store=store, client_flow_id="tag-behind"
+        ).run()
+        halt = asyncio.Event()
+        await build_canonical_flow(
+            make_test_logger(),
+            max_iters=5,
+            halt=halt,
+            halt_after_iteration=2,
+            store=store,
+            client_flow_id="tag-behind",
+        ).run(resume=True)
+        flow_id = flow_id_for(store, "tag-behind")
+        assert store.resolve_tag(flow_id, COMPLETE_TAG) != store.resolve_ref(flow_id)
+
+        # A fresh run would start from this fallback state (n=100); resume ignores it.
+        resumed = await build_canonical_flow(
+            make_test_logger(),
+            state=CanonicalCounter(n=100),
+            max_iters=5,
+            store=store,
+            client_flow_id="tag-behind",
+        ).run(resume=True)
+        assert resumed["iterations_completed"] == 5
+        assert resumed["log"][0] == 1
+        assert store.resolve_tag(flow_id, COMPLETE_TAG) == store.resolve_ref(flow_id)
+
+    async def test_untagged_final_state_head_counts_as_complete(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A crash between the $end commit and the tag write must not replay "$end"."""
+        from llm_gent.flow._checkpoint_ctx import CheckpointContext
+        from llm_gent.flow._resume import END_NODE_PATH
+        from llm_gent.flow.checkpoint import COMPLETE_TAG
+        from llm_gent.flow.state import State
+        from llm_gent.flow.testing.checkpoint import CanonicalCounter
+
+        ctx = CheckpointContext(store, "torn-completion")
+        await ctx.save_scope_commit((), 0, END_NODE_PATH, State(data={"n": 7}), "ok")
+        assert store.resolve_tag(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
+
+        result = await build_canonical_flow(
+            make_test_logger(),
+            state=CanonicalCounter(n=100),
+            max_iters=1,
+            store=store,
+            client_flow_id="torn-completion",
+        ).run(resume=True)
+        assert result["log"][0] == 101
 
 
 # ---------------------------------------------------------------------------
@@ -1669,8 +1785,8 @@ class TestScopedStateRoundTrip:
         )
         await outer_resume.run(resume=True)
         # Inspect the FINAL commit under the iterate's node_path (the
-        # completion marker at "$complete" is skipped by this specific
-        # lookup — it's stamped on clean exit).
+        # final-state commit at "$end" is skipped by this specific
+        # lookup — it's written on clean exit).
         final_commit_hash = store.resolve_ref(
             flow_id_for(store, "3-level-1"), commit.meta.node_path
         )
@@ -1748,6 +1864,14 @@ class TestAsyncStore:
                 await asyncio.sleep(0)
                 return self._inner.resolve_ref(*a, **kw)
 
+            async def put_tag(self, *a: Any, **kw: Any) -> None:
+                await asyncio.sleep(0)
+                self._inner.put_tag(*a, **kw)
+
+            async def resolve_tag(self, *a: Any, **kw: Any) -> str | None:
+                await asyncio.sleep(0)
+                return self._inner.resolve_tag(*a, **kw)
+
             async def gc_history(self, *a: Any, **kw: Any) -> None:
                 await asyncio.sleep(0)
                 self._inner.gc_history(*a, **kw)
@@ -1762,6 +1886,8 @@ class TestAsyncStore:
             "get_object",
             "put_ref",
             "resolve_ref",
+            "put_tag",
+            "resolve_tag",
             "gc_history",
         ):
             assert inspect.iscoroutinefunction(getattr(wrap, m))

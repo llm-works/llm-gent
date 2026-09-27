@@ -3,7 +3,7 @@
 
 """Postgres-backed :class:`CheckpointStore` — content-addressed object + ref store.
 
-Three tables:
+Four tables:
 
 - :class:`FlowName` — ``client_flow_id`` PK → ``flow_id`` (unique): the
   agent's name for a history mapped to gent's internal id.
@@ -15,10 +15,12 @@ Three tables:
   ``VARCHAR(64) commit_hash``, ``TIMESTAMPTZ created_at``. Idempotent
   overwrite via ``ON CONFLICT DO UPDATE`` refreshing ``created_at`` so
   the latest ref is discoverable by ``ORDER BY created_at DESC``.
+- :class:`FlowTag` — ``(flow_id, name)`` PK → ``commit_hash``. Upsert
+  moves the tag.
 
-Object and ref tables scope everything by ``flow_id`` — history-scoped
-storage; blobs are deliberately not shared across histories.
-:meth:`gc_history` is three DELETE statements.
+Object, ref and tag tables scope everything by ``flow_id`` —
+history-scoped storage; blobs are deliberately not shared across
+histories. :meth:`gc_history` is four DELETE statements.
 
 Schema is not managed by the store. Consumers call
 :func:`llm_gent.ensure_schema` (or :class:`llm_gent.schema.SchemaManager`
@@ -97,6 +99,19 @@ class FlowRef(Base):
     flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
     node_path: Mapped[str] = mapped_column(String(1024), primary_key=True)
     iteration: Mapped[int] = mapped_column(Integer, primary_key=True)
+    commit_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class FlowTag(Base):
+    """One row = one named tag ``(flow_id, name)`` → commit_hash; re-put moves it."""
+
+    __tablename__ = "llm_gent_flow_tag"
+
+    flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), primary_key=True)
     commit_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
@@ -254,12 +269,34 @@ class PgCheckpointStore:
         return None if row is None else str(row[0])
 
     # ------------------------------------------------------------------
+    # Tags
+    # ------------------------------------------------------------------
+
+    def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None:
+        """Upsert — re-put moves the tag and refreshes ``created_at``."""
+        stmt = insert(FlowTag).values(flow_id=flow_id, name=name, commit_hash=commit_hash)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["flow_id", "name"],
+            set_={"commit_hash": stmt.excluded.commit_hash, "created_at": datetime.now(UTC)},
+        )
+        with self._pg.session() as session:
+            session.execute(stmt)
+
+    def resolve_tag(self, flow_id: str, name: str) -> str | None:
+        """Return the commit hash tag ``name`` points at, or ``None``."""
+        stmt = select(FlowTag.commit_hash).where(FlowTag.flow_id == flow_id, FlowTag.name == name)
+        with self._pg.session() as session:
+            row = session.execute(stmt).first()
+        return None if row is None else str(row[0])
+
+    # ------------------------------------------------------------------
     # History cleanup
     # ------------------------------------------------------------------
 
     def gc_history(self, flow_id: str) -> None:
-        """Delete every object and ref under ``flow_id`` and its name binding. Idempotent."""
+        """Delete every object, ref and tag under ``flow_id`` and its name binding. Idempotent."""
         with self._pg.session() as session:
+            session.execute(delete(FlowTag).where(FlowTag.flow_id == flow_id))
             session.execute(delete(FlowRef).where(FlowRef.flow_id == flow_id))
             session.execute(delete(FlowObject).where(FlowObject.flow_id == flow_id))
             session.execute(delete(FlowName).where(FlowName.flow_id == flow_id))

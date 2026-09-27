@@ -118,6 +118,7 @@ from llm_gent.flow import (
     TypeStateFactory,
     verb,
 )
+from llm_gent.flow.checkpoint import COMPLETE_TAG
 from llm_gent.flow.state.cas import Commit
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
@@ -457,13 +458,16 @@ def _resume_pending(store: JsonFileCheckpointStore) -> bool:
     """True when ``run(resume=True)`` will resume rather than start fresh.
 
     Mirrors the rule in :meth:`Resume.hydrate`: resume from the
-    latest commit unless the store is empty or that commit is the
-    ``$complete`` marker the default ``retain`` policy stamps on
-    clean exit. This flow writes no ``ok`` iterate commits, so a
-    pending resume here is always a halt.
+    latest commit unless the store is empty or the ``complete`` tag
+    points at that commit (the default ``retain`` policy moves it to
+    the final-state commit on clean exit). This flow writes no ``ok``
+    iterate commits, so a pending resume here is always a halt.
     """
-    commit = _latest_commit(store)
-    return commit is not None and commit.meta.node_path != "$complete"
+    flow_id = store.get_flow_id(CLIENT_FLOW_ID)
+    head = store.resolve_ref(flow_id) if flow_id is not None else None
+    if flow_id is None or head is None:
+        return False
+    return store.resolve_tag(flow_id, COMPLETE_TAG) != head
 
 
 def _paused_turn_saved(store: JsonFileCheckpointStore) -> bool:
@@ -476,7 +480,7 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     """One process-level invocation; return ``(final state, halted)``.
 
     Always runs with ``resume=True`` and lets the framework pick
-    the path: no commit or a ``$complete`` marker → fresh run,
+    the path: no commit or a head tagged ``complete`` → fresh run,
     any other latest commit → resume. The halt is armed only on a
     fresh run so the resumed turn completes.
     """
@@ -509,7 +513,7 @@ def _report(store: JsonFileCheckpointStore, store_dir: Path, final: Digest, halt
         )
         print(f"  halted mid-turn ({saved}) — invoke again to resume")
     else:
-        print("  complete — $complete marker stamped; next invocation starts fresh")
+        print("  complete — final state committed and tagged; next invocation starts fresh")
 
 
 async def _run_smoke(lg: Logger) -> int:

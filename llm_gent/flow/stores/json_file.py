@@ -17,8 +17,10 @@ Layout under the caller-owned root::
           commit/<content_hash>           # canonical JSON bytes
         refs/
           <encoded-node-path>/<iteration>.json    # {"commit_hash": "...", "seq": N}
+        tags/
+          <encoded-tag-name>              # text: commit hash
 
-``client_flow_id``, ``flow_id`` and ``node_path`` are URL-quoted
+``client_flow_id``, ``flow_id``, ``node_path`` and tag names are URL-quoted
 (``quote(..., safe="")``) so arbitrary strings survive round-trip as
 single directory / file names.
 ``.`` and ``..`` are rejected up front; a resolved-path containment check
@@ -296,6 +298,23 @@ class JsonFileCheckpointStore:
         return self._latest_under_node_path(ref_dir)
 
     # ------------------------------------------------------------------
+    # Tags
+    # ------------------------------------------------------------------
+
+    def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None:
+        """Point tag ``name`` at ``commit_hash`` (atomic overwrite)."""
+        tag_file = self._tag_file(flow_id, name)
+        tag_file.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(tag_file, commit_hash)
+
+    def resolve_tag(self, flow_id: str, name: str) -> str | None:
+        """Return the commit hash tag ``name`` points at, or ``None``."""
+        try:
+            return self._tag_file(flow_id, name).read_text(encoding="utf-8").strip() or None
+        except FileNotFoundError:
+            return None
+
+    # ------------------------------------------------------------------
     # History cleanup
     # ------------------------------------------------------------------
 
@@ -338,6 +357,10 @@ class JsonFileCheckpointStore:
         if raw in (".", ".."):
             raise ValueError(f"{field_name} must not be {raw!r} (path-traversal risk)")
         return self._checked(base / quote(raw, safe=""), base, field_name, raw)
+
+    def _tag_file(self, flow_id: str, name: str) -> Path:
+        """Return ``<history>/tags/<encoded-name>``."""
+        return self._encoded_child(self._history_dir(flow_id) / "tags", name, "tag name")
 
     def _objects_dir(self, flow_id: str, kind: Kind) -> Path:
         """Return ``<history>/objects/<kind>`` (``kind`` is a fixed enum, no encode)."""

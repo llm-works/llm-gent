@@ -22,9 +22,9 @@ python -m llm_gent.examples.flow.durable_resume --smoke
 
 The two real invocations must be separate processes — that is the point. The store lives at
 `~/.cache/llm-gent-durable-resume`. Every invocation calls `flow.run(resume=True)`; the framework
-starts fresh on an empty store or when the latest commit is the `$complete` marker, and otherwise
+starts fresh on an empty store or when the `complete` tag points at the latest commit, and otherwise
 resumes from the latest commit (here always the halt commit). A third invocation therefore starts
-a new cycle; `--reset` wipes the store first.
+a new cycle on the same history; `--reset` wipes the store first.
 
 ## The flow
 
@@ -56,7 +56,7 @@ commits. Changing the flow's shape between runs changes the ids and orphans the 
   paused mid-turn on 'content-addressed storage'
   pending: ['content-addressed storage', 'async cancellation']
   summaries: []
-  ref files: ['durable-resume-demo/refs/e62e0596ecc27e3c/1.json']
+  ref files: ['histories/45d814fb-7be0-4b96-b7eb-450e9850c608/refs/e62e0596ecc27e3c/1.json']
   halted mid-turn (paused_turn saved) — invoke again to resume
 ```
 
@@ -85,7 +85,7 @@ Sequence inside the process:
     systems software that allows for the interruption and cleanup of ongoing asynchronous
     operations.'
   pending: []
-  complete — $complete marker stamped; next invocation starts fresh
+  complete — final state committed and tagged; next invocation starts fresh
 ```
 
 The first topic is summarized with no `lookup_reference` line: the model's first completion in
@@ -102,28 +102,41 @@ run 2 is the one run 1 never got to make. Sequence:
    `submit_summary`.
 5. The next pass handles the second topic normally (counter 2 → 3, within `max_iters=3`). `until`
    fires on the empty queue.
-6. Clean exit under the default `retain` retention stamps a `$complete` marker.
+6. Clean exit under the default `retain` retention commits the final state and moves the
+   `complete` tag to it.
 
 ## The on-disk store
 
 After both runs (`~/.cache/llm-gent-durable-resume/`):
 
 ```
-durable-resume-demo/                       # URL-quoted client_flow_id
-├── _seq                                   # "2": monotonic ref counter; newest ref wins
-├── refs/
-│   ├── e62e0596ecc27e3c/1.json            # node_path / iteration -> halt commit (seq 1)
-│   └── %24complete/0.json                 # "$complete" / 0 -> completion marker (seq 2)
-└── objects/                               # content-addressed, file name = blake2b hash
-    ├── commit/8f3ce969…                   # halt commit
-    ├── commit/bafb01ab…                   # completion marker commit
-    ├── tree/614ab218…                     # halt commit's tree
-    ├── tree/c2c013c8…                     # empty tree (completion marker)
-    ├── blob/e6e66548…                     # Digest state at halt
-    └── blob/8f339b74…                     # paused_turn envelope
+names/
+└── durable-resume-demo                    # URL-quoted client_flow_id; content: the flow_id
+histories/
+└── 45d814fb-7be0-4b96-b7eb-450e9850c608/  # flow_id: UUID generated on the first save
+    ├── _client_flow_id                    # "durable-resume-demo"
+    ├── _seq                               # "2": monotonic ref counter; newest ref wins
+    ├── refs/
+    │   ├── e62e0596ecc27e3c/1.json        # node_path / iteration -> halt commit (seq 1)
+    │   └── %24end/0.json                  # "$end" / 0 -> final-state commit (seq 2)
+    ├── tags/
+    │   └── complete                       # -> final-state commit
+    └── objects/                           # content-addressed, file name = blake2b hash
+        ├── commit/8f3ce969…               # halt commit
+        ├── commit/bafb01ab…               # final-state commit
+        ├── tree/614ab218…                 # halt commit's tree
+        ├── tree/…                         # final-state commit's tree
+        ├── blob/e6e66548…                 # Digest state at halt
+        ├── blob/…                         # Digest state at the end of run 2
+        └── blob/8f339b74…                 # paused_turn envelope
 ```
 
-Only `refs/` is mutable. Everything under `objects/` is immutable and named by the hash of its
+`client_flow_id` is the agent's name for the history; the store keys everything by the internal
+`flow_id` it maps to. The name is looked up once per process, and the first save of a new history
+binds a fresh UUID to it. The `flow_id` and every commit hash therefore differ between runs.
+
+Only `refs/` and `tags/` are mutable. Everything under `objects/` is immutable and named by the hash
+of its
 bytes; identical content is stored once. If resume finds the commit, tree, or a state blob
 missing, it falls back to a fresh run; a missing `paused_turn` blob makes only that Loop restart its
 turn from the task.
@@ -137,15 +150,15 @@ turn from the task.
 
 A ref maps `(node_path, iteration)` to a commit. `node_path` is the `/`-joined chain of node ids
 from the run root to the save site; here the save site is the top-level iterate, so it is one id.
-`resolve_ref(client_flow_id)` returns the ref with the highest `seq`, which is how resume picks the
-latest commit.
+`resolve_ref(flow_id)` returns the ref with the highest `seq`, which is how resume picks the latest
+commit — the head of the history.
 
 ### Halt commit
 
 ```json
 {
   "meta": {
-    "client_flow_id": "durable-resume-demo",
+    "flow_id": "45d814fb-7be0-4b96-b7eb-450e9850c608",
     "node_path": "e62e0596ecc27e3c",
     "iteration": 1,
     "outcome": "halted",
@@ -159,11 +172,14 @@ latest commit.
 }
 ```
 
+- `flow_id` — the history's internal id. Commits never carry the agent's `client_flow_id`.
+- `parent_hashes: []` — the first commit of the history has no parent. Every later commit's
+  parent is the commit that was head when it was written.
 - `iteration: 1` — the iterate counter at halt. The paused pass counted as an iteration, which is
   why the flow bounds `max_iters` at `len(TOPICS) + 1` and terminates on `until` instead.
 - `outcome: "halted"` — written by the halt-observation site. Resume does not branch on it: any
-  latest commit other than `$complete` is resumed, and the script applies the same rule
-  (`node_path != "$complete"`) to decide whether to arm the halt on the next invocation.
+  latest commit the `complete` tag does not point at is resumed, and the script applies the same
+  rule to decide whether to arm the halt on the next invocation.
 - `trace_ref` — one entry per paused dispatch, `"<step node id>:<blob hash>"`. Resume hands the
   blob back to the Loop called from that step. The key is per step, not per Loop: a verb that
   calls two Loops that can pause would have them overwrite each other's entry, so keep one
@@ -210,17 +226,27 @@ after. `conversation` is the `to_dict()` payload of the conversation class the L
 The state blob and the paused-turn blob are separate on purpose: state is the flow's data at the
 save site; the paused-turn blob is the in-flight model turn. Resume needs both.
 
-### Completion marker
+### Final-state commit and the `complete` tag
 
 ```json
-{"meta": {"node_path": "$complete", "iteration": 0, "outcome": "ok", "trace_ref": []},
- "root_tree_hash": "c2c013c8…"}   // empty tree
+{"meta": {"node_path": "$end", "iteration": 0, "outcome": "ok", "trace_ref": []},
+ "parent_hashes": ["8f3ce969…"],  // the halt commit
+ "root_tree_hash": "…"}           // one blob: Digest with pending [] and both summaries
+
+// tags/complete
+bafb01ab…
 ```
 
-Stamped on clean exit when the store's retention is `retain` (the `JsonFileCheckpointStore`
-default). `run(resume=True)` treats a history whose latest commit is this marker as a fresh
-start instead of replaying the old halt commit. With `retention="gc_on_success"` the history is
-deleted instead.
+The history is the chain final-state commit → halt commit, written by two different processes:
+run 2 read the head from the store before its first commit and parented on it.
+
+Written on clean exit when the store's retention is `retain` (the `JsonFileCheckpointStore`
+default). It is an ordinary scope commit of the top-level state at the reserved `node_path` `$end`,
+so the head always holds the state the last run ended with, even when no save point fired during
+the run. The `complete` tag moves to it. `run(resume=True)` treats a history whose latest commit
+carries the tag as a fresh start instead of replaying the old halt commit; the fresh run's commits
+extend the same history, and its first one leaves the tag behind. With
+`retention="gc_on_success"` the history is deleted instead.
 
 ## Save sites
 
@@ -229,7 +255,7 @@ deleted instead.
 | Iterate halt observation (top of each pass) | Yes — run 1 | Halt set during pass 1; observed before pass 2. |
 | Iterate boundary, `outcome="ok"` | No | `CheckpointPolicy.on_iterate` is off by default; enable with `flow.with_checkpoint_policy(CheckpointPolicy(on_iterate=True))`. |
 | Chain between-step / trailing halt | No | Only the top-level chain saves; the body chain is nested, so halt propagates to the iterate boundary where iteration state is consistent. |
-| Completion marker | Yes — run 2 | Clean exit, `retain` retention. |
+| Final-state commit (`$end`, tagged `complete`) | Yes — run 2 | Clean exit, `retain` retention. |
 | Explicit `ctx.checkpoint()` | No | The verb does not call it. |
 
 ## Two contracts the example depends on

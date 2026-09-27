@@ -917,7 +917,7 @@ class Flow:
             **kwargs,
         )
         assert_replay_consumed(self, replay)
-        await apply_clean_exit_retention(self)
+        await apply_clean_exit_retention(self, active_state)
         return result
 
     async def _run_as_subflow(

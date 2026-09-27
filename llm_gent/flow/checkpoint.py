@@ -13,7 +13,7 @@ it:
   generated on the first save. Every object, ref and commit is keyed by
   ``flow_id``; the agent's name never enters stored objects.
 
-The store is a Protocol with four surfaces:
+The store is a Protocol with five surfaces:
 
 - **Name map** — :meth:`get_flow_id` / :meth:`put_flow_id` map a
   ``client_flow_id`` to its ``flow_id``. At most one history per name.
@@ -33,8 +33,14 @@ The store is a Protocol with four surfaces:
   a full or partial key (``node_path=None, iteration=None`` returns the
   latest commit across the history — the resume entry point).
 
-- **History cleanup** — :meth:`gc_history` removes every object, ref
-  and the name mapping of one ``flow_id``. The framework calls it on a
+- **Tags** — :meth:`put_tag` / :meth:`resolve_tag` point a named label
+  under ``flow_id`` at a commit hash. A tag moves when re-put. The
+  framework maintains ``"complete"``: on a clean exit it commits the
+  final state and tags it; the history is complete while that tag
+  points at the latest commit.
+
+- **History cleanup** — :meth:`gc_history` removes every object, ref,
+  tag and the name mapping of one ``flow_id``. The framework calls it on a
   fully successful :meth:`Flow.run` when the store's retention policy is
   ``"gc_on_success"``; the default ``"retain"`` keeps successful
   histories on disk for audit, cross-run diff, and downstream
@@ -80,6 +86,14 @@ Values match :mod:`llm_gent.flow.state.cas`:
 - ``"tree"`` — canonical JSON of ordered ``TreeEntry`` list.
 - ``"commit"`` — canonical JSON of ``(root_tree_hash, parent_hashes,
   meta)``.
+"""
+
+
+COMPLETE_TAG = "complete"
+"""Tag the framework moves to a history's final-state commit on clean exit.
+
+The history is complete while this tag points at its latest commit; any
+later commit (a new run appending to the history) leaves it behind.
 """
 
 
@@ -174,9 +188,9 @@ async def maybe_await(value: Any) -> Any:
 class CheckpointStore(Protocol):
     """Content-addressed persistence for Flow histories.
 
-    Two surfaces on one Protocol: object store (put / get / has for
-    opaque bytes keyed by content hash) and ref store (points a
-    history key at a commit hash). See the module docstring for the
+    Name map, object store (put / get / has for opaque bytes keyed by
+    content hash), ref store (points a history key at a commit hash),
+    tags, and cleanup on one Protocol. See the module docstring for the
     object model and retention policy.
 
     Each method may be declared ``def`` (returning its value directly)
@@ -321,10 +335,28 @@ class CheckpointStore(Protocol):
         """
         ...
 
+    # Tags
+
+    def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None | Awaitable[None]:
+        """Point the tag ``name`` under ``flow_id`` at ``commit_hash``.
+
+        Overwrites: re-putting a tag moves it.
+
+        May be declared ``async def``.
+        """
+        ...
+
+    def resolve_tag(self, flow_id: str, name: str) -> str | None | Awaitable[str | None]:
+        """Return the commit hash the tag ``name`` points at, or ``None``.
+
+        May be declared ``async def``.
+        """
+        ...
+
     # History cleanup
 
     def gc_history(self, flow_id: str) -> None | Awaitable[None]:
-        """Remove every object and ref under ``flow_id``, and its name mapping.
+        """Remove every object, ref and tag under ``flow_id``, and its name mapping.
 
         Idempotent: absence is not an error. Called by :meth:`Flow.run`'s
         clean-exit path when :attr:`retention` is ``"gc_on_success"``;

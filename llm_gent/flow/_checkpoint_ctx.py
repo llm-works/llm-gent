@@ -145,6 +145,19 @@ class CheckpointContext:
         result: bytes | None = await maybe_await(self.store.get_object(flow_id, kind, content_hash))
         return result
 
+    async def put_tag(self, name: str, commit_hash: str) -> None:
+        """Point tag ``name`` under this history at ``commit_hash``."""
+        flow_id = await self.ensure_flow_id()
+        await maybe_await(self.store.put_tag(flow_id, name, commit_hash))
+
+    async def resolve_tag(self, name: str) -> str | None:
+        """Commit hash tag ``name`` points at, or ``None`` (incl. no history)."""
+        flow_id = await self.lookup_flow_id()
+        if flow_id is None:
+            return None
+        result: str | None = await maybe_await(self.store.resolve_tag(flow_id, name))
+        return result
+
     async def gc_history(self) -> None:
         """Remove this history (objects, refs, name mapping); the next save starts a new one."""
         flow_id = await self.lookup_flow_id()
@@ -194,8 +207,8 @@ class CheckpointContext:
         current_state: State[Any],
         outcome: CommitOutcome,
         trace_ref: tuple[TraceRef, ...] = (),
-    ) -> None:
-        """Persist a content-addressed scope commit at ``node_id``.
+    ) -> Commit:
+        """Persist a content-addressed scope commit at ``node_id``; return it.
 
         Walks the scope stack from root to ``current_state``. For
         each scope: serialize its ``data`` via the state-data
@@ -224,7 +237,7 @@ class CheckpointContext:
         node_path = "/".join(ancestor_chain + (node_id,))
         flow_id = await self.ensure_flow_id()
         meta = self._build_commit_meta(flow_id, node_path, iteration, node_id, outcome, trace_ref)
-        await self.append_commit(tree.content_hash, meta)
+        return await self.append_commit(tree.content_hash, meta)
 
     # --- private helpers used by save_scope_commit ---
 

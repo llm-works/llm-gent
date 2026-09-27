@@ -4,8 +4,8 @@
 """Unit tests for :class:`llm_gent.flow.stores.JsonFileCheckpointStore`.
 
 Direct surface tests: object put/get/has round-trip, ref put/resolve
-across the three key forms, gc_history idempotency, path-traversal
-guards, retention default. End-to-end resume behavior is covered in
+across the three key forms, name map, tags, gc_history idempotency,
+path-traversal guards, retention default. End-to-end resume behavior is covered in
 :mod:`tests.unit.flow.test_checkpoint`.
 """
 
@@ -123,6 +123,49 @@ class TestRefStore:
 
 
 # ---------------------------------------------------------------------------
+# Name map
+# ---------------------------------------------------------------------------
+
+
+class TestNameMap:
+    def test_put_get_round_trip(self, store: JsonFileCheckpointStore) -> None:
+        store.put_flow_id("campaign-1", "history-1")
+        assert store.get_flow_id("campaign-1") == "history-1"
+
+    def test_get_returns_none_when_unbound(self, store: JsonFileCheckpointStore) -> None:
+        assert store.get_flow_id("campaign-1") is None
+
+    def test_rebinding_a_name_raises(self, store: JsonFileCheckpointStore) -> None:
+        store.put_flow_id("campaign-1", "history-1")
+        with pytest.raises(ValueError, match="already bound"):
+            store.put_flow_id("campaign-1", "history-2")
+        assert store.get_flow_id("campaign-1") == "history-1"
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+
+class TestTags:
+    def test_put_resolve_round_trip(self, store: JsonFileCheckpointStore) -> None:
+        store.put_tag("history-1", "complete", "commit-h")
+        assert store.resolve_tag("history-1", "complete") == "commit-h"
+
+    def test_resolve_returns_none_when_absent(self, store: JsonFileCheckpointStore) -> None:
+        assert store.resolve_tag("history-1", "complete") is None
+
+    def test_re_put_moves_the_tag(self, store: JsonFileCheckpointStore) -> None:
+        store.put_tag("history-1", "complete", "commit-1")
+        store.put_tag("history-1", "complete", "commit-2")
+        assert store.resolve_tag("history-1", "complete") == "commit-2"
+
+    def test_tags_do_not_leak_across_histories(self, store: JsonFileCheckpointStore) -> None:
+        store.put_tag("history-a", "complete", "hash-a")
+        assert store.resolve_tag("history-b", "complete") is None
+
+
+# ---------------------------------------------------------------------------
 # gc_history
 # ---------------------------------------------------------------------------
 
@@ -134,6 +177,15 @@ class TestGcHistory:
         store.gc_history("history-1")
         assert store.get_object("history-1", "blob", "h1") is None
         assert store.resolve_ref("history-1", "node/x", 1) is None
+
+    def test_removes_tags_and_name_binding(self, store: JsonFileCheckpointStore) -> None:
+        store.put_flow_id("campaign-1", "history-1")
+        store.put_tag("history-1", "complete", "commit-h")
+        store.gc_history("history-1")
+        assert store.resolve_tag("history-1", "complete") is None
+        assert store.get_flow_id("campaign-1") is None
+        store.put_flow_id("campaign-1", "history-2")  # name is free again
+        assert store.get_flow_id("campaign-1") == "history-2"
 
     def test_idempotent_when_absent(self, store: JsonFileCheckpointStore) -> None:
         store.gc_history("never-existed")  # no raise
@@ -186,6 +238,13 @@ class TestPathTraversalGuards:
     ) -> None:
         with pytest.raises(ValueError):
             store.put_ref("history-1", bad_path, 1, "hash")
+
+    @pytest.mark.parametrize("bad_name", ["", ".", ".."])
+    def test_rejects_adversarial_names(self, store: JsonFileCheckpointStore, bad_name: str) -> None:
+        with pytest.raises(ValueError):
+            store.put_tag("history-1", bad_name, "hash")
+        with pytest.raises(ValueError):
+            store.put_flow_id(bad_name, "history-1")
 
     def test_slash_and_special_chars_supported(self, store: JsonFileCheckpointStore) -> None:
         """URL-quoting round-trips arbitrary caller strings through path segments."""
