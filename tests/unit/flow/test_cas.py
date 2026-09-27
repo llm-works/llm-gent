@@ -37,7 +37,7 @@ from llm_gent.flow.state.cas import (
 
 def _meta(
     *,
-    client_flow_id: str = "flow-1",
+    flow_id: str = "flow-1",
     node_path: str = "n1",
     iteration: int = 1,
     node_id: str = "n1",
@@ -52,7 +52,7 @@ def _meta(
 ) -> CommitMeta:
     """Build a CommitMeta for tests without repeating every field."""
     return CommitMeta(
-        client_flow_id=client_flow_id,
+        flow_id=flow_id,
         node_path=node_path,
         iteration=iteration,
         produced_by=ProducedBy(

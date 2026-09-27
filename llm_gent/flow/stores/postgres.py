@@ -3,20 +3,22 @@
 
 """Postgres-backed :class:`CheckpointStore` — content-addressed object + ref store.
 
-Two tables, one row per object / ref respectively:
+Three tables:
 
-- :class:`FlowObject` — ``(client_flow_id, kind, content_hash)`` PK,
+- :class:`FlowName` — ``client_flow_id`` PK → ``flow_id`` (unique): the
+  agent's name for a history mapped to gent's internal id.
+- :class:`FlowObject` — ``(flow_id, kind, content_hash)`` PK,
   ``BYTEA payload``. Idempotent puts via ``ON CONFLICT DO NOTHING``:
   content-hashing guarantees same-hash → same bytes, so a re-put is a
   no-op.
-- :class:`FlowRef` — ``(client_flow_id, node_path, iteration)`` PK,
+- :class:`FlowRef` — ``(flow_id, node_path, iteration)`` PK,
   ``VARCHAR(64) commit_hash``, ``TIMESTAMPTZ created_at``. Idempotent
   overwrite via ``ON CONFLICT DO UPDATE`` refreshing ``created_at`` so
   the latest ref is discoverable by ``ORDER BY created_at DESC``.
 
-Both tables scope everything by ``client_flow_id`` — history-scoped
+Object and ref tables scope everything by ``flow_id`` — history-scoped
 storage; blobs are deliberately not shared across histories.
-:meth:`gc_history` is two DELETE statements.
+:meth:`gc_history` is three DELETE statements.
 
 Schema is not managed by the store. Consumers call
 :func:`llm_gent.ensure_schema` (or :class:`llm_gent.schema.SchemaManager`
@@ -46,24 +48,44 @@ from llm_gent.schema import Base
 from ..checkpoint import Kind, Retention
 
 
+_FLOW_ID_LEN = 36
+"""Length of a ``flow_id`` column — a canonical UUID string."""
+
+
+class FlowName(Base):
+    """One row = one agent-chosen ``client_flow_id`` bound to its history's ``flow_id``.
+
+    Kept in sync with :mod:`llm_gent.migrations.versions.001_initial_flow_cas`
+    (which owns the DDL), like the other models below.
+    """
+
+    __tablename__ = "llm_gent_flow_name"
+
+    client_flow_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
 class FlowObject(Base):
     """One row = one content-addressed object under a history.
 
-    Kept in sync with :mod:`llm_gent.migrations.versions.001_initial_flow_checkpoint`
+    Kept in sync with :mod:`llm_gent.migrations.versions.001_initial_flow_cas`
     (which owns the DDL). Any schema change lands as both a new alembic
     revision and a matching model edit.
     """
 
     __tablename__ = "llm_gent_flow_object"
 
-    client_flow_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
     kind: Mapped[str] = mapped_column(String(16), primary_key=True)
     content_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
 class FlowRef(Base):
-    """One row = one ``(client_flow_id, node_path, iteration)`` → commit_hash.
+    """One row = one ``(flow_id, node_path, iteration)`` → commit_hash.
 
     ``created_at`` is refreshed on every put so :meth:`resolve_ref` can
     return the newest ref across a history via ``ORDER BY created_at
@@ -72,7 +94,7 @@ class FlowRef(Base):
 
     __tablename__ = "llm_gent_flow_ref"
 
-    client_flow_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
     node_path: Mapped[str] = mapped_column(String(1024), primary_key=True)
     iteration: Mapped[int] = mapped_column(Integer, primary_key=True)
     commit_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -108,38 +130,53 @@ class PgCheckpointStore:
         self.retention = retention
 
     # ------------------------------------------------------------------
+    # Name map
+    # ------------------------------------------------------------------
+
+    def get_flow_id(self, client_flow_id: str) -> str | None:
+        """Return the ``flow_id`` bound to ``client_flow_id``, or ``None``."""
+        stmt = select(FlowName.flow_id).where(FlowName.client_flow_id == client_flow_id)
+        with self._pg.session() as session:
+            row = session.execute(stmt).first()
+        return None if row is None else str(row[0])
+
+    def put_flow_id(self, client_flow_id: str, flow_id: str) -> None:
+        """Bind ``client_flow_id`` → ``flow_id``; a second bind of the name raises (PK)."""
+        stmt = insert(FlowName).values(client_flow_id=client_flow_id, flow_id=flow_id)
+        with self._pg.session() as session:
+            session.execute(stmt)
+
+    # ------------------------------------------------------------------
     # Object store
     # ------------------------------------------------------------------
 
     def put_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
         payload: bytes,
     ) -> None:
         """Idempotent insert — ``ON CONFLICT DO NOTHING`` on the PK."""
         stmt = insert(FlowObject).values(
-            client_flow_id=client_flow_id,
+            flow_id=flow_id,
             kind=kind,
             content_hash=content_hash,
             payload=payload,
         )
-        stmt = stmt.on_conflict_do_nothing(
-            index_elements=["client_flow_id", "kind", "content_hash"]
-        )
+        stmt = stmt.on_conflict_do_nothing(index_elements=["flow_id", "kind", "content_hash"])
         with self._pg.session() as session:
             session.execute(stmt)
 
     def get_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
     ) -> bytes | None:
         """Return the payload bytes for the object, or ``None`` on miss."""
         stmt = select(FlowObject.payload).where(
-            FlowObject.client_flow_id == client_flow_id,
+            FlowObject.flow_id == flow_id,
             FlowObject.kind == kind,
             FlowObject.content_hash == content_hash,
         )
@@ -149,13 +186,13 @@ class PgCheckpointStore:
 
     def has_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
     ) -> bool:
         """Return ``True`` when the object row exists."""
         stmt = select(FlowObject.content_hash).where(
-            FlowObject.client_flow_id == client_flow_id,
+            FlowObject.flow_id == flow_id,
             FlowObject.kind == kind,
             FlowObject.content_hash == content_hash,
         )
@@ -168,20 +205,20 @@ class PgCheckpointStore:
 
     def put_ref(
         self,
-        client_flow_id: str,
+        flow_id: str,
         node_path: str,
         iteration: int,
         commit_hash: str,
     ) -> None:
         """Idempotent overwrite — refreshes ``created_at`` on re-put."""
         stmt = insert(FlowRef).values(
-            client_flow_id=client_flow_id,
+            flow_id=flow_id,
             node_path=node_path,
             iteration=iteration,
             commit_hash=commit_hash,
         )
         stmt = stmt.on_conflict_do_update(
-            index_elements=["client_flow_id", "node_path", "iteration"],
+            index_elements=["flow_id", "node_path", "iteration"],
             set_={"commit_hash": stmt.excluded.commit_hash, "created_at": datetime.now(UTC)},
         )
         with self._pg.session() as session:
@@ -189,7 +226,7 @@ class PgCheckpointStore:
 
     def resolve_ref(
         self,
-        client_flow_id: str,
+        flow_id: str,
         node_path: str | None = None,
         iteration: int | None = None,
     ) -> str | None:
@@ -199,7 +236,7 @@ class PgCheckpointStore:
         """
         if node_path is None and iteration is not None:
             raise ValueError("iteration requires node_path; use both or neither")
-        stmt = select(FlowRef.commit_hash).where(FlowRef.client_flow_id == client_flow_id)
+        stmt = select(FlowRef.commit_hash).where(FlowRef.flow_id == flow_id)
         if node_path is not None:
             stmt = stmt.where(FlowRef.node_path == node_path)
         if iteration is not None:
@@ -220,8 +257,9 @@ class PgCheckpointStore:
     # History cleanup
     # ------------------------------------------------------------------
 
-    def gc_history(self, client_flow_id: str) -> None:
-        """Delete every object and ref under ``client_flow_id``. Idempotent."""
+    def gc_history(self, flow_id: str) -> None:
+        """Delete every object and ref under ``flow_id`` and its name binding. Idempotent."""
         with self._pg.session() as session:
-            session.execute(delete(FlowRef).where(FlowRef.client_flow_id == client_flow_id))
-            session.execute(delete(FlowObject).where(FlowObject.client_flow_id == client_flow_id))
+            session.execute(delete(FlowRef).where(FlowRef.flow_id == flow_id))
+            session.execute(delete(FlowObject).where(FlowObject.flow_id == flow_id))
+            session.execute(delete(FlowName).where(FlowName.flow_id == flow_id))

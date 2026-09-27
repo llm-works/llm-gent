@@ -195,19 +195,19 @@ async def stamp_completion_marker(flow: Flow) -> None:
     assert flow._checkpoint_ctx is not None
     ctx = flow._checkpoint_ctx
     empty_tree = Tree.from_entries([])
-    meta = _build_completion_marker_meta(ctx.client_flow_id)
+    meta = _build_completion_marker_meta(await ctx.ensure_flow_id())
     commit = Commit.build(root_tree_hash=empty_tree.content_hash, parent_hashes=(), meta=meta)
     await ctx.put_tree(empty_tree)
     await ctx.put_commit(commit)
     await ctx.put_ref("$complete", 0, commit.content_hash)
 
 
-def _build_completion_marker_meta(client_flow_id: str) -> CommitMeta:
+def _build_completion_marker_meta(flow_id: str) -> CommitMeta:
     """Build :class:`CommitMeta` for the completion sentinel."""
     from llm_gent import __version__
 
     return CommitMeta(
-        client_flow_id=client_flow_id,
+        flow_id=flow_id,
         node_path="$complete",
         iteration=0,
         produced_by=ProducedBy(node_id="$complete", verb_name=None, role=None, result_hash=None),

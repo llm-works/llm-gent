@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import uuid
+from typing import Any
+
 from appinfra.log import Logger, quick_console_logger
 
 from llm_gent.flow import FlowFactory, Role, SAIAFactory
@@ -17,6 +20,20 @@ ROLE_B = Role(name="b", backend="anthropic", model="claude-3-5")
 def make_test_logger() -> Logger:
     """Return a logger for tests (suppressed output)."""
     return quick_console_logger("test", config={"level": "error"})
+
+
+def flow_id_for(store: Any, client_flow_id: str) -> str:
+    """Return the ``flow_id`` bound to ``client_flow_id`` in a sync store.
+
+    Binds a fresh one when the name is unbound, so tests can also seed
+    objects / refs under a name before any flow ran. Stores key every
+    object and ref by ``flow_id``; tests address histories by name.
+    """
+    flow_id: str | None = store.get_flow_id(client_flow_id)
+    if flow_id is None:
+        flow_id = str(uuid.uuid4())
+        store.put_flow_id(client_flow_id, flow_id)
+    return flow_id
 
 
 class StubSAIA:

@@ -3,30 +3,44 @@
 
 """CheckpointStore — content-addressed persistence for Flow histories.
 
-The store is a two-surface Protocol:
+A *history* is the line of commits one flow instance writes. Two ids name
+it:
+
+- ``client_flow_id`` — the agent's name for the history, supplied through
+  the public API (``with_checkpointer`` / ``FlowFactory.create``). Used only
+  to look the history up.
+- ``flow_id`` — gent's internal identity for the history: an opaque UUID
+  generated on the first save. Every object, ref and commit is keyed by
+  ``flow_id``; the agent's name never enters stored objects.
+
+The store is a Protocol with four surfaces:
+
+- **Name map** — :meth:`get_flow_id` / :meth:`put_flow_id` map a
+  ``client_flow_id`` to its ``flow_id``. At most one history per name.
 
 - **Object store** — content-addressed put / get / has for opaque bytes,
-  keyed by ``(client_flow_id, kind, content_hash)``. ``kind`` is one of
+  keyed by ``(flow_id, kind, content_hash)``. ``kind`` is one of
   ``"blob"`` / ``"tree"`` / ``"commit"``, the object triad from
   :mod:`llm_gent.flow.state.cas`. Objects are history-scoped: each
-  ``client_flow_id`` owns its objects, so gc at history boundaries is
+  ``flow_id`` owns its objects, so gc at history boundaries is
   self-contained. Content-addressing still holds within a history —
   identical byte payloads produce identical blob hashes, so a resume's
   reconstruction is byte-exact.
 
-- **Ref store** — points ``(client_flow_id, node_path, iteration)`` at a
+- **Ref store** — points ``(flow_id, node_path, iteration)`` at a
   commit hash. ``put_ref`` records "this history reached this commit
   at this iterate boundary"; ``resolve_ref`` returns the commit hash for
   a full or partial key (``node_path=None, iteration=None`` returns the
   latest commit across the history — the resume entry point).
 
-- **History cleanup** — :meth:`gc_history` removes every object
-  and ref under one ``client_flow_id``. The framework calls it on a
+- **History cleanup** — :meth:`gc_history` removes every object, ref
+  and the name mapping of one ``flow_id``. The framework calls it on a
   fully successful :meth:`Flow.run` when the store's retention policy is
   ``"gc_on_success"``; the default ``"retain"`` keeps successful
   histories on disk for audit, cross-run diff, and downstream
   provenance exporters. Consumers who need explicit cleanup call
-  :meth:`gc_history` themselves.
+  :meth:`gc_history` themselves. A name whose history was collected
+  starts a new history (new ``flow_id``) on its next save.
 
 Every method may be declared ``def`` (returning the value directly) or
 ``async def`` (returning a coroutine). The framework awaits the return
@@ -85,8 +99,7 @@ class CheckpointPolicy:
     - Halt observation — :meth:`HaltSaveObserver.save_if_signaled`
       fires whenever the executor observes the halt event set at
       any of its save sites (iterate boundary, chain between-step,
-      chain tail), provided a checkpointer + client_flow_id are
-      wired. This is the durability guarantee that makes
+      chain tail), provided a checkpointer is wired. This is the durability guarantee that makes
       ``run(resume=True)`` reach a halted history.
     - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires
       regardless of policy; when the verb asks to save, we save.
@@ -146,7 +159,7 @@ async def maybe_await(value: Any) -> Any:
     Use this helper at every checkpoint-store call site so sync and
     async stores are handled uniformly::
 
-        result = await maybe_await(store.get_object(client_flow_id, "commit", h))
+        result = await maybe_await(store.get_object(flow_id, "commit", h))
 
     Uses :func:`inspect.isawaitable`, which returns ``True`` only for
     coroutines and objects with ``__await__``. Generators and async
@@ -185,19 +198,43 @@ class CheckpointStore(Protocol):
     accepts a ``retention=`` keyword argument.
     """
 
+    # Name map
+
+    def get_flow_id(self, client_flow_id: str) -> str | None | Awaitable[str | None]:
+        """Return the ``flow_id`` of the history named ``client_flow_id``, or ``None``.
+
+        ``None`` means no history exists under that name (never saved, or
+        collected by :meth:`gc_history`).
+
+        May be declared ``async def``.
+        """
+        ...
+
+    def put_flow_id(self, client_flow_id: str, flow_id: str) -> None | Awaitable[None]:
+        """Record that ``client_flow_id`` names the history ``flow_id``.
+
+        Called once per history, by the framework, on its first save —
+        after :meth:`get_flow_id` returned ``None``. Under the
+        single-writer contract a name is never bound twice concurrently;
+        implementations MAY raise if the name is already bound.
+
+        May be declared ``async def``.
+        """
+        ...
+
     # Object store
 
     def put_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
         payload: bytes,
     ) -> None | Awaitable[None]:
-        """Persist ``payload`` under ``(client_flow_id, kind, content_hash)``.
+        """Persist ``payload`` under ``(flow_id, kind, content_hash)``.
 
-        Idempotent — the same ``(client_flow_id, kind, content_hash)`` re-
-        put with the same bytes MUST be a no-op. Because ``content_hash``
+        Idempotent — the same ``(flow_id, kind, content_hash)`` re-put
+        with the same bytes MUST be a no-op. Because ``content_hash``
         is derived from ``payload``, differing bytes under the same hash
         indicate either a hash collision or corruption; implementations
         MAY raise on that condition.
@@ -208,11 +245,11 @@ class CheckpointStore(Protocol):
 
     def get_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
     ) -> bytes | None | Awaitable[bytes | None]:
-        """Return the payload for ``(client_flow_id, kind, content_hash)``, or ``None``.
+        """Return the payload for ``(flow_id, kind, content_hash)``, or ``None``.
 
         Absence is not an error — callers routinely probe for objects
         that may not exist yet (dedup shortcut on save).
@@ -223,11 +260,11 @@ class CheckpointStore(Protocol):
 
     def has_object(
         self,
-        client_flow_id: str,
+        flow_id: str,
         kind: Kind,
         content_hash: str,
     ) -> bool | Awaitable[bool]:
-        """Return ``True`` when ``(client_flow_id, kind, content_hash)`` exists.
+        """Return ``True`` when ``(flow_id, kind, content_hash)`` exists.
 
         Cheaper than :meth:`get_object` when the caller only needs to
         know whether to skip a put — the dedup shortcut on save.
@@ -240,12 +277,12 @@ class CheckpointStore(Protocol):
 
     def put_ref(
         self,
-        client_flow_id: str,
+        flow_id: str,
         node_path: str,
         iteration: int,
         commit_hash: str,
     ) -> None | Awaitable[None]:
-        """Point ``(client_flow_id, node_path, iteration)`` at ``commit_hash``.
+        """Point ``(flow_id, node_path, iteration)`` at ``commit_hash``.
 
         Idempotent overwrite: the same key re-put with a different
         commit_hash replaces the earlier record. Callers rely on this
@@ -257,7 +294,7 @@ class CheckpointStore(Protocol):
 
     def resolve_ref(
         self,
-        client_flow_id: str,
+        flow_id: str,
         node_path: str | None = None,
         iteration: int | None = None,
     ) -> str | None | Awaitable[str | None]:
@@ -266,7 +303,7 @@ class CheckpointStore(Protocol):
         Argument combinations:
 
         - Both ``None`` (default) — return the latest commit across every
-          ``node_path`` under ``client_flow_id``. This is what
+          ``node_path`` under ``flow_id``. This is what
           :meth:`Flow.run` ``resume=True`` calls to find the resume
           entry point.
         - ``node_path`` set, ``iteration=None`` — latest iteration under
@@ -286,8 +323,8 @@ class CheckpointStore(Protocol):
 
     # History cleanup
 
-    def gc_history(self, client_flow_id: str) -> None | Awaitable[None]:
-        """Remove every object and ref under ``client_flow_id``.
+    def gc_history(self, flow_id: str) -> None | Awaitable[None]:
+        """Remove every object and ref under ``flow_id``, and its name mapping.
 
         Idempotent: absence is not an error. Called by :meth:`Flow.run`'s
         clean-exit path when :attr:`retention` is ``"gc_on_success"``;

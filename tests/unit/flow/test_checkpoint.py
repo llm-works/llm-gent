@@ -31,7 +31,7 @@ from llm_gent.flow.testing.checkpoint import (
     build_canonical_flow,
 )
 
-from .conftest import make_test_logger
+from .conftest import flow_id_for, make_test_logger
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -60,7 +60,7 @@ class TestFreshRunSaves:
             make_test_logger(), max_iters=3, store=store, client_flow_id="freshrun"
         ).run()
         # A resolvable ref exists — the history reached at least one commit.
-        assert store.resolve_ref("freshrun") is not None
+        assert store.resolve_ref(flow_id_for(store, "freshrun")) is not None
 
     async def test_default_retention_keeps_history_on_success(
         self, store: JsonFileCheckpointStore
@@ -70,7 +70,7 @@ class TestFreshRunSaves:
             make_test_logger(), max_iters=2, store=store, client_flow_id="retain-1"
         ).run()
         # Successful run — but retention="retain" so the ref survives.
-        assert store.resolve_ref("retain-1") is not None
+        assert store.resolve_ref(flow_id_for(store, "retain-1")) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,8 @@ class TestRetention:
         await build_canonical_flow(
             make_test_logger(), max_iters=2, store=store, client_flow_id="gc-1"
         ).run()
-        assert store.resolve_ref("gc-1") is None
+        # History collected, including the name binding: the next save starts a new one.
+        assert store.get_flow_id("gc-1") is None
 
     async def test_halt_preserves_history_regardless_of_retention(self, tmp_path: Path) -> None:
         """A halt-triggered exit preserves the history even under gc_on_success —
@@ -105,7 +106,7 @@ class TestRetention:
             store=store,
             client_flow_id="halt-preserve",
         ).run()
-        assert store.resolve_ref("halt-preserve") is not None
+        assert store.resolve_ref(flow_id_for(store, "halt-preserve")) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +150,9 @@ class TestCheckpointPolicyIterate:
         # (only the clean-exit completion marker fires under the default
         # policy). Walking the commit objects on disk reveals no iterate-
         # boundary commits.
-        commits_dir = store._root / "policy-halt-only" / "objects" / "commit"  # type: ignore[attr-defined]
+        commits_dir = (
+            store._history_dir(flow_id_for(store, "policy-halt-only")) / "objects" / "commit"
+        )
         node_paths: set[str] = set()
         for f in commits_dir.iterdir():
             payload = f.read_bytes()
@@ -191,7 +194,9 @@ class TestCheckpointPolicyIterate:
         # iteration + a $complete marker on clean exit. Group commit
         # objects by node_path: 3 boundary commits share the iterate's
         # node_path, plus one $complete marker.
-        commits_dir = store._root / "policy-on-iter" / "objects" / "commit"  # type: ignore[attr-defined]
+        commits_dir = (
+            store._history_dir(flow_id_for(store, "policy-on-iter")) / "objects" / "commit"
+        )
         by_node_path: dict[str, int] = {}
         for f in commits_dir.iterdir():
             commit = Commit.from_bytes(f.read_bytes())
@@ -228,7 +233,7 @@ class TestCheckpointPolicyMap:
         )
         await outer.run()
 
-        commits_dir = store._root / "map-default" / "objects" / "commit"  # type: ignore[attr-defined]
+        commits_dir = store._history_dir(flow_id_for(store, "map-default")) / "objects" / "commit"
         node_paths: set[str] = set()
         for f in commits_dir.iterdir():
             node_paths.add(Commit.from_bytes(f.read_bytes()).meta.node_path)
@@ -264,7 +269,7 @@ class TestCheckpointPolicyMap:
         )
         await outer.run()
 
-        commits_dir = store._root / "map-on-item" / "objects" / "commit"  # type: ignore[attr-defined]
+        commits_dir = store._history_dir(flow_id_for(store, "map-on-item")) / "objects" / "commit"
         iterations_at_map_path: dict[str, list[int]] = {}
         for f in commits_dir.iterdir():
             commit = Commit.from_bytes(f.read_bytes())
@@ -307,7 +312,7 @@ class TestCtxCheckpoint:
 
         # Two commits total: one from the explicit ctx.checkpoint() (verb's
         # chain-step node) + one $complete marker on clean exit.
-        commits_dir = store._root / "ctx-ckpt" / "objects" / "commit"  # type: ignore[attr-defined]
+        commits_dir = store._history_dir(flow_id_for(store, "ctx-ckpt")) / "objects" / "commit"
         node_paths: list[str] = []
         for f in commits_dir.iterdir():
             node_paths.append(Commit.from_bytes(f.read_bytes()).meta.node_path)
@@ -405,9 +410,11 @@ class TestPausedTurnTraceRef:
         )
         await flow.run()
 
-        halted_hash = store.resolve_ref("paused-turn-1")
+        halted_hash = store.resolve_ref(flow_id_for(store, "paused-turn-1"))
         assert halted_hash is not None
-        commit = Commit.from_bytes(store.get_object("paused-turn-1", "commit", halted_hash) or b"")
+        commit = Commit.from_bytes(
+            store.get_object(flow_id_for(store, "paused-turn-1"), "commit", halted_hash) or b""
+        )
         assert commit.meta.outcome == "halted"
         # trace_ref carries exactly one paused_turn entry whose id encodes the
         # Loop's node_id and the blob hash; the blob bytes match canonical_json
@@ -418,7 +425,7 @@ class TestPausedTurnTraceRef:
         node_id, _, blob_hash = ref.id.partition(":")
         assert node_id and blob_hash
         expected = canonical_json({"task": "t", "conversation": conv.to_dict()})
-        stored = store.get_object("paused-turn-1", "blob", blob_hash)
+        stored = store.get_object(flow_id_for(store, "paused-turn-1"), "blob", blob_hash)
         assert stored == expected
 
     async def test_sibling_non_paused_clear_does_not_erase_other_loops_bytes(
@@ -498,10 +505,10 @@ class TestPausedTurnTraceRef:
         )
         await flow.run()
 
-        halted_hash = store.resolve_ref("paused-turn-multi")
+        halted_hash = store.resolve_ref(flow_id_for(store, "paused-turn-multi"))
         assert halted_hash is not None
         commit = Commit.from_bytes(
-            store.get_object("paused-turn-multi", "commit", halted_hash) or b""
+            store.get_object(flow_id_for(store, "paused-turn-multi"), "commit", halted_hash) or b""
         )
         assert commit.meta.outcome == "halted"
         # Under the old single-slot design Loop B's non-paused clear would have
@@ -511,7 +518,9 @@ class TestPausedTurnTraceRef:
         assert len(saia_refs) == 1
         _, _, blob_hash = saia_refs[0].id.partition(":")
         expected = canonical_json({"task": "t", "conversation": conv_a.to_dict()})
-        assert store.get_object("paused-turn-multi", "blob", blob_hash) == expected
+        assert (
+            store.get_object(flow_id_for(store, "paused-turn-multi"), "blob", blob_hash) == expected
+        )
 
     async def test_resume_round_trip_hands_reconstructed_conv_and_resume_true(
         self, store: JsonFileCheckpointStore
@@ -851,9 +860,11 @@ class TestSaveOnHaltChain:
         )
         await pre.run()
 
-        halted_hash = store.resolve_ref("chain-halt")
+        halted_hash = store.resolve_ref(flow_id_for(store, "chain-halt"))
         assert halted_hash is not None
-        commit = Commit.from_bytes(store.get_object("chain-halt", "commit", halted_hash) or b"")
+        commit = Commit.from_bytes(
+            store.get_object(flow_id_for(store, "chain-halt"), "commit", halted_hash) or b""
+        )
         assert commit.meta.outcome == "halted"
         assert commit.meta.iteration == 0
         # node_path's last segment is the not-yet-run step's chain id — step_c's.
@@ -932,9 +943,11 @@ class TestSaveOnHaltChain:
         await pre.run()
 
         # Halt fired after step_a, commit saved at the branch position.
-        halted_hash = store.resolve_ref("branch-halt")
+        halted_hash = store.resolve_ref(flow_id_for(store, "branch-halt"))
         assert halted_hash is not None
-        commit = Commit.from_bytes(store.get_object("branch-halt", "commit", halted_hash) or b"")
+        commit = Commit.from_bytes(
+            store.get_object(flow_id_for(store, "branch-halt"), "commit", halted_hash) or b""
+        )
         assert commit.meta.outcome == "halted"
 
         # Resume: branch runs (with its plain verb), then step_c.
@@ -981,9 +994,11 @@ class TestSaveOnHaltChain:
         await pre.run([1, 2, 3])
 
         # Checkpoint saved at step_b (halt observed after step_a)
-        halted_hash = store.resolve_ref("pre-set-halt")
+        halted_hash = store.resolve_ref(flow_id_for(store, "pre-set-halt"))
         assert halted_hash is not None
-        commit = Commit.from_bytes(store.get_object("pre-set-halt", "commit", halted_hash) or b"")
+        commit = Commit.from_bytes(
+            store.get_object(flow_id_for(store, "pre-set-halt"), "commit", halted_hash) or b""
+        )
         assert commit.meta.outcome == "halted"
 
         # Resume with halt cleared — step_b runs, reads items from state
@@ -1039,9 +1054,11 @@ class TestSaveOnHaltChain:
 
         # Checkpoint saved at outer_b (halt observed between outer's call(inner) and outer_b)
         # NOT at inner_b (nested flow's chain-walk skips halt observation)
-        halted_hash = store.resolve_ref("nested-halt")
+        halted_hash = store.resolve_ref(flow_id_for(store, "nested-halt"))
         assert halted_hash is not None
-        commit = Commit.from_bytes(store.get_object("nested-halt", "commit", halted_hash) or b"")
+        commit = Commit.from_bytes(
+            store.get_object(flow_id_for(store, "nested-halt"), "commit", halted_hash) or b""
+        )
         assert commit.meta.outcome == "halted"
 
         # Resume — outer_b runs, inner flow doesn't re-run
@@ -1079,9 +1096,11 @@ class TestSaveOnHaltIterate:
             client_flow_id="halt-iter-0",
         ).run()
 
-        halted_hash = store.resolve_ref("halt-iter-0")
+        halted_hash = store.resolve_ref(flow_id_for(store, "halt-iter-0"))
         assert halted_hash is not None
-        commit = Commit.from_bytes(store.get_object("halt-iter-0", "commit", halted_hash) or b"")
+        commit = Commit.from_bytes(
+            store.get_object(flow_id_for(store, "halt-iter-0"), "commit", halted_hash) or b""
+        )
         assert commit.meta.outcome == "halted"
         assert commit.meta.iteration == 0
 
@@ -1108,9 +1127,11 @@ class TestSaveOnHaltIterate:
             client_flow_id="halt-iter-mid",
         ).run()
 
-        halted_hash = store.resolve_ref("halt-iter-mid")
+        halted_hash = store.resolve_ref(flow_id_for(store, "halt-iter-mid"))
         assert halted_hash is not None
-        commit = Commit.from_bytes(store.get_object("halt-iter-mid", "commit", halted_hash) or b"")
+        commit = Commit.from_bytes(
+            store.get_object(flow_id_for(store, "halt-iter-mid"), "commit", halted_hash) or b""
+        )
         # Halt fired inside body 2's halt_check (iteration counter=2 by the time the loop-top
         # check observed halt). Post-halt-save iteration matches.
         assert commit.meta.outcome == "halted"
@@ -1218,7 +1239,7 @@ class TestResumeErrorPaths:
     ) -> None:
         """Ref points at a commit that isn't stored → treated as absent, fresh run."""
         # Seed a ref pointing at a non-existent commit hash.
-        store.put_ref("orphan-ref", "some/node", 0, "0" * 64)
+        store.put_ref(flow_id_for(store, "orphan-ref"), "some/node", 0, "0" * 64)
         # No corresponding commit object was ever put — resume falls back.
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-ref"
@@ -1237,7 +1258,7 @@ class TestResumeErrorPaths:
         )
 
         meta = CommitMeta(
-            client_flow_id="orphan-tree",
+            flow_id=flow_id_for(store, "orphan-tree"),
             node_path="root",
             iteration=0,
             produced_by=ProducedBy(node_id="x", verb_name=None, role=None, result_hash=None),
@@ -1248,8 +1269,10 @@ class TestResumeErrorPaths:
             framework_version="test",
         )
         commit = Commit.build(root_tree_hash="deadbeef" * 8, parent_hashes=(), meta=meta)
-        store.put_object("orphan-tree", "commit", commit.content_hash, commit.to_bytes())
-        store.put_ref("orphan-tree", "root", 0, commit.content_hash)
+        store.put_object(
+            flow_id_for(store, "orphan-tree"), "commit", commit.content_hash, commit.to_bytes()
+        )
+        store.put_ref(flow_id_for(store, "orphan-tree"), "root", 0, commit.content_hash)
         # Tree object missing → resume falls back.
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-tree"
@@ -1273,7 +1296,7 @@ class TestResumeErrorPaths:
         entry = TreeEntry(scope_id="00", kind="blob", child_hash="c0ffee" * 10 + "1234")
         tree = Tree.from_entries([entry])
         meta = CommitMeta(
-            client_flow_id="orphan-blob",
+            flow_id=flow_id_for(store, "orphan-blob"),
             node_path="root",
             iteration=0,
             produced_by=ProducedBy(node_id="x", verb_name=None, role=None, result_hash=None),
@@ -1284,9 +1307,13 @@ class TestResumeErrorPaths:
             framework_version="test",
         )
         commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
-        store.put_object("orphan-blob", "tree", tree.content_hash, tree.to_bytes())
-        store.put_object("orphan-blob", "commit", commit.content_hash, commit.to_bytes())
-        store.put_ref("orphan-blob", "root", 0, commit.content_hash)
+        store.put_object(
+            flow_id_for(store, "orphan-blob"), "tree", tree.content_hash, tree.to_bytes()
+        )
+        store.put_object(
+            flow_id_for(store, "orphan-blob"), "commit", commit.content_hash, commit.to_bytes()
+        )
+        store.put_ref(flow_id_for(store, "orphan-blob"), "root", 0, commit.content_hash)
         # Blob missing → resume falls back.
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-blob"
@@ -1315,13 +1342,13 @@ class TestResumeErrorPaths:
         # the resume flow's tree.
         stale_path = "cafebabecafebabe/deadbeefdeadbeef"
         blob = Blob.from_bytes(canonical_json({}))
-        store.put_object("stale-1", "blob", blob.content_hash, blob.payload)
+        store.put_object(flow_id_for(store, "stale-1"), "blob", blob.content_hash, blob.payload)
         tree = Tree.from_entries(
             [TreeEntry(scope_id="00", kind="blob", child_hash=blob.content_hash)]
         )
-        store.put_object("stale-1", "tree", tree.content_hash, tree.to_bytes())
+        store.put_object(flow_id_for(store, "stale-1"), "tree", tree.content_hash, tree.to_bytes())
         meta = CommitMeta(
-            client_flow_id="stale-1",
+            flow_id=flow_id_for(store, "stale-1"),
             node_path=stale_path,
             iteration=2,
             produced_by=ProducedBy(node_id="x", verb_name=None, role=None, result_hash=None),
@@ -1332,8 +1359,10 @@ class TestResumeErrorPaths:
             framework_version="test",
         )
         commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
-        store.put_object("stale-1", "commit", commit.content_hash, commit.to_bytes())
-        store.put_ref("stale-1", stale_path, 2, commit.content_hash)
+        store.put_object(
+            flow_id_for(store, "stale-1"), "commit", commit.content_hash, commit.to_bytes()
+        )
+        store.put_ref(flow_id_for(store, "stale-1"), stale_path, 2, commit.content_hash)
         flow = build_canonical_flow(
             make_test_logger(), max_iters=3, store=store, client_flow_id="stale-1"
         )
@@ -1392,16 +1421,19 @@ class TestScopedStateRoundTrip:
         await outer_pre.run()
 
         # Halt-commit's leaf scope (the .call scope) carries counter=2.
-        halted_hash = store.resolve_ref("scoped-1")
+        halted_hash = store.resolve_ref(flow_id_for(store, "scoped-1"))
         assert halted_hash is not None
         halted_commit = Commit.from_bytes(
-            store.get_object("scoped-1", "commit", halted_hash) or b""
+            store.get_object(flow_id_for(store, "scoped-1"), "commit", halted_hash) or b""
         )
         halted_tree = Tree.from_bytes(
-            store.get_object("scoped-1", "tree", halted_commit.root_tree_hash) or b""
+            store.get_object(flow_id_for(store, "scoped-1"), "tree", halted_commit.root_tree_hash)
+            or b""
         )
         leaf_hash = halted_tree.entries[-1].child_hash
-        leaf_data = json.loads((store.get_object("scoped-1", "blob", leaf_hash) or b"").decode())
+        leaf_data = json.loads(
+            (store.get_object(flow_id_for(store, "scoped-1"), "blob", leaf_hash) or b"").decode()
+        )
         assert leaf_data == {"counter": 2}
 
         # Resume — projected scope restores from the commit instead of
@@ -1476,7 +1508,7 @@ class TestScopedStateRoundTrip:
             .call(mid_flow, state=lambda _p: {})
         )
         await outer_pre.run()
-        assert store.resolve_ref("3-level-1") is not None
+        assert store.resolve_ref(flow_id_for(store, "3-level-1")) is not None
 
         # Load the commit and inspect the middle scope's blob directly —
         # end-to-end verification that scope_id "01" carries the witness
@@ -1484,17 +1516,24 @@ class TestScopedStateRoundTrip:
         # the load side.
         from llm_gent.flow.state.cas import Commit, Tree
 
-        commit_hash = store.resolve_ref("3-level-1")
+        commit_hash = store.resolve_ref(flow_id_for(store, "3-level-1"))
         assert commit_hash is not None
-        commit = Commit.from_bytes(store.get_object("3-level-1", "commit", commit_hash) or b"")
-        tree = Tree.from_bytes(store.get_object("3-level-1", "tree", commit.root_tree_hash) or b"")
+        commit = Commit.from_bytes(
+            store.get_object(flow_id_for(store, "3-level-1"), "commit", commit_hash) or b""
+        )
+        tree = Tree.from_bytes(
+            store.get_object(flow_id_for(store, "3-level-1"), "tree", commit.root_tree_hash) or b""
+        )
         # Three scope entries: root (00), middle (01), leaf (02).
         assert [e.scope_id for e in tree.entries] == ["00", "01", "02"]
         middle_entry = tree.entries[1]
         import json
 
         middle_data = json.loads(
-            (store.get_object("3-level-1", "blob", middle_entry.child_hash) or b"").decode()
+            (
+                store.get_object(flow_id_for(store, "3-level-1"), "blob", middle_entry.child_hash)
+                or b""
+            ).decode()
         )
         assert middle_data.get(WITNESS_KEY) == 2, (
             f"middle scope blob should carry the WITNESS mutation; got {middle_data!r}"
@@ -1515,17 +1554,22 @@ class TestScopedStateRoundTrip:
         # Inspect the FINAL commit under the iterate's node_path (the
         # completion marker at "$complete" is skipped by this specific
         # lookup — it's stamped on clean exit).
-        final_commit_hash = store.resolve_ref("3-level-1", commit.meta.node_path)
+        final_commit_hash = store.resolve_ref(
+            flow_id_for(store, "3-level-1"), commit.meta.node_path
+        )
         assert final_commit_hash is not None
         final_commit = Commit.from_bytes(
-            store.get_object("3-level-1", "commit", final_commit_hash) or b""
+            store.get_object(flow_id_for(store, "3-level-1"), "commit", final_commit_hash) or b""
         )
         final_tree = Tree.from_bytes(
-            store.get_object("3-level-1", "tree", final_commit.root_tree_hash) or b""
+            store.get_object(flow_id_for(store, "3-level-1"), "tree", final_commit.root_tree_hash)
+            or b""
         )
         final_middle_hash = next(e.child_hash for e in final_tree.entries if e.scope_id == "01")
         final_middle = json.loads(
-            (store.get_object("3-level-1", "blob", final_middle_hash) or b"").decode()
+            (
+                store.get_object(flow_id_for(store, "3-level-1"), "blob", final_middle_hash) or b""
+            ).decode()
         )
         assert final_middle.get(WITNESS_KEY) == 5, (
             f"resume should have restored the middle scope (WITNESS=2) and "
@@ -1559,6 +1603,14 @@ class TestAsyncStore:
             def retention(self) -> str:
                 return self._inner.retention
 
+            async def get_flow_id(self, *a: Any, **kw: Any) -> str | None:
+                await asyncio.sleep(0)
+                return self._inner.get_flow_id(*a, **kw)
+
+            async def put_flow_id(self, *a: Any, **kw: Any) -> None:
+                await asyncio.sleep(0)
+                self._inner.put_flow_id(*a, **kw)
+
             async def put_object(self, *a: Any, **kw: Any) -> None:
                 await asyncio.sleep(0)
                 self._inner.put_object(*a, **kw)
@@ -1586,7 +1638,15 @@ class TestAsyncStore:
         inner = _Sync(make_test_logger(), tmp_path / "cp")
         wrap = _AsyncWrap(inner)
         # Sanity: every method IS async.
-        for m in ("put_object", "get_object", "put_ref", "resolve_ref", "gc_history"):
+        for m in (
+            "get_flow_id",
+            "put_flow_id",
+            "put_object",
+            "get_object",
+            "put_ref",
+            "resolve_ref",
+            "gc_history",
+        ):
             assert inspect.iscoroutinefunction(getattr(wrap, m))
 
         # Round-trip via the canonical flow: fresh save + resume.

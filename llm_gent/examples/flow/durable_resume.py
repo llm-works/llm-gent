@@ -446,10 +446,11 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
 
 def _latest_commit(store: JsonFileCheckpointStore) -> Commit | None:
     """Return the history's latest commit, or ``None`` for an empty store."""
-    head = store.resolve_ref(CLIENT_FLOW_ID)
-    if head is None:
+    flow_id = store.get_flow_id(CLIENT_FLOW_ID)
+    head = store.resolve_ref(flow_id) if flow_id is not None else None
+    if flow_id is None or head is None:
         return None
-    return Commit.from_bytes(store.get_object(CLIENT_FLOW_ID, "commit", head) or b"")
+    return Commit.from_bytes(store.get_object(flow_id, "commit", head) or b"")
 
 
 def _resume_pending(store: JsonFileCheckpointStore) -> bool:

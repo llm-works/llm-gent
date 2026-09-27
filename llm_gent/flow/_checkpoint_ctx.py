@@ -15,10 +15,17 @@ Presence is the persistence gate. When a Flow was constructed with
 ``.with_checkpointer(store, client_flow_id)`` there is a context;
 otherwise ``env.checkpoint_ctx is None`` and every save site skips.
 No more Optional-pair guards.
+
+The context is also the translation layer between the agent's name
+(``client_flow_id``) and gent's internal history identity
+(``flow_id``): reads look the ``flow_id`` up; the first save creates it.
+Every store call below the context is keyed by ``flow_id``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -50,62 +57,95 @@ class CheckpointContext:
 
     Owns the ``(store, client_flow_id)`` pair unambiguously (both
     fields are always populated once the context exists — the
-    Optional lives at the context level, not per-field). Exposes
-    the put-object triad, ref put/resolve, get_object,
-    gc_history, and the compound :meth:`save_scope_commit` that
-    assembles a Blob→Tree→Commit chain and refs it at the boundary.
+    Optional lives at the context level, not per-field) and caches
+    the history's ``flow_id`` once resolved. Exposes the put-object
+    triad, ref put/resolve, get_object, gc_history, and the compound
+    :meth:`save_scope_commit` that assembles a Blob→Tree→Commit chain
+    and refs it at the boundary.
     """
 
     def __init__(self, store: CheckpointStore, client_flow_id: str) -> None:
         self.store = store
         self.client_flow_id = client_flow_id
+        self._flow_id: str | None = None
+        self._flow_id_lock = asyncio.Lock()
 
     @property
     def retention(self) -> Retention:
         """The store's retention mode (``"retain"`` or ``"gc_on_success"``)."""
         return self.store.retention
 
+    # --- flow_id resolution (client_flow_id → flow_id) ---
+
+    async def lookup_flow_id(self) -> str | None:
+        """Return this history's ``flow_id``, or ``None`` when none exists yet."""
+        if self._flow_id is None:
+            self._flow_id = await maybe_await(self.store.get_flow_id(self.client_flow_id))
+        return self._flow_id
+
+    async def ensure_flow_id(self) -> str:
+        """Return this history's ``flow_id``, creating the history on first call.
+
+        Serialized so concurrent first saves (parallel map items) bind
+        exactly one ``flow_id`` to the name.
+        """
+        async with self._flow_id_lock:
+            flow_id = await self.lookup_flow_id()
+            if flow_id is None:
+                flow_id = str(uuid.uuid4())
+                await maybe_await(self.store.put_flow_id(self.client_flow_id, flow_id))
+                self._flow_id = flow_id
+            return flow_id
+
     # --- store passthrough (kind-specific put_object variants) ---
 
     async def put_blob(self, content_hash: str, payload: bytes) -> None:
-        """Put a blob under this history's ``client_flow_id``."""
-        await maybe_await(self.store.put_object(self.client_flow_id, "blob", content_hash, payload))
+        """Put a blob under this history."""
+        flow_id = await self.ensure_flow_id()
+        await maybe_await(self.store.put_object(flow_id, "blob", content_hash, payload))
 
     async def put_tree(self, tree: Tree) -> None:
         """Serialize + put a Tree under this history."""
+        flow_id = await self.ensure_flow_id()
         await maybe_await(
-            self.store.put_object(self.client_flow_id, "tree", tree.content_hash, tree.to_bytes())
+            self.store.put_object(flow_id, "tree", tree.content_hash, tree.to_bytes())
         )
 
     async def put_commit(self, commit: Commit) -> None:
         """Serialize + put a Commit under this history."""
+        flow_id = await self.ensure_flow_id()
         await maybe_await(
-            self.store.put_object(
-                self.client_flow_id, "commit", commit.content_hash, commit.to_bytes()
-            )
+            self.store.put_object(flow_id, "commit", commit.content_hash, commit.to_bytes())
         )
 
     async def put_ref(self, node_path: str, iteration: int, commit_hash: str) -> None:
-        """Point ``(client_flow_id, node_path, iteration)`` at ``commit_hash``."""
-        await maybe_await(
-            self.store.put_ref(self.client_flow_id, node_path, iteration, commit_hash)
-        )
+        """Point ``(flow_id, node_path, iteration)`` at ``commit_hash``."""
+        flow_id = await self.ensure_flow_id()
+        await maybe_await(self.store.put_ref(flow_id, node_path, iteration, commit_hash))
 
     async def resolve_ref(self) -> str | None:
-        """Latest commit hash across this history, or ``None``."""
-        result: str | None = await maybe_await(self.store.resolve_ref(self.client_flow_id))
+        """Latest commit hash across this history, or ``None`` (incl. no history)."""
+        flow_id = await self.lookup_flow_id()
+        if flow_id is None:
+            return None
+        result: str | None = await maybe_await(self.store.resolve_ref(flow_id))
         return result
 
     async def get_object(self, kind: Kind, content_hash: str) -> bytes | None:
         """Fetch an object under this history by kind + hash."""
-        result: bytes | None = await maybe_await(
-            self.store.get_object(self.client_flow_id, kind, content_hash)
-        )
+        flow_id = await self.lookup_flow_id()
+        if flow_id is None:
+            return None
+        result: bytes | None = await maybe_await(self.store.get_object(flow_id, kind, content_hash))
         return result
 
     async def gc_history(self) -> None:
-        """Remove every object and ref under this ``client_flow_id``."""
-        await maybe_await(self.store.gc_history(self.client_flow_id))
+        """Remove this history (objects, refs, name mapping); the next save starts a new one."""
+        flow_id = await self.lookup_flow_id()
+        if flow_id is None:
+            return
+        await maybe_await(self.store.gc_history(flow_id))
+        self._flow_id = None
 
     # --- compound: save a scope commit ---
 
@@ -127,7 +167,7 @@ class CheckpointContext:
         content hash. Bundle every scope's blob hash into a Tree
         (one :class:`TreeEntry` per scope, ordered by depth via a
         two-digit ``scope_id``). Wrap the Tree in a Commit whose
-        :class:`CommitMeta` pins ``(client_flow_id, node_path,
+        :class:`CommitMeta` pins ``(flow_id, node_path,
         iteration)`` and the provenance triple (``produced_by``,
         ``trace_ref``, ``outcome``). Finally :meth:`put_ref` points
         this boundary at the commit hash.
@@ -145,7 +185,8 @@ class CheckpointContext:
         tree = Tree.from_entries(entries)
         await self.put_tree(tree)
         node_path = "/".join(ancestor_chain + (node_id,))
-        meta = self._build_commit_meta(node_path, iteration, node_id, outcome, trace_ref)
+        flow_id = await self.ensure_flow_id()
+        meta = self._build_commit_meta(flow_id, node_path, iteration, node_id, outcome, trace_ref)
         commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
         await self.put_commit(commit)
         await self.put_ref(node_path, iteration, commit.content_hash)
@@ -179,8 +220,9 @@ class CheckpointContext:
             )
         return entries
 
+    @staticmethod
     def _build_commit_meta(
-        self,
+        flow_id: str,
         node_path: str,
         iteration: int,
         node_id: str,
@@ -198,7 +240,7 @@ class CheckpointContext:
         from llm_gent import __version__
 
         return CommitMeta(
-            client_flow_id=self.client_flow_id,
+            flow_id=flow_id,
             node_path=node_path,
             iteration=iteration,
             produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),

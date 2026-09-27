@@ -7,7 +7,7 @@ Blob / Tree / Commit form a Git-shaped provenance store for gent
 histories. State at every save-point becomes a :class:`Blob` keyed by
 its content hash; an ordered :class:`Tree` of scope entries binds those
 blobs to the state stack; a :class:`Commit` stamps the tree with its
-position in the history (``client_flow_id``, ``node_path``,
+position in the history (``flow_id``, ``node_path``,
 ``iteration``) and provenance metadata (``produced_by``, ``trace_ref``,
 ``outcome``, ``flow_root_hash``).
 
@@ -18,8 +18,8 @@ executor save/resume plumbing are separate concerns.
 Hash discipline
 ---------------
 - All content hashes are :func:`blake2b` with ``digest_size=32``.
-- Content-only — no ``client_flow_id`` / ``node_path`` / ``iteration``
-  salt in the hash. Two identical byte payloads across histories
+- Content-only — no ``flow_id`` / ``node_path`` / ``iteration``
+  salt in the blob hash. Two identical byte payloads across histories
   produce the same blob hash; cross-history diff depends on this.
 - Canonical serialization is versioned via
   :attr:`CommitMeta.framework_version` so a canonicalization change in a
@@ -234,7 +234,9 @@ class CommitMeta:
     every field participating in the commit's identity hash.
     """
 
-    client_flow_id: str
+    flow_id: str
+    """Internal identity of the history this commit belongs to (a UUID).
+    The agent's ``client_flow_id`` is never stored in commits."""
     node_path: str
     iteration: int
     produced_by: ProducedBy
@@ -315,7 +317,7 @@ def _parse_commit_meta(meta_body: dict[str, Any]) -> CommitMeta:
     """Rebuild :class:`CommitMeta` from its canonical JSON body."""
     produced = meta_body["produced_by"]
     return CommitMeta(
-        client_flow_id=meta_body["client_flow_id"],
+        flow_id=meta_body["flow_id"],
         node_path=meta_body["node_path"],
         iteration=meta_body["iteration"],
         produced_by=ProducedBy(
@@ -360,7 +362,7 @@ def _commit_body(
 def _meta_body(meta: CommitMeta) -> dict[str, Any]:
     """Flatten :class:`CommitMeta` to a canonical dict."""
     return {
-        "client_flow_id": meta.client_flow_id,
+        "flow_id": meta.flow_id,
         "node_path": meta.node_path,
         "iteration": meta.iteration,
         "produced_by": {

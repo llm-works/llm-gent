@@ -235,7 +235,7 @@ async def assert_resume_determinism(
         ValueError: If a checkpoint already exists for the client_flow_id,
             or if halt_after_iteration is not in [1, max_iters].
     """
-    if await maybe_await(store.resolve_ref(client_flow_id)) is not None:
+    if await maybe_await(store.get_flow_id(client_flow_id)) is not None:
         raise ValueError(f"checkpoint already exists for client_flow_id={client_flow_id!r}")
     if not (1 <= halt_after_iteration <= max_iters):
         raise ValueError(
