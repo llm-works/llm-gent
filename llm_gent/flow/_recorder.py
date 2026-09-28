@@ -14,8 +14,9 @@ An instance is identified by its node id and the dynamic coordinates of
 the iterate passes and map items enclosing it. It is recorded only when
 it finishes complete:
 
-- the halt event is unset — once it is set nothing is recorded, control
-  decisions included, since a verb may have returned early because of it;
+- no halt event has been seen set — the run's, or a subflow's own; once
+  one is, nothing is recorded, control decisions included, since a verb
+  may have returned early because of it;
 - no Loop under it has paused — a paused Loop is found under an instance
   when the instance's node is the Loop's step or one of its structural
   ancestors, and the instance's coordinates are a prefix of the Loop's.
@@ -82,6 +83,7 @@ class RunRecorder:
         self.scopes: dict[str, State[Any]] = {}
         self._pauses: list[_Pause] = []
         self._unlocated_pause = False
+        self._halted = False
 
     def mark_paused(self, env: _RunEnv, node_id: str | None) -> None:
         """A Loop at chain step ``node_id`` (under ``env``) returned a paused result.
@@ -95,8 +97,15 @@ class RunRecorder:
         self._pauses.append(_Pause(node_id, env.ancestor_chain, env.coords))
 
     def halted(self, env: _RunEnv) -> bool:
-        """True once nothing more may be recorded anywhere in the run."""
-        return self._unlocated_pause or is_halt_signaled(env)
+        """True once nothing more may be recorded anywhere in the run.
+
+        A halt seen under any env latches: a subflow's own ``.with_halt()``
+        event is not visible from the enclosing env, yet the step holding
+        that subflow returned early because of it.
+        """
+        if not self._halted and is_halt_signaled(env):
+            self._halted = True
+        return self._halted or self._unlocated_pause
 
     def incomplete(self, env: _RunEnv, node_id: str, coords: tuple[str, ...]) -> bool:
         """True when the instance ``(node_id, coords)`` must not be recorded."""

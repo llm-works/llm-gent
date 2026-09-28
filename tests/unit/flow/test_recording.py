@@ -280,6 +280,33 @@ class TestMap:
         with pytest.raises(RecordError):
             await flow.run()
 
+    async def test_a_refused_item_result_is_not_merged(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """The body's last step refuses the result inside the item, before its merge.
+
+        ``_on_success`` has no rollback for a refusal, so the ``$failed``
+        state must not hold the item's merge.
+        """
+
+        @verb
+        async def handle(ctx: Context[dict[str, Any]], _x: Any) -> object:
+            ctx.state.data["n"] = 1
+            return object()
+
+        flow = _flow(store).map(
+            lambda b: b.call(handle),
+            items=lambda _p, _c: [1],
+            state=lambda _p: {"n": 0},
+            merge=lambda p, c: p.__setitem__("total", c["n"]),
+        )
+        with pytest.raises(RecordError):
+            await flow.run()
+        history = History(store, NAME)
+        head = await history.head()
+        assert head is not None
+        assert await history.scopes(head) == [{}]
+
 
 class TestBranch:
     @pytest.mark.parametrize(("value", "arm"), [(1, "then"), (0, "none")])
@@ -354,6 +381,43 @@ class TestInterruption:
             await flow.run(0)
         passes = [k for k, _ in (await _head_record(store)).items() if k.startswith("p|")]
         assert passes == [f"p|{iterate_id}@i0"]
+
+    async def test_an_unrecorded_step_passes_an_unstorable_value_on(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """After the halt a step's input is not hashed, so a sentinel it receives is not refused."""
+        halt = asyncio.Event()
+        cancelled = object()
+
+        @verb
+        async def work(ctx: Context[dict[str, Any]], _x: Any) -> object:
+            halt.set()
+            return cancelled
+
+        @verb
+        async def finish(ctx: Context[dict[str, Any]], r: object) -> int:
+            return 0 if r is cancelled else 1
+
+        flow = _flow(store).with_halt(halt)
+        flow.iterate(lambda b: b.call(work).call(finish), max_iters=2)
+        assert await flow.run(1) == 0
+
+    async def test_a_subflow_halt_leaves_the_enclosing_step_unrecorded(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A subflow's own halt event stops recording for the rest of the run."""
+        local = asyncio.Event()
+
+        @verb
+        async def stop(ctx: Context[dict[str, Any]], x: int) -> int:
+            local.set()
+            return x
+
+        sub = FlowFactory(LG).create(name="sub").with_halt(local).call(stop).call(inc)
+        flow = _flow(store).call(double).call(sub).call(inc)
+        double_id = _compute_node_ids("", flow._nodes)[0]
+        record = await _run_failing(flow, 1)
+        assert [k for k, _ in record.items()] == [f"s|{double_id}"]
 
 
 class TestNestedCheckpointers:

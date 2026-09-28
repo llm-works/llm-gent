@@ -951,13 +951,17 @@ class Flow:
         nothing extra, and neither does cancellation.
 
         Raises:
-            RuntimeError: The flow has no nodes to run, OR a resume mode
-                was requested without :meth:`with_checkpointer` wired.
+            RuntimeError: The flow has no nodes to run, a resume mode
+                was requested without :meth:`with_checkpointer` wired, or a
+                composed subflow has its own checkpointer.
                 Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
             ValueError: ``resume`` is not a :data:`ResumeMode` value.
+            RecordError: With a checkpointer wired, a step input, or an
+                output a later node receives, cannot be stored exactly in
+                the execution record.
         """
         self._check_run_args(resume)
         self._begin_checkpoint_run()
@@ -986,7 +990,7 @@ class Flow:
         return result
 
     def _check_run_args(self, resume: ResumeMode) -> None:
-        """Reject an empty flow, an unknown mode, or a resume mode without a checkpointer.
+        """Reject an empty flow, a bad mode, resume without a checkpointer, or a nested one.
 
         Runs before the failure-commit boundary, so a misconfigured run
         leaves no ``$failed`` commit (or new history) behind.
@@ -1056,12 +1060,12 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_halt`` / ``parent_budget`` / ``parent_checkpoint_ctx`` are
-        the effective ambients from the calling scope — nested subflows
-        fall back to them when they have no local
-        ``.with_halt()`` / ``.with_budget()`` / ``.with_checkpointer()``
-        override, preserving an intermediate layer's ambient through
-        arbitrarily deep nesting.
+        ``parent_halt`` / ``parent_budget`` are the effective ambients from
+        the calling scope — nested subflows fall back to them when they
+        have no local ``.with_halt()`` / ``.with_budget()`` override,
+        preserving an intermediate layer's ambient through arbitrarily deep
+        nesting. ``parent_checkpoint_ctx`` is the run's context: a composed
+        subflow has none of its own (:meth:`_refuse_nested_checkpointers`).
 
         ``parent_chain_context`` is the hash the executor uses to compute
         this Flow's chain-step node IDs (empty at run root; extended by
@@ -1118,10 +1122,12 @@ class Flow:
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
-        Local ``.with_halt`` / ``.with_budget`` / ``.with_checkpointer``
-        wins over the caller's parent ambients; unset locals fall back to
-        the parent so an intermediate layer's ambient survives arbitrarily
-        deep nesting.
+        Local ``.with_halt`` / ``.with_budget`` wins over the caller's
+        parent ambients; unset locals fall back to the parent so an
+        intermediate layer's ambient survives arbitrarily deep nesting. The
+        checkpoint context is the flow's own at the run root and the
+        parent's below it, since :meth:`run` refuses a composed subflow
+        with its own checkpointer.
 
         ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
         verbatim: the descent sites in :mod:`._executor` are the ones

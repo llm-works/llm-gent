@@ -200,7 +200,16 @@ class Chain:
         needed = self._output_needed(index)
         env = dataclasses.replace(self.env, output_needed=needed)
         recorder = env.recorder
-        input_hash = _step_input_hash(node, node_args, node_kwargs) if recorder else ""
+        # A step already incomplete (halted, or under a paused Loop) stays so:
+        # skip its input hash, which would raise RecordError for an input its
+        # unrecorded producer was never refused for.
+        if recorder is not None and recorder.incomplete(env, node_id, env.coords):
+            self._recording = False
+        input_hash = (
+            _step_input_hash(node, node_args, node_kwargs)
+            if recorder is not None and self._recording
+            else ""
+        )
         ctx = _build_ctx(node.target, env, node_id)
         result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
         if recorder is not None and self._recording:

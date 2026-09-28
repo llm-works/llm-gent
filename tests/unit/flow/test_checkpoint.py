@@ -296,6 +296,48 @@ class TestCheckpointPolicyMap:
         iterations = sorted(next(iter(non_final.values())))
         assert iterations == [0, 1, 2], f"expected three item slots 0/1/2; got {iterations}"
 
+    async def test_failed_item_commit_restores_the_state_before_the_merge(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A per-item commit that fails rolls the merge back to the prior state, not to empty."""
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        original = store.put_object
+        failed: list[bool] = []
+
+        def fail_first_commit(flow_id: str, kind: Any, content_hash: str, payload: bytes) -> None:
+            if kind == "commit" and not failed:
+                failed.append(True)
+                raise OSError("disk full")
+            original(flow_id, kind, content_hash, payload)
+
+        store.put_object = fail_first_commit  # type: ignore[method-assign]
+
+        @verb
+        async def add(ctx: Context[dict[str, Any]], item: int) -> int:
+            ctx.state.data["n"] += item
+            return item
+
+        @verb
+        async def read_state(ctx: Context[dict[str, Any]]) -> dict[str, Any]:
+            return dict(ctx.state.data)
+
+        outer = (
+            FlowFactory(make_test_logger())
+            .create(state={"total": 1})
+            .with_checkpointer(store, "map-rollback")
+            .with_checkpoint_policy(on_map_item=True)
+            .map(
+                lambda b: b.call(add),
+                items=lambda _p, _c: [5],
+                state=lambda _p: {"n": 0},
+                merge=lambda p, c: p.__setitem__("total", p["total"] + c["n"]),
+                strict=False,
+            )
+            .call(read_state)
+        )
+        assert await outer.run() == {"total": 1}
+
 
 class TestCtxCheckpoint:
     """Explicit ctx.checkpoint() writes a commit regardless of policy."""

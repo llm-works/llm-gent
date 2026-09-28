@@ -24,6 +24,7 @@ Extracted from :mod:`._executor`. Two classes:
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 from typing import TYPE_CHECKING, Any
 
@@ -316,7 +317,9 @@ class MapItemRunner:
         try:
             async with self.merge_lock:
                 if self.env.policy.on_map_item:
-                    snapshot = serialize_state_data(self.env.state.data)
+                    # serialize_state_data passes a dict through as-is: copy it,
+                    # or the merge mutates the snapshot the rollback restores from.
+                    snapshot = copy.deepcopy(serialize_state_data(self.env.state.data))
                 await _merge_state(self.mp.merge_fn, self.env.state, child_state)
                 self._record_success(result)
                 if self.env.policy.on_map_item:
