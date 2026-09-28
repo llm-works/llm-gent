@@ -107,7 +107,9 @@ class Context(Generic[T]):
     """Ambient halt event attached via :meth:`Flow.with_halt`, or ``None``.
 
     Verbs that expose their own inner loop (SAIA turn-by-turn, long-running
-    external calls) can observe ``ctx.halt`` to short-circuit gracefully.
+    external calls) can observe ``ctx.halt`` to short-circuit gracefully;
+    one that returns before finishing its work calls
+    :meth:`mark_cut_short` so resume re-runs it.
     :meth:`Flow.map` and :meth:`Flow.iterate` observe this at their natural
     boundaries automatically; verbs are free to poll it when useful.
     Subflows inherit the outer runtime's halt unless they declare their own.
@@ -262,6 +264,9 @@ class Context(Generic[T]):
         - No checkpointer is wired on the enclosing flow.
         - The ctx has no live executor env (e.g. built by
           :meth:`Flow.dispatch` used standalone).
+        - The verb runs under a halt that has fired and the run has
+          already written its halt commit; the halt commit stays the
+          history's head and this work re-runs on resume.
 
         Repeated calls at the same node write distinct commit objects
         (framework does not dedupe by state hash beyond the CAS layer
@@ -283,3 +288,21 @@ class Context(Generic[T]):
         from ._executor import _save_scope_commit
 
         await _save_scope_commit(env, 0, node_id, self.state, "ok")
+
+    def mark_cut_short(self) -> None:
+        """Record that halt cut this verb's work short, so resume re-runs it.
+
+        A verb that observes :attr:`halt` and returns before finishing
+        calls this before returning. The run's halt commit then anchors
+        at the chain step containing this verb rather than the step
+        after it, and ``run(resume="replay")`` re-dispatches that step.
+        Without the call, a step that returned counts as done.
+
+        No-op when the ctx has no live executor env (e.g. built by
+        :meth:`Flow.dispatch` used standalone).
+        """
+        env = self._env
+        node_id = self._node_id
+        if env is None or node_id is None:
+            return
+        env.cut_short.mark(node_id, env.ancestor_chain)

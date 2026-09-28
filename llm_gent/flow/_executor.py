@@ -24,6 +24,7 @@ import dataclasses
 import inspect
 from typing import TYPE_CHECKING, Any
 
+from ._halt_observer import is_halt_signaled
 from .context import Context
 from .nodes import (
     UNSET,
@@ -564,11 +565,18 @@ async def _persist_halt(
     node_id: str,
     current_state: State[Any],
 ) -> tuple[str, ...]:
-    """Stash pending paused turns + save the halted commit; return stashed node_ids."""
-    assert env.checkpoint_ctx is not None
+    """Stash pending paused turns + save the halted commit; return stashed node_ids.
+
+    Also stashes the input of the top-level chain step the commit's
+    path starts at, so that step re-runs with it on resume.
+    """
+    ctx = env.checkpoint_ctx
+    assert ctx is not None
+    top_step_id = (env.ancestor_chain + (node_id,))[0]
     try:
-        trace_ref, stashed_ids = await env.pending_paused_turns.stash_to_ctx(env.checkpoint_ctx)
-        await env.checkpoint_ctx.save_scope_commit(
+        paused_refs, stashed_ids = await env.pending_paused_turns.stash_to_ctx(ctx)
+        trace_ref = paused_refs + await env.step_inputs.stash_to_ctx(ctx, top_step_id)
+        await ctx.save_scope_commit(
             env.ancestor_chain, iteration, node_id, current_state, "halted", trace_ref
         )
     except Exception as e:
@@ -596,12 +604,14 @@ async def _save_scope_commit(
     :meth:`Context.checkpoint`). Delegates the actual persistence
     machinery to :meth:`CheckpointContext.save_scope_commit`.
 
-    Also a no-op once the run has written its halt commit: work that
-    finishes after the halt (in-flight map items, a trailing ``ok``
-    boundary) must not supersede the halt commit as the history's head.
-    That work re-runs on resume.
+    Also a no-op for work running under a fired halt once the run has
+    written its halt commit: work that finishes after the halt
+    (in-flight map items, a trailing ``ok`` boundary) must not
+    supersede the halt commit as the history's head. That work re-runs
+    on resume. Work outside the halted subtree (a subflow's own
+    ``.with_halt`` fired while the run carries on) still saves.
     """
-    if env.checkpoint_ctx is None or env.runtime._halt_saved:
+    if env.checkpoint_ctx is None or (env.runtime._halt_saved and is_halt_signaled(env)):
         return
     await env.checkpoint_ctx.save_scope_commit(
         env.ancestor_chain, iteration, node_id, current_state, outcome, trace_ref

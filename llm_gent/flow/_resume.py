@@ -33,6 +33,7 @@ from .checkpoint import COMPLETE_TAG
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
+from .state.halt_anchor import load_step_input
 
 
 if TYPE_CHECKING:
@@ -68,7 +69,9 @@ class Resume:
         2. :meth:`History.scopes` walks the commit's tree to one JSON
            payload per scope, root → leaf via the zero-padded ``scope_id``.
         3. The commit's ``paused_turn`` trace refs load as resume entries
-           for the Loops that paused.
+           for the Loops that paused; its ``step_input`` trace ref, if
+           any, rides on the :class:`_ResumeReplay` for the chain step
+           it belongs to.
         4. The root scope's payload rehydrates the top-level
            :class:`State`; every non-root scope rides on the
            :class:`_ResumeReplay` for its descent site to restore.
@@ -83,7 +86,8 @@ class Resume:
             return fallback, None
         scope_data = await self._history.scopes(commit)
         await self.flow._resume_paused_turns.load_from_commit(self._ctx, commit)
-        return self._split_scopes(commit, scope_data)
+        step_input = await load_step_input(self._ctx, commit)
+        return self._split_scopes(commit, scope_data, step_input)
 
     async def restart(self, fallback: State[Any]) -> State[Any]:
         """Restart: the root state of the newest commit that has usable state.
@@ -138,7 +142,7 @@ class Resume:
         return State(data=data, _factory=factory)
 
     def _split_scopes(
-        self, commit: Commit, scope_data: list[Any]
+        self, commit: Commit, scope_data: list[Any], step_input: tuple[str, Any] | None
     ) -> tuple[State[Any], _ResumeReplay | None]:
         """Split root / non-root scope payloads; return (State, replay).
 
@@ -164,6 +168,7 @@ class Resume:
                 iteration=commit.meta.iteration,
                 child_state_data=None,
                 intermediate_scope_data=intermediate_raw,
+                step_input=step_input,
             ),
         )
 
@@ -171,23 +176,22 @@ class Resume:
 async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:
     """Apply the store's retention policy on the clean-exit path.
 
-    A run the halt cut short preserves the history regardless of policy:
-    it wrote a halt commit, halt skipped work, or a paused turn is still
-    pending. A run whose halt arrived after all its work completed is a
-    clean exit. On a clean exit: ``gc_on_success`` prunes; ``retain``
-    keeps the record and commits ``final_state`` tagged ``complete`` so a
-    subsequent resume doesn't replay the last save point and re-execute
-    chain steps after it.
+    A run that wrote a halt commit leaves the history as is: that
+    commit is where resume picks up. Any other run is a clean exit,
+    including one whose halt arrived after all its work completed (the
+    chain writes a halt commit whenever the run's halt cut a step
+    short). On a
+    clean exit ``retain`` keeps the record and commits ``final_state``
+    tagged ``complete`` so a subsequent resume doesn't replay the last
+    save point and re-execute chain steps after it. ``gc_on_success``
+    prunes instead — unless the run's halt is set: a halt exit never
+    deletes the history, so it commits the final state like ``retain``.
     """
-    if (
-        flow._checkpoint_ctx is None
-        or flow._halt_saved
-        or flow._halt_skipped_work
-        or bool(flow._pending_paused_turns)
-    ):
-        return
     ctx = flow._checkpoint_ctx
-    if ctx.retention == "gc_on_success":
+    if ctx is None or flow._halt_saved:
+        return
+    halted = flow._halt_event is not None and flow._halt_event.is_set()
+    if ctx.retention == "gc_on_success" and not halted:
         await ctx.gc_history()
     else:
         await commit_completion(flow, final_state)

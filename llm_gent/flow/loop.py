@@ -367,7 +367,9 @@ class Loop:
     async def _after_run(self, result: Any, ctx: Context[Any], task: str, conversation: Any) -> Any:
         """Cost hook, then paused-vs-complete branching + return override.
 
-        On the paused path, capture ``task`` alongside the
+        On the paused path, mark the step cut short
+        (:meth:`Context.mark_cut_short`) so a halt commit anchors at it,
+        whether or not the turn can be captured, and capture ``task`` alongside the
         conversation's serialized :meth:`to_dict` payload as
         canonical bytes on :attr:`_paused_bytes` when a
         :class:`ConversationFactory` is wired — the halt-observation
@@ -387,6 +389,7 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
+            ctx.mark_cut_short()
             self._capture_paused(ctx, task, conversation)
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
