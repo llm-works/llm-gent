@@ -43,7 +43,7 @@ from .state.cas import (
     CommitOutcome,
     TraceRef,
 )
-from .state.record import RecordError, instance_address, value_hash
+from .state.record import RecordError, value_hash
 
 
 if TYPE_CHECKING:
@@ -330,7 +330,7 @@ async def _run_subflow(
     else:
         effective_factory = state_factory if state_factory is not None else env.state._factory
         child_state = _restore_scope_state(env.state, raw, effective_factory)
-    owner = _open_scope(env, node_id, state_fn, child_state)
+    opened = _open_scope(env, node_id, state_fn, child_state)
     result = await body._run_as_subflow(
         *node_args,
         state=child_state,
@@ -348,31 +348,30 @@ async def _run_subflow(
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
-    _close_scope(env, owner)
+    _close_scope(env, node_id, opened)
     return result
 
 
 def _open_scope(
     env: _RunEnv, node_id: str, state_fn: StateProject | None, child_state: State[Any]
-) -> str | None:
-    """Register a ``state=`` child scope with the run's recorder; return its owner address.
+) -> bool:
+    """Register the ``state=`` child scope of step ``node_id``; return whether one was registered.
 
-    ``None`` when no scope was created (no projection — the child shares
-    the parent's scope) or the run records nothing.
+    Nothing is registered when no scope was created (no projection — the
+    child shares the parent's scope) or the run records nothing.
     """
     recorder = env.recorder
     if state_fn is None or recorder is None:
-        return None
-    owner = instance_address(node_id, env.coords)
-    recorder.open_scope(owner, child_state)
-    return owner
+        return False
+    recorder.open_scope(node_id, env.coords, child_state)
+    return True
 
 
-def _close_scope(env: _RunEnv, owner: str | None) -> None:
-    """Drop a scope :func:`_open_scope` registered, once its owner merged it back."""
+def _close_scope(env: _RunEnv, node_id: str, opened: bool) -> None:
+    """Drop the scope :func:`_open_scope` registered for step ``node_id`` once it merged back."""
     recorder = env.recorder
-    if owner is not None and recorder is not None:
-        recorder.close_scope(env, owner)
+    if opened and recorder is not None:
+        recorder.close_scope(env, node_id, env.coords)
 
 
 def _consume_scope_data(

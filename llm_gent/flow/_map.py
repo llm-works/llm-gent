@@ -38,7 +38,7 @@ from ._node_id import _compute_node_ids, _descend_context
 from .context import Context
 from .nodes import Failure, ItemsFn, Skipped
 from .state import serialize_state_data
-from .state.record import RecordError, index_coord, instance_address
+from .state.record import RecordError, index_coord
 
 
 if TYPE_CHECKING:
@@ -208,7 +208,6 @@ class MapItemRunner:
         self.replay = replay
         self.merge_lock = merge_lock
         self.coords = env.coords + (index_coord(item_index),)
-        self.address = instance_address(node_id, self.coords)
 
     async def run(self) -> Any:
         """Drive this item through the run pipeline.
@@ -249,19 +248,19 @@ class MapItemRunner:
         """Register the item's ``state=`` scope with the run's recorder."""
         recorder = self.env.recorder
         if self.mp.state_fn is not None and recorder is not None:
-            recorder.open_scope(self.address, child_state)
+            recorder.open_scope(self.node_id, self.coords, child_state)
 
     def _close_scope(self) -> None:
         """Drop the item's scope: merged back, or discarded by the guard."""
         recorder = self.env.recorder
         if recorder is not None:
-            recorder.close_scope(self.env, self.address)
+            recorder.close_scope(self.env, self.node_id, self.coords)
 
     async def _on_guard_skip(self, item_ctx: Context[Any]) -> Skipped:
         """Record the guard's skip, drop the item's scope, fire on_item_complete."""
         recorder = self.env.recorder
         if recorder is not None:
-            recorder.record_item_skipped(self.env, self.address)
+            recorder.record_item_skipped(self.env, self.node_id, self.coords)
         self._close_scope()
         skipped = Skipped(item=self.item)
         await self._fire_on_item_complete(skipped, item_ctx)
@@ -349,8 +348,8 @@ class MapItemRunner:
         recorder = self.env.recorder
         if recorder is None:
             return
-        recorder.record_item(self.env, self.address, result)
-        recorder.close_scope(self.env, self.address)
+        recorder.record_item(self.env, self.node_id, self.coords, result)
+        recorder.close_scope(self.env, self.node_id, self.coords)
 
     async def _run_on_error(self, exc: BaseException, ctx: Context[Any]) -> None:
         """Invoke on_error and swallow any exception it raises.

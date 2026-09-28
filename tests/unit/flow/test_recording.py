@@ -60,6 +60,29 @@ async def inc(ctx: Context[dict[str, Any]], x: int) -> int:
     return x + 1
 
 
+@dataclass
+class TurnResult:
+    """A SAIA-style result; ``paused`` is what Loop checks."""
+
+    value: int
+    paused: bool = False
+
+
+class PausingSAIA:
+    """Echoes the task back as the result, paused for the tasks in ``pause_on``."""
+
+    def __init__(self, pause_on: set[int]) -> None:
+        self.pause_on = pause_on
+
+    async def complete(self, task: Any, **kwargs: Any) -> TurnResult:
+        return TurnResult(value=task, paused=task in self.pause_on)
+
+
+@verb
+async def unwrap(ctx: Context[dict[str, Any]], r: TurnResult) -> int:
+    return r.value + 1
+
+
 def _flow(store: JsonFileCheckpointStore) -> Flow:
     return FlowFactory(LG).create(state={}).with_checkpointer(store, NAME)
 
@@ -284,27 +307,70 @@ class TestInterruption:
         record = await _head_record(store)
         assert [k for k, _ in record.items()] == [f"s|{ids[0]}"]
 
-    async def test_nothing_is_recorded_after_a_loop_pauses(
+    async def test_the_paused_step_and_the_steps_after_it_are_not_recorded(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        @dataclass
-        class _Paused:
-            paused: bool = True
-
-        class _SAIA:
-            async def complete(self, task: str, **kwargs: Any) -> Any:
-                return _Paused()
-
-        @verb
-        async def checkpoint(ctx: Context[dict[str, Any]]) -> None:
-            await ctx.checkpoint()
-
-        loop = Loop(ROLE_A, saia=_SAIA())
-        flow = _flow(store).call(double).call(loop).call(checkpoint)
-        ids = _compute_node_ids("", flow._nodes)
-        await flow.run(1)
+        """The paused step is incomplete; ``unwrap`` consumed it, so it is not recorded either."""
+        loop = Loop(ROLE_A, saia=PausingSAIA(pause_on={2}))
+        flow = _flow(store).call(double).call(loop).call(unwrap).call(boom)
+        double_id = _compute_node_ids("", flow._nodes)[0]
+        with pytest.raises(Boom):
+            await flow.run(1)
         record = await _head_record(store)
-        assert [k for k, _ in record.items()] == [f"s|{ids[0]}"]
+        assert [k for k, _ in record.items()] == [f"s|{double_id}"]
+
+    async def test_a_pause_leaves_sibling_map_items_recordable(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Item 0's Loop pauses; item 1 completes and is recorded.
+
+        The map step holds the pause, so it is not recorded. Inside item 0
+        neither step is recorded; inside item 1 both are.
+        """
+        loop = Loop(ROLE_A, saia=PausingSAIA(pause_on={0}))
+        flow = _flow(store).map(
+            lambda b: b.call(loop).call(unwrap), items=lambda _p, _c: [0, 1], max_concurrency=1
+        )
+        flow.call(boom)
+        map_id = _compute_node_ids("", flow._nodes)[0]
+        with pytest.raises(Boom):
+            await flow.run()
+        keys = [k for k, _ in (await _head_record(store)).items()]
+        assert f"m|{map_id}@n1" in keys
+        assert f"m|{map_id}@n0" not in keys
+        assert f"s|{map_id}" not in keys
+        step_coords = sorted(k.rsplit("@", 1)[1] for k in keys if k.startswith("s|"))
+        assert step_coords == ["n1", "n1"]
+
+    async def test_passes_after_a_paused_pass_are_not_recorded(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Pass 1 pauses; pass 2 completes but was fed by pass 1, so only pass 0 is recorded."""
+        loop = Loop(ROLE_A, saia=PausingSAIA(pause_on={1}))
+        flow = _flow(store).iterate(lambda b: b.call(loop).call(unwrap), max_iters=3)
+        flow.call(boom)
+        iterate_id = _compute_node_ids("", flow._nodes)[0]
+        with pytest.raises(Boom):
+            await flow.run(0)
+        passes = [k for k, _ in (await _head_record(store)).items() if k.startswith("p|")]
+        assert passes == [f"p|{iterate_id}@i0"]
+
+
+class TestNestedCheckpointers:
+    async def test_a_composed_subflow_with_its_own_checkpointer_is_refused(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        sub = FlowFactory(LG).create().with_checkpointer(store, "sub").call(inc)
+        with pytest.raises(RuntimeError, match="has its own checkpointer"):
+            await _flow(store).call(sub).run(1)
+
+    async def test_refused_without_a_top_level_checkpointer_too(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        sub = FlowFactory(LG).create().with_checkpointer(store, "sub").call(inc)
+        flow = FlowFactory(LG).create().iterate(lambda b: b.call(sub), max_iters=1)
+        with pytest.raises(RuntimeError, match="has its own checkpointer"):
+            await flow.run(1)
 
 
 class TestScopes:

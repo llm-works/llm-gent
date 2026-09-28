@@ -53,6 +53,9 @@ class Chain:
         self.flow = flow
         self.env = env
         self.ids: tuple[str, ...] = _compute_node_ids(env.chain_context, flow._nodes)
+        # Recorded steps stay a prefix of the walk: after a step goes
+        # unrecorded, the later ones consumed its result or its state.
+        self._recording = True
 
     async def walk(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Execute chain steps in order, threading returns; return the last result.
@@ -200,9 +203,9 @@ class Chain:
         input_hash = _step_input_hash(node, node_args, node_kwargs) if recorder else ""
         ctx = _build_ctx(node.target, env, node_id)
         result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
-        if recorder is not None:
+        if recorder is not None and self._recording:
             label = _target_label(node.target)
-            recorder.record_step(env, node_id, label, input_hash, result, needed)
+            self._recording = recorder.record_step(env, node_id, label, input_hash, result, needed)
         return result
 
     def _output_needed(self, index: int) -> bool:

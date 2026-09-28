@@ -67,6 +67,7 @@ class IterateRunner:
         # read from self.env so the update propagates.
         self.env = env
         self.node_id = node_id
+        self._recording = True
 
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Drive the loop; return the last body result.
@@ -95,7 +96,7 @@ class IterateRunner:
         iteration, restored_child = self._resume_iteration()
         env, child_state = await self._resolve_child_scope(restored_child)
         self.env = env
-        owner = _open_scope(env, self.node_id, self.it.state_fn, child_state)
+        opened = _open_scope(env, self.node_id, self.it.state_fn, child_state)
         result: Any = node_args[0] if node_args else None
         started = time.monotonic()
         while True:
@@ -116,14 +117,21 @@ class IterateRunner:
             if stop:
                 break
         await _merge_state(self.it.merge_fn, self.env.state, child_state)
-        _close_scope(self.env, owner)
+        _close_scope(self.env, self.node_id, opened)
         return result
 
     def _record_pass(self, iteration: int, result: Any, stop: bool) -> None:
-        """Record one completed pass and the ``until`` verdict that followed it."""
+        """Record one completed pass and the ``until`` verdict that followed it.
+
+        Recorded passes stay a prefix: once one is incomplete, the later
+        passes — fed its result and its state — are not recorded either.
+        """
         recorder = self.env.recorder
-        if recorder is not None:
-            recorder.record_pass(self.env, self.node_id, iteration, result, cont=not stop)
+        if recorder is None or not self._recording:
+            return
+        self._recording = recorder.record_pass(
+            self.env, self.node_id, iteration, result, cont=not stop
+        )
 
     def _resume_iteration(self) -> tuple[int, Any]:
         """Return the starting iteration count and restored child state.

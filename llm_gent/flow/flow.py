@@ -778,9 +778,11 @@ class Flow:
         save/load/delete call and identifies the resumable history. It
         is agent-owned: the framework never assigns one automatically.
 
-        A subflow inherits the outer runtime's checkpointer + id
-        automatically; calling ``.with_checkpointer`` on a subflow
-        overrides both for that subtree.
+        A subflow inherits the checkpointer + id of the flow that runs
+        it. A subflow composed into a flow (``.call`` / ``.branch`` /
+        ``.iterate`` / ``.map``) must not have its own: :meth:`run`
+        refuses it, since one run keeps one history and one execution
+        record.
 
         Resume semantics on the wired iterate:
 
@@ -806,14 +808,13 @@ class Flow:
         return self
 
     def _begin_checkpoint_run(self) -> None:
-        """Reset run-scoped caches on every checkpoint context in the tree.
+        """Reset the checkpoint context's run-scoped caches.
 
-        Covers subflows wired with their own ``.with_checkpointer``, which
-        are entered per run through :meth:`_run_as_subflow`, not :meth:`run`.
+        Only this flow's context: :meth:`_refuse_nested_checkpointers`
+        guarantees no composed subflow has one of its own.
         """
-        for flow in iter_flows(self):
-            if flow._checkpoint_ctx is not None:
-                flow._checkpoint_ctx.begin_run()
+        if self._checkpoint_ctx is not None:
+            self._checkpoint_ctx.begin_run()
 
     def root_hash(self) -> str:
         """Structure hash of this flow's composition tree.
@@ -1000,6 +1001,25 @@ class Flow:
                 f"Flow {label!r} was run with resume={resume!r} but has no "
                 f"checkpointer — call .with_checkpointer(store, client_flow_id) first"
             )
+        self._refuse_nested_checkpointers()
+
+    def _refuse_nested_checkpointers(self) -> None:
+        """Refuse a composed subflow that has its own checkpointer.
+
+        A run keeps one history and one execution record, owned by the flow
+        :meth:`run` is called on. A subflow's own checkpointer would write
+        commits into a second history that carries no record, which no
+        resume can continue. A flow run separately — ``flow.run()`` inside
+        a verb — is its own run and may have its own checkpointer.
+        """
+        for sub in iter_flows(self)[1:]:
+            if sub._checkpoint_ctx is not None:
+                label = sub._name or "<anonymous>"
+                raise RuntimeError(
+                    f"subflow {label!r} has its own checkpointer; a run checkpoints to "
+                    f"the checkpointer of the flow it runs — attach .with_checkpointer "
+                    f"there, or run the subflow separately with flow.run()"
+                )
 
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode
