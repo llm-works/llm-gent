@@ -3,29 +3,26 @@
 
 """Unit tests for :class:`llm_gent.flow.stores.JsonFileCheckpointStore`.
 
-Direct surface tests: object put/get/has round-trip, ref put/resolve
-across the three key forms, name map, tags, gc_history idempotency,
-path-traversal guards, retention default. End-to-end resume behavior is covered in
-:mod:`tests.unit.flow.test_checkpoint`.
+Protocol behaviour comes from :class:`CheckpointStoreConformance`; this
+module adds the file store's own concerns: directory cleanup, gc retry
+after a partial failure, and path-traversal guards. End-to-end resume
+behavior is covered in :mod:`tests.unit.flow.test_checkpoint`.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from llm_gent.flow.stores import JsonFileCheckpointStore
+from tests.checkpoint_store_conformance import CheckpointStoreConformance
 
 from .conftest import make_test_logger
 
 
 pytestmark = pytest.mark.unit
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -34,166 +31,24 @@ def store(tmp_path: Path) -> JsonFileCheckpointStore:
     return JsonFileCheckpointStore(make_test_logger(), tmp_path / "checkpoints")
 
 
-# ---------------------------------------------------------------------------
-# Object store surface
-# ---------------------------------------------------------------------------
+class TestConformance(CheckpointStoreConformance):
+    """The Protocol behaviour every store shares."""
 
 
-class TestObjectStore:
-    def test_put_get_round_trip(self, store: JsonFileCheckpointStore) -> None:
-        store.put_object("history-1", "blob", "hash-a", b"payload-a")
-        assert store.get_object("history-1", "blob", "hash-a") == b"payload-a"
-
-    def test_get_returns_none_when_absent(self, store: JsonFileCheckpointStore) -> None:
-        assert store.get_object("history-1", "blob", "missing") is None
-
-    def test_has_object_reflects_presence(self, store: JsonFileCheckpointStore) -> None:
-        assert not store.has_object("history-1", "blob", "hash-a")
-        store.put_object("history-1", "blob", "hash-a", b"payload")
-        assert store.has_object("history-1", "blob", "hash-a")
-
-    def test_put_idempotent_same_hash(self, store: JsonFileCheckpointStore) -> None:
-        store.put_object("history-1", "blob", "hash-a", b"payload")
-        store.put_object("history-1", "blob", "hash-a", b"payload")  # no raise
-        assert store.get_object("history-1", "blob", "hash-a") == b"payload"
-
-    def test_kinds_do_not_collide(self, store: JsonFileCheckpointStore) -> None:
-        """Same hash under different kinds addresses different objects."""
-        store.put_object("history-1", "blob", "hash", b"blob-bytes")
-        store.put_object("history-1", "tree", "hash", b"tree-bytes")
-        store.put_object("history-1", "commit", "hash", b"commit-bytes")
-        assert store.get_object("history-1", "blob", "hash") == b"blob-bytes"
-        assert store.get_object("history-1", "tree", "hash") == b"tree-bytes"
-        assert store.get_object("history-1", "commit", "hash") == b"commit-bytes"
-
-    def test_histories_do_not_collide(self, store: JsonFileCheckpointStore) -> None:
-        """Same (kind, hash) under two histories store separately."""
-        store.put_object("history-a", "blob", "hash", b"a-bytes")
-        store.put_object("history-b", "blob", "hash", b"b-bytes")
-        assert store.get_object("history-a", "blob", "hash") == b"a-bytes"
-        assert store.get_object("history-b", "blob", "hash") == b"b-bytes"
-
-
-# ---------------------------------------------------------------------------
-# Ref store surface
-# ---------------------------------------------------------------------------
-
-
-class TestRefStore:
-    def test_put_resolve_exact_key(self, store: JsonFileCheckpointStore) -> None:
-        store.put_ref("history-1", "node/x", 5, "commit-hash-5")
-        assert store.resolve_ref("history-1", "node/x", 5) == "commit-hash-5"
-
-    def test_resolve_returns_none_when_absent(self, store: JsonFileCheckpointStore) -> None:
-        assert store.resolve_ref("history-1") is None
-        assert store.resolve_ref("history-1", "node/x") is None
-        assert store.resolve_ref("history-1", "node/x", 5) is None
-
-    def test_resolve_latest_across_node_paths(self, store: JsonFileCheckpointStore) -> None:
-        """resolve_ref with both None returns the newest ref across the history."""
-        store.put_ref("history-1", "node/a", 1, "hash-1")
-        store.put_ref("history-1", "node/b", 1, "hash-2")
-        # hash-2 was put last → latest.
-        assert store.resolve_ref("history-1") == "hash-2"
-
-    def test_resolve_latest_under_node_path(self, store: JsonFileCheckpointStore) -> None:
-        """resolve_ref with node_path returns highest iteration under that path."""
-        store.put_ref("history-1", "node/x", 1, "hash-1")
-        store.put_ref("history-1", "node/x", 3, "hash-3")
-        store.put_ref("history-1", "node/x", 2, "hash-2")
-        assert store.resolve_ref("history-1", "node/x") == "hash-3"
-
-    def test_resolve_iteration_without_node_path_raises(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        with pytest.raises(ValueError, match="iteration requires node_path"):
-            store.resolve_ref("history-1", None, 5)
-
-    def test_put_ref_overwrites_same_key(self, store: JsonFileCheckpointStore) -> None:
-        """Same (client_flow_id, node_path, iteration) re-put replaces."""
-        store.put_ref("history-1", "node/x", 5, "hash-first")
-        store.put_ref("history-1", "node/x", 5, "hash-second")
-        assert store.resolve_ref("history-1", "node/x", 5) == "hash-second"
-
-    def test_refs_do_not_leak_across_histories(self, store: JsonFileCheckpointStore) -> None:
-        store.put_ref("history-a", "node/x", 1, "hash-a")
-        store.put_ref("history-b", "node/x", 1, "hash-b")
-        assert store.resolve_ref("history-a", "node/x", 1) == "hash-a"
-        assert store.resolve_ref("history-b", "node/x", 1) == "hash-b"
-
-
-# ---------------------------------------------------------------------------
-# Name map
-# ---------------------------------------------------------------------------
-
-
-class TestNameMap:
-    def test_bind_get_round_trip(self, store: JsonFileCheckpointStore) -> None:
-        assert store.bind_flow_id("campaign-1", "history-1") == "history-1"
-        assert store.get_flow_id("campaign-1") == "history-1"
-
-    def test_get_returns_none_when_unbound(self, store: JsonFileCheckpointStore) -> None:
-        assert store.get_flow_id("campaign-1") is None
-
-    def test_second_bind_returns_existing(self, store: JsonFileCheckpointStore) -> None:
+class TestDirectories:
+    def test_second_bind_leaves_no_directory(self, store: JsonFileCheckpointStore) -> None:
         store.bind_flow_id("campaign-1", "history-1")
-        assert store.bind_flow_id("campaign-1", "history-2") == "history-1"
-        assert store.get_flow_id("campaign-1") == "history-1"
+        store.bind_flow_id("campaign-1", "history-2")
         assert not store._history_dir("history-2").exists()
 
-    def test_flow_id_cannot_name_two_histories(self, store: JsonFileCheckpointStore) -> None:
-        store.bind_flow_id("campaign-1", "history-1")
-        with pytest.raises(ValueError, match="already names"):
-            store.bind_flow_id("campaign-2", "history-1")
-
-    def test_concurrent_binds_agree_on_one_winner(self, store: JsonFileCheckpointStore) -> None:
-        """Racing binds with distinct ids all return one id; losers leave no directory."""
-        from concurrent.futures import ThreadPoolExecutor
-
+    def test_concurrent_bind_losers_leave_no_directory(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
         with ThreadPoolExecutor(max_workers=16) as pool:
             results = list(
                 pool.map(lambda i: store.bind_flow_id("campaign-1", f"history-{i}"), range(32))
             )
-        assert len(set(results)) == 1
-        assert store.get_flow_id("campaign-1") == results[0]
         assert [p.name for p in (store._root / "histories").iterdir()] == [results[0]]
-
-
-# ---------------------------------------------------------------------------
-# Tags
-# ---------------------------------------------------------------------------
-
-
-class TestTags:
-    def test_put_resolve_round_trip(self, store: JsonFileCheckpointStore) -> None:
-        store.put_tag("history-1", "complete", "commit-h")
-        assert store.resolve_tag("history-1", "complete") == "commit-h"
-
-    def test_resolve_returns_none_when_absent(self, store: JsonFileCheckpointStore) -> None:
-        assert store.resolve_tag("history-1", "complete") is None
-
-    def test_re_put_moves_the_tag(self, store: JsonFileCheckpointStore) -> None:
-        store.put_tag("history-1", "complete", "commit-1")
-        store.put_tag("history-1", "complete", "commit-2")
-        assert store.resolve_tag("history-1", "complete") == "commit-2"
-
-    def test_tags_do_not_leak_across_histories(self, store: JsonFileCheckpointStore) -> None:
-        store.put_tag("history-a", "complete", "hash-a")
-        assert store.resolve_tag("history-b", "complete") is None
-
-
-# ---------------------------------------------------------------------------
-# gc_history
-# ---------------------------------------------------------------------------
-
-
-class TestGcHistory:
-    def test_removes_all_objects_and_refs(self, store: JsonFileCheckpointStore) -> None:
-        store.put_object("history-1", "blob", "h1", b"payload")
-        store.put_ref("history-1", "node/x", 1, "commit-h")
-        store.gc_history("history-1")
-        assert store.get_object("history-1", "blob", "h1") is None
-        assert store.resolve_ref("history-1", "node/x", 1) is None
 
     def test_failed_gc_keeps_name_for_retry(
         self, store: JsonFileCheckpointStore, monkeypatch: pytest.MonkeyPatch
@@ -218,36 +73,8 @@ class TestGcHistory:
         assert store.get_flow_id("campaign-1") is None
         assert not store._history_dir("history-1").exists()
 
-    def test_removes_tags_and_name_binding(self, store: JsonFileCheckpointStore) -> None:
-        store.bind_flow_id("campaign-1", "history-1")
-        store.put_tag("history-1", "complete", "commit-h")
-        store.gc_history("history-1")
-        assert store.resolve_tag("history-1", "complete") is None
-        assert store.get_flow_id("campaign-1") is None
-        store.bind_flow_id("campaign-1", "history-2")  # name is free again
-        assert store.get_flow_id("campaign-1") == "history-2"
-
-    def test_idempotent_when_absent(self, store: JsonFileCheckpointStore) -> None:
-        store.gc_history("never-existed")  # no raise
-
-    def test_leaves_other_histories_intact(self, store: JsonFileCheckpointStore) -> None:
-        store.put_object("history-a", "blob", "h", b"a-bytes")
-        store.put_object("history-b", "blob", "h", b"b-bytes")
-        store.gc_history("history-a")
-        assert store.get_object("history-a", "blob", "h") is None
-        assert store.get_object("history-b", "blob", "h") == b"b-bytes"
-
-
-# ---------------------------------------------------------------------------
-# Retention policy
-# ---------------------------------------------------------------------------
-
 
 class TestRetention:
-    def test_default_is_retain(self, tmp_path: Path) -> None:
-        s = JsonFileCheckpointStore(make_test_logger(), tmp_path)
-        assert s.retention == "retain"
-
     def test_explicit_retain(self, tmp_path: Path) -> None:
         s = JsonFileCheckpointStore(make_test_logger(), tmp_path, retention="retain")
         assert s.retention == "retain"
@@ -255,11 +82,6 @@ class TestRetention:
     def test_explicit_gc_on_success(self, tmp_path: Path) -> None:
         s = JsonFileCheckpointStore(make_test_logger(), tmp_path, retention="gc_on_success")
         assert s.retention == "gc_on_success"
-
-
-# ---------------------------------------------------------------------------
-# Path-traversal guards
-# ---------------------------------------------------------------------------
 
 
 class TestPathTraversalGuards:
