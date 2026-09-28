@@ -1506,7 +1506,7 @@ class TestCompletionTag:
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
         ctx = CheckpointContext(store, "torn-completion", lambda: "")
-        tree = await ctx.put_state_tree(State(data={"n": 7}))
+        tree = await ctx.put_state_tree(State(data={"n": 7}), None)
         await ctx.save_completion_commit(tree)
         assert store.resolve_tag(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
 

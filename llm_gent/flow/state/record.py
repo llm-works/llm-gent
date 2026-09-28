@@ -31,7 +31,7 @@ import json
 import math
 import sys
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, Literal, cast
 
 from .cas import canonical_json, content_hash
 from .serialization import state_converter
@@ -241,6 +241,35 @@ def key_coord(key: Any) -> str:
     return "k" + value_hash(key)[:32]
 
 
+# --- entry keys --------------------------------------------------------------
+
+
+RecordKind = Literal["s", "p", "i", "m", "b"]
+"""Kind of a record entry: ``s`` chain step, ``p`` iterate pass, ``i`` a map's item
+list, ``m`` one map item, ``b`` a branch verdict."""
+
+STEP: RecordKind = "s"
+PASS: RecordKind = "p"
+ITEMS: RecordKind = "i"
+ITEM: RecordKind = "m"
+BRANCH: RecordKind = "b"
+
+_KINDS: frozenset[str] = frozenset({STEP, PASS, ITEMS, ITEM, BRANCH})
+
+
+def record_key(kind: RecordKind, address: str) -> str:
+    """Key of the entry of ``kind`` at ``address``: ``"<kind>|<address>"``."""
+    return f"{kind}|{address}"
+
+
+def parse_record_key(key: str) -> tuple[RecordKind, str]:
+    """``(kind, address)`` of a :func:`record_key`; :class:`RecordError` for anything else."""
+    kind, sep, address = key.partition("|")
+    if not sep or kind not in _KINDS or not address:
+        raise RecordError(f"malformed record key: {key!r}")
+    return cast(RecordKind, kind), address
+
+
 # --- the record --------------------------------------------------------------
 
 
@@ -277,6 +306,19 @@ class ExecutionRecord:
         shard = _shard_of(key)
         self._shards.setdefault(shard, {})[key] = entry
         self._dirty.add(shard)
+
+    def remove(self, key: str) -> None:
+        """Drop the entry at ``key``, if any."""
+        shard = _shard_of(key)
+        entries = self._shards.get(shard)
+        if entries is not None and key in entries:
+            del entries[key]
+            if not entries:
+                del self._shards[shard]
+                self._bytes.pop(shard, None)
+                self._dirty.discard(shard)
+            else:
+                self._dirty.add(shard)
 
     def items(self) -> list[tuple[str, Any]]:
         """Every ``(key, entry)`` pair, sorted by key."""
