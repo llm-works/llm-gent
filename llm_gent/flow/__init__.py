@@ -68,7 +68,6 @@ from .nodes import UNSET, Failure, Skipped, Unset
 from .panel import Panel
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
-from .state.record import ExecutionRecord, RecordError
 from .verb import verb
 
 
@@ -77,7 +76,6 @@ __all__ = [
     "CheckpointPolicy",
     "CheckpointStore",
     "Context",
-    "ExecutionRecord",
     "Failure",
     "Flow",
     "FlowFactory",
@@ -86,7 +84,6 @@ __all__ = [
     "Loop",
     "LoopFactory",
     "Panel",
-    "RecordError",
     "ResumeMode",
     "Role",
     "SAIAFactory",

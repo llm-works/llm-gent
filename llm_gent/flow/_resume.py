@@ -29,12 +29,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ._recorder import RunRecorder
 from .checkpoint import COMPLETE_TAG
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
-from .state.record import RecordError
 
 
 if TYPE_CHECKING:
@@ -235,7 +233,7 @@ async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
     """
     ctx = flow._checkpoint_ctx
     assert ctx is not None
-    tree = await _put_root_tree(flow, final_state, None)
+    tree = await _put_root_tree(flow, final_state)
     commit = await ctx.save_completion_commit(tree)
     await ctx.put_tag(COMPLETE_TAG, commit.content_hash)
     return commit
@@ -248,45 +246,23 @@ async def commit_failure(flow: Flow, failed_state: State[Any]) -> None:
     exception is re-raised. Any error while writing is logged at warning
     level and swallowed, so it never replaces the exception that ended the
     run. A no-op without a checkpointer.
-
-    The commit carries the run's execution record and open scopes, so the
-    work that completed before the failure is on record. When an open
-    scope cannot be serialized (a verb put a live handle into it), the
-    commit is written with the root state alone: a record without the
-    scopes its entries' effects live in would be inconsistent, while a
-    commit without a record is merely less complete.
     """
     ctx = flow._checkpoint_ctx
     if ctx is None:
         return
     try:
-        tree = await _failure_tree(flow, failed_state)
+        tree = await _put_root_tree(flow, failed_state)
         await ctx.save_failure_commit(tree)
     except Exception as e:
         flow._lg.warning("failure commit could not be written", extra={"exception": e})
 
 
-async def _failure_tree(flow: Flow, state: State[Any]) -> Tree:
-    """The failure commit's tree: with the run's record and scopes, else the root alone."""
-    try:
-        return await _put_root_tree(flow, state, flow._recorder)
-    except RecordError as e:
-        flow._lg.warning(
-            "failure commit carries no execution record: an open scope cannot be serialized",
-            extra={"exception": e},
-        )
-        return await _put_root_tree(flow, state, None)
-
-
-async def _put_root_tree(flow: Flow, state: State[Any], run: RunRecorder | None) -> Tree:
-    """Put ``state``'s commit tree (with ``run``'s record and scopes), or an empty tree.
-
-    The tree is empty when the root state cannot be serialized.
-    """
+async def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
+    """Put ``state``'s scope tree, or an empty tree when it cannot be serialized."""
     ctx = flow._checkpoint_ctx
     assert ctx is not None
     if _serializable(flow, state):
-        return await ctx.put_state_tree(state, run)
+        return await ctx.put_state_tree(state)
     tree = Tree.from_entries([])
     await ctx.put_tree(tree)
     return tree

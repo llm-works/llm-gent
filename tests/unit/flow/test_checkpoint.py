@@ -40,14 +40,64 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 @dataclass
 class SaiaResult:
-    """Stand-in for SAIA's task result, passed between Loop steps.
-
-    Module-level so the execution record can store it: a result a later
-    step receives must be importable to be recorded.
-    """
+    """Stand-in for SAIA's task result, passed between Loop steps."""
 
     paused: bool = False
     reason: str = ""
+
+
+@dataclass
+class WaveTarget:
+    """A map item, like an app's fan-out target."""
+
+    qid: int
+
+
+class AppHandle:
+    """An app object with no JSON form (e.g. an ORM row), passed between steps."""
+
+    def __init__(self, qid: int) -> None:
+        self.qid = qid
+
+
+class YieldingStore:
+    """Delegates to a sync store, yielding to the event loop before every call.
+
+    In-tree stores are synchronous; yielding lets other tasks run in the
+    middle of a commit, as they do against an async store.
+    """
+
+    def __init__(self, inner: JsonFileCheckpointStore) -> None:
+        self._inner = inner
+
+    @property
+    def retention(self) -> Any:
+        return self._inner.retention
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.sleep(0)
+            return attr(*args, **kwargs)
+
+        return call
+
+
+def fail_first_commit(store: JsonFileCheckpointStore) -> None:
+    """Make the store's first commit put raise ``OSError("disk full")``."""
+    original = store.put_object
+    failed: list[bool] = []
+
+    def flaky(flow_id: str, kind: Any, content_hash: str, payload: bytes) -> None:
+        if kind == "commit" and not failed:
+            failed.append(True)
+            raise OSError("disk full")
+        original(flow_id, kind, content_hash, payload)
+
+    store.put_object = flaky  # type: ignore[method-assign]
 
 
 # ---------------------------------------------------------------------------
@@ -302,16 +352,7 @@ class TestCheckpointPolicyMap:
         """A per-item commit that fails rolls the merge back to the prior state, not to empty."""
         from llm_gent.flow import Context, FlowFactory, verb
 
-        original = store.put_object
-        failed: list[bool] = []
-
-        def fail_first_commit(flow_id: str, kind: Any, content_hash: str, payload: bytes) -> None:
-            if kind == "commit" and not failed:
-                failed.append(True)
-                raise OSError("disk full")
-            original(flow_id, kind, content_hash, payload)
-
-        store.put_object = fail_first_commit  # type: ignore[method-assign]
+        fail_first_commit(store)
 
         @verb
         async def add(ctx: Context[dict[str, Any]], item: int) -> int:
@@ -337,6 +378,123 @@ class TestCheckpointPolicyMap:
             .call(read_state)
         )
         assert await outer.run() == {"total": 1}
+
+    async def test_failed_item_commit_without_state_keeps_sibling_writes(
+        self, tmp_path: Path
+    ) -> None:
+        """Without ``state=`` items write the shared state; a failed commit must not erase them.
+
+        Item 1 writes while item 0's commit is in flight; item 0's commit
+        fails. Restoring a pre-merge snapshot would drop item 1's write.
+        """
+        from llm_gent.flow import Context, FlowFactory, History, verb
+
+        inner = JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+        fail_first_commit(inner)
+        store = YieldingStore(inner)
+
+        @verb
+        async def mark(ctx: Context[dict[str, Any]], x: int) -> int:
+            if x == 1:
+                for _ in range(3):
+                    await asyncio.sleep(0)
+            ctx.state.data[f"s{x}"] = True
+            return x
+
+        state: dict[str, Any] = {}
+        outer = (
+            FlowFactory(make_test_logger())
+            .create(state=state)
+            .with_checkpointer(store, "map-siblings")  # type: ignore[arg-type]
+            .with_checkpoint_policy(on_map_item=True)
+            .map(lambda b: b.call(mark), items=lambda _p, _c: [0, 1], strict=False)
+        )
+        await outer.run()
+        assert state == {"s0": True, "s1": True}
+        history = History(store, "map-siblings")  # type: ignore[arg-type]
+        head = await history.head()
+        assert head is not None
+        assert (await history.scopes(head))[0] == {"s0": True, "s1": True}
+
+
+class TestCheckpointedRunValues:
+    """A checkpointed run passes any value between steps, as an uncheckpointed one does.
+
+    Only state is persisted: step results, map item outputs and failures
+    never have to be JSON-serializable.
+    """
+
+    async def test_app_object_passed_between_steps(self, store: JsonFileCheckpointStore) -> None:
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        @verb
+        async def make(ctx: Context[dict[str, Any]]) -> AppHandle:
+            return AppHandle(7)
+
+        @verb
+        async def read(ctx: Context[dict[str, Any]], handle: AppHandle) -> int:
+            return handle.qid
+
+        flow = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpointer(store, "app-object")
+            .call(make)
+            .call(read)
+        )
+        assert await flow.run() == 7
+
+    async def test_non_strict_guarded_map_of_app_objects(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """Items that fail, are skipped by the guard, or return app objects all reach the next step."""
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        @verb
+        async def dispatch(ctx: Context[dict[str, Any]], t: WaveTarget) -> AppHandle:
+            if t.qid == 2:
+                raise RuntimeError("inner run failed")
+            return AppHandle(t.qid)
+
+        @verb
+        async def kinds(ctx: Context[dict[str, Any]], outcomes: list[Any]) -> list[str]:
+            return [type(o).__name__ for o in outcomes]
+
+        flow = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpointer(store, "wave")
+            .map(
+                lambda b: b.call(dispatch),
+                items=lambda _p, _c: [WaveTarget(1), WaveTarget(2), WaveTarget(3)],
+                strict=False,
+            )
+            .guard(lambda t, _c: t.qid != 3)
+            .call(kinds)
+        )
+        assert await flow.run() == ["AppHandle", "Failure", "Skipped"]
+
+    async def test_non_strict_map_with_a_failed_item(self, store: JsonFileCheckpointStore) -> None:
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        @verb
+        async def double(ctx: Context[dict[str, Any]], x: int) -> int:
+            if x == 2:
+                raise RuntimeError("item failed")
+            return 2 * x
+
+        @verb
+        async def summarize(ctx: Context[dict[str, Any]], results: list[Any]) -> list[Any]:
+            return [r if isinstance(r, int) else "failed" for r in results]
+
+        flow = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpointer(store, "failed-item")
+            .map(lambda b: b.call(double), items=lambda _p, _c: [1, 2, 3], strict=False)
+            .call(summarize)
+        )
+        assert await flow.run() == [2, "failed", 6]
 
 
 class TestCtxCheckpoint:
@@ -377,6 +535,33 @@ class TestCtxCheckpoint:
         assert len(non_final) == 1, (
             f"expected exactly one explicit-checkpoint commit; got {non_final}"
         )
+
+    async def test_unchanged_state_is_not_put_again(self, store: JsonFileCheckpointStore) -> None:
+        """Two checkpoints of the same state put its blob and tree once; only the commits differ."""
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        puts: list[str] = []
+        original = store.put_object
+
+        def counting(flow_id: str, kind: Any, content_hash: str, payload: bytes) -> None:
+            puts.append(content_hash)
+            original(flow_id, kind, content_hash, payload)
+
+        store.put_object = counting  # type: ignore[method-assign]
+
+        @verb
+        async def save_twice(ctx: Context[dict[str, Any]]) -> None:
+            await ctx.checkpoint()
+            await ctx.checkpoint()
+
+        await (
+            FlowFactory(make_test_logger())
+            .create(state={"n": 1})
+            .with_checkpointer(store, "no-reput")
+            .call(save_twice)
+            .run()
+        )
+        assert len(puts) == len(set(puts))
 
     async def test_ctx_checkpoint_noop_without_checkpointer(self) -> None:
         """``ctx.checkpoint()`` under a flow with no checkpointer is a no-op."""
@@ -1506,7 +1691,7 @@ class TestCompletionTag:
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
         ctx = CheckpointContext(store, "torn-completion", lambda: "")
-        tree = await ctx.put_state_tree(State(data={"n": 7}), None)
+        tree = await ctx.put_state_tree(State(data={"n": 7}))
         await ctx.save_completion_commit(tree)
         assert store.resolve_tag(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
 
@@ -1857,8 +2042,7 @@ class TestScopedStateRoundTrip:
             store.get_object(flow_id_for(store, "scoped-1"), "tree", halted_commit.root_tree_hash)
             or b""
         )
-        stack = [e for e in halted_tree.entries if e.scope_id.isdigit()]
-        leaf_hash = stack[-1].child_hash
+        leaf_hash = halted_tree.entries[-1].child_hash
         leaf_data = json.loads(
             (store.get_object(flow_id_for(store, "scoped-1"), "blob", leaf_hash) or b"").decode()
         )
@@ -1952,9 +2136,8 @@ class TestScopedStateRoundTrip:
         tree = Tree.from_bytes(
             store.get_object(flow_id_for(store, "3-level-1"), "tree", commit.root_tree_hash) or b""
         )
-        # Three scope entries: root (00), middle (01), leaf (02), then the
-        # execution record (r) and the run's open scopes (s).
-        assert [e.scope_id for e in tree.entries] == ["00", "01", "02", "r", "s"]
+        # Three scope entries: root (00), middle (01), leaf (02).
+        assert [e.scope_id for e in tree.entries] == ["00", "01", "02"]
         middle_entry = tree.entries[1]
         import json
 

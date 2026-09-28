@@ -89,7 +89,7 @@ def _compute_node_ids(chain_context: str, nodes: list[_Node]) -> tuple[str, ...]
     where ``occurrence`` counts the earlier steps in the same chain with
     the same kind and target. Chain position does not enter the key:
     inserting, removing or reordering steps with other targets leaves a
-    step's id unchanged, so its record and paused turns are still found
+    step's id unchanged, so its checkpoints and paused turns are still found
     after a deploy that edits the chain around it. Steps sharing a
     target (the same verb twice, two anonymous subflows, two maps) are
     told apart by their order among themselves.
