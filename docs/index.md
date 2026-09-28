@@ -181,10 +181,30 @@ mid-execution. The checkpoint records the last completed boundary
 - **Mid-step crash**: a chain step is running when the process dies.
   The last checkpoint is at the prior step. Resume re-runs the step.
 
-Clean halts (observed between iterations or chain steps) do not cause
-re-runs — they checkpoint the halt position and resume continues from
-the next boundary. Chain-step resume receives no `prev_result` (the
-predecessor did not re-run), so the step reads from state instead.
+A clean halt writes one `halted` commit carrying the state at the point
+the halt was observed: between iterations, between top-level chain
+steps, or at the last top-level step when the halt was set during it.
+Work that finishes after that point (in-flight map items, nested steps
+still running) is not in the halt commit; its own saves (`on_map_item`,
+`on_iterate`, `ctx.checkpoint()`) are still written after it. A halted
+history is never marked complete.
+
+`resume="restart"` runs from the first step with the root state of the
+newest commit that has usable state; verbs that decide from state what
+is already done skip it. This is the resume mode that does not depend
+on where the halt landed.
+
+`resume="replay"` continues at the halt commit's position, with these
+limits:
+
+- The resumed step receives no `prev_result` (its predecessor did not
+  re-run), so it reads its input from state.
+- A halt that skipped map items in a top-level map followed by another
+  step resumes at that next step; the skipped items do not run.
+- A map that re-runs re-runs its completed items and re-applies their
+  merges.
+- A save written after the halt commit becomes the head, and replay
+  continues at that save's position instead.
 
 Consequence: **verbs must be idempotent-in-effects.** Reading state,
 mutating state, and returning a value are all safe to repeat. Side
@@ -202,7 +222,8 @@ Three save triggers govern when the framework writes commits:
 - **Halt observation** — always on. Setting the ambient halt event
   causes the executor to save a `halted` commit before returning.
   This is the durability guarantee for pause/resume across process
-  restart.
+  restart. A run whose halt is set is never marked complete and never
+  deleted under `gc_on_success`.
 - **Explicit `ctx.checkpoint()`** — always available. Verbs invoke
   the async method to force a save at their current node position.
 - **Implicit multi-execution boundary saves** — off by default.

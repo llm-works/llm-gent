@@ -170,9 +170,8 @@ class Chain:
             ctx = _build_ctx(node.target, self.env, node_id)
             result = await _execute_node(node, ctx, self.env, node_args, node_kwargs, node_id)
         else:
-            # for-else: chain exhausted without a between-steps halt-save. If the
-            # LAST step paused SAIA mid-turn, save at its node so resume can
-            # re-dispatch — no next step exists to save at.
+            # for-else: chain exhausted without a between-steps halt-save. A halt
+            # set during the LAST step saves at that step — no next step exists.
             await self._observe_halt_trailing()
         return result
 
@@ -210,19 +209,24 @@ class Chain:
         return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
 
     async def _observe_halt_trailing(self) -> None:
-        """Save a halt commit after the LAST chain step when it paused a Loop.
+        """Save a halt commit at the LAST chain step when halt was signaled during it.
 
         :meth:`_observe_halt_between` only fires between steps. When
         halt was signaled during the final step's dispatch, no next
-        step exists to save at and the walker just returns — losing
-        the paused turn on resume. This mirror observes halt at the
-        trailing edge and, when the last step owns pending paused-turn
-        bytes, saves at its node so resume re-dispatches it and the
-        Loop consumes the paused_turn entry.
+        step exists to save at. Without a commit here the head would
+        be an older save point, and a later run would start from
+        stale state.
 
-        No-op when halt is not set, no pending Loop entry is owned by
-        the last step, or the run is nested / has no checkpointer
-        bound.
+        The commit carries the run's final state, and the history is
+        not marked complete: the framework cannot tell whether the
+        last step finished its work or returned early because of the
+        halt. ``resume="restart"`` continues from that state;
+        ``resume="replay"`` re-runs the last step (and a Loop in it
+        picks up its paused_turn entry).
+
+        No-op when halt is not set, a halt commit was already written
+        (the save kernel latches), or the run is nested / has no
+        checkpointer bound.
         """
         env = self.env
         if (
@@ -232,10 +236,7 @@ class Chain:
             or not self.ids
         ):
             return
-        last = self.ids[-1]
-        if not _just_completed_owns_paused_turn(env, last):
-            return
-        await HaltSaveObserver.save_if_signaled(env, 0, last, env.state)
+        await HaltSaveObserver.save_if_signaled(env, 0, self.ids[-1], env.state)
 
 
 def _just_completed_owns_paused_turn(env: _RunEnv, node_id: str) -> bool:

@@ -171,7 +171,9 @@ class Resume:
 async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:
     """Apply the store's retention policy on the clean-exit path.
 
-    Halt-triggered exits preserve the history regardless of policy.
+    Halt-triggered exits preserve the history regardless of policy:
+    the halt commit (the chain writes one at the last step when halt
+    was set during it) is the head and carries the run's final state.
     On a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the
     record and commits ``final_state`` tagged ``complete`` so a
     subsequent ``run(resume="replay")`` doesn't replay the last save point
