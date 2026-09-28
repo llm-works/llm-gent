@@ -11,12 +11,15 @@ on a small, stable serialization surface.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import PurePath
 from typing import Any
 from uuid import UUID
 
 from cattrs import Converter
+from cattrs.cols import is_any_set, iterable_unstructure_factory
 from cattrs.preconf.json import make_converter as _make_json_converter
 from pydantic import BaseModel
 
@@ -33,6 +36,28 @@ def _is_basemodel_class(cls: Any) -> bool:
         return False
 
 
+def _member_sort_key(member: Any) -> str:
+    """Sort key for an unstructured set member: its canonical JSON text.
+
+    ``default=repr`` keeps a member JSON cannot render from raising here;
+    it still fails when the state is serialized, as before.
+    """
+    return json.dumps(
+        member, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=repr
+    )
+
+
+def _sorted_set_unstructure(cl: Any, converter: Converter) -> Callable[[Any], list[Any]]:
+    """Unstructure hook factory: sets and frozensets become lists sorted by member JSON.
+
+    The JSON preset emits set members in iteration order, which follows
+    per-process string hashing; sorting makes the output, and every hash
+    taken over it, identical across processes.
+    """
+    unstructure = iterable_unstructure_factory(cl, converter, unstructure_to=list)
+    return lambda value: sorted(unstructure(value), key=_member_sort_key)
+
+
 def _build_state_converter() -> Converter:
     """Build the module-level converter with the pydantic hook wired.
 
@@ -44,9 +69,11 @@ def _build_state_converter() -> Converter:
 
     :class:`~pydantic.BaseModel` is not one of the preconf hooks, so a
     factory dispatches every BaseModel subclass to
-    ``model_dump(mode="json")`` / ``model_validate(...)``.
+    ``model_dump(mode="json")`` / ``model_validate(...)``. Sets and
+    frozensets unstructure to sorted lists (:func:`_sorted_set_unstructure`).
     """
     conv = _make_json_converter()
+    conv.register_unstructure_hook_factory(is_any_set, _sorted_set_unstructure)
     conv.register_unstructure_hook_factory(
         _is_basemodel_class,
         lambda _cls: lambda inst: inst.model_dump(mode="json"),

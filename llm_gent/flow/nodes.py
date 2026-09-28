@@ -334,10 +334,10 @@ class _Node:
     Identity is content-addressed but derived lazily, not stored: the
     executor computes each node's runtime ``node_id`` from the enclosing
     :attr:`_RunEnv.chain_context` plus the node's local key
-    (kind + target qualname + chain position) on descent. The hash chain
-    from root gives every node in the composition tree a globally-unique
-    identifier the checkpoint layer uses; see
-    :func:`llm_gent.flow.flow._compute_node_id`.
+    (kind + target qualname + occurrence among same-target steps) on
+    descent. The hash chain from root gives every node in the
+    composition tree a globally-unique identifier the checkpoint layer
+    uses; see :func:`llm_gent.flow._node_id._compute_node_ids`.
     """
 
     target: Any

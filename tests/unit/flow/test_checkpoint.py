@@ -1703,6 +1703,59 @@ class TestResumeErrorPaths:
         assert "cafebabecafebabe" in message
         assert "deadbeefdeadbeef" in message
 
+    @pytest.mark.parametrize(
+        "edited",
+        [["a", "c", "b"], ["a", "b", "x", "c"], ["a", "b", "c", "x"]],
+        ids=["reorder", "insert-before-save-point", "append"],
+    )
+    async def test_replay_refuses_edited_chain(
+        self, store: JsonFileCheckpointStore, edited: list[str]
+    ) -> None:
+        """Halt in ``[a, b, c]`` saves at c; replay of an edited chain raises before any step.
+
+        The saved step's id survives each edit, so only the structure check
+        stops replay from skipping ``x`` or running ``b`` twice.
+        """
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        halt = asyncio.Event()
+        ran: list[str] = []
+
+        @verb
+        async def a(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            ran.append("a")
+
+        @verb
+        async def b(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            ran.append("b")
+            halt.set()
+
+        @verb
+        async def c(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            ran.append("c")
+
+        @verb
+        async def x(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            ran.append("x")
+
+        steps = {"a": a, "b": b, "c": c, "x": x}
+
+        def build(names: list[str], halt_event: asyncio.Event) -> Any:
+            flow = ff.create(state={}).with_checkpointer(store, "edited").with_halt(halt_event)
+            flow = flow.call(steps[names[0]])
+            for name in names[1:]:
+                flow = flow.then(steps[name])
+            return flow
+
+        ff = FlowFactory(make_test_logger())
+        await build(["a", "b", "c"], halt).run()
+        assert ran == ["a", "b"]
+
+        ran.clear()
+        with pytest.raises(RuntimeError, match="structurally changed"):
+            await build(edited, asyncio.Event()).run(resume="replay")
+        assert ran == []
+
 
 # ---------------------------------------------------------------------------
 # Scoped state — .call(state=...) round-trip through the CAS commit tree

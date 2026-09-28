@@ -34,7 +34,7 @@ from ._executor import (
     _save_scope_commit,
 )
 from ._halt_observer import is_halt_signaled
-from ._node_id import _compute_node_id, _descend_context
+from ._node_id import _compute_node_ids, _descend_context
 from .context import Context
 from .nodes import Failure, ItemsFn, Skipped
 from .state import serialize_state_data
@@ -162,9 +162,7 @@ class MapRunner:
         head = popped.remaining_path[0]
         for i in range(item_count):
             item_ctx = _descend_context(self.node_id, f"map:{i}")
-            item_ids = tuple(
-                _compute_node_id(item_ctx, n, j) for j, n in enumerate(self.mp.body._nodes)
-            )
+            item_ids = _compute_node_ids(item_ctx, self.mp.body._nodes)
             if head in item_ids:
                 result[i] = popped
                 break

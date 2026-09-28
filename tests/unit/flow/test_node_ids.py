@@ -4,19 +4,21 @@
 """Content-addressed node IDs — lazy, chained, collision-free.
 
 Exercises the pair
-:func:`llm_gent.flow._node_id._compute_node_id` /
+:func:`llm_gent.flow._node_id._compute_node_ids` /
 :func:`llm_gent.flow._node_id._descend_context`. IDs are computed at
 descent time from the enclosing Flow's ``chain_context`` plus the
-node's local key (kind, chain position, target qualname); the descent
-context is itself a hash chain from the run's root through every
-subflow / branch-arm / iterate-body above.
+node's local key (kind, target qualname, occurrence among same-target
+steps); the descent context is itself a hash chain from the run's root
+through every subflow / branch-arm / iterate-body above.
 
 The chain gives every node in the composition tree a globally-unique
-identifier the checkpoint layer uses. Tests pin four properties:
+identifier the checkpoint layer uses. Tests pin five properties:
 
 - **Deterministic:** same graph → same IDs across processes.
-- **Collision-free by construction:** distinct chain positions,
+- **Collision-free by construction:** distinct occurrences,
   boundaries, and target qualnames all flip the hash.
+- **Position-independent:** inserting, removing or reordering steps
+  with other targets leaves a step's ID unchanged.
 - **Context-sensitive:** the same subflow at two different call sites
   produces two different IDs for its inner nodes.
 - **Cosmetic-stable:** edits that don't change the local key
@@ -27,7 +29,7 @@ identifier the checkpoint layer uses. Tests pin four properties:
 from __future__ import annotations
 
 from llm_gent.flow import Flow, verb
-from llm_gent.flow._node_id import _compute_node_id, _descend_context
+from llm_gent.flow._node_id import _compute_node_ids, _descend_context
 
 from .conftest import ROLE_A, ROLE_B, make_test_logger
 
@@ -53,7 +55,7 @@ def _mkflow() -> Flow:
 
 def _chain_step_ids(flow: Flow, chain_context: str = "") -> list[str]:
     """Compute the runtime node_ids for a Flow's chain under a given context."""
-    return [_compute_node_id(chain_context, n, i) for i, n in enumerate(flow._nodes)]
+    return list(_compute_node_ids(chain_context, flow._nodes))
 
 
 # -----------------------------------------------------------------------------
@@ -64,7 +66,7 @@ def _chain_step_ids(flow: Flow, chain_context: str = "") -> list[str]:
 def test_id_is_16_hex_chars() -> None:
     """digest_size=8 → 64 bits → 16 hex chars."""
     flow = _mkflow().call(verb_alpha)
-    node_id = _compute_node_id("", flow._nodes[0], 0)
+    node_id = _chain_step_ids(flow)[0]
     assert len(node_id) == 16
     int(node_id, 16)  # parses as hex
 
@@ -77,23 +79,19 @@ def test_same_composition_same_ids() -> None:
 
 
 def test_ids_unique_within_chain() -> None:
-    """Same target at three different positions → three distinct IDs.
-
-    Chain position participates in the hash, so identity at (i) is
-    always distinct from identity at (j) for i != j.
-    """
+    """Same target three times → three distinct IDs, told apart by occurrence."""
     flow = _mkflow().call(verb_alpha).then(verb_alpha).then(verb_alpha)
     ids = _chain_step_ids(flow)
     assert len(set(ids)) == 3
 
 
 # -----------------------------------------------------------------------------
-# Structural changes flip IDs (identity break)
+# Identity under chain edits
 # -----------------------------------------------------------------------------
 
 
 def test_target_swap_flips_id() -> None:
-    """Same position + different target → different ID at that position."""
+    """A different target → a different ID; the unchanged step keeps its ID."""
     a = _mkflow().call(verb_alpha).then(verb_beta)
     b = _mkflow().call(verb_alpha).then(verb_gamma)
     ids_a, ids_b = _chain_step_ids(a), _chain_step_ids(b)
@@ -101,22 +99,40 @@ def test_target_swap_flips_id() -> None:
     assert ids_a[1] != ids_b[1]
 
 
-def test_reorder_flips_ids() -> None:
-    """Swapping the order of two chain steps flips both IDs.
-
-    Chain position participates in identity — a saved path built
-    against the pre-swap layout will refuse to replay against the
-    post-swap layout at the very first mismatch.
-    """
+def test_reorder_keeps_ids() -> None:
+    """Swapping two steps with different targets keeps each step's ID."""
     a = _mkflow().call(verb_alpha).then(verb_beta)
     b = _mkflow().call(verb_beta).then(verb_alpha)
     ids_a, ids_b = _chain_step_ids(a), _chain_step_ids(b)
-    assert ids_a[0] != ids_b[0]
-    assert ids_a[1] != ids_b[1]
+    assert ids_a[0] == ids_b[1]
+    assert ids_a[1] == ids_b[0]
+
+
+def test_insert_and_remove_keep_ids() -> None:
+    """Inserting or removing a step leaves the other steps' IDs unchanged."""
+    base = _chain_step_ids(_mkflow().call(verb_alpha).then(verb_beta))
+    inserted = _chain_step_ids(_mkflow().call(verb_gamma).then(verb_alpha).then(verb_beta))
+    removed = _chain_step_ids(_mkflow().call(verb_beta))
+    assert inserted[1:] == base
+    assert removed == base[1:]
+
+
+def test_same_target_steps_follow_their_order() -> None:
+    """Steps sharing a target are identified by their order among themselves.
+
+    Removing the first of two ``verb_alpha`` steps hands the second the
+    first one's ID — the only identity available for indistinguishable
+    targets.
+    """
+    both = _chain_step_ids(_mkflow().call(verb_alpha).then(verb_beta).then(verb_alpha))
+    second_removed = _chain_step_ids(_mkflow().call(verb_alpha).then(verb_beta))
+    assert second_removed == both[:2]
+    first_removed = _chain_step_ids(_mkflow().call(verb_beta).then(verb_alpha))
+    assert first_removed == [both[1], both[0]]
 
 
 def test_kind_swap_flips_id() -> None:
-    """Same target at the same position but different composition kind → different ID."""
+    """Same target but a different composition kind → different ID."""
     a = _mkflow().call(verb_alpha)
     b = _mkflow().iterate(verb_alpha, max_iters=1)
     ids_a = _chain_step_ids(a)
@@ -137,7 +153,7 @@ def test_descend_context_boundary_matters() -> None:
     will differ even though the body's own chain is identical.
     """
     parent = _mkflow().call(verb_alpha)
-    parent_id = _compute_node_id("", parent._nodes[0], 0)
+    parent_id = _chain_step_ids(parent)[0]
     then_ctx = _descend_context(parent_id, "then")
     else_ctx = _descend_context(parent_id, "else")
     body = _mkflow().call(verb_beta)
@@ -151,13 +167,12 @@ def test_shared_subflow_at_two_call_sites_has_distinct_ids() -> None:
 
     Content-addressing under the chained-hash scheme means "identity in
     the tree," not "identity of the underlying object." Reusing a
-    subflow at two places yields two positions — two identities —
+    subflow at two places yields two occurrences — two identities —
     for each of its inner nodes.
     """
     shared = _mkflow().call(verb_beta)
     parent = _mkflow().call(shared).then(shared)
-    call_0_id = _compute_node_id("", parent._nodes[0], 0)
-    call_1_id = _compute_node_id("", parent._nodes[1], 1)
+    call_0_id, call_1_id = _chain_step_ids(parent)
     inner_at_0 = _chain_step_ids(shared, _descend_context(call_0_id, "call"))
     inner_at_1 = _chain_step_ids(shared, _descend_context(call_1_id, "call"))
     assert inner_at_0 != inner_at_1
