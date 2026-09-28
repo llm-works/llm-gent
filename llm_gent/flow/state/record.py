@@ -254,32 +254,47 @@ class ExecutionRecord:
     Entries are JSON values; their shape belongs to the executor that
     writes them. Not safe for concurrent writers across threads — the
     executor writes from one event loop.
+
+    :meth:`shards` serializes only the shards whose entries changed since
+    the previous call and returns cached bytes for the rest, so a run
+    that commits often pays for what it recorded since the last commit,
+    not for the whole record.
     """
 
     def __init__(self, entries: dict[str, Any]) -> None:
-        self._entries: dict[str, Any] = dict(entries)
+        self._shards: dict[str, dict[str, Any]] = {}
+        for key, entry in entries.items():
+            self._shards.setdefault(_shard_of(key), {})[key] = entry
+        self._bytes: dict[str, bytes] = {}
+        self._dirty: set[str] = set(self._shards)
 
     def get(self, key: str) -> Any | None:
         """The entry at ``key``, or ``None``."""
-        return self._entries.get(key)
+        return self._shards.get(_shard_of(key), {}).get(key)
 
     def put(self, key: str, entry: Any) -> None:
         """Set the entry at ``key``."""
-        self._entries[key] = entry
+        shard = _shard_of(key)
+        self._shards.setdefault(shard, {})[key] = entry
+        self._dirty.add(shard)
+
+    def items(self) -> list[tuple[str, Any]]:
+        """Every ``(key, entry)`` pair, sorted by key."""
+        pairs = [pair for entries in self._shards.values() for pair in entries.items()]
+        return sorted(pairs)
 
     def __contains__(self, key: object) -> bool:
-        return key in self._entries
+        return isinstance(key, str) and key in self._shards.get(_shard_of(key), {})
 
     def __len__(self) -> int:
-        return len(self._entries)
+        return sum(len(entries) for entries in self._shards.values())
 
     def shards(self) -> dict[str, bytes]:
         """Canonical JSON bytes per shard id, one shard per populated key-hash prefix."""
-        grouped: dict[str, dict[str, Any]] = {}
-        for key, entry in self._entries.items():
-            shard = content_hash(key.encode("utf-8"))[:_SHARD_PREFIX_LEN]
-            grouped.setdefault(shard, {})[key] = entry
-        return {shard: canonical_json(entries) for shard, entries in grouped.items()}
+        for shard in self._dirty:
+            self._bytes[shard] = canonical_json(self._shards[shard])
+        self._dirty.clear()
+        return dict(self._bytes)
 
     @classmethod
     def from_shards(cls, payloads: Iterable[bytes]) -> ExecutionRecord:
@@ -297,6 +312,11 @@ class ExecutionRecord:
                 raise RecordError(f"record keys in more than one shard: {sorted(overlap)[:3]}")
             entries.update(shard)
         return cls(entries)
+
+
+def _shard_of(key: str) -> str:
+    """Shard id of ``key``: the leading hex chars of its content hash."""
+    return content_hash(key.encode("utf-8"))[:_SHARD_PREFIX_LEN]
 
 
 def _parse_shard(payload: bytes) -> dict[str, Any]:

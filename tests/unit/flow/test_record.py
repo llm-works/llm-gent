@@ -257,6 +257,32 @@ class TestExecutionRecord:
         changed = [s for s in after if before.get(s) != after[s]]
         assert len(changed) == 1
 
+    def test_shards_reserialize_only_changed_shards(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A shards() call after one put serializes one shard; with no puts, none."""
+        from llm_gent.flow.state import record as record_module
+
+        record = ExecutionRecord({f"k{i}": i for i in range(100)})
+        record.shards()
+        calls: list[Any] = []
+        real = record_module.canonical_json
+
+        def counting(obj: Any) -> bytes:
+            calls.append(obj)
+            return real(obj)
+
+        monkeypatch.setattr(record_module, "canonical_json", counting)
+        assert record.shards() == record.shards()
+        assert calls == []
+        record.put("k0", "changed")
+        shards = record.shards()
+        assert len(calls) == 1
+        assert ExecutionRecord.from_shards(shards.values()).get("k0") == "changed"
+
+    def test_items_lists_every_entry_sorted(self) -> None:
+        record = ExecutionRecord({"b": 2, "a": 1})
+        record.put("c", 3)
+        assert record.items() == [("a", 1), ("b", 2), ("c", 3)]
+
     @pytest.mark.parametrize(
         "payload",
         [b"[]", b'[["k", 1]]', b"not json", b"\xff\xfe", b"42"],

@@ -24,6 +24,7 @@ import dataclasses
 import inspect
 from typing import TYPE_CHECKING, Any
 
+from ._recorder import BranchArm
 from .context import Context
 from .nodes import (
     UNSET,
@@ -42,6 +43,7 @@ from .state.cas import (
     CommitOutcome,
     TraceRef,
 )
+from .state.record import RecordError, instance_address, value_hash
 
 
 if TYPE_CHECKING:
@@ -109,7 +111,9 @@ async def _execute_node(
     env.lg.debug("executing node", extra={"target": target_name})
     try:
         result = await _invoke_target(node, ctx, env, node_args, node_kwargs, node_id)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, RecordError):
+        # A record refusal is a contract error in the flow, not a node
+        # failure a rescue policy may paper over.
         raise
     except Exception as exc:
         if node.rescue is None:
@@ -264,6 +268,41 @@ def _filter_verb_args(
     return passed_args, passed_kwargs
 
 
+def _is_composite(target: Any) -> bool:
+    """True for targets the executor descends into: subflows and control-flow primitives."""
+    from .flow import Flow
+
+    return isinstance(target, Flow | _Branch | _Iterate | _Map)
+
+
+def _consumes_input(node: _Node) -> bool:
+    """Whether ``node`` receives the previous chain step's result.
+
+    True with a ``project=`` callable, for subflows and control-flow
+    primitives (their bodies or predicates receive it), and for verbs
+    whose signature takes a positional after ``ctx`` (or could not be
+    inspected). A ``(ctx)``-only verb drops it.
+    """
+    if node.project is not None or _is_composite(node.target):
+        return True
+    arity = _verb_arity(node.target)
+    return arity.introspection_failed or arity.var_positional or arity.positional_slots > 0
+
+
+def _step_input_hash(node: _Node, node_args: tuple[Any, ...], node_kwargs: dict[str, Any]) -> str:
+    """Hash of the inputs a chain step receives — what the record compares on resume.
+
+    Verbs are hashed over the arguments their signature accepts, so a
+    value the verb drops does not have to be recordable.
+    """
+    if not _is_composite(node.target):
+        node_args, node_kwargs = _filter_verb_args(node.target, node_args, node_kwargs)
+    try:
+        return value_hash((node_args, node_kwargs))
+    except RecordError as e:
+        raise RecordError(f"input of {_target_label(node.target)} cannot be recorded: {e}") from e
+
+
 async def _run_subflow(
     body: Flow,
     env: _RunEnv,
@@ -291,6 +330,7 @@ async def _run_subflow(
     else:
         effective_factory = state_factory if state_factory is not None else env.state._factory
         child_state = _restore_scope_state(env.state, raw, effective_factory)
+    owner = _open_scope(env, node_id, state_fn, child_state)
     result = await body._run_as_subflow(
         *node_args,
         state=child_state,
@@ -303,10 +343,36 @@ async def _run_subflow(
         parent_replay=child_replay,
         parent_extra=env.extra,
         parent_policy=env.policy,
+        parent_coords=env.coords,
+        parent_output_needed=env.output_needed,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
+    _close_scope(env, owner)
     return result
+
+
+def _open_scope(
+    env: _RunEnv, node_id: str, state_fn: StateProject | None, child_state: State[Any]
+) -> str | None:
+    """Register a ``state=`` child scope with the run's recorder; return its owner address.
+
+    ``None`` when no scope was created (no projection — the child shares
+    the parent's scope) or the run records nothing.
+    """
+    recorder = env.recorder
+    if state_fn is None or recorder is None:
+        return None
+    owner = instance_address(node_id, env.coords)
+    recorder.open_scope(owner, child_state)
+    return owner
+
+
+def _close_scope(env: _RunEnv, owner: str | None) -> None:
+    """Drop a scope :func:`_open_scope` registered, once its owner merged it back."""
+    recorder = env.recorder
+    if owner is not None and recorder is not None:
+        recorder.close_scope(env, owner)
 
 
 def _consume_scope_data(
@@ -438,13 +504,12 @@ async def _run_branch(
     identity-distinct positions in the composition tree even when they
     share a target Flow.
     """
-    from ._node_id import _descend_context
-
     prev_result = node_args[0] if node_args else None
     verdict = br.when(prev_result, ctx)
     if inspect.isawaitable(verdict):
         verdict = await verdict
     chosen = br.then_flow if verdict else br.else_flow
+    _record_branch_verdict(env, node_id, bool(verdict), chosen is not None)
     if chosen is None:
         _assert_replay_allows_skip(
             env,
@@ -454,19 +519,38 @@ async def _run_branch(
             "has changed since checkpoint.",
         )
         return prev_result
-    return await chosen._run_as_subflow(
+    return await _run_branch_arm(chosen, "then" if verdict else "else", env, node_id, prev_result)
+
+
+async def _run_branch_arm(
+    arm: Flow, boundary: str, env: _RunEnv, node_id: str, prev_result: Any
+) -> Any:
+    """Run the arm a branch chose, entered via ``boundary`` (``"then"`` / ``"else"``)."""
+    from ._node_id import _descend_context
+
+    return await arm._run_as_subflow(
         prev_result,
         state=env.state,
         runtime=env.runtime,
         parent_halt=env.halt,
         parent_budget=env.budget,
         parent_checkpoint_ctx=env.checkpoint_ctx,
-        parent_chain_context=_descend_context(node_id, "then" if verdict else "else"),
+        parent_chain_context=_descend_context(node_id, boundary),
         parent_ancestor_chain=env.ancestor_chain + (node_id,),
         parent_replay=_pop_replay_for(env, node_id),
         parent_extra=env.extra,
         parent_policy=env.policy,
+        parent_coords=env.coords,
+        parent_output_needed=env.output_needed,
     )
+
+
+def _record_branch_verdict(env: _RunEnv, node_id: str, verdict: bool, has_arm: bool) -> None:
+    """Record the arm a branch chose: ``then``, ``else``, or ``none`` (falsy, no ``else_``)."""
+    if env.recorder is None:
+        return
+    arm: BranchArm = "then" if verdict else ("else" if has_arm else "none")
+    env.recorder.record_branch(env, node_id, arm)
 
 
 def _pop_replay_for(env: _RunEnv, node_id: str) -> _ResumeReplay | None:
@@ -569,7 +653,13 @@ async def _persist_halt(
     try:
         trace_ref, stashed_ids = await env.pending_paused_turns.stash_to_ctx(env.checkpoint_ctx)
         await env.checkpoint_ctx.save_scope_commit(
-            env.ancestor_chain, iteration, node_id, current_state, "halted", trace_ref
+            env.ancestor_chain,
+            iteration,
+            node_id,
+            current_state,
+            "halted",
+            trace_ref,
+            run=env.recorder,
         )
     except Exception as e:
         env.lg.warning(
@@ -599,7 +689,7 @@ async def _save_scope_commit(
     if env.checkpoint_ctx is None:
         return
     await env.checkpoint_ctx.save_scope_commit(
-        env.ancestor_chain, iteration, node_id, current_state, outcome, trace_ref
+        env.ancestor_chain, iteration, node_id, current_state, outcome, trace_ref, run=env.recorder
     )
 
 

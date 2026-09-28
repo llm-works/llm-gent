@@ -131,6 +131,18 @@ The framework writes both itself — no node produced them — following the
 """
 
 
+RECORD_ENTRY = "r"
+"""Root-tree entry holding a commit's execution record (a subtree of shard blobs)."""
+
+
+SCOPES_ENTRY = "s"
+"""Root-tree entry holding the run's open child scopes (a subtree keyed by owner address).
+
+The root tree's other entries are the scope stack, ``"00"``, ``"01"``, ...
+— digit-only ids, so they never collide with these two.
+"""
+
+
 ResumeMode = Literal["off", "replay", "restart"]
 """How :meth:`Flow.run` starts from a checkpointed history.
 

@@ -407,6 +407,10 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
+            # A paused turn is unfinished work: from here on the run records
+            # no instance as complete (the one holding this Loop included).
+            if ctx._env is not None and ctx._env.recorder is not None:
+                ctx._env.recorder.mark_paused()
             self._capture_paused(ctx, task, conversation)
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))

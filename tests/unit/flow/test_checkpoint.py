@@ -20,6 +20,7 @@ Direct-Protocol tests (put/get/put_ref/resolve_ref/gc) live in
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,18 @@ from .conftest import flow_id_for, make_test_logger
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+
+
+@dataclass
+class SaiaResult:
+    """Stand-in for SAIA's task result, passed between Loop steps.
+
+    Module-level so the execution record can store it: a result a later
+    step receives must be importable to be recorded.
+    """
+
+    paused: bool = False
+    reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -456,11 +469,7 @@ class TestPausedTurnTraceRef:
                 c.messages = list(state.get("messages", []))
                 return c
 
-        @dataclass
-        class _Result:
-            paused: bool = False
-            reason: str = ""
-
+        _Result = SaiaResult
         halt = asyncio.Event()
         conv_a = _Conv(messages=["from-a"])
         conv_b = _Conv(messages=["from-b"])
@@ -554,10 +563,7 @@ class TestPausedTurnTraceRef:
                 c.messages = list(state.get("messages", []))
                 return c
 
-        @dataclass
-        class _Result:
-            paused: bool = False
-            reason: str = ""
+        _Result = SaiaResult
 
         # Recording SAIA — captures every call so the test can assert what
         # the resume-side dispatch handed to complete().
@@ -679,10 +685,7 @@ class TestPausedTurnTraceRef:
                 c.messages = list(state.get("messages", []))
                 return c
 
-        @dataclass
-        class _Result:
-            paused: bool = False
-
+        _Result = SaiaResult
         after_calls: list[int] = []
         complete_calls: list[dict[str, Any]] = []
 
@@ -1812,7 +1815,8 @@ class TestScopedStateRoundTrip:
             store.get_object(flow_id_for(store, "scoped-1"), "tree", halted_commit.root_tree_hash)
             or b""
         )
-        leaf_hash = halted_tree.entries[-1].child_hash
+        stack = [e for e in halted_tree.entries if e.scope_id.isdigit()]
+        leaf_hash = stack[-1].child_hash
         leaf_data = json.loads(
             (store.get_object(flow_id_for(store, "scoped-1"), "blob", leaf_hash) or b"").decode()
         )
@@ -1906,8 +1910,9 @@ class TestScopedStateRoundTrip:
         tree = Tree.from_bytes(
             store.get_object(flow_id_for(store, "3-level-1"), "tree", commit.root_tree_hash) or b""
         )
-        # Three scope entries: root (00), middle (01), leaf (02).
-        assert [e.scope_id for e in tree.entries] == ["00", "01", "02"]
+        # Three scope entries: root (00), middle (01), leaf (02), then the
+        # execution record (r) and the run's open scopes (s).
+        assert [e.scope_id for e in tree.entries] == ["00", "01", "02", "r", "s"]
         middle_entry = tree.entries[1]
         import json
 

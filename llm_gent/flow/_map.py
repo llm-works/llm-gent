@@ -38,6 +38,7 @@ from ._node_id import _compute_node_ids, _descend_context
 from .context import Context
 from .nodes import Failure, ItemsFn, Skipped
 from .state import serialize_state_data
+from .state.record import RecordError, index_coord, instance_address
 
 
 if TYPE_CHECKING:
@@ -82,6 +83,8 @@ class MapRunner:
         prev_result = node_args[0] if node_args else None
         ctx = self._build_ctx()
         items = await _resolve_items(self.mp.items, prev_result, ctx)
+        if self.env.recorder is not None:
+            self.env.recorder.record_items(self.env, self.node_id, items)
         results = await self._gather_items(items)
         return await self._aggregate(results)
 
@@ -204,6 +207,8 @@ class MapItemRunner:
         self.item_index = item_index
         self.replay = replay
         self.merge_lock = merge_lock
+        self.coords = env.coords + (index_coord(item_index),)
+        self.address = instance_address(node_id, self.coords)
 
     async def run(self) -> Any:
         """Drive this item through the run pipeline.
@@ -221,15 +226,14 @@ class MapItemRunner:
             child_state = await _project_state(
                 self.mp.state_fn, self.env.state, self.mp.state_factory
             )
+            self._open_scope(child_state)
             item_ctx = self._ctx(child_state)
             if self.mp.guard is not None and not await _run_guard(
                 self.mp.guard, self.item, item_ctx
             ):
-                skipped = Skipped(item=self.item)
-                await self._fire_on_item_complete(skipped, item_ctx)
-                return skipped
+                return await self._on_guard_skip(item_ctx)
             result = await self._dispatch_body(child_state)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, RecordError):
             raise
         except Exception as exc:
             if self.mp.on_error is not None:
@@ -240,6 +244,28 @@ class MapItemRunner:
                 raise
             return failure
         return await self._on_success(result, child_state, item_ctx)
+
+    def _open_scope(self, child_state: State[Any]) -> None:
+        """Register the item's ``state=`` scope with the run's recorder."""
+        recorder = self.env.recorder
+        if self.mp.state_fn is not None and recorder is not None:
+            recorder.open_scope(self.address, child_state)
+
+    def _close_scope(self) -> None:
+        """Drop the item's scope: merged back, or discarded by the guard."""
+        recorder = self.env.recorder
+        if recorder is not None:
+            recorder.close_scope(self.env, self.address)
+
+    async def _on_guard_skip(self, item_ctx: Context[Any]) -> Skipped:
+        """Record the guard's skip, drop the item's scope, fire on_item_complete."""
+        recorder = self.env.recorder
+        if recorder is not None:
+            recorder.record_item_skipped(self.env, self.address)
+        self._close_scope()
+        skipped = Skipped(item=self.item)
+        await self._fire_on_item_complete(skipped, item_ctx)
+        return skipped
 
     async def _dispatch_body(self, child_state: State[Any]) -> Any:
         """Run the body subflow with per-item composition-tree identity.
@@ -266,6 +292,8 @@ class MapItemRunner:
             parent_replay=self.replay,
             parent_extra=env.extra,
             parent_policy=env.policy,
+            parent_coords=self.coords,
+            parent_output_needed=True,
         )
 
     async def _on_success(
@@ -291,11 +319,12 @@ class MapItemRunner:
                 if self.env.policy.on_map_item:
                     snapshot = serialize_state_data(self.env.state.data)
                 await _merge_state(self.mp.merge_fn, self.env.state, child_state)
+                self._record_success(result)
                 if self.env.policy.on_map_item:
                     await _save_scope_commit(
                         self.env, self.item_index, self.node_id, self.env.state, "ok"
                     )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, RecordError):
             raise
         except Exception as exc:
             if snapshot is not None:
@@ -309,6 +338,19 @@ class MapItemRunner:
             return failure
         await self._fire_on_item_complete(result, item_ctx)
         return result
+
+    def _record_success(self, result: Any) -> None:
+        """Record the completed item and drop its scope, in the same step as its merge.
+
+        Runs under the merge lock right after the merge, before any
+        per-item commit, so a commit never holds a merge without the
+        item's entry.
+        """
+        recorder = self.env.recorder
+        if recorder is None:
+            return
+        recorder.record_item(self.env, self.address, result)
+        recorder.close_scope(self.env, self.address)
 
     async def _run_on_error(self, exc: BaseException, ctx: Context[Any]) -> None:
         """Invoke on_error and swallow any exception it raises.

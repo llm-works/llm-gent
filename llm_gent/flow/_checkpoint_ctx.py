@@ -30,11 +30,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from ._recorder import RunRecorder
 from .checkpoint import (
     COMPLETION_PRODUCER,
     END_NODE_PATH,
     FAILED_NODE_PATH,
     FAILURE_PRODUCER,
+    RECORD_ENTRY,
+    SCOPES_ENTRY,
     CheckpointStore,
     Kind,
     Retention,
@@ -99,6 +102,10 @@ class CheckpointContext:
         self._head: str | None = None
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
+        # Blob / tree hashes this context already put during the run. Record
+        # shards and scopes that did not change since the last commit are
+        # content-identical, so their puts are skipped instead of repeated.
+        self._written: set[str] = set()
 
     def begin_run(self) -> None:
         """Drop the cached ``flow_id``, head and root hash, and create fresh locks.
@@ -114,6 +121,7 @@ class CheckpointContext:
         self._head = None
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
+        self._written = set()
 
     @property
     def retention(self) -> Retention:
@@ -146,16 +154,22 @@ class CheckpointContext:
     # --- store passthrough (kind-specific put_object variants) ---
 
     async def put_blob(self, content_hash: str, payload: bytes) -> None:
-        """Put a blob under this history."""
+        """Put a blob under this history; a no-op when this run already put it."""
+        if content_hash in self._written:
+            return
         flow_id = await self.ensure_flow_id()
         await maybe_await(self.store.put_object(flow_id, "blob", content_hash, payload))
+        self._written.add(content_hash)
 
     async def put_tree(self, tree: Tree) -> None:
-        """Serialize + put a Tree under this history."""
+        """Serialize + put a Tree under this history; a no-op when this run already put it."""
+        if tree.content_hash in self._written:
+            return
         flow_id = await self.ensure_flow_id()
         await maybe_await(
             self.store.put_object(flow_id, "tree", tree.content_hash, tree.to_bytes())
         )
+        self._written.add(tree.content_hash)
 
     async def put_commit(self, commit: Commit) -> None:
         """Serialize + put a Commit under this history."""
@@ -203,6 +217,7 @@ class CheckpointContext:
             self._flow_id = None
             self._head = None
             self._head_loaded = False
+            self._written.clear()
 
     # --- history: append a commit on top of the head ---
 
@@ -243,6 +258,8 @@ class CheckpointContext:
         current_state: State[Any],
         outcome: CommitOutcome,
         trace_ref: tuple[TraceRef, ...] = (),
+        *,
+        run: RunRecorder | None = None,
     ) -> Commit:
         """Persist a content-addressed scope commit at ``node_id``; return it.
 
@@ -265,16 +282,54 @@ class CheckpointContext:
         ``outcome`` records why the commit fired — ``"ok"`` for a
         successful iterate boundary, ``"halted"`` when the
         halt-observation site triggered the save.
+
+        ``run`` adds the run's execution record and live scopes to the
+        tree (:meth:`put_state_tree`).
         """
-        tree = await self.put_state_tree(current_state)
+        tree = await self.put_state_tree(current_state, run)
         node_path = "/".join(ancestor_chain + (node_id,))
         flow_id = await self.ensure_flow_id()
         meta = self._build_commit_meta(flow_id, node_path, iteration, node_id, outcome, trace_ref)
         return await self.append_commit(tree.content_hash, meta)
 
-    async def put_state_tree(self, current_state: State[Any]) -> Tree:
-        """Put one blob per scope from run root to ``current_state`` and their Tree."""
+    async def put_state_tree(
+        self, current_state: State[Any], run: RunRecorder | None = None
+    ) -> Tree:
+        """Put the commit tree for ``current_state``; return it.
+
+        Entries ``"00"``, ``"01"``, ... hold one blob per scope from the
+        run root to ``current_state``. With ``run``, two subtrees follow:
+        ``"r"`` — the execution record, one blob per shard, keyed by shard
+        id — and ``"s"`` — every child scope the run has open, one blob
+        per scope, keyed by its owner's address.
+        """
         entries = await self._put_scope_blobs(self._collect_scope_stack(current_state))
+        if run is not None:
+            entries += await self._put_run_entries(run)
+        tree = Tree.from_entries(entries)
+        await self.put_tree(tree)
+        return tree
+
+    async def _put_run_entries(self, run: RunRecorder) -> list[TreeEntry]:
+        """Put the record and open-scope subtrees; return their root-tree entries."""
+        scopes = {
+            owner: canonical_json(serialize_state_data(state.data))
+            for owner, state in run.scopes.items()
+        }
+        record_tree = await self._put_blob_tree(run.record.shards())
+        scope_tree = await self._put_blob_tree(scopes)
+        return [
+            TreeEntry(scope_id=RECORD_ENTRY, kind="tree", child_hash=record_tree.content_hash),
+            TreeEntry(scope_id=SCOPES_ENTRY, kind="tree", child_hash=scope_tree.content_hash),
+        ]
+
+    async def _put_blob_tree(self, payloads: dict[str, bytes]) -> Tree:
+        """Put one blob per payload and a Tree mapping each key to its blob."""
+        entries: list[TreeEntry] = []
+        for key, payload in payloads.items():
+            blob = Blob.from_bytes(payload)
+            await self.put_blob(blob.content_hash, blob.payload)
+            entries.append(TreeEntry(scope_id=key, kind="blob", child_hash=blob.content_hash))
         tree = Tree.from_entries(entries)
         await self.put_tree(tree)
         return tree

@@ -28,12 +28,15 @@ from .checkpoint import (
     COMPLETE_TAG,
     END_NODE_PATH,
     FAILED_NODE_PATH,
+    RECORD_ENTRY,
+    SCOPES_ENTRY,
     CheckpointStore,
     Kind,
     maybe_await,
 )
 from .state import StateFactory, restore_state_data
 from .state.cas import Commit, Tree
+from .state.record import ExecutionRecord
 
 
 T = TypeVar("T")
@@ -140,9 +143,42 @@ class History:
         tree = Tree.from_bytes(await self._object(flow_id, "tree", commit.root_tree_hash))
         payloads: list[Any] = []
         for entry in tree.entries:
+            if entry.kind != "blob" or not entry.scope_id.isdigit():
+                continue  # the record / open-scopes subtrees, not the scope stack
             blob = await self._object(flow_id, "blob", entry.child_hash)
             payloads.append(json.loads(blob.decode("utf-8")))
         return payloads
+
+    async def record(self, commit: Commit) -> ExecutionRecord | None:
+        """The execution record ``commit`` carries, or ``None`` when it carries none.
+
+        Commits written while a checkpointed run is in progress (halt,
+        failure, policy and ``ctx.checkpoint()`` commits) carry the record
+        of everything that run completed up to that point; the final-state
+        commit of a completed run does not.
+        """
+        blobs = await self._subtree_blobs(commit, RECORD_ENTRY)
+        return None if blobs is None else ExecutionRecord.from_shards(blobs.values())
+
+    async def open_scopes(self, commit: Commit) -> dict[str, Any]:
+        """Child scopes open when ``commit`` was written, keyed by owner address, as stored.
+
+        Empty when the commit carries none.
+        """
+        blobs = await self._subtree_blobs(commit, SCOPES_ENTRY)
+        return {} if blobs is None else {k: json.loads(v) for k, v in blobs.items()}
+
+    async def _subtree_blobs(self, commit: Commit, name: str) -> dict[str, bytes] | None:
+        """The blobs of root-tree subtree ``name`` by entry id; ``None`` when absent."""
+        flow_id = commit.meta.flow_id
+        root = Tree.from_bytes(await self._object(flow_id, "tree", commit.root_tree_hash))
+        entry = next((e for e in root.entries if e.scope_id == name), None)
+        if entry is None or entry.kind != "tree":
+            return None
+        subtree = Tree.from_bytes(await self._object(flow_id, "tree", entry.child_hash))
+        return {
+            e.scope_id: await self._object(flow_id, "blob", e.child_hash) for e in subtree.entries
+        }
 
     async def root_state(self, commit: Commit, factory: StateFactory[T]) -> T | None:
         """Top-level state ``commit`` holds, restored through ``factory``.
