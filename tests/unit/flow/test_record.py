@@ -171,6 +171,9 @@ class TestMalformed:
             {"a": 1, "b": 2},
             [1, 2],
             {"$l": [[1]]},
+            float("nan"),
+            float("inf"),
+            {"$l": [float("-inf")]},
         ],
     )
     def test_malformed_value_raises_record_error(self, encoded: Any) -> None:
@@ -262,6 +265,15 @@ class TestExecutionRecord:
     def test_non_object_shard_is_refused(self, payload: bytes) -> None:
         with pytest.raises(RecordError, match="record shard"):
             ExecutionRecord.from_shards([b'{"a": 1}', payload])
+
+    @pytest.mark.parametrize(
+        "payload",
+        [b'{"k": NaN}', b'{"k": Infinity}', b'{"k": {"$l": [-Infinity]}}', b'{"k": 1e999}'],
+        ids=["nan", "infinity", "nested-negative-infinity", "overflow"],
+    )
+    def test_non_finite_number_in_shard_is_refused(self, payload: bytes) -> None:
+        with pytest.raises(RecordError, match="non-finite"):
+            ExecutionRecord.from_shards([payload])
 
     def test_key_in_two_shards_is_refused(self) -> None:
         with pytest.raises(RecordError, match="more than one shard"):

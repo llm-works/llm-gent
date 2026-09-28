@@ -123,7 +123,11 @@ def decode_value(encoded: Any) -> Any:
 def _decode(encoded: Any) -> Any:
     """Recursive body of :func:`decode_value`: untagged scalars, tagged everything else."""
     kind = type(encoded)
-    if kind in _PRIMITIVES or kind is float:
+    if kind in _PRIMITIVES:
+        return encoded
+    if kind is float:
+        if not math.isfinite(encoded):
+            raise RecordError(f"malformed record value: non-finite float {encoded!r}")
         return encoded
     if kind is not dict:
         raise RecordError(f"malformed record value: untagged {kind.__name__}")
@@ -296,11 +300,33 @@ class ExecutionRecord:
 
 
 def _parse_shard(payload: bytes) -> dict[str, Any]:
-    """One shard payload as a JSON object; raise :class:`RecordError` for any other shape."""
+    """One shard payload as a JSON object; raise :class:`RecordError` for any other shape.
+
+    Non-finite numbers (``NaN``, ``Infinity``, literals that overflow to
+    infinity) are refused anywhere in the payload: the record only ever
+    writes finite JSON.
+    """
     try:
-        parsed = json.loads(payload.decode("utf-8"))
+        parsed = json.loads(
+            payload.decode("utf-8"),
+            parse_constant=_refuse_non_finite,
+            parse_float=_finite_float,
+        )
     except ValueError as e:  # JSONDecodeError and UnicodeDecodeError
         raise RecordError(f"record shard is not JSON: {e}") from e
     if type(parsed) is not dict:
         raise RecordError(f"record shard is a {type(parsed).__name__}, not a JSON object")
     return parsed
+
+
+def _refuse_non_finite(literal: str) -> float:
+    """``parse_constant`` hook: ``NaN`` / ``Infinity`` / ``-Infinity`` are not record values."""
+    raise RecordError(f"record shard holds a non-finite number: {literal}")
+
+
+def _finite_float(literal: str) -> float:
+    """``parse_float`` hook: refuse float literals that overflow to infinity (``1e999``)."""
+    value = float(literal)
+    if not math.isfinite(value):
+        raise RecordError(f"record shard holds a non-finite number: {literal}")
+    return value

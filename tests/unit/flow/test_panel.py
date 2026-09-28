@@ -259,11 +259,6 @@ class TestPanel:
         store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "panel-cp")
 
         @verb(role=ROLE_A)
-        async def nested_bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
-            ctx.state.data["nested_n"] += 1
-            return ctx.state.data["nested_n"]
-
-        @verb(role=ROLE_A)
         async def run_nested_resumable(ctx: Context, _prev: Any = None) -> str:
             """Records Panel-forwarded state, then runs a nested resumable Flow."""
             panel_state_observed.append(dict(ctx.state.data))
@@ -288,11 +283,13 @@ class TestPanel:
             await primed.run()  # Runs 2 iterations, saves checkpoint, halts.
 
             # Resume the nested flow — hydrates its checkpoint independently.
+            # Same structure as the primed flow (replay refuses any other);
+            # without a halt event bound, bump_then_halt's halt.set() is inert.
             resumed = (
                 make_ff()
                 .create(state={"nested_n": 0})
                 .with_checkpointer(store, "nested-history")
-                .iterate(nested_bump, max_iters=5)
+                .iterate(bump_then_halt, max_iters=5)
             )
             result = await resumed.run(resume="replay")
             nested_flow_result.append(result)
