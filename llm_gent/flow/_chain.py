@@ -20,9 +20,17 @@ resolves reachability + start_index internally and drives the walk.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
-from ._executor import _build_ctx, _execute_node, _step_inputs
+from ._executor import (
+    _build_ctx,
+    _consumes_input,
+    _execute_node,
+    _step_input_hash,
+    _step_inputs,
+    _target_label,
+)
 from ._halt_observer import HaltSaveObserver, is_halt_signaled
 from ._node_id import _compute_node_ids
 from .nodes import UNSET, _Iterate
@@ -45,6 +53,9 @@ class Chain:
         self.flow = flow
         self.env = env
         self.ids: tuple[str, ...] = _compute_node_ids(env.chain_context, flow._nodes)
+        # Recorded steps stay a prefix of the walk: after a step goes
+        # unrecorded, the later ones consumed its result or its state.
+        self._recording = True
 
     async def walk(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Execute chain steps in order, threading returns; return the last result.
@@ -165,13 +176,57 @@ class Chain:
                 node_args, node_kwargs = (), {}
             else:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
-            ctx = _build_ctx(node.target, self.env, node_id)
-            result = await _execute_node(node, ctx, self.env, node_args, node_kwargs, node_id)
+            result = await self._run_step(index, node_id, node_args, node_kwargs)
         else:
             # for-else: chain exhausted without a between-steps halt-save. A halt
             # set during the LAST step saves at that step — no next step exists.
             await self._observe_halt_trailing()
         return result
+
+    async def _run_step(
+        self,
+        index: int,
+        node_id: str,
+        node_args: tuple[Any, ...],
+        node_kwargs: dict[str, Any],
+    ) -> Any:
+        """Execute the chain step at ``index`` and record it when the run records.
+
+        The step runs under an env whose ``output_needed`` says whether a
+        later node receives its result, so descents inside it (subflow,
+        branch arms) know whether their own output must be recordable.
+        """
+        node = self.flow._nodes[index]
+        needed = self._output_needed(index)
+        env = dataclasses.replace(self.env, output_needed=needed)
+        recorder = env.recorder
+        # A step already incomplete (halted, or under a paused Loop) stays so:
+        # skip its input hash, which would raise RecordError for an input its
+        # unrecorded producer was never refused for.
+        if recorder is not None and recorder.incomplete(env, node_id, env.coords):
+            self._recording = False
+        input_hash = (
+            _step_input_hash(node, node_args, node_kwargs)
+            if recorder is not None and self._recording
+            else ""
+        )
+        ctx = _build_ctx(node.target, env, node_id)
+        result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id)
+        if recorder is not None and self._recording:
+            label = _target_label(node.target)
+            self._recording = recorder.record_step(env, node_id, label, input_hash, result, needed)
+        return result
+
+    def _output_needed(self, index: int) -> bool:
+        """Whether a later node receives the result of the step at ``index``.
+
+        The next step in this chain decides; the last step's result is
+        this chain's result, needed when the enclosing walk said so.
+        """
+        nodes = self.flow._nodes
+        if index + 1 < len(nodes):
+            return _consumes_input(nodes[index + 1])
+        return self.env.output_needed
 
     async def _observe_halt_between(self, index: int, start_index: int) -> bool:
         """Save a halt commit between chain steps when appropriate; return True if saved.

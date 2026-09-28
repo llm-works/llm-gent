@@ -36,6 +36,7 @@ from .state import State, StateFactory
 
 if TYPE_CHECKING:
     from ._checkpoint_ctx import CheckpointContext
+    from ._recorder import RunRecorder
     from .flow import Flow
     from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
 
@@ -253,6 +254,13 @@ class _RunEnv:
     entered this Flow. Extended pairwise on every subflow / branch-arm /
     iterate-body descent. The pair is what the checkpoint layer walks to
     address any point in the composition tree.
+
+    ``coords`` holds one dynamic coordinate per enclosing iterate pass
+    and map item, outermost first; with a node id it forms the address
+    of one execution of that node (:func:`~.state.record.instance_address`).
+    ``output_needed`` is whether a later node receives the output of the
+    Flow walked under this env — the execution record refuses such an
+    output when it cannot store it exactly.
     """
 
     runtime: Flow
@@ -266,6 +274,13 @@ class _RunEnv:
     replay: _ResumeReplay | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
+    coords: tuple[str, ...] = ()
+    output_needed: bool = False
+
+    @property
+    def recorder(self) -> RunRecorder | None:
+        """The run's execution-record writer; ``None`` when the run has no checkpointer."""
+        return self.runtime._recorder
 
     @property
     def pending_paused_turns(self) -> PendingPausedTurns:
@@ -295,6 +310,7 @@ class _Branch:
     when: WhenFn
     then_flow: Flow
     else_flow: Flow | None
+    name: str | None = None
 
 
 @dataclass
@@ -308,6 +324,7 @@ class _Iterate:
     state_fn: StateProject | None = None
     merge_fn: StateMerge | None = None
     state_factory: StateFactory[Any] | None = None
+    name: str | None = None
 
 
 @dataclass
@@ -325,6 +342,7 @@ class _Map:
     on_item_complete: OnItemCompleteFn | None = None
     max_concurrency: int | None = None
     state_factory: StateFactory[Any] | None = None
+    name: str | None = None
 
 
 @dataclass

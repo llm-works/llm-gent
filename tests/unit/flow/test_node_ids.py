@@ -28,7 +28,11 @@ identifier the checkpoint layer uses. Tests pin five properties:
 
 from __future__ import annotations
 
-from llm_gent.flow import Flow, verb
+from typing import Any
+
+import pytest
+
+from llm_gent.flow import Flow, Loop, verb
 from llm_gent.flow._node_id import _compute_node_ids, _descend_context
 
 from .conftest import ROLE_A, ROLE_B, make_test_logger
@@ -129,6 +133,66 @@ def test_same_target_steps_follow_their_order() -> None:
     assert second_removed == both[:2]
     first_removed = _chain_step_ids(_mkflow().call(verb_beta).then(verb_alpha))
     assert first_removed == [both[1], both[0]]
+
+
+def _item_body(f: Flow) -> None:
+    f.call(verb_beta)
+
+
+def test_unnamed_primitives_alias_on_removal() -> None:
+    """Removing the first of two unnamed maps hands its id to the second.
+
+    Pins the aliasing that ``name=`` exists to prevent.
+    """
+    both = _chain_step_ids(_mkflow().map(_item_body).map(_item_body))
+    second_only = _chain_step_ids(_mkflow().map(_item_body))
+    assert second_only == both[:1]
+
+
+def test_named_primitive_keeps_its_id_when_a_sibling_is_removed() -> None:
+    """A named map keeps its id when another map before it is removed."""
+    both = _chain_step_ids(_mkflow().map(_item_body).map(_item_body, name="wave"))
+    named_only = _chain_step_ids(_mkflow().map(_item_body, name="wave"))
+    assert named_only == both[1:]
+
+
+def test_names_distinguish_same_kind_primitives() -> None:
+    a = _chain_step_ids(_mkflow().iterate(_item_body, max_iters=1, name="x"))
+    b = _chain_step_ids(_mkflow().iterate(_item_body, max_iters=1, name="y"))
+    c = _chain_step_ids(_mkflow().iterate(_item_body, max_iters=1))
+    assert len({a[0], b[0], c[0]}) == 3
+
+
+def test_loops_with_different_roles_do_not_alias() -> None:
+    """Loop steps are labeled by role: removing one Loop keeps the other's id."""
+    loop_a, loop_b = Loop(ROLE_A), Loop(ROLE_B)
+    both = _chain_step_ids(_mkflow().call(loop_a).then(loop_b))
+    b_only = _chain_step_ids(_mkflow().call(loop_b))
+    assert b_only == both[1:]
+
+
+def test_loop_name_overrides_role_label() -> None:
+    """Loops sharing a role are told apart by ``name=``."""
+    first, second = Loop(ROLE_A, name="plan"), Loop(ROLE_A, name="review")
+    both = _chain_step_ids(_mkflow().call(first).then(second))
+    second_only = _chain_step_ids(_mkflow().call(second))
+    assert second_only == both[1:]
+    assert Loop(ROLE_A).node_label == ROLE_A.name
+    assert first.node_label == "plan"
+
+
+@pytest.mark.parametrize("bad", ["", 3])
+def test_empty_or_non_str_name_is_rejected(bad: Any) -> None:
+    with pytest.raises(ValueError, match="non-empty str"):
+        _mkflow().map(_item_body, name=bad)
+    with pytest.raises(ValueError, match="non-empty str"):
+        Loop(ROLE_A, name=bad)
+
+
+def test_name_enters_the_root_hash() -> None:
+    a = _mkflow().map(_item_body, name="wave")
+    b = _mkflow().map(_item_body)
+    assert a.root_hash() != b.root_hash()
 
 
 def test_kind_swap_flips_id() -> None:

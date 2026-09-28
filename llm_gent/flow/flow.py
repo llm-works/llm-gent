@@ -64,13 +64,19 @@ from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext
 from ._node_id import flow_root_hash, iter_flows
+from ._recorder import RunRecorder
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
     assert_replay_consumed,
     commit_failure,
 )
-from ._validation import _materialize, _require_state_for_merge, _validate_target
+from ._validation import (
+    _check_node_name,
+    _materialize,
+    _require_state_for_merge,
+    _validate_target,
+)
 from .checkpoint import CheckpointPolicy, CheckpointStore, ResumeMode
 from .context import Context
 from .factory import SAIAFactory
@@ -98,6 +104,7 @@ from .nodes import (
 from .role import Role
 from .state import State, StateFactory
 from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
+from .state.record import ExecutionRecord
 
 
 class Flow:
@@ -174,6 +181,7 @@ class Flow:
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._pending_paused_turns: PendingPausedTurns = PendingPausedTurns()
         self._resume_paused_turns: ResumePausedTurns = ResumePausedTurns()
+        self._recorder: RunRecorder | None = None
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -423,6 +431,7 @@ class Flow:
         else_: Any = None,
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
+        name: str | None = None,
     ) -> Flow:
         """Append a conditional node: run ``then`` or ``else_`` based on ``when``.
 
@@ -438,6 +447,7 @@ class Flow:
                 (or the predicate) raises.
             after: Attached to the branch node — fires with the chosen
                 subflow's result (or the pass-through input).
+            name: Stable label for the node's id (see :meth:`iterate`).
 
         The branch node's result is the chosen subflow's output; it becomes
         the next chain step's input like any other node's result. Both bodies
@@ -446,10 +456,11 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
+        _check_node_name(name, ".branch")
         then_flow = _materialize(then, self._lg, "branch.then")
         else_flow = _materialize(else_, self._lg, "branch.else") if else_ is not None else None
         node = _Node(
-            target=_Branch(when=when, then_flow=then_flow, else_flow=else_flow),
+            target=_Branch(when=when, then_flow=then_flow, else_flow=else_flow, name=name),
             rescue=rescue,
             after=after,
         )
@@ -468,6 +479,7 @@ class Flow:
         state: StateProject | None = None,
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
+        name: str | None = None,
     ) -> Flow:
         """Append a bounded iteration: run ``body`` until a stop condition holds.
 
@@ -498,6 +510,11 @@ class Flow:
                 runs once after the block exits successfully (via ``until``,
                 ``max_iters``, or ``deadline``). Skipped if an iteration
                 raises past any ``rescue``. Requires ``state``.
+            name: Stable label folded into the node's id, so its checkpoint
+                record stays bound to it when other iterate steps are added,
+                removed or reordered in the same chain. Omitted → the node
+                is identified by its order among the chain's unnamed iterate
+                steps. Must be non-empty when given.
 
         At least one of ``until`` or ``max_iters`` must be provided so the
         iteration is guaranteed to terminate. An ambient :meth:`with_halt`
@@ -513,6 +530,7 @@ class Flow:
         if deadline is not None and deadline <= 0:
             raise ValueError(f".iterate(deadline=) must be > 0; got {deadline}")
         _require_state_for_merge(state, merge, ".iterate")
+        _check_node_name(name, ".iterate")
         body_flow = _materialize(body, self._lg, "iterate.body")
         node = _Node(
             target=_Iterate(
@@ -523,6 +541,7 @@ class Flow:
                 state_fn=state,
                 merge_fn=merge,
                 state_factory=state_factory,
+                name=name,
             ),
             rescue=rescue,
             after=after,
@@ -543,6 +562,7 @@ class Flow:
         state: StateProject | None = None,
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
+        name: str | None = None,
     ) -> Flow:
         """Append a parallel fan-out: run ``body`` per item concurrently.
 
@@ -583,6 +603,7 @@ class Flow:
                 wanting a single sequential fold should use ``aggregate``
                 (which runs once after every item completes) instead.
                 Requires ``state``.
+            name: Stable label for the node's id (see :meth:`iterate`).
 
         Cancellation propagates unconditionally regardless of ``strict``.
         Sibling items keep running when one fails; the wasted work is the
@@ -591,6 +612,7 @@ class Flow:
         Returns ``self`` for chaining.
         """
         _require_state_for_merge(state, merge, ".map")
+        _check_node_name(name, ".map")
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency < 1
         ):
@@ -606,6 +628,7 @@ class Flow:
                 merge_fn=merge,
                 max_concurrency=max_concurrency,
                 state_factory=state_factory,
+                name=name,
             ),
             rescue=rescue,
             after=after,
@@ -755,9 +778,11 @@ class Flow:
         save/load/delete call and identifies the resumable history. It
         is agent-owned: the framework never assigns one automatically.
 
-        A subflow inherits the outer runtime's checkpointer + id
-        automatically; calling ``.with_checkpointer`` on a subflow
-        overrides both for that subtree.
+        A subflow inherits the checkpointer + id of the flow that runs
+        it. A subflow composed into a flow (``.call`` / ``.branch`` /
+        ``.iterate`` / ``.map``) must not have its own: :meth:`run`
+        refuses it, since one run keeps one history and one execution
+        record.
 
         Resume semantics on the wired iterate:
 
@@ -783,14 +808,13 @@ class Flow:
         return self
 
     def _begin_checkpoint_run(self) -> None:
-        """Reset run-scoped caches on every checkpoint context in the tree.
+        """Reset the checkpoint context's run-scoped caches.
 
-        Covers subflows wired with their own ``.with_checkpointer``, which
-        are entered per run through :meth:`_run_as_subflow`, not :meth:`run`.
+        Only this flow's context: :meth:`_refuse_nested_checkpointers`
+        guarantees no composed subflow has one of its own.
         """
-        for flow in iter_flows(self):
-            if flow._checkpoint_ctx is not None:
-                flow._checkpoint_ctx.begin_run()
+        if self._checkpoint_ctx is not None:
+            self._checkpoint_ctx.begin_run()
 
     def root_hash(self) -> str:
         """Structure hash of this flow's composition tree.
@@ -927,16 +951,23 @@ class Flow:
         nothing extra, and neither does cancellation.
 
         Raises:
-            RuntimeError: The flow has no nodes to run, OR a resume mode
-                was requested without :meth:`with_checkpointer` wired.
+            RuntimeError: The flow has no nodes to run, a resume mode
+                was requested without :meth:`with_checkpointer` wired, or a
+                composed subflow has its own checkpointer.
                 Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
             ValueError: ``resume`` is not a :data:`ResumeMode` value.
+            RecordError: With a checkpointer wired, a step input, or an
+                output a later node receives, cannot be stored exactly in
+                the execution record.
         """
         self._check_run_args(resume)
         self._begin_checkpoint_run()
+        self._recorder = (
+            RunRecorder(ExecutionRecord({})) if self._checkpoint_ctx is not None else None
+        )
         self._resume_paused_turns.clear()
         active_state, replay = await self._start_state(self._wrap_top_state(state), resume)
         self._replay_consumed = False
@@ -959,7 +990,7 @@ class Flow:
         return result
 
     def _check_run_args(self, resume: ResumeMode) -> None:
-        """Reject an empty flow, an unknown mode, or a resume mode without a checkpointer.
+        """Reject an empty flow, a bad mode, resume without a checkpointer, or a nested one.
 
         Runs before the failure-commit boundary, so a misconfigured run
         leaves no ``$failed`` commit (or new history) behind.
@@ -974,6 +1005,25 @@ class Flow:
                 f"Flow {label!r} was run with resume={resume!r} but has no "
                 f"checkpointer — call .with_checkpointer(store, client_flow_id) first"
             )
+        self._refuse_nested_checkpointers()
+
+    def _refuse_nested_checkpointers(self) -> None:
+        """Refuse a composed subflow that has its own checkpointer.
+
+        A run keeps one history and one execution record, owned by the flow
+        :meth:`run` is called on. A subflow's own checkpointer would write
+        commits into a second history that carries no record, which no
+        resume can continue. A flow run separately — ``flow.run()`` inside
+        a verb — is its own run and may have its own checkpointer.
+        """
+        for sub in iter_flows(self)[1:]:
+            if sub._checkpoint_ctx is not None:
+                label = sub._name or "<anonymous>"
+                raise RuntimeError(
+                    f"subflow {label!r} has its own checkpointer; a run checkpoints to "
+                    f"the checkpointer of the flow it runs — attach .with_checkpointer "
+                    f"there, or run the subflow separately with flow.run()"
+                )
 
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode
@@ -998,6 +1048,8 @@ class Flow:
         parent_replay: _ResumeReplay | None = None,
         parent_extra: dict[str, Any] | None = None,
         parent_policy: CheckpointPolicy | None = None,
+        parent_coords: tuple[str, ...] = (),
+        parent_output_needed: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -1008,12 +1060,12 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_halt`` / ``parent_budget`` / ``parent_checkpoint_ctx`` are
-        the effective ambients from the calling scope — nested subflows
-        fall back to them when they have no local
-        ``.with_halt()`` / ``.with_budget()`` / ``.with_checkpointer()``
-        override, preserving an intermediate layer's ambient through
-        arbitrarily deep nesting.
+        ``parent_halt`` / ``parent_budget`` are the effective ambients from
+        the calling scope — nested subflows fall back to them when they
+        have no local ``.with_halt()`` / ``.with_budget()`` override,
+        preserving an intermediate layer's ambient through arbitrarily deep
+        nesting. ``parent_checkpoint_ctx`` is the run's context: a composed
+        subflow has none of its own (:meth:`_refuse_nested_checkpointers`).
 
         ``parent_chain_context`` is the hash the executor uses to compute
         this Flow's chain-step node IDs (empty at run root; extended by
@@ -1022,7 +1074,9 @@ class Flow:
         from root down to the ``_Node`` whose descent entered this Flow;
         it grows by one on every recursion. ``parent_replay`` carries a
         pending checkpoint replay when :meth:`run` was invoked with
-        ``resume="replay"``; ``None`` otherwise.
+        ``resume="replay"``; ``None`` otherwise. ``parent_coords`` and
+        ``parent_output_needed`` become the env's ``coords`` and
+        ``output_needed`` (see :class:`_RunEnv`).
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
@@ -1037,6 +1091,8 @@ class Flow:
             parent_replay=parent_replay,
             parent_extra=parent_extra,
             parent_policy=parent_policy,
+            parent_coords=parent_coords,
+            parent_output_needed=parent_output_needed,
         )
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
@@ -1061,13 +1117,17 @@ class Flow:
         parent_replay: _ResumeReplay | None = None,
         parent_extra: dict[str, Any] | None = None,
         parent_policy: CheckpointPolicy | None = None,
+        parent_coords: tuple[str, ...] = (),
+        parent_output_needed: bool = False,
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
-        Local ``.with_halt`` / ``.with_budget`` / ``.with_checkpointer``
-        wins over the caller's parent ambients; unset locals fall back to
-        the parent so an intermediate layer's ambient survives arbitrarily
-        deep nesting.
+        Local ``.with_halt`` / ``.with_budget`` wins over the caller's
+        parent ambients; unset locals fall back to the parent so an
+        intermediate layer's ambient survives arbitrarily deep nesting. The
+        checkpoint context is the flow's own at the run root and the
+        parent's below it, since :meth:`run` refuses a composed subflow
+        with its own checkpointer.
 
         ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
         verbatim: the descent sites in :mod:`._executor` are the ones
@@ -1097,6 +1157,8 @@ class Flow:
             replay=parent_replay,
             extra=parent_extra if parent_extra is not None else {},
             policy=policy,
+            coords=parent_coords,
+            output_needed=parent_output_needed,
         )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:

@@ -151,6 +151,7 @@ class Loop:
         self,
         role: Role,
         *,
+        name: str | None = None,
         saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
         conversation_factory: ConversationFactory | None = None,
@@ -169,6 +170,9 @@ class Loop:
             role: The role under which this Loop runs. Also determines
                 which saia the enclosing flow binds to ``ctx.saia`` when
                 ``saia=`` is not supplied.
+            name: Stable label folded into the node id of every chain step
+                that calls this Loop (see :attr:`node_label`). Omitted →
+                the role's name labels it. Must be non-empty when given.
             saia: Optional explicit SAIA instance. When set, ``Loop`` uses
                 it directly and bypasses the enclosing flow's
                 :class:`SAIAFactory` for THIS Loop. Intended for consumers
@@ -218,7 +222,10 @@ class Loop:
                 (runs on both complete and paused results; NOT on the
                 cancelled / failed paths since no result exists there).
         """
+        if name is not None and (not isinstance(name, str) or not name):
+            raise ValueError(f"Loop(name=) must be a non-empty str; got {name!r}")
         self._role = role
+        self._name = name
         self._saia = saia
         self._halt = halt
         self._conversation_factory = conversation_factory
@@ -241,6 +248,19 @@ class Loop:
         accept it wherever they accept an ``@verb`` function.
         """
         return self._role
+
+    @property
+    def node_label(self) -> str:
+        """Label that tells this Loop's chain steps apart from other Loops' steps.
+
+        ``name=`` when given, else the role's name. Every Loop shares one
+        qualname, so without a label the steps calling different Loops
+        would be identified only by their order among themselves: removing
+        an earlier Loop step would hand its id — and its checkpoint record
+        and paused turn — to the next one. Loops sharing a label are still
+        told apart only by that order; give them distinct ``name=``.
+        """
+        return self._name if self._name is not None else self._role.name
 
     async def __call__(
         self,
@@ -387,6 +407,10 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
+            # A paused turn is unfinished work: the instances holding this
+            # Loop are not recorded as complete.
+            if ctx._env is not None and ctx._env.recorder is not None:
+                ctx._env.recorder.mark_paused(ctx._env, ctx._node_id)
             self._capture_paused(ctx, task, conversation)
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
@@ -628,6 +652,7 @@ class LoopFactory:
         self,
         role: Role,
         *,
+        name: str | None = None,
         saia: SAIA | None = None,
         halt: asyncio.Event | None = None,
         conversation_factory: ConversationFactory | None = None,
@@ -645,10 +670,12 @@ class LoopFactory:
         Per-``create`` ``halt=`` / ``conversation_factory=`` override
         the factory defaults. ``saia=`` pins an explicit SAIA instance
         on the resulting Loop, bypassing the enclosing flow's
-        :class:`SAIAFactory`. Hooks are per-Loop and never inherited.
+        :class:`SAIAFactory`. ``name=`` labels the Loop's node id
+        (:attr:`Loop.node_label`). Hooks are per-Loop and never inherited.
         """
         return Loop(
             role,
+            name=name,
             saia=saia,
             halt=halt if halt is not None else self._halt,
             conversation_factory=(
