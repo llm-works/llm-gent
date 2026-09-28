@@ -407,6 +407,12 @@ class _WithPath(StateDataclass):
     where: PurePosixPath
 
 
+@dataclass
+class _WithSets(StateDataclass):
+    tags: frozenset[str]
+    ids: set[int]
+
+
 class TestStateDataclassJSONPreconf:
     """Types the JSON preconf converter handles natively — datetime, UUID, Decimal, Path."""
 
@@ -437,6 +443,18 @@ class TestStateDataclassJSONPreconf:
         loaded = _WithPath.from_dict(original.to_dict())
         assert loaded == original
         assert isinstance(loaded.where, PurePosixPath)
+
+    def test_sets_serialize_sorted(self) -> None:
+        """Set members come out sorted by their JSON text, so equal states hash the same.
+
+        Iteration order of a string set follows per-process hash seeding;
+        unsorted output would give the same state different commit hashes
+        in different processes.
+        """
+        original = _WithSets(tags=frozenset({"delta", "alpha", "gamma", "beta"}), ids={3, 1, 2})
+        data = original.to_dict()
+        assert data == {"tags": ["alpha", "beta", "delta", "gamma"], "ids": [1, 2, 3]}
+        assert _WithSets.from_dict(data) == original
 
 
 # ── StateDataclass mixin: escalation ─────────────────────────────────

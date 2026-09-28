@@ -416,15 +416,24 @@ class Case:
 KNOWN_DEFECTS_FILE = Path(__file__).with_name("halt_restart_known_defects.json")
 
 
-def _known_defects() -> dict[str, str]:
-    """Case id → reason, for every case failing on a known defect.
+_RAISES: dict[str, type[BaseException]] = {"TypeError": TypeError, "AssertionError": AssertionError}
+
+
+def _known_defects() -> dict[str, tuple[str, type[BaseException]]]:
+    """Case id → (reason, exception the defect raises), for every case failing on a known defect.
 
     The file lists exact case ids per defect: whether a halted map hands
     ``aggregate`` a partial result depends on which item was running, so
-    no rule over the dimensions matches the failing cases exactly.
+    no rule over the dimensions matches the failing cases exactly. The
+    exception type keeps a listed case from passing as xfail when it
+    fails for another reason.
     """
     defects = json.loads(KNOWN_DEFECTS_FILE.read_text(encoding="utf-8"))
-    return {case_id: d["reason"] for d in defects.values() for case_id in d["cases"]}
+    return {
+        case_id: (d["reason"], _RAISES[d["raises"]])
+        for d in defects.values()
+        for case_id in d["cases"]
+    }
 
 
 def _variants(stop: Stop) -> Iterator[tuple[str, str]]:
@@ -463,8 +472,10 @@ def _cases() -> list[Case]:
 def _params() -> Iterator[Any]:
     known = _known_defects()
     for case in _cases():
-        reason = known.get(case.id)
-        marks = [pytest.mark.xfail(reason=reason, strict=True)] if reason else []
+        defect = known.get(case.id)
+        marks = (
+            [pytest.mark.xfail(reason=defect[0], raises=defect[1], strict=True)] if defect else []
+        )
         yield pytest.param(case, id=case.id, marks=marks)
 
 

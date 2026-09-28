@@ -1,6 +1,7 @@
 {
  "halted-map-aggregates": {
   "reason": "halt inside a map: the map still runs aggregate over Skipped or partial item results and raises, so the halted run writes no halt checkpoint",
+  "raises": "TypeError",
   "cases": [
    "fan(iter(fan))>leaf-halt-at1-after-none-leaf-par-mem",
    "fan(iter(fan))>leaf-halt-at1-after-none-leaf-seq-mem",
@@ -1206,6 +1207,7 @@
  },
  "scope-checkpoint-lost": {
   "reason": "checkpoint inside a state= scope: restart restores only the root scope, so progress checkpointed in the scope is lost",
+  "raises": "AssertionError",
   "cases": [
    "fan(scope)>leaf-crash-at1-after-leaf-par-mem",
    "fan(scope)>leaf-crash-at1-after-leaf-seq-file",

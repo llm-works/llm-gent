@@ -417,6 +417,45 @@ class TestCheckpointPolicyMap:
         assert (await history.scopes(head))[0] == {"s0": True, "s1": True}
 
 
+class TestCommitConsistency:
+    async def test_every_scope_in_a_commit_comes_from_one_moment(self, tmp_path: Path) -> None:
+        """A commit's scopes are all serialized before its first store write.
+
+        Each item bumps a counter in the root and in the subflow's scope in
+        one step, so the two always agree. Items interleave while a
+        commit awaits the store; serializing a scope after a write would
+        commit one counter from before another item's step and one from after.
+        """
+        from llm_gent.flow import Context, FlowFactory, History, verb
+
+        store = YieldingStore(JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp"))
+
+        @verb
+        async def bump(ctx: Context[dict[str, Any]], _item: int) -> None:
+            await asyncio.sleep(0)
+            ctx.state.data["n"] += 1
+            ctx.state.root().data["n"] += 1
+            await ctx.checkpoint()
+
+        sub = FlowFactory(make_test_logger()).create()
+        sub.map(lambda b: b.call(bump), items=lambda _p, _c: list(range(6)))
+        await (
+            FlowFactory(make_test_logger())
+            .create(state={"n": 0})
+            .with_checkpointer(store, "one-moment")  # type: ignore[arg-type]
+            .call(sub, state=lambda p: {"n": p["n"]})
+            .run()
+        )
+        history = History(store, "one-moment")  # type: ignore[arg-type]
+        pairs = [
+            [scope["n"] for scope in await history.scopes(commit)]
+            async for commit in history.commits()
+        ]
+        nested = [p for p in pairs if len(p) == 2]
+        assert len(nested) == 6
+        assert all(root == child for root, child in nested), nested
+
+
 class TestCheckpointedRunValues:
     """A checkpointed run passes any value between steps, as an uncheckpointed one does.
 

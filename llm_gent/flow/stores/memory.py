@@ -12,9 +12,8 @@ One instance holds any number of histories and outlives the flows that
 use it, so a restart is a new :class:`~llm_gent.flow.Flow` run against
 the same store instance.
 
-Methods are synchronous and never yield to the event loop, so each call
-is atomic with respect to other tasks. Binds, ref writes and gc also
-hold a lock, so they stay atomic when called from several threads.
+Every method holds one lock for its whole body, so each call is atomic
+with respect to other threads as well as other tasks.
 """
 
 from __future__ import annotations
@@ -37,10 +36,11 @@ class _History:
     tags: dict[str, str] = field(default_factory=dict)
 
 
-def _require_non_empty(value: str, field_name: str) -> None:
-    """Reject an empty key, as the file store does."""
-    if not value:
-        raise ValueError(f"{field_name} must not be empty")
+def _require_non_empty(**keys: str | None) -> None:
+    """Reject an empty key on reads and writes alike, as the file store does."""
+    for name, value in keys.items():
+        if value is not None and not value:
+            raise ValueError(f"{name} must not be empty")
 
 
 class InMemoryCheckpointStore:
@@ -66,13 +66,13 @@ class InMemoryCheckpointStore:
 
     def get_flow_id(self, client_flow_id: str) -> str | None:
         """Return the ``flow_id`` bound to ``client_flow_id``, or ``None``."""
-        _require_non_empty(client_flow_id, "client_flow_id")
-        return self._names.get(client_flow_id)
+        _require_non_empty(client_flow_id=client_flow_id)
+        with self._lock:
+            return self._names.get(client_flow_id)
 
     def bind_flow_id(self, client_flow_id: str, flow_id: str) -> str:
         """Bind ``client_flow_id`` → ``flow_id`` unless already bound; return the bound id."""
-        _require_non_empty(client_flow_id, "client_flow_id")
-        _require_non_empty(flow_id, "flow_id")
+        _require_non_empty(client_flow_id=client_flow_id, flow_id=flow_id)
         with self._lock:
             existing = self._names.get(client_flow_id)
             if existing is not None:
@@ -95,17 +95,21 @@ class InMemoryCheckpointStore:
             ValueError: Different bytes arrive under an existing hash —
                 a hash collision or corrupted serialization.
         """
-        objects = self._history(flow_id).objects
-        existing = objects.get((kind, content_hash))
-        if existing is None:
-            objects[(kind, content_hash)] = bytes(payload)
-        elif existing != payload:
-            raise ValueError(f"{kind} {content_hash} re-put with different bytes")
+        _require_non_empty(flow_id=flow_id, content_hash=content_hash)
+        with self._lock:
+            objects = self._history(flow_id).objects
+            existing = objects.get((kind, content_hash))
+            if existing is None:
+                objects[(kind, content_hash)] = bytes(payload)
+            elif existing != payload:
+                raise ValueError(f"{kind} {content_hash} re-put with different bytes")
 
     def get_object(self, flow_id: str, kind: Kind, content_hash: str) -> bytes | None:
         """Return the payload stored under the key, or ``None``."""
-        history = self._histories.get(flow_id)
-        return None if history is None else history.objects.get((kind, content_hash))
+        _require_non_empty(flow_id=flow_id, content_hash=content_hash)
+        with self._lock:
+            history = self._histories.get(flow_id)
+            return None if history is None else history.objects.get((kind, content_hash))
 
     def has_object(self, flow_id: str, kind: Kind, content_hash: str) -> bool:
         """Return ``True`` when the object exists."""
@@ -115,7 +119,7 @@ class InMemoryCheckpointStore:
 
     def put_ref(self, flow_id: str, node_path: str, iteration: int, commit_hash: str) -> None:
         """Point ``(node_path, iteration)`` at ``commit_hash``; a re-put is the newest write."""
-        _require_non_empty(node_path, "node_path")
+        _require_non_empty(flow_id=flow_id, node_path=node_path)
         with self._lock:
             self._seq += 1
             self._history(flow_id).refs[(node_path, iteration)] = (commit_hash, self._seq)
@@ -133,39 +137,43 @@ class InMemoryCheckpointStore:
         """
         if node_path is None and iteration is not None:
             raise ValueError("iteration requires node_path; use both or neither")
-        history = self._histories.get(flow_id)
-        if history is None or not history.refs:
-            return None
-        if node_path is None:
-            return max(history.refs.values(), key=lambda ref: ref[1])[0]
-        if iteration is not None:
-            ref = history.refs.get((node_path, iteration))
-            return None if ref is None else ref[0]
-        under = [(it, ref) for (path, it), ref in history.refs.items() if path == node_path]
-        return max(under, key=lambda entry: entry[0])[1][0] if under else None
+        _require_non_empty(flow_id=flow_id, node_path=node_path)
+        with self._lock:
+            history = self._histories.get(flow_id)
+            refs = {} if history is None else history.refs
+            if node_path is None:
+                return max(refs.values(), key=lambda ref: ref[1])[0] if refs else None
+            if iteration is not None:
+                ref = refs.get((node_path, iteration))
+                return None if ref is None else ref[0]
+            under = [(it, ref) for (path, it), ref in refs.items() if path == node_path]
+            return max(under, key=lambda entry: entry[0])[1][0] if under else None
 
     # --- tags ---
 
     def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None:
         """Point tag ``name`` at ``commit_hash``, moving it if it exists."""
-        _require_non_empty(name, "tag name")
-        self._history(flow_id).tags[name] = commit_hash
+        _require_non_empty(flow_id=flow_id, tag_name=name)
+        with self._lock:
+            self._history(flow_id).tags[name] = commit_hash
 
     def resolve_tag(self, flow_id: str, name: str) -> str | None:
         """Return the commit hash tag ``name`` points at, or ``None``."""
-        history = self._histories.get(flow_id)
-        return None if history is None else history.tags.get(name)
+        _require_non_empty(flow_id=flow_id, tag_name=name)
+        with self._lock:
+            history = self._histories.get(flow_id)
+            return None if history is None else history.tags.get(name)
 
     # --- history cleanup ---
 
     def gc_history(self, flow_id: str) -> None:
         """Remove the history and its name binding; a no-op when absent."""
+        _require_non_empty(flow_id=flow_id)
         with self._lock:
             history = self._histories.pop(flow_id, None)
             if history is not None and self._names.get(history.client_flow_id) == flow_id:
                 del self._names[history.client_flow_id]
 
     def _history(self, flow_id: str) -> _History:
-        """The history a write goes to; created unbound when the caller never bound a name."""
-        _require_non_empty(flow_id, "flow_id")
+        """The history a write goes to, created unbound if new; the caller holds the lock."""
         return self._histories.setdefault(flow_id, _History(client_flow_id=""))
