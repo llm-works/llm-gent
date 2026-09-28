@@ -39,7 +39,6 @@ from ._node_id import _compute_node_ids, _descend_context
 from .context import Context
 from .nodes import Failure, ItemsFn, Skipped
 from .state import serialize_state_data
-from .state.record import RecordError, index_coord
 
 
 if TYPE_CHECKING:
@@ -84,8 +83,6 @@ class MapRunner:
         prev_result = node_args[0] if node_args else None
         ctx = self._build_ctx()
         items = await _resolve_items(self.mp.items, prev_result, ctx)
-        if self.env.recorder is not None:
-            self.env.recorder.record_items(self.env, self.node_id, items)
         results = await self._gather_items(items)
         return await self._aggregate(results)
 
@@ -208,7 +205,6 @@ class MapItemRunner:
         self.item_index = item_index
         self.replay = replay
         self.merge_lock = merge_lock
-        self.coords = env.coords + (index_coord(item_index),)
 
     async def run(self) -> Any:
         """Drive this item through the run pipeline.
@@ -226,14 +222,15 @@ class MapItemRunner:
             child_state = await _project_state(
                 self.mp.state_fn, self.env.state, self.mp.state_factory
             )
-            self._open_scope(child_state)
             item_ctx = self._ctx(child_state)
             if self.mp.guard is not None and not await _run_guard(
                 self.mp.guard, self.item, item_ctx
             ):
-                return await self._on_guard_skip(item_ctx)
+                skipped = Skipped(item=self.item)
+                await self._fire_on_item_complete(skipped, item_ctx)
+                return skipped
             result = await self._dispatch_body(child_state)
-        except (asyncio.CancelledError, RecordError):
+        except asyncio.CancelledError:
             raise
         except Exception as exc:
             if self.mp.on_error is not None:
@@ -244,28 +241,6 @@ class MapItemRunner:
                 raise
             return failure
         return await self._on_success(result, child_state, item_ctx)
-
-    def _open_scope(self, child_state: State[Any]) -> None:
-        """Register the item's ``state=`` scope with the run's recorder."""
-        recorder = self.env.recorder
-        if self.mp.state_fn is not None and recorder is not None:
-            recorder.open_scope(self.env, self.node_id, self.coords, child_state)
-
-    def _close_scope(self) -> None:
-        """Drop the item's scope: merged back, or discarded by the guard."""
-        recorder = self.env.recorder
-        if recorder is not None:
-            recorder.close_scope(self.env, self.node_id, self.coords)
-
-    async def _on_guard_skip(self, item_ctx: Context[Any]) -> Skipped:
-        """Record the guard's skip, drop the item's scope, fire on_item_complete."""
-        recorder = self.env.recorder
-        if recorder is not None:
-            recorder.record_item_skipped(self.env, self.node_id, self.coords)
-        self._close_scope()
-        skipped = Skipped(item=self.item)
-        await self._fire_on_item_complete(skipped, item_ctx)
-        return skipped
 
     async def _dispatch_body(self, child_state: State[Any]) -> Any:
         """Run the body subflow with per-item composition-tree identity.
@@ -292,9 +267,6 @@ class MapItemRunner:
             parent_replay=self.replay,
             parent_extra=env.extra,
             parent_policy=env.policy,
-            parent_coords=self.coords,
-            parent_output_needed=True,
-            parent_recording=env.recording,
         )
 
     async def _on_success(
@@ -312,15 +284,13 @@ class MapItemRunner:
         When ``on_map_item`` checkpointing is enabled, the merge is
         atomic with the checkpoint write: a snapshot is taken before
         merge, and on checkpoint failure the parent state is rolled
-        back so concurrent items don't serialize an uncommitted merge —
-        and the item's record entry and scope, settled with the merge,
-        are undone. Without ``state=`` there is no merge (``merge``
-        requires it) and items write the shared state directly, so no
-        snapshot is taken: restoring one would erase what siblings wrote
-        while the commit was in flight.
+        back so concurrent items don't serialize an uncommitted merge.
+        Without ``state=`` there is no merge (``merge`` requires it) and
+        items write the shared state directly, so no snapshot is taken:
+        restoring one would erase what siblings wrote while the commit
+        was in flight.
         """
         snapshot = None
-        settled = False
         try:
             async with self.merge_lock:
                 if self.env.policy.on_map_item and self.mp.state_fn is not None:
@@ -328,16 +298,15 @@ class MapItemRunner:
                     # or the merge mutates the snapshot the rollback restores from.
                     snapshot = copy.deepcopy(serialize_state_data(self.env.state.data))
                 await _merge_state(self.mp.merge_fn, self.env.state, child_state)
-                self._settle(result)
-                settled = True
                 if self.env.policy.on_map_item:
                     await _save_scope_commit(
                         self.env, self.item_index, self.node_id, self.env.state, "ok"
                     )
-        except (asyncio.CancelledError, RecordError):
+        except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._roll_back(snapshot, settled, child_state)
+            if snapshot is not None:
+                _restore_state_data(self.env.state.data, snapshot)
             if self.mp.on_error is not None:
                 await self._run_on_error(exc, item_ctx)
             failure = Failure(exception=exc, item=self.item)
@@ -347,34 +316,6 @@ class MapItemRunner:
             return failure
         await self._fire_on_item_complete(result, item_ctx)
         return result
-
-    def _settle(self, result: Any) -> None:
-        """Record the completed item and drop its scope, which merged back.
-
-        Runs under the merge lock right after the merge, before any
-        per-item commit, so a commit never holds a merge without the
-        item's entry. The scope is dropped whether or not the item was
-        recorded: a walk that stopped recording still finished the item.
-        """
-        recorder = self.env.recorder
-        if recorder is None:
-            return
-        recorder.record_item(self.env, self.node_id, self.coords, result)
-        self._close_scope()
-
-    def _roll_back(self, snapshot: Any, settled: bool, child_state: State[Any]) -> None:
-        """Undo a merge whose per-item commit failed: parent state, the item's entry and scope.
-
-        The reopened scope stays until the enclosing map step returns:
-        a strict map raises and the failure commit carries it; a
-        non-strict map returns and its step drops it.
-        """
-        if snapshot is not None:
-            _restore_state_data(self.env.state.data, snapshot)
-        recorder = self.env.recorder
-        if settled and recorder is not None:
-            recorder.unrecord_item(self.node_id, self.coords)
-            self._open_scope(child_state)
 
     async def _run_on_error(self, exc: BaseException, ctx: Context[Any]) -> None:
         """Invoke on_error and swallow any exception it raises.

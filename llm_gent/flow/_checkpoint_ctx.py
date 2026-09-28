@@ -30,14 +30,11 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from ._recorder import RunRecorder
 from .checkpoint import (
     COMPLETION_PRODUCER,
     END_NODE_PATH,
     FAILED_NODE_PATH,
     FAILURE_PRODUCER,
-    RECORD_ENTRY,
-    SCOPES_ENTRY,
     CheckpointStore,
     Kind,
     Retention,
@@ -102,9 +99,9 @@ class CheckpointContext:
         self._head: str | None = None
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
-        # Blob / tree hashes this context already put during the run. Record
-        # shards and scopes that did not change since the last commit are
-        # content-identical, so their puts are skipped instead of repeated.
+        # Blob / tree hashes this context already put during the run. Scopes
+        # that did not change since the last commit are content-identical,
+        # so their puts are skipped instead of repeated.
         self._written: set[str] = set()
 
     def begin_run(self) -> None:
@@ -258,8 +255,6 @@ class CheckpointContext:
         current_state: State[Any],
         outcome: CommitOutcome,
         trace_ref: tuple[TraceRef, ...] = (),
-        *,
-        run: RunRecorder | None,
     ) -> Commit:
         """Persist a content-addressed scope commit at ``node_id``; return it.
 
@@ -282,61 +277,33 @@ class CheckpointContext:
         ``outcome`` records why the commit fired — ``"ok"`` for a
         successful iterate boundary, ``"halted"`` when the
         halt-observation site triggered the save.
-
-        ``run`` adds the run's execution record and live scopes to the
-        tree (:meth:`put_state_tree`). It is required: pass ``None``
-        explicitly for a commit that must not carry them.
         """
-        tree = await self.put_state_tree(current_state, run)
+        tree = await self.put_state_tree(current_state)
         node_path = "/".join(ancestor_chain + (node_id,))
         flow_id = await self.ensure_flow_id()
         meta = self._build_commit_meta(flow_id, node_path, iteration, node_id, outcome, trace_ref)
         return await self.append_commit(tree.content_hash, meta)
 
-    async def put_state_tree(self, current_state: State[Any], run: RunRecorder | None) -> Tree:
-        """Put the commit tree for ``current_state``; return it.
+    async def put_state_tree(self, current_state: State[Any]) -> Tree:
+        """Put one blob per scope from run root to ``current_state`` and their Tree.
 
-        Entries ``"00"``, ``"01"``, ... hold one blob per scope from the
-        run root to ``current_state``. With ``run``, two subtrees follow:
-        ``"r"`` — the execution record, one blob per shard, keyed by shard
-        id — and ``"s"`` — every child scope the run has open, one blob
-        per scope, keyed by its owner's address.
-
-        Everything is serialized before the first write. The writes await
-        the store, and other tasks (concurrent map items) change the state
-        and the record meanwhile; reading one before and another after an
-        await would give a commit whose record holds instances whose state
-        effects it lacks.
+        Entries ``"00"``, ``"01"``, ... are ordered root → leaf, so
+        canonical sort order matches depth order. Every scope is
+        serialized before the first write: the writes await the store,
+        and other tasks (concurrent map items) change the scopes
+        meanwhile, so serializing between writes could commit scopes
+        from different moments.
         """
         stack = {
             f"{depth:02d}": canonical_json(serialize_state_data(scope.data))
             for depth, scope in enumerate(self._collect_scope_stack(current_state))
         }
-        run_payloads = None if run is None else (run.record.shards(), run.serialized_scopes())
-        entries = await self._put_blobs(stack)
-        if run_payloads is not None:
-            record_tree = await self._put_blob_tree(run_payloads[0])
-            scope_tree = await self._put_blob_tree(run_payloads[1])
-            entries += [
-                TreeEntry(scope_id=RECORD_ENTRY, kind="tree", child_hash=record_tree.content_hash),
-                TreeEntry(scope_id=SCOPES_ENTRY, kind="tree", child_hash=scope_tree.content_hash),
-            ]
-        tree = Tree.from_entries(entries)
-        await self.put_tree(tree)
-        return tree
-
-    async def _put_blobs(self, payloads: dict[str, bytes]) -> list[TreeEntry]:
-        """Put one blob per payload; return the tree entries mapping each key to its blob."""
         entries: list[TreeEntry] = []
-        for key, payload in payloads.items():
+        for scope_id, payload in stack.items():
             blob = Blob.from_bytes(payload)
             await self.put_blob(blob.content_hash, blob.payload)
-            entries.append(TreeEntry(scope_id=key, kind="blob", child_hash=blob.content_hash))
-        return entries
-
-    async def _put_blob_tree(self, payloads: dict[str, bytes]) -> Tree:
-        """Put one blob per payload and a Tree mapping each key to its blob."""
-        tree = Tree.from_entries(await self._put_blobs(payloads))
+            entries.append(TreeEntry(scope_id=scope_id, kind="blob", child_hash=blob.content_hash))
+        tree = Tree.from_entries(entries)
         await self.put_tree(tree)
         return tree
 

@@ -256,8 +256,8 @@ class Loop:
         ``name=`` when given, else the role's name. Every Loop shares one
         qualname, so without a label the steps calling different Loops
         would be identified only by their order among themselves: removing
-        an earlier Loop step would hand its id — and its checkpoint record
-        and paused turn — to the next one. Loops sharing a label are still
+        an earlier Loop step would hand its id — and its checkpoints and
+        paused turn — to the next one. Loops sharing a label are still
         told apart only by that order; give them distinct ``name=``.
         """
         return self._name if self._name is not None else self._role.name
@@ -407,10 +407,6 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
-            # A paused turn is unfinished work: the instances holding this
-            # Loop are not recorded as complete.
-            if ctx._env is not None and ctx._env.recorder is not None:
-                ctx._env.recorder.mark_paused(ctx._env, ctx._node_id)
             self._capture_paused(ctx, task, conversation)
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))

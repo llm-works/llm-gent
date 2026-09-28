@@ -30,10 +30,8 @@ from typing import TYPE_CHECKING, Any
 
 from ._executor import (
     _check_until,
-    _close_scope,
     _consume_scope_data,
     _merge_state,
-    _open_scope,
     _pop_replay_for,
     _project_state,
     _restore_scope_state,
@@ -43,7 +41,6 @@ from ._halt_observer import HaltSaveObserver
 from ._node_id import _descend_context
 from .nodes import UNSET
 from .state import State
-from .state.record import iteration_coord
 
 
 if TYPE_CHECKING:
@@ -67,9 +64,6 @@ class IterateRunner:
         # read from self.env so the update propagates.
         self.env = env
         self.node_id = node_id
-        # Recorded passes stay a prefix; starts off when the step itself runs
-        # in a walk that no longer records.
-        self._recording = env.recording
 
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Drive the loop; return the last body result.
@@ -98,7 +92,6 @@ class IterateRunner:
         iteration, restored_child = self._resume_iteration()
         env, child_state = await self._resolve_child_scope(restored_child)
         self.env = env
-        opened = _open_scope(env, self.node_id, self.it.state_fn, child_state)
         result: Any = node_args[0] if node_args else None
         started = time.monotonic()
         while True:
@@ -110,30 +103,14 @@ class IterateRunner:
                 self.env, iteration, self.node_id, child_state
             ):
                 break
-            result = await self._dispatch_body(child_state, result, iteration)
-            stop = await _check_until(self.it.until, result, child_state, self.env, self.node_id)
-            self._record_pass(iteration, result, stop)
+            result = await self._dispatch_body(child_state, result)
             iteration += 1
             if self.env.policy.on_iterate:
                 await _save_scope_commit(self.env, iteration, self.node_id, child_state, "ok")
-            if stop:
+            if await _check_until(self.it.until, result, child_state, self.env, self.node_id):
                 break
         await _merge_state(self.it.merge_fn, self.env.state, child_state)
-        _close_scope(self.env, self.node_id, opened)
         return result
-
-    def _record_pass(self, iteration: int, result: Any, stop: bool) -> None:
-        """Record one completed pass and the ``until`` verdict that followed it.
-
-        Recorded passes stay a prefix: once one is incomplete, the later
-        passes — fed its result and its state — are not recorded either.
-        """
-        recorder = self.env.recorder
-        if recorder is None or not self._recording:
-            return
-        self._recording = recorder.record_pass(
-            self.env, self.node_id, iteration, result, cont=not stop
-        )
 
     def _resume_iteration(self) -> tuple[int, Any]:
         """Return the starting iteration count and restored child state.
@@ -198,20 +175,15 @@ class IterateRunner:
                 return env, _restore_scope_state(env.state, raw, effective_factory)
         return env, await _project_state(it.state_fn, env.state, it.state_factory)
 
-    async def _dispatch_body(
-        self, child_state: State[Any], prev_result: Any, iteration: int
-    ) -> Any:
-        """Run pass ``iteration`` (0-based) of the body under the current env.
+    async def _dispatch_body(self, child_state: State[Any], prev_result: Any) -> Any:
+        """Run one pass of the body under the current env.
 
         Descends into the body with
         ``chain_context = _descend_context(node_id, "body")`` and
         ``ancestor_chain`` extended by ``node_id`` — the same context
         every pass, so the body's chain steps have iteration-
         invariant IDs (the runtime pass counter is stored alongside
-        the path, not baked into node identity). The pass enters the
-        body's ``coords`` instead, so each pass's instances have their
-        own record addresses. The body's result feeds the next pass, so
-        it must be recordable.
+        the path, not baked into node identity).
         """
         env = self.env
         return await self.it.body._run_as_subflow(
@@ -226,7 +198,4 @@ class IterateRunner:
             parent_replay=_pop_replay_for(env, self.node_id),
             parent_extra=env.extra,
             parent_policy=env.policy,
-            parent_coords=env.coords + (iteration_coord(iteration),),
-            parent_output_needed=True,
-            parent_recording=self._recording,
         )
