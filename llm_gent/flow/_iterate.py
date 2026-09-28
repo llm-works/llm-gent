@@ -67,7 +67,9 @@ class IterateRunner:
         # read from self.env so the update propagates.
         self.env = env
         self.node_id = node_id
-        self._recording = True
+        # Recorded passes stay a prefix; starts off when the step itself runs
+        # in a walk that no longer records.
+        self._recording = env.recording
 
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Drive the loop; return the last body result.
@@ -226,4 +228,5 @@ class IterateRunner:
             parent_policy=env.policy,
             parent_coords=env.coords + (iteration_coord(iteration),),
             parent_output_needed=True,
+            parent_recording=self._recording,
         )

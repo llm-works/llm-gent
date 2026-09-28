@@ -345,6 +345,7 @@ async def _run_subflow(
         parent_policy=env.policy,
         parent_coords=env.coords,
         parent_output_needed=env.output_needed,
+        parent_recording=env.recording,
         **node_kwargs,
     )
     await _merge_state(merge_fn, env.state, child_state)
@@ -541,6 +542,7 @@ async def _run_branch_arm(
         parent_policy=env.policy,
         parent_coords=env.coords,
         parent_output_needed=env.output_needed,
+        parent_recording=env.recording,
     )
 
 

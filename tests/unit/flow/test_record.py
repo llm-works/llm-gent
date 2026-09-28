@@ -14,6 +14,8 @@ import pytest
 from pydantic import BaseModel
 
 from llm_gent.flow.state.record import (
+    ITEM,
+    STEP,
     ExecutionRecord,
     RecordError,
     decode_value,
@@ -22,6 +24,8 @@ from llm_gent.flow.state.record import (
     instance_address,
     iteration_coord,
     key_coord,
+    parse_record_key,
+    record_key,
     storable,
     value_hash,
 )
@@ -218,6 +222,18 @@ class TestValueHash:
         assert value_hash(Loose(parsed={"name": "m", "score": 1.0}))
 
 
+class TestRecordKeys:
+    def test_keys_round_trip(self) -> None:
+        address = instance_address("abc", (iteration_coord(1), index_coord(2)))
+        assert parse_record_key(record_key(ITEM, address)) == (ITEM, address)
+        assert record_key(STEP, "abc") == "s|abc"
+
+    @pytest.mark.parametrize("key", ["abc", "x|abc", "s|", "|abc"])
+    def test_malformed_keys_are_refused(self, key: str) -> None:
+        with pytest.raises(RecordError, match="malformed record key"):
+            parse_record_key(key)
+
+
 class TestAddresses:
     def test_top_level_address_is_the_node_id(self) -> None:
         assert instance_address("abc", ()) == "abc"
@@ -277,6 +293,22 @@ class TestExecutionRecord:
         shards = record.shards()
         assert len(calls) == 1
         assert ExecutionRecord.from_shards(shards.values()).get("k0") == "changed"
+
+    def test_remove_drops_the_entry_and_rewrites_its_shard(self) -> None:
+        record = ExecutionRecord({"a": 1, "b": 2})
+        before = record.shards()
+        record.remove("a")
+        record.remove("missing")
+        assert "a" not in record and record.get("b") == 2
+        rebuilt = ExecutionRecord.from_shards(record.shards().values())
+        assert rebuilt.items() == [("b", 2)]
+        assert record.shards() != before
+
+    def test_removing_the_last_entry_of_a_shard_drops_the_shard(self) -> None:
+        record = ExecutionRecord({"only": 1})
+        record.shards()
+        record.remove("only")
+        assert record.shards() == {}
 
     def test_items_lists_every_entry_sorted(self) -> None:
         record = ExecutionRecord({"b": 2, "a": 1})

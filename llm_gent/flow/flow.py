@@ -968,6 +968,20 @@ class Flow:
         self._recorder = (
             RunRecorder(ExecutionRecord({})) if self._checkpoint_ctx is not None else None
         )
+        try:
+            return await self._run_top(args, kwargs, state, resume, extra)
+        finally:
+            self._recorder = None
+
+    async def _run_top(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        state: Any,
+        resume: ResumeMode,
+        extra: dict[str, Any] | None,
+    ) -> Any:
+        """Body of :meth:`run` once the arguments are checked and the recorder is set."""
         self._resume_paused_turns.clear()
         active_state, replay = await self._start_state(self._wrap_top_state(state), resume)
         self._replay_consumed = False
@@ -1050,6 +1064,7 @@ class Flow:
         parent_policy: CheckpointPolicy | None = None,
         parent_coords: tuple[str, ...] = (),
         parent_output_needed: bool = False,
+        parent_recording: bool = True,
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -1074,9 +1089,9 @@ class Flow:
         from root down to the ``_Node`` whose descent entered this Flow;
         it grows by one on every recursion. ``parent_replay`` carries a
         pending checkpoint replay when :meth:`run` was invoked with
-        ``resume="replay"``; ``None`` otherwise. ``parent_coords`` and
-        ``parent_output_needed`` become the env's ``coords`` and
-        ``output_needed`` (see :class:`_RunEnv`).
+        ``resume="replay"``; ``None`` otherwise. ``parent_coords``,
+        ``parent_output_needed`` and ``parent_recording`` become the env's
+        ``coords``, ``output_needed`` and ``recording`` (see :class:`_RunEnv`).
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
@@ -1093,6 +1108,7 @@ class Flow:
             parent_policy=parent_policy,
             parent_coords=parent_coords,
             parent_output_needed=parent_output_needed,
+            parent_recording=parent_recording,
         )
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
@@ -1119,6 +1135,7 @@ class Flow:
         parent_policy: CheckpointPolicy | None = None,
         parent_coords: tuple[str, ...] = (),
         parent_output_needed: bool = False,
+        parent_recording: bool = True,
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
@@ -1159,6 +1176,7 @@ class Flow:
             policy=policy,
             coords=parent_coords,
             output_needed=parent_output_needed,
+            recording=parent_recording,
         )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:

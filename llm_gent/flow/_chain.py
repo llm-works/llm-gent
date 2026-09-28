@@ -54,8 +54,9 @@ class Chain:
         self.env = env
         self.ids: tuple[str, ...] = _compute_node_ids(env.chain_context, flow._nodes)
         # Recorded steps stay a prefix of the walk: after a step goes
-        # unrecorded, the later ones consumed its result or its state.
-        self._recording = True
+        # unrecorded, the later ones consumed its result or its state. Off
+        # from the start when the enclosing walk already stopped recording.
+        self._recording = env.recording
 
     async def walk(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Execute chain steps in order, threading returns; return the last result.
@@ -193,18 +194,19 @@ class Chain:
         """Execute the chain step at ``index`` and record it when the run records.
 
         The step runs under an env whose ``output_needed`` says whether a
-        later node receives its result, so descents inside it (subflow,
-        branch arms) know whether their own output must be recordable.
+        later node receives its result, and whose ``recording`` says whether
+        this walk still records — so descents inside it (subflow, branch
+        arms, iterate and map bodies) record nothing once this walk stopped.
         """
         node = self.flow._nodes[index]
         needed = self._output_needed(index)
-        env = dataclasses.replace(self.env, output_needed=needed)
-        recorder = env.recorder
+        recorder = self.env.recorder
         # A step already incomplete (halted, or under a paused Loop) stays so:
         # skip its input hash, which would raise RecordError for an input its
         # unrecorded producer was never refused for.
-        if recorder is not None and recorder.incomplete(env, node_id, env.coords):
+        if recorder is not None and recorder.incomplete(self.env, node_id, self.env.coords):
             self._recording = False
+        env = dataclasses.replace(self.env, output_needed=needed, recording=self._recording)
         input_hash = (
             _step_input_hash(node, node_args, node_kwargs)
             if recorder is not None and self._recording

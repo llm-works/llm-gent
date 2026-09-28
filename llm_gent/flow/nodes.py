@@ -260,7 +260,9 @@ class _RunEnv:
     of one execution of that node (:func:`~.state.record.instance_address`).
     ``output_needed`` is whether a later node receives the output of the
     Flow walked under this env — the execution record refuses such an
-    output when it cannot store it exactly.
+    output when it cannot store it exactly. ``recording`` is ``False``
+    once an earlier instance of an enclosing walk went unrecorded: this
+    walk consumed its result or state, so nothing under it is recorded.
     """
 
     runtime: Flow
@@ -276,6 +278,7 @@ class _RunEnv:
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
     coords: tuple[str, ...] = ()
     output_needed: bool = False
+    recording: bool = True
 
     @property
     def recorder(self) -> RunRecorder | None:

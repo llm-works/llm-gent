@@ -294,6 +294,7 @@ class MapItemRunner:
             parent_policy=env.policy,
             parent_coords=self.coords,
             parent_output_needed=True,
+            parent_recording=env.recording,
         )
 
     async def _on_success(
@@ -311,9 +312,11 @@ class MapItemRunner:
         When ``on_map_item`` checkpointing is enabled, the merge is
         atomic with the checkpoint write: a snapshot is taken before
         merge, and on checkpoint failure the parent state is rolled
-        back so concurrent items don't serialize an uncommitted merge.
+        back so concurrent items don't serialize an uncommitted merge —
+        and the item's record entry, written with the merge, is undone.
         """
         snapshot = None
+        recorded = False
         try:
             async with self.merge_lock:
                 if self.env.policy.on_map_item:
@@ -321,7 +324,7 @@ class MapItemRunner:
                     # or the merge mutates the snapshot the rollback restores from.
                     snapshot = copy.deepcopy(serialize_state_data(self.env.state.data))
                 await _merge_state(self.mp.merge_fn, self.env.state, child_state)
-                self._record_success(result)
+                recorded = self._record_success(result)
                 if self.env.policy.on_map_item:
                     await _save_scope_commit(
                         self.env, self.item_index, self.node_id, self.env.state, "ok"
@@ -329,8 +332,7 @@ class MapItemRunner:
         except (asyncio.CancelledError, RecordError):
             raise
         except Exception as exc:
-            if snapshot is not None:
-                _restore_state_data(self.env.state.data, snapshot)
+            self._roll_back(snapshot, recorded, child_state)
             if self.mp.on_error is not None:
                 await self._run_on_error(exc, item_ctx)
             failure = Failure(exception=exc, item=self.item)
@@ -341,8 +343,8 @@ class MapItemRunner:
         await self._fire_on_item_complete(result, item_ctx)
         return result
 
-    def _record_success(self, result: Any) -> None:
-        """Record the completed item and drop its scope, in the same step as its merge.
+    def _record_success(self, result: Any) -> bool:
+        """Record the completed item (dropping its scope); return whether it was recorded.
 
         Runs under the merge lock right after the merge, before any
         per-item commit, so a commit never holds a merge without the
@@ -350,9 +352,17 @@ class MapItemRunner:
         """
         recorder = self.env.recorder
         if recorder is None:
-            return
-        recorder.record_item(self.env, self.node_id, self.coords, result)
-        recorder.close_scope(self.env, self.node_id, self.coords)
+            return False
+        return recorder.record_item(self.env, self.node_id, self.coords, result)
+
+    def _roll_back(self, snapshot: Any, recorded: bool, child_state: State[Any]) -> None:
+        """Undo a merge whose per-item commit failed: parent state, and the item's entry."""
+        if snapshot is not None:
+            _restore_state_data(self.env.state.data, snapshot)
+        recorder = self.env.recorder
+        if recorded and recorder is not None:
+            scope = child_state if self.mp.state_fn is not None else None
+            recorder.unrecord_item(self.node_id, self.coords, scope)
 
     async def _run_on_error(self, exc: BaseException, ctx: Context[Any]) -> None:
         """Invoke on_error and swallow any exception it raises.
