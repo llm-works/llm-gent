@@ -364,7 +364,7 @@ def _open_scope(
     recorder = env.recorder
     if state_fn is None or recorder is None:
         return False
-    recorder.open_scope(node_id, env.coords, child_state)
+    recorder.open_scope(env, node_id, env.coords, child_state)
     return True
 
 

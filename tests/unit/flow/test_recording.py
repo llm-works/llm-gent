@@ -542,6 +542,38 @@ class AsyncStore:
         return call
 
 
+def _fail_first_commit(store: JsonFileCheckpointStore) -> None:
+    """Make the store's first commit put raise ``OSError("disk full")``."""
+    original = store.put_object
+    failed: list[str] = []
+
+    def flaky(flow_id: str, kind: Any, content_hash: str, payload: bytes) -> None:
+        if kind == "commit" and not failed:
+            failed.append(content_hash)
+            raise OSError("disk full")
+        original(flow_id, kind, content_hash, payload)
+
+    store.put_object = flaky  # type: ignore[method-assign]
+
+
+@verb
+async def add_to_scope(ctx: Context[dict[str, Any]], x: int) -> int:
+    ctx.state.data["n"] += x
+    return x
+
+
+def _counting_map(*, strict: bool) -> dict[str, Any]:
+    """``.map`` kwargs: items [1, 2], one at a time, each adding itself to a scoped ``n``."""
+    return {
+        "body": lambda b: b.call(add_to_scope),
+        "items": lambda _p, _c: [1, 2],
+        "state": lambda _p: {"n": 0},
+        "merge": lambda p, c: p.setdefault("total", []).append(c["n"]),
+        "max_concurrency": 1,
+        "strict": strict,
+    }
+
+
 class TestRecordStateConsistency:
     """A commit never records an instance whose state effects it does not hold."""
 
@@ -570,36 +602,14 @@ class TestRecordStateConsistency:
     async def test_a_failed_per_item_commit_leaves_the_item_unrecorded(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """Item 0's commit fails, so its merge is rolled back: it must not stay recorded."""
-        original = store.put_object
-        failed: list[str] = []
+        """Item 0's commit fails, so its merge is rolled back: it must not stay recorded.
 
-        def flaky(flow_id: str, kind: Any, content_hash: str, payload: bytes) -> None:
-            if kind == "commit" and not failed:
-                failed.append(content_hash)
-                raise OSError("disk full")
-            original(flow_id, kind, content_hash, payload)
-
-        store.put_object = flaky  # type: ignore[method-assign]
-
-        @verb
-        async def work(ctx: Context[dict[str, Any]], x: int) -> int:
-            ctx.state.data["n"] += x
-            return x
-
-        flow = (
-            _flow(store)
-            .with_checkpoint_policy(on_map_item=True)
-            .map(
-                lambda b: b.call(work),
-                items=lambda _p, _c: [1, 2],
-                state=lambda _p: {"n": 0},
-                merge=lambda p, c: p.setdefault("total", []).append(c["n"]),
-                max_concurrency=1,
-                strict=False,
-            )
-        )
-        flow.call(boom)
+        The non-strict map step still returns, so it is recorded and item
+        0 never runs again: its reopened scope is dropped with the step.
+        """
+        _fail_first_commit(store)
+        flow = _flow(store).with_checkpoint_policy(on_map_item=True)
+        flow.map(**_counting_map(strict=False)).call(boom)
         map_id = _compute_node_ids("", flow._nodes)[0]
         with pytest.raises(Boom):
             await flow.run()
@@ -610,8 +620,30 @@ class TestRecordStateConsistency:
         assert record is not None
         assert f"m|{map_id}@n0" not in record
         assert f"m|{map_id}@n1" in record
+        assert f"s|{map_id}" in record
         assert (await history.scopes(head))[0]["total"] == [2]
-        assert f"{map_id}@n0" in await history.open_scopes(head)
+        assert await history.open_scopes(head) == {}
+
+    async def test_a_failed_per_item_commit_in_a_strict_map_keeps_the_item_scope(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A strict map raises past the rolled-back item: the failure commit carries its scope."""
+        _fail_first_commit(store)
+        flow = _flow(store).with_checkpoint_policy(on_map_item=True)
+        flow.map(**_counting_map(strict=True))
+        map_id = _compute_node_ids("", flow._nodes)[0]
+        with pytest.raises(OSError, match="disk full"):
+            await flow.run()
+        history = History(store, NAME)
+        head = await history.head()
+        assert head is not None
+        record = await history.record(head)
+        assert record is not None
+        assert f"m|{map_id}@n0" not in record
+        assert f"s|{map_id}" not in record
+        # Item 1 is not cancelled when the strict map raises, so only item 0 is asserted on.
+        assert 1 not in (await history.scopes(head))[0].get("total", [])
+        assert (await history.open_scopes(head))[f"{map_id}@n0"] == {"n": 1}
 
     async def test_commits_with_an_async_store_hold_what_they_record(self, tmp_path: Path) -> None:
         """Items that run while a commit awaits the store must not be recorded without their effects."""
@@ -643,6 +675,39 @@ class TestRecordStateConsistency:
                     assert root.get(f"s{item}"), f"{key} recorded, its effect missing from root"
                     checked += 1
         assert checked > 0
+
+    async def test_a_failed_per_item_commit_without_state_keeps_sibling_writes(
+        self, tmp_path: Path
+    ) -> None:
+        """Without ``state=`` items write the shared state; a rollback must not erase siblings."""
+        inner = JsonFileCheckpointStore(LG, tmp_path / "cp")
+        _fail_first_commit(inner)
+        store = AsyncStore(inner)
+
+        @verb
+        async def mark(ctx: Context[dict[str, Any]], x: int) -> int:
+            if x == 1:
+                for _ in range(3):
+                    await asyncio.sleep(0)
+            ctx.state.data[f"s{x}"] = True
+            return x
+
+        state: dict[str, Any] = {}
+        flow = (
+            FlowFactory(LG)
+            .create(state=state)
+            .with_checkpointer(store, NAME)  # type: ignore[arg-type]
+            .with_checkpoint_policy(on_map_item=True)
+            .map(lambda b: b.call(mark), items=lambda _p, _c: [0, 1], strict=False)
+        )
+        flow.call(boom)
+        with pytest.raises(Boom):
+            await flow.run()
+        assert state == {"s0": True, "s1": True}
+        history = History(store, NAME)  # type: ignore[arg-type]
+        head = await history.head()
+        assert head is not None
+        assert (await history.scopes(head))[0] == {"s0": True, "s1": True}
 
 
 class TestScopeLifecycle:
@@ -679,6 +744,43 @@ class TestScopeLifecycle:
         flow.call(boom)
         with pytest.raises(Boom):
             await flow.run(1)
+        history = History(store, NAME)
+        head = await history.head()
+        assert head is not None
+        assert await history.open_scopes(head) == {}
+
+    async def test_scopes_nested_in_a_rescued_step_are_closed(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """The rescue returns past an inner iterate that raised with its scope open."""
+
+        @verb
+        async def fail(ctx: Context[dict[str, Any]], _x: Any = None) -> None:
+            raise ValueError("inner")
+
+        inner = (
+            FlowFactory(LG)
+            .create()
+            .iterate(lambda b: b.call(fail), max_iters=2, state=lambda _p: {"n": 0})
+        )
+        flow = _flow(store).call(inner, rescue=lambda *_: 0).call(boom)
+        with pytest.raises(Boom):
+            await flow.run(1)
+        history = History(store, NAME)
+        head = await history.head()
+        assert head is not None
+        assert await history.open_scopes(head) == {}
+
+    async def test_scopes_after_an_unrecorded_step_are_closed(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A walk that stopped recording (after a pause) still finishes, and merges, its passes."""
+        loop = Loop(ROLE_A, saia=PausingSAIA(pause_on={1}))
+        sub = FlowFactory(LG).create().call(inc)
+        flow = _flow(store).call(loop).call(unwrap)
+        flow.iterate(lambda b: b.call(sub, state=lambda _p: {"n": 0}), max_iters=3)
+        with pytest.raises(Boom):
+            await flow.call(boom).run(1)
         history = History(store, NAME)
         head = await history.head()
         assert head is not None

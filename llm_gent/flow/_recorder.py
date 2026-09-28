@@ -32,10 +32,12 @@ Entry keys are ``"<kind>|<address>"`` with kinds ``s`` (chain step),
 item) and ``b`` (a branch verdict).
 
 Scopes: a child scope created by ``state=`` on ``.call`` / ``.iterate`` /
-``.map`` is registered under its owner's address while it is live and
-dropped once the owner completes. Scopes still registered when a commit
-is written — those of owners the halt, a pause or an exception left
-incomplete — are saved with it, so the work done inside them survives.
+``.map`` is registered under its owner's address while it is live. When
+an instance returns, its scope and every scope under it are dropped,
+unless the halt or a pause under it left its work unfinished. Scopes
+still registered when a commit is written — those of owners the halt, a
+pause or a raised exception left incomplete — are saved with it, so the
+work done inside them survives.
 """
 
 from __future__ import annotations
@@ -70,17 +72,25 @@ BranchArm = Literal["then", "else", "none"]
 
 
 @dataclass(frozen=True)
-class _Pause:
-    """Where a Loop paused: its step's node id, structural ancestors and coordinates."""
+class _Site:
+    """Where an instance sits: its node id, structural ancestors and coordinates."""
 
     node_id: str
     ancestors: tuple[str, ...]
     coords: tuple[str, ...]
 
     def under(self, node_id: str, coords: tuple[str, ...]) -> bool:
-        """True when this pause lies inside the instance ``(node_id, coords)``."""
+        """True when this site is the instance ``(node_id, coords)`` or lies inside it."""
         in_node = node_id == self.node_id or node_id in self.ancestors
         return in_node and self.coords[: len(coords)] == coords
+
+
+@dataclass(frozen=True)
+class _Scope:
+    """A registered child scope and the site of the instance that owns it."""
+
+    owner: _Site
+    state: State[Any]
 
 
 class RunRecorder:
@@ -88,8 +98,8 @@ class RunRecorder:
 
     def __init__(self, record: ExecutionRecord) -> None:
         self.record = record
-        self.scopes: dict[str, State[Any]] = {}
-        self._pauses: list[_Pause] = []
+        self._scopes: dict[str, _Scope] = {}
+        self._pauses: list[_Site] = []
         self._unlocated_pause = False
         self._halted = False
 
@@ -102,7 +112,7 @@ class RunRecorder:
         if node_id is None:
             self._unlocated_pause = True
             return
-        self._pauses.append(_Pause(node_id, env.ancestor_chain, env.coords))
+        self._pauses.append(_Site(node_id, env.ancestor_chain, env.coords))
 
     def halted(self, env: _RunEnv) -> bool:
         """True once nothing more may be recorded anywhere in the run.
@@ -126,11 +136,22 @@ class RunRecorder:
 
     def incomplete(self, env: _RunEnv, node_id: str, coords: tuple[str, ...]) -> bool:
         """True when the instance ``(node_id, coords)`` must not be recorded."""
-        return self.closed(env) or any(p.under(node_id, coords) for p in self._pauses)
+        return self.closed(env) or self._held(env, node_id, coords)
+
+    def _held(self, env: _RunEnv, node_id: str, coords: tuple[str, ...]) -> bool:
+        """True when the instance returned with its work unfinished (halted, or a Loop paused).
+
+        Unlike :meth:`incomplete`, a walk that merely stopped recording
+        does not hold its instances: they finished, and their merges are
+        in the parent's state.
+        """
+        return self.halted(env) or any(p.under(node_id, coords) for p in self._pauses)
 
     # --- scopes --------------------------------------------------------------
 
-    def open_scope(self, node_id: str, coords: tuple[str, ...], state: State[Any]) -> None:
+    def open_scope(
+        self, env: _RunEnv, node_id: str, coords: tuple[str, ...], state: State[Any]
+    ) -> None:
         """Register ``state`` as the live child scope of the instance ``(node_id, coords)``.
 
         Every commit the run writes carries the open scopes, so a scope
@@ -139,20 +160,25 @@ class RunRecorder:
         """
         address = instance_address(node_id, coords)
         _serialized_scope(address, state)
-        self.scopes[address] = state
+        self._scopes[address] = _Scope(_Site(node_id, env.ancestor_chain, coords), state)
 
     def close_scope(self, env: _RunEnv, node_id: str, coords: tuple[str, ...]) -> None:
-        """Drop the instance's scope once it completed; keep it when it is incomplete.
+        """Drop the scopes of the instance ``(node_id, coords)`` and of everything under it.
 
-        An incomplete owner is not recorded, so it runs again on resume and
-        needs its scope back.
+        Called once the instance returned. Kept when the instance is held
+        (halted, or a Loop under it paused): it runs again on resume and
+        needs the work done in them. Otherwise every scope under it is
+        dead — including those a raised exception left behind that a
+        rescue, or a non-strict map, turned into a result.
         """
-        if not self.incomplete(env, node_id, coords):
-            self.scopes.pop(instance_address(node_id, coords), None)
+        if self._held(env, node_id, coords):
+            return
+        for address in [a for a, s in self._scopes.items() if s.owner.under(node_id, coords)]:
+            del self._scopes[address]
 
     def serialized_scopes(self) -> dict[str, bytes]:
         """Canonical JSON of every open scope by owner address; :class:`RecordError` when one fails."""
-        return {address: _serialized_scope(address, s) for address, s in self.scopes.items()}
+        return {a: _serialized_scope(a, s.state) for a, s in self._scopes.items()}
 
     # --- entries -------------------------------------------------------------
 
@@ -170,9 +196,7 @@ class RunRecorder:
         Stores its input hash and, when storable, its output. ``needed`` —
         a later node receives ``output`` — makes an output the record
         cannot store exactly a :class:`RecordError`; otherwise the step is
-        recorded without it. A recorded step's own scope, if it still has
-        one open (its body raised and a rescue produced the output), is
-        dropped.
+        recorded without it.
         """
         if self.incomplete(env, node_id, env.coords):
             return False
@@ -187,7 +211,6 @@ class RunRecorder:
                     f"node receives it: {e}"
                 ) from e
         self.record.put(record_key(STEP, address), entry)
-        self.scopes.pop(address, None)
         return True
 
     def record_pass(
@@ -221,21 +244,11 @@ class RunRecorder:
             return False
         address = instance_address(map_id, item_coords)
         self.record.put(record_key(ITEM, address), {"out": _needed_output(output, address)})
-        self.scopes.pop(address, None)
         return True
 
-    def unrecord_item(
-        self, map_id: str, item_coords: tuple[str, ...], child_state: State[Any] | None
-    ) -> None:
-        """Undo :meth:`record_item` after the item's merge was rolled back.
-
-        Its entry goes, and its scope (when it had one) reopens, so the
-        item runs again on resume from the work it had done.
-        """
-        address = instance_address(map_id, item_coords)
-        self.record.remove(record_key(ITEM, address))
-        if child_state is not None:
-            self.scopes[address] = child_state
+    def unrecord_item(self, map_id: str, item_coords: tuple[str, ...]) -> None:
+        """Undo :meth:`record_item` (if it recorded) after the item's merge was rolled back."""
+        self.record.remove(record_key(ITEM, instance_address(map_id, item_coords)))
 
     def record_item_skipped(self, env: _RunEnv, map_id: str, item_coords: tuple[str, ...]) -> None:
         """Record a map item its guard skipped."""

@@ -197,6 +197,9 @@ class Chain:
         later node receives its result, and whose ``recording`` says whether
         this walk still records — so descents inside it (subflow, branch
         arms, iterate and map bodies) record nothing once this walk stopped.
+        Once the step returns, the scopes opened under it are closed: a
+        rescue or a non-strict map can return past a body that raised
+        and left its scope registered.
         """
         node = self.flow._nodes[index]
         needed = self._output_needed(index)
@@ -217,6 +220,8 @@ class Chain:
         if recorder is not None and self._recording:
             label = _target_label(node.target)
             self._recording = recorder.record_step(env, node_id, label, input_hash, result, needed)
+        if recorder is not None:
+            recorder.close_scope(env, node_id, env.coords)
         return result
 
     def _output_needed(self, index: int) -> bool:
