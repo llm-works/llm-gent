@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import math
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from .cas import canonical_json, content_hash
@@ -121,22 +121,37 @@ def decode_value(encoded: Any) -> Any:
 
 
 def _decode(encoded: Any) -> Any:
-    """Recursive body of :func:`decode_value`."""
-    if not isinstance(encoded, dict):
+    """Recursive body of :func:`decode_value`: untagged scalars, tagged everything else."""
+    kind = type(encoded)
+    if kind in _PRIMITIVES or kind is float:
         return encoded
+    if kind is not dict:
+        raise RecordError(f"malformed record value: untagged {kind.__name__}")
+    if encoded.keys() == {_OBJECT, "v"}:
+        return state_converter.structure(encoded["v"], _load_type(encoded[_OBJECT]))
     if len(encoded) == 1:
         ((tag, body),) = encoded.items()
-        if tag in (_LIST, _TUPLE):
-            items = [_decode(v) for v in body]
-            return items if tag == _LIST else tuple(items)
-        if tag in (_SET, _FROZENSET):
-            members = (_decode(v) for v in body)
-            return set(members) if tag == _SET else frozenset(members)
-        if tag == _DICT:
-            return {k: _decode(v) for k, v in body.items()}
-    if _OBJECT in encoded:
-        return state_converter.structure(encoded["v"], _load_type(encoded[_OBJECT]))
-    raise RecordError(f"malformed record value: {sorted(encoded)}")
+        return _decode_tagged(tag, body)
+    raise RecordError(f"malformed record value: keys {sorted(encoded)}")
+
+
+_SEQUENCE_TAGS: dict[str, Callable[[Iterable[Any]], Any]] = {
+    _LIST: list,
+    _TUPLE: tuple,
+    _SET: set,
+    _FROZENSET: frozenset,
+}
+"""Tag → constructor for the containers encoded as a JSON array body."""
+
+
+def _decode_tagged(tag: str, body: Any) -> Any:
+    """Decode a one-key tagged container; the body must have the tag's JSON shape."""
+    if tag == _DICT and type(body) is dict:
+        return {k: _decode(v) for k, v in body.items()}
+    build = _SEQUENCE_TAGS.get(tag)
+    if build is not None and type(body) is list:
+        return build(_decode(v) for v in body)
+    raise RecordError(f"malformed record value: tag {tag!r} with a {type(body).__name__} body")
 
 
 def _load_type(path: str) -> Any:
@@ -180,20 +195,18 @@ def storable(value: Any) -> Any:
 
 
 def value_hash(value: Any) -> str:
-    """Content hash of ``value``'s encoding — how the record compares inputs.
+    """Content hash of ``value``'s stored form — how the record compares inputs and map keys.
 
-    Needs an encoding, not a round trip. Raises :class:`RecordError` when
-    ``value`` has none. Sets hash order-independently, including sets
-    nested in objects the state converter unstructures. Exception: a set
-    field of a pydantic model is dumped by pydantic in iteration order,
-    so its hash can differ across processes (a miss, never a false match).
+    Only a value :func:`storable` accepts has a hash; anything else raises
+    :class:`RecordError`. A lossy encoding would give unequal values one
+    hash (a model in an ``Any`` field dumps like the equivalent dict), and
+    a matching input hash must mean the same input. Sets hash
+    order-independently, including sets nested in objects the state
+    converter unstructures. Exception: a set field of a pydantic model is
+    dumped by pydantic in iteration order, so its hash can differ across
+    processes (a miss, never a false match).
     """
-    try:
-        return content_hash(canonical_json(encode_value(value)))
-    except RecordError:
-        raise
-    except (TypeError, ValueError) as e:
-        raise RecordError(f"{type(value).__qualname__} has no JSON encoding: {e}") from e
+    return content_hash(canonical_json(storable(value)))
 
 
 # --- addresses ---------------------------------------------------------------
@@ -266,8 +279,28 @@ class ExecutionRecord:
 
     @classmethod
     def from_shards(cls, payloads: Iterable[bytes]) -> ExecutionRecord:
-        """Rebuild a record from :meth:`shards` payloads."""
+        """Rebuild a record from :meth:`shards` payloads.
+
+        Raises :class:`RecordError` when a payload is not a JSON object, or
+        holds a key an earlier payload already held — :meth:`shards` puts
+        each key in exactly one shard.
+        """
         entries: dict[str, Any] = {}
         for payload in payloads:
-            entries.update(json.loads(payload.decode("utf-8")))
+            shard = _parse_shard(payload)
+            overlap = entries.keys() & shard.keys()
+            if overlap:
+                raise RecordError(f"record keys in more than one shard: {sorted(overlap)[:3]}")
+            entries.update(shard)
         return cls(entries)
+
+
+def _parse_shard(payload: bytes) -> dict[str, Any]:
+    """One shard payload as a JSON object; raise :class:`RecordError` for any other shape."""
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except ValueError as e:  # JSONDecodeError and UnicodeDecodeError
+        raise RecordError(f"record shard is not JSON: {e}") from e
+    if type(parsed) is not dict:
+        raise RecordError(f"record shard is a {type(parsed).__name__}, not a JSON object")
+    return parsed

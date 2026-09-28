@@ -67,6 +67,8 @@ class Resume:
            ``complete`` tag write after it never landed).
         2. :meth:`History.scopes` walks the commit's tree to one JSON
            payload per scope, root → leaf via the zero-padded ``scope_id``.
+           A commit written by a flow of a different structure is refused
+           (:meth:`_assert_same_structure`).
         3. The commit's ``paused_turn`` trace refs load as resume entries
            for the Loops that paused.
         4. The root scope's payload rehydrates the top-level
@@ -82,8 +84,32 @@ class Resume:
         if commit is None:
             return fallback, None
         scope_data = await self._history.scopes(commit)
+        self._assert_same_structure(commit)
         await self.flow._resume_paused_turns.load_from_commit(self._ctx, commit)
         return self._split_scopes(commit, scope_data)
+
+    def _assert_same_structure(self, commit: Commit) -> None:
+        """Refuse to replay a commit written by a flow with a different structure.
+
+        Replay starts at the saved step's index in the current chain and
+        skips every step before it. Node ids do not encode chain position,
+        so an edited chain can still contain the saved step while placing
+        a new or already-run step before or after it; replaying would skip
+        the new step or run the other one twice. ``flow_root_hash`` covers
+        step order, so equal hashes guarantee the chain that wrote the
+        commit. ``resume="restart"`` continues from the saved state instead.
+        """
+        saved = commit.meta.flow_root_hash
+        current = self.flow.root_hash()
+        if saved == current:
+            return
+        saved_path = commit.meta.node_path.replace("/", " → ")
+        raise RuntimeError(
+            f"cannot replay: the composition graph has structurally changed since the "
+            f"checkpoint was written (flow_root_hash {saved!r} != {current!r}). "
+            f'Saved path (root→leaf): {saved_path}. Use resume="restart" to continue '
+            f"from the saved state."
+        )
 
     async def restart(self, fallback: State[Any]) -> State[Any]:
         """Restart: the root state of the newest commit that has usable state.

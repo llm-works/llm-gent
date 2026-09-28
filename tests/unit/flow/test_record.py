@@ -163,8 +163,14 @@ class TestMalformed:
             {"$o": "tests.unit.flow.test_record:Point"},
             {"$o": "tests.unit.flow.test_record:Missing", "v": {}},
             {"$l": 5},
+            {"$l": "abc"},
+            {"$l": {"k": 1}},
             {"$d": [1]},
+            {"$zz": []},
+            {"$o": "tests.unit.flow.test_record:Point", "v": {"x": 1, "y": 2}, "extra": 1},
             {"a": 1, "b": 2},
+            [1, 2],
+            {"$l": [[1]]},
         ],
     )
     def test_malformed_value_raises_record_error(self, encoded: Any) -> None:
@@ -199,6 +205,14 @@ class TestValueHash:
     def test_value_without_encoding_raises(self) -> None:
         with pytest.raises(RecordError):
             value_hash({1: "a"})
+
+    def test_lossy_value_has_no_hash(self) -> None:
+        """A model in an ``Any`` field dumps like the equal-looking dict; it gets no hash."""
+        with pytest.raises(RecordError, match="does not round-trip"):
+            value_hash(Loose(parsed=Model(name="m", score=1.0)))
+        with pytest.raises(RecordError, match="does not round-trip"):
+            key_coord(Loose(parsed=Model(name="m", score=1.0)))
+        assert value_hash(Loose(parsed={"name": "m", "score": 1.0}))
 
 
 class TestAddresses:
@@ -239,3 +253,16 @@ class TestExecutionRecord:
         after = record.shards()
         changed = [s for s in after if before.get(s) != after[s]]
         assert len(changed) == 1
+
+    @pytest.mark.parametrize(
+        "payload",
+        [b"[]", b'[["k", 1]]', b"not json", b"\xff\xfe", b"42"],
+        ids=["empty-array", "pairs", "invalid-json", "invalid-utf8", "scalar"],
+    )
+    def test_non_object_shard_is_refused(self, payload: bytes) -> None:
+        with pytest.raises(RecordError, match="record shard"):
+            ExecutionRecord.from_shards([b'{"a": 1}', payload])
+
+    def test_key_in_two_shards_is_refused(self) -> None:
+        with pytest.raises(RecordError, match="more than one shard"):
+            ExecutionRecord.from_shards([b'{"a": 1}', b'{"a": 2}'])
