@@ -262,9 +262,6 @@ class Context(Generic[T]):
         - No checkpointer is wired on the enclosing flow.
         - The ctx has no live executor env (e.g. built by
           :meth:`Flow.dispatch` used standalone).
-        - The verb runs under a halt that has fired and the run has
-          already written its halt commit; the halt commit stays the
-          history's head and this work re-runs on resume.
 
         Repeated calls at the same node write distinct commit objects
         (framework does not dedupe by state hash beyond the CAS layer

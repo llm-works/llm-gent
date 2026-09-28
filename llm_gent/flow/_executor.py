@@ -24,7 +24,6 @@ import dataclasses
 import inspect
 from typing import TYPE_CHECKING, Any
 
-from ._halt_observer import is_halt_signaled
 from .context import Context
 from .nodes import (
     UNSET,
@@ -596,15 +595,8 @@ async def _save_scope_commit(
     (:class:`IterateRunner`, :class:`MapItemRunner`,
     :meth:`Context.checkpoint`). Delegates the actual persistence
     machinery to :meth:`CheckpointContext.save_scope_commit`.
-
-    Also a no-op for work running under a fired halt once the run has
-    written its halt commit: work that finishes after the halt
-    (in-flight map items, a trailing ``ok`` boundary) must not
-    supersede the halt commit as the history's head. That work re-runs
-    on resume. Work outside the halted subtree (a subflow's own
-    ``.with_halt`` fired while the run carries on) still saves.
     """
-    if env.checkpoint_ctx is None or (env.runtime._halt_saved and is_halt_signaled(env)):
+    if env.checkpoint_ctx is None:
         return
     await env.checkpoint_ctx.save_scope_commit(
         env.ancestor_chain, iteration, node_id, current_state, outcome, trace_ref

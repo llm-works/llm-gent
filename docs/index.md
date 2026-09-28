@@ -185,12 +185,14 @@ A clean halt writes one `halted` commit carrying the state at the point
 the halt was observed: between iterations, between top-level chain
 steps, or at the last top-level step when the halt was set during it.
 Work that finishes after that point (in-flight map items, nested steps
-still running) is not in the commit and runs again on resume. A halted
+still running) is not in the halt commit; its own saves (`on_map_item`,
+`on_iterate`, `ctx.checkpoint()`) are still written after it. A halted
 history is never marked complete.
 
-`resume="restart"` runs from the first step with the halt commit's root
-state; verbs that decide from state what is already done skip it. This
-is the resume mode that does not depend on where the halt landed.
+`resume="restart"` runs from the first step with the root state of the
+newest commit that has usable state; verbs that decide from state what
+is already done skip it. This is the resume mode that does not depend
+on where the halt landed.
 
 `resume="replay"` continues at the halt commit's position, with these
 limits:
@@ -201,6 +203,8 @@ limits:
   step resumes at that next step; the skipped items do not run.
 - A map that re-runs re-runs its completed items and re-applies their
   merges.
+- A save written after the halt commit becomes the head, and replay
+  continues at that save's position instead.
 
 Consequence: **verbs must be idempotent-in-effects.** Reading state,
 mutating state, and returning a value are all safe to repeat. Side
@@ -218,13 +222,10 @@ Three save triggers govern when the framework writes commits:
 - **Halt observation** — always on. Setting the ambient halt event
   causes the executor to save a `halted` commit before returning.
   This is the durability guarantee for pause/resume across process
-  restart. The commit stays the history's head: work still running
-  under the halt does not save over it. A run whose halt is set is never
-  marked complete and never deleted under `gc_on_success`.
-- **Explicit `ctx.checkpoint()`** — available to every verb with a
-  checkpointer wired. Verbs invoke the async method to force a save at
-  their current node position; like the implicit saves, it is not
-  written by work running under a halt after the halt commit.
+  restart. A run whose halt is set is never marked complete and never
+  deleted under `gc_on_success`.
+- **Explicit `ctx.checkpoint()`** — always available. Verbs invoke
+  the async method to force a save at their current node position.
 - **Implicit multi-execution boundary saves** — off by default.
   Governed by `CheckpointPolicy`:
     - `on_iterate: bool` — save after every iterate body iteration.
