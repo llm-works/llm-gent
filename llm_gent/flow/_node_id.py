@@ -5,8 +5,9 @@
 
 Every ``_Node`` at execution time gets a stable, globally unique ID
 derived from the enclosing Flow's ``chain_context``, the node's kind
-(call / branch / iterate / map), its position in the parent chain,
-and a qualname string identifying its target. Subflow / branch-arm /
+(call / branch / iterate / map), a qualname string identifying its
+target, and its occurrence among same-target steps of the parent
+chain (not its chain position). Subflow / branch-arm /
 iterate-body descents extend ``chain_context`` via
 :func:`_descend_context` so a shared subflow used at two call sites
 produces two distinct IDs for the same underlying ``_Node``.
@@ -40,15 +41,15 @@ size; 8 is the deliberate default.
 
 
 def _target_qualname(target: Any) -> str:
-    """Stable identity string for a node target — feeds :func:`_compute_node_id`.
+    """Stable identity string for a node target — feeds :func:`_compute_node_ids`.
 
     Verb / plain callable → ``verb:<__module__>.<__qualname__>`` (module
     prefix prevents cross-module collisions between two functions with
     the same qualname). :class:`Flow` subflow → ``flow:<name>`` (or
     ``flow:<anonymous>`` when unnamed). Composition primitives
     (:class:`_Branch`, :class:`_Iterate`, :class:`_Map`) → the
-    primitive's kind string; the primitive's identity flows from the
-    outer :class:`_Node`'s chain position and its enclosing
+    primitive's kind string; the primitive's identity flows from its
+    occurrence among same-kind steps of the chain and the enclosing
     ``chain_context``, not from any label on the primitive itself.
     """
     from .flow import Flow
@@ -78,37 +79,52 @@ def _node_kind(node: _Node) -> str:
     return "call"
 
 
-def _compute_node_id(chain_context: str, node: _Node, position: int) -> str:
-    """Runtime content-addressed node ID for the chain step at ``position``.
+def _compute_node_ids(chain_context: str, nodes: list[_Node]) -> tuple[str, ...]:
+    """Runtime content-addressed node IDs for a Flow's chain steps, in chain order.
 
-    Composes the enclosing Flow's ``chain_context`` with this node's
-    local key ``(kind, position, target_qualname)``. The chain_context
-    is itself a hash chain from the run's root down through every
-    subflow / branch-arm / iterate-body descent above this Flow (see
-    :func:`_descend_context`), so the resulting node ID is globally
-    unique across the entire composition tree — a shared subflow used
-    at two call sites produces two distinct IDs for the same underlying
-    ``_Node`` because their ``chain_context`` values differ.
+    Each step's local key is ``(kind, target_qualname, occurrence)``,
+    where ``occurrence`` counts the earlier steps in the same chain with
+    the same kind and target. Chain position does not enter the key:
+    inserting, removing or reordering steps with other targets leaves a
+    step's id unchanged, so its record and paused turns are still found
+    after a deploy that edits the chain around it. Steps sharing a
+    target (the same verb twice, two anonymous subflows, two maps) are
+    told apart by their order among themselves.
 
-    Deterministic: identical composition graphs produce identical IDs
+    The key is composed with the enclosing Flow's ``chain_context`` — a
+    hash chain from the run's root down through every subflow /
+    branch-arm / iterate-body / map-body descent above this Flow (see
+    :func:`_descend_context`) — so ids are globally unique across the
+    composition tree: a shared subflow used at two call sites produces
+    two distinct ids for the same underlying ``_Node``.
+
+    Deterministic: identical composition graphs produce identical ids
     across processes / Python versions (blake2b is stable and every
-    input is a Unicode-canonical string). Collision-free at the design
-    level for any well-formed graph — see :data:`_NODE_ID_DIGEST_SIZE`
-    for the birthday-collision margin.
+    input is a Unicode-canonical string). See
+    :data:`_NODE_ID_DIGEST_SIZE` for the birthday-collision margin.
     """
-    payload = f"{chain_context}|{_node_kind(node)}|{position}|{_target_qualname(node.target)}"
-    return hashlib.blake2b(payload.encode("utf-8"), digest_size=_NODE_ID_DIGEST_SIZE).hexdigest()
+    seen: dict[tuple[str, str], int] = {}
+    ids: list[str] = []
+    for node in nodes:
+        local = (_node_kind(node), _target_qualname(node.target))
+        occurrence = seen.get(local, 0)
+        seen[local] = occurrence + 1
+        payload = f"{chain_context}|{local[0]}|{occurrence}|{local[1]}"
+        digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=_NODE_ID_DIGEST_SIZE)
+        ids.append(digest.hexdigest())
+    return tuple(ids)
 
 
 def flow_root_hash(flow: Any) -> str:
     """Structure hash of ``flow``'s composition tree — the commit meta's ``flow_root_hash``.
 
-    Hashes (CAS :func:`content_hash` over canonical JSON) exactly the
-    inputs :func:`_compute_node_id` and :func:`_descend_context` consume:
-    every chain step's kind, position and target qualname, and every
-    Flow it descends into under its boundary name. Two flows with equal
-    hashes therefore assign identical node ids to every step, so a
-    ``node_path`` saved under one resolves under the other.
+    Hashes (CAS :func:`content_hash` over canonical JSON) every chain
+    step's kind and target qualname in chain order, and every Flow it
+    descends into under its boundary name — a superset of what
+    :func:`_compute_node_ids` and :func:`_descend_context` consume. Two
+    flows with equal hashes therefore assign identical node ids to every
+    step; flows that differ only in step order hash differently but can
+    still share ids.
 
     Node parameters (``max_iters``, predicates, projections) do not
     enter node ids and do not enter this hash. A Flow that re-enters

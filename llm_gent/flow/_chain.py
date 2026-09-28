@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._executor import _build_ctx, _execute_node, _step_inputs
 from ._halt_observer import HaltSaveObserver, is_halt_signaled
-from ._node_id import _compute_node_id
+from ._node_id import _compute_node_ids
 from .nodes import UNSET, _Iterate
 
 
@@ -44,9 +44,7 @@ class Chain:
     def __init__(self, flow: Flow, env: _RunEnv) -> None:
         self.flow = flow
         self.env = env
-        self.ids: tuple[str, ...] = tuple(
-            _compute_node_id(env.chain_context, n, i) for i, n in enumerate(flow._nodes)
-        )
+        self.ids: tuple[str, ...] = _compute_node_ids(env.chain_context, flow._nodes)
 
     async def walk(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Execute chain steps in order, threading returns; return the last result.

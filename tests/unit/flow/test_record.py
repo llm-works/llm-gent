@@ -1,0 +1,206 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
+"""Execution record: value codec, round-trip refusal, input hashes, addresses, shards."""
+
+from __future__ import annotations
+
+import enum
+from dataclasses import dataclass, field
+from typing import Any
+
+import pytest
+from pydantic import BaseModel
+
+from llm_gent.flow.state.record import (
+    ExecutionRecord,
+    RecordError,
+    decode_value,
+    encode_value,
+    index_coord,
+    instance_address,
+    iteration_coord,
+    key_coord,
+    storable,
+    value_hash,
+)
+
+
+pytestmark = pytest.mark.unit
+
+
+@dataclass(frozen=True)
+class Point:
+    x: int
+    y: int
+
+
+@dataclass
+class Outcome:
+    run_id: str
+    points: list[Point] = field(default_factory=list)
+
+
+class Color(enum.Enum):
+    RED = "red"
+
+
+class Level(enum.IntEnum):
+    LOW = 1
+
+
+class Model(BaseModel):
+    name: str
+    score: float
+
+
+class Loose(BaseModel):
+    parsed: Any = None
+
+
+def _round_trip(value: Any) -> Any:
+    import json
+
+    from llm_gent.flow.state.cas import canonical_json
+
+    return decode_value(json.loads(canonical_json(storable(value))))
+
+
+class TestRoundTrip:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            True,
+            0,
+            -3,
+            1.5,
+            "text",
+            [1, "a", None],
+            (1, 2),
+            {"a": [1, (2, 3)], "b": {"c": None}},
+            {1, 2, 3},
+            frozenset({"x"}),
+            [],
+            {},
+        ],
+    )
+    def test_json_shapes_keep_their_types(self, value: Any) -> None:
+        decoded = _round_trip(value)
+        assert decoded == value
+        assert type(decoded) is type(value)
+
+    def test_nested_tuple_stays_a_tuple(self) -> None:
+        assert _round_trip({"k": [(1, 2)]}) == {"k": [(1, 2)]}
+        assert type(_round_trip({"k": [(1, 2)]})["k"][0]) is tuple
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            Point(1, 2),
+            Outcome("r1", [Point(0, 0)]),
+            Color.RED,
+            Level.LOW,
+            Model(name="m", score=0.5),
+            [Point(1, 2), Model(name="n", score=1.0)],
+        ],
+    )
+    def test_converter_types_round_trip(self, value: Any) -> None:
+        decoded = _round_trip(value)
+        assert decoded == value
+        assert type(decoded) is type(value)
+
+    def test_int_enum_is_not_flattened_to_int(self) -> None:
+        assert encode_value(Level.LOW) != 1
+        assert _round_trip(Level.LOW) is Level.LOW
+
+
+class TestRefusal:
+    def test_local_class_is_refused(self) -> None:
+        @dataclass
+        class Local:
+            a: int
+
+        with pytest.raises(RecordError, match="inside a function"):
+            storable(Local(1))
+
+    def test_non_str_dict_key_is_refused(self) -> None:
+        with pytest.raises(RecordError, match="not a str"):
+            storable({1: "a"})
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    def test_non_finite_float_is_refused(self, value: float) -> None:
+        with pytest.raises(RecordError, match="non-finite"):
+            storable(value)
+
+    def test_any_field_that_changes_type_is_refused(self) -> None:
+        """A pydantic ``Any`` field holding a model decodes as a dict — not exact."""
+        with pytest.raises(RecordError, match="does not round-trip"):
+            storable(Loose(parsed=Model(name="m", score=1.0)))
+
+    def test_any_field_holding_json_round_trips(self) -> None:
+        assert _round_trip(Loose(parsed={"a": 1})) == Loose(parsed={"a": 1})
+
+    def test_exception_is_refused(self) -> None:
+        with pytest.raises(RecordError):
+            storable(ValueError("boom"))
+
+    def test_callable_is_refused(self) -> None:
+        with pytest.raises(RecordError):
+            storable(len)
+
+
+class TestValueHash:
+    def test_equal_values_hash_equal(self) -> None:
+        assert value_hash({"a": 1, "b": [2]}) == value_hash({"b": [2], "a": 1})
+
+    def test_set_hash_is_order_independent(self) -> None:
+        assert value_hash({"b", "a", "c"}) == value_hash({"c", "a", "b"})
+
+    def test_container_types_hash_differently(self) -> None:
+        assert value_hash([1, 2]) != value_hash((1, 2))
+        assert value_hash(1) != value_hash(Level.LOW)
+
+    def test_value_without_encoding_raises(self) -> None:
+        with pytest.raises(RecordError):
+            value_hash({1: "a"})
+
+
+class TestAddresses:
+    def test_top_level_address_is_the_node_id(self) -> None:
+        assert instance_address("abc", ()) == "abc"
+
+    def test_coords_join_outermost_first(self) -> None:
+        coords = (iteration_coord(2), index_coord(0))
+        assert instance_address("abc", coords) == "abc@i2/n0"
+
+    def test_key_coord_depends_on_the_key_only(self) -> None:
+        assert key_coord("q1") == key_coord("q1")
+        assert key_coord("q1") != key_coord("q2")
+        assert key_coord(("run", 1)) != key_coord(["run", 1])
+
+
+class TestExecutionRecord:
+    def test_shards_round_trip(self) -> None:
+        record = ExecutionRecord()
+        for i in range(50):
+            record.put(f"step:{i}", {"out": i})
+        rebuilt = ExecutionRecord.from_shards(record.shards().values())
+        assert len(rebuilt) == 50
+        assert rebuilt.get("step:7") == {"out": 7}
+        assert "step:49" in rebuilt and "step:50" not in rebuilt
+
+    def test_shard_ids_are_hash_prefixes(self) -> None:
+        record = ExecutionRecord({f"k{i}": i for i in range(1000)})
+        shards = record.shards()
+        assert 1 < len(shards) <= 256
+        assert all(len(s) == 2 for s in shards)
+
+    def test_unchanged_shards_keep_their_bytes(self) -> None:
+        """Adding one entry rewrites one shard; the others are byte-identical (CAS dedupe)."""
+        record = ExecutionRecord({f"k{i}": i for i in range(100)})
+        before = record.shards()
+        record.put("new-entry", 1)
+        after = record.shards()
+        changed = [s for s in after if before.get(s) != after[s]]
+        assert len(changed) == 1
