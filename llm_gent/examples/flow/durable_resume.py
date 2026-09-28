@@ -490,7 +490,11 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
 
 async def _report(history: History, store_dir: Path, final: Digest, halted: bool) -> None:
     """Print the post-run state and the ref files the store holds."""
-    refs = sorted(str(p.relative_to(store_dir)) for p in store_dir.rglob("*.json"))
+    refs = sorted(
+        str(p.relative_to(store_dir))
+        for p in store_dir.glob("histories/*/refs/*")
+        if p.name != ".lock"
+    )
     print(f"  pending: {final.pending}")
     print(f"  summaries: {final.summaries}")
     print(f"  ref files: {refs}")

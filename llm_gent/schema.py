@@ -5,8 +5,8 @@
 
 llm-gent owns one alembic tree at :mod:`llm_gent.migrations` covering
 every framework-level persistent table this package ships (currently
-the flow checkpoint tables ``gent_flow_name``, ``gent_flow_object``,
-``gent_flow_ref`` and ``gent_flow_tag``; more revisions land here as
+the flow checkpoint tables ``gent_flow_name``, ``gent_flow_object`` and
+``gent_flow_ref``; more revisions land here as
 future subsystems add persistence). Tables are prefixed ``gent_``.
 Model classes live near their consumers (e.g.
 :class:`llm_gent.flow.stores.postgres.FlowObject`,

@@ -35,7 +35,9 @@ from .checkpoint import (
     END_NODE_PATH,
     FAILED_NODE_PATH,
     FAILURE_PRODUCER,
+    HEAD_REF,
     CheckpointStore,
+    ConcurrentWriteError,
     Kind,
     Retention,
     maybe_await,
@@ -69,10 +71,10 @@ class CheckpointContext:
     fields are always populated once the context exists — the
     Optional lives at the context level, not per-field) and caches
     the history's ``flow_id`` and head within one run
-    (:meth:`begin_run` drops them). Exposes the put-object triad, ref
-    put/resolve, get_object, put_tag, gc_history, :meth:`append_commit`,
-    and the compound :meth:`save_scope_commit` that assembles a
-    Blob→Tree→Commit chain and refs it at the boundary.
+    (:meth:`begin_run` drops them). Exposes the put-object triad,
+    get_ref / move_ref, get_object, put_tag, gc_history,
+    :meth:`append_commit`, and the compound :meth:`save_scope_commit`
+    that assembles a Blob→Tree→Commit chain and moves ``HEAD`` to it.
     """
 
     def __init__(
@@ -175,18 +177,25 @@ class CheckpointContext:
             self.store.put_object(flow_id, "commit", commit.content_hash, commit.to_bytes())
         )
 
-    async def put_ref(self, node_path: str, iteration: int, commit_hash: str) -> None:
-        """Point ``(flow_id, node_path, iteration)`` at ``commit_hash``."""
-        flow_id = await self.ensure_flow_id()
-        await maybe_await(self.store.put_ref(flow_id, node_path, iteration, commit_hash))
-
-    async def resolve_ref(self) -> str | None:
-        """Latest commit hash across this history, or ``None`` (incl. no history)."""
+    async def get_ref(self, name: str) -> str | None:
+        """Commit hash ref ``name`` points at, or ``None`` (incl. no history)."""
         flow_id = await self.lookup_flow_id()
         if flow_id is None:
             return None
-        result: str | None = await maybe_await(self.store.resolve_ref(flow_id))
+        result: str | None = await maybe_await(self.store.get_ref(flow_id, name))
         return result
+
+    async def move_ref(self, name: str, commit_hash: str, expected: str | None) -> None:
+        """Move ref ``name`` from ``expected`` to ``commit_hash``.
+
+        Raises:
+            ConcurrentWriteError: The ref no longer points at ``expected``
+                — another writer moved it.
+        """
+        flow_id = await self.ensure_flow_id()
+        moved = await maybe_await(self.store.set_ref(flow_id, name, commit_hash, expected))
+        if not moved:
+            raise ConcurrentWriteError(self.client_flow_id, name, expected)
 
     async def get_object(self, kind: Kind, content_hash: str) -> bytes | None:
         """Fetch an object under this history by kind + hash."""
@@ -197,9 +206,8 @@ class CheckpointContext:
         return result
 
     async def put_tag(self, name: str, commit_hash: str) -> None:
-        """Point tag ``name`` under this history at ``commit_hash``."""
-        flow_id = await self.ensure_flow_id()
-        await maybe_await(self.store.put_tag(flow_id, name, commit_hash))
+        """Point tag ref ``name`` at ``commit_hash``, moving it from wherever it points now."""
+        await self.move_ref(name, commit_hash, await self.get_ref(name))
 
     async def gc_history(self) -> None:
         """Remove this history (objects, refs, tags, name mapping); the next save starts a new one."""
@@ -219,12 +227,14 @@ class CheckpointContext:
     # --- history: append a commit on top of the head ---
 
     async def append_commit(self, root_tree_hash: str, meta: CommitMeta) -> Commit:
-        """Build a commit whose parent is the current head, store it, and ref it.
+        """Build a commit whose parent is the current head, store it, and move ``HEAD`` to it.
 
-        The ref goes to ``(meta.node_path, meta.iteration)``; the new commit
-        becomes the head. Serialized so concurrent saves (parallel map items)
-        form one linear history rather than sibling commits sharing a parent.
-        The first commit of a history has no parent.
+        ``HEAD`` moves by compare-and-set from the parent, so a second
+        writer on the same history raises :class:`ConcurrentWriteError`
+        instead of forking it silently. Serialized so concurrent saves
+        (parallel map items) form one linear history rather than sibling
+        commits sharing a parent. The first commit of a history has no
+        parent.
         """
         async with self._commit_lock:
             parent = await self._load_head()
@@ -234,14 +244,14 @@ class CheckpointContext:
                 meta=meta,
             )
             await self.put_commit(commit)
-            await self.put_ref(meta.node_path, meta.iteration, commit.content_hash)
+            await self.move_ref(HEAD_REF, commit.content_hash, parent)
             self._head = commit.content_hash
             return commit
 
     async def _load_head(self) -> str | None:
-        """Return the cached head, reading the newest ref on first use."""
+        """Return the cached head, reading ``HEAD`` on first use."""
         if not self._head_loaded:
-            self._head = await self.resolve_ref()
+            self._head = await self.get_ref(HEAD_REF)
             self._head_loaded = True
         return self._head
 

@@ -12,14 +12,11 @@ Creates the content-addressed persistence tables backing
   ``(flow_id, kind, content_hash)`` with a ``BYTEA payload``.
   ``kind`` is one of ``"blob"`` / ``"tree"`` / ``"commit"`` (see
   :mod:`llm_gent.flow.state.cas`).
-- ``gent_flow_ref`` — one row per
-  ``(flow_id, node_path, iteration)`` pointing at a
-  ``commit_hash``, with a sequence-assigned ``seq`` for latest-ref lookup
-  and a ``created_at`` timestamp for inspection.
-- ``gent_flow_tag`` — one row per ``(flow_id, name)`` pointing at a
-  ``commit_hash``; re-put moves the tag.
+- ``gent_flow_ref`` — one row per named ref ``(flow_id, name)``
+  (``HEAD``, ``tags/...``) pointing at a ``commit_hash``, moved by
+  compare-and-set, with an ``updated_at`` timestamp for inspection.
 
-Objects, refs and tags are history-scoped by ``flow_id``; blobs are
+Objects and refs are history-scoped by ``flow_id``; blobs are
 deliberately not shared across histories.
 
 Revision ID: 001
@@ -42,18 +39,12 @@ depends_on: str | Sequence[str] | None = None
 _FLOW_ID_LEN = 36
 """``flow_id`` column length — a canonical UUID string."""
 
-_REF_SEQ = "gent_flow_ref_seq"
-"""Sequence feeding ``gent_flow_ref.seq`` (write order of refs)."""
-
 
 def upgrade() -> None:
-    """Create the name, object, ref and tag tables backing :class:`PgCheckpointStore`."""
+    """Create the name, object and ref tables backing :class:`PgCheckpointStore`."""
     _create_name_table()
     _create_object_table()
-    op.execute(sa.schema.CreateSequence(sa.Sequence(_REF_SEQ)))
     _create_ref_table()
-    op.create_index("ix_gent_flow_ref_flow_seq", "gent_flow_ref", ["flow_id", sa.text("seq DESC")])
-    _create_tag_table()
 
 
 def _create_name_table() -> None:
@@ -91,62 +82,24 @@ def _create_object_table() -> None:
 
 
 def _create_ref_table() -> None:
-    """Create ``gent_flow_ref`` — history-keyed pointers at commit hashes.
-
-    ``seq`` is drawn from a database sequence on every insert and re-put,
-    so "latest ref" is write order as the database saw it — independent
-    of the writers' clocks. :func:`upgrade` creates the sequence before
-    this table and the ``(flow_id, seq DESC)`` index after it.
-    """
+    """Create ``gent_flow_ref`` — named, compare-and-set pointers at commit hashes."""
     op.create_table(
         "gent_flow_ref",
-        sa.Column("flow_id", sa.String(length=_FLOW_ID_LEN), nullable=False),
-        sa.Column("node_path", sa.String(length=1024), nullable=False),
-        sa.Column("iteration", sa.Integer(), nullable=False),
-        sa.Column("commit_hash", sa.String(length=64), nullable=False),
-        sa.Column(
-            "seq",
-            sa.BigInteger(),
-            server_default=sa.text(f"nextval('{_REF_SEQ}')"),
-            nullable=False,
-        ),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.PrimaryKeyConstraint(
-            "flow_id",
-            "node_path",
-            "iteration",
-            name="pk_gent_flow_ref",
-        ),
-    )
-
-
-def _create_tag_table() -> None:
-    """Create ``gent_flow_tag`` — named, movable pointers at commit hashes."""
-    op.create_table(
-        "gent_flow_tag",
         sa.Column("flow_id", sa.String(length=_FLOW_ID_LEN), nullable=False),
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column("commit_hash", sa.String(length=64), nullable=False),
         sa.Column(
-            "created_at",
+            "updated_at",
             sa.DateTime(timezone=True),
             server_default=sa.func.now(),
             nullable=False,
         ),
-        sa.PrimaryKeyConstraint("flow_id", "name", name="pk_gent_flow_tag"),
+        sa.PrimaryKeyConstraint("flow_id", "name", name="pk_gent_flow_ref"),
     )
 
 
 def downgrade() -> None:
-    """Drop the tag, ref, object and name tables."""
-    op.drop_table("gent_flow_tag")
-    op.drop_index("ix_gent_flow_ref_flow_seq", table_name="gent_flow_ref")
+    """Drop the ref, object and name tables."""
     op.drop_table("gent_flow_ref")
-    op.execute(sa.schema.DropSequence(sa.Sequence(_REF_SEQ)))
     op.drop_table("gent_flow_object")
     op.drop_table("gent_flow_name")

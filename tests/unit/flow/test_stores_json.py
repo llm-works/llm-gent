@@ -94,25 +94,24 @@ class TestPathTraversalGuards:
         with pytest.raises(ValueError):
             store.get_object(bad_id, "blob", "h")
 
-    @pytest.mark.parametrize("bad_path", ["", ".", ".."])
-    def test_rejects_adversarial_node_path(
-        self, store: JsonFileCheckpointStore, bad_path: str
-    ) -> None:
-        with pytest.raises(ValueError):
-            store.put_ref("history-1", bad_path, 1, "hash")
-
     @pytest.mark.parametrize("bad_name", ["", ".", ".."])
     def test_rejects_adversarial_names(self, store: JsonFileCheckpointStore, bad_name: str) -> None:
         with pytest.raises(ValueError):
-            store.put_tag("history-1", bad_name, "hash")
+            store.set_ref("history-1", bad_name, "hash", None)
+        with pytest.raises(ValueError):
+            store.get_ref("history-1", bad_name)
         with pytest.raises(ValueError):
             store.bind_flow_id(bad_name, "history-1")
 
     def test_slash_and_special_chars_supported(self, store: JsonFileCheckpointStore) -> None:
         """URL-quoting round-trips arbitrary caller strings through path segments."""
         weird_id = "campaign/2026-09-22:15h30 "
-        weird_path = "cafebabe/deadbeef"
+        weird_ref = "tags/complete: v1"
         store.put_object(weird_id, "blob", "h", b"x")
-        store.put_ref(weird_id, weird_path, 1, "commit-h")
+        store.set_ref(weird_id, weird_ref, "commit-h", None)
         assert store.get_object(weird_id, "blob", "h") == b"x"
-        assert store.resolve_ref(weird_id, weird_path, 1) == "commit-h"
+        assert store.get_ref(weird_id, weird_ref) == "commit-h"
+        refs_dir = store._history_dir(weird_id) / "refs"
+        assert sorted(p.name for p in refs_dir.iterdir() if p.name != ".lock") == [
+            "tags%2Fcomplete%3A%20v1"
+        ]

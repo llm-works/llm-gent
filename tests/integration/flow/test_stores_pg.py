@@ -3,10 +3,10 @@
 
 """Integration tests for :class:`llm_gent.flow.stores.PgCheckpointStore`.
 
-Real Postgres round-trip against the migrated schema (name, object,
-ref and tag tables). Protocol behaviour comes from
-:class:`CheckpointStoreConformance`, shared with the file and in-memory
-stores; this module adds the ordering of refs by database sequence.
+Real Postgres round-trip against the migrated schema (name, object and
+ref tables). Protocol behaviour, including compare-and-set on refs from
+concurrent threads, comes from :class:`CheckpointStoreConformance`,
+shared with the file and in-memory stores.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from appinfra.log import Logger
 from sqlalchemy import delete
 
 from llm_gent.flow.stores import PgCheckpointStore
-from llm_gent.flow.stores.postgres import FlowName, FlowObject, FlowRef, FlowTag
+from llm_gent.flow.stores.postgres import FlowName, FlowObject, FlowRef
 from tests.checkpoint_store_conformance import CheckpointStoreConformance
 
 
@@ -32,7 +32,7 @@ def store(pg_migrated: PG, pg_test_logger: Logger) -> PgCheckpointStore:
 def _wipe(pg: PG) -> None:
     """Delete every row from the store's tables."""
     with pg.session() as session:
-        for model in (FlowTag, FlowRef, FlowObject, FlowName):
+        for model in (FlowRef, FlowObject, FlowName):
             session.execute(delete(model))
 
 
@@ -50,25 +50,6 @@ def clean_tables(pg_migrated: PG) -> Generator[None, None, None]:
 
 class TestConformance(CheckpointStoreConformance):
     """The Protocol behaviour every store shares."""
-
-
-class TestRefOrdering:
-    def test_latest_ignores_writer_clock(self, store: PgCheckpointStore, pg_migrated: PG) -> None:
-        """A ref written later wins even if its writer's clock stamped an earlier created_at."""
-        from datetime import UTC, datetime, timedelta
-
-        from sqlalchemy import update
-
-        store.put_ref("history-1", "node/a", 1, "hash-first")
-        store.put_ref("history-1", "node/b", 1, "hash-second")
-        # Simulate the second writer's clock lagging by an hour.
-        with pg_migrated.session() as session:
-            session.execute(
-                update(FlowRef)
-                .where(FlowRef.commit_hash == "hash-second")
-                .values(created_at=datetime.now(UTC) - timedelta(hours=1))
-            )
-        assert store.resolve_ref("history-1") == "hash-second"
 
 
 class TestRetention:

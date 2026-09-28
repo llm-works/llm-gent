@@ -28,6 +28,7 @@ from .checkpoint import (
     COMPLETE_TAG,
     END_NODE_PATH,
     FAILED_NODE_PATH,
+    HEAD_REF,
     CheckpointStore,
     Kind,
     maybe_await,
@@ -70,7 +71,7 @@ class History:
         flow_id = await self.flow_id()
         if flow_id is None:
             return None
-        commit_hash = await maybe_await(self.store.resolve_ref(flow_id))
+        commit_hash = await maybe_await(self.store.get_ref(flow_id, HEAD_REF))
         return None if commit_hash is None else await self._commit(flow_id, commit_hash)
 
     async def is_complete(self) -> bool:
@@ -114,7 +115,7 @@ class History:
         flow_id = await self.flow_id()
         if flow_id is None:
             return None
-        commit_hash = await maybe_await(self.store.resolve_tag(flow_id, COMPLETE_TAG))
+        commit_hash = await maybe_await(self.store.get_ref(flow_id, COMPLETE_TAG))
         return None if commit_hash is None else await self._commit(flow_id, commit_hash)
 
     async def commits(self) -> AsyncIterator[Commit]:
