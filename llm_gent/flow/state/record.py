@@ -17,7 +17,8 @@ any type :data:`~llm_gent.flow.state.state_converter` round-trips
 (dataclasses, attrs, enums, pydantic models, ...). A value is storable
 when it decodes back equal and of the same type (:func:`storable`);
 anything else raises :class:`RecordError`. Object types are recorded by
-import path, so they must be importable module-level classes.
+import path, so they must be module-level classes, and decoding finds
+them only in modules the process has already imported.
 
 The record is persisted as up to 256 shards (:meth:`ExecutionRecord.shards`),
 grouped by a hash of the entry key, so a commit rewrites only the shards
@@ -26,9 +27,9 @@ whose entries changed and unchanged shards dedupe in the CAS.
 
 from __future__ import annotations
 
-import importlib
 import json
 import math
+import sys
 from collections.abc import Iterable
 from typing import Any
 
@@ -105,28 +106,50 @@ def _type_path(cls: type) -> str:
 
 
 def decode_value(encoded: Any) -> Any:
-    """Inverse of :func:`encode_value` over the parsed JSON form."""
+    """Inverse of :func:`encode_value` over the parsed JSON form.
+
+    Raises :class:`RecordError` for anything :func:`encode_value` cannot
+    have produced, including an object whose recorded type no longer
+    imports or no longer structures from the stored fields.
+    """
+    try:
+        return _decode(encoded)
+    except RecordError:
+        raise
+    except Exception as e:
+        raise RecordError(f"malformed record value: {e!r}") from e
+
+
+def _decode(encoded: Any) -> Any:
+    """Recursive body of :func:`decode_value`."""
     if not isinstance(encoded, dict):
         return encoded
     if len(encoded) == 1:
         ((tag, body),) = encoded.items()
         if tag in (_LIST, _TUPLE):
-            items = [decode_value(v) for v in body]
+            items = [_decode(v) for v in body]
             return items if tag == _LIST else tuple(items)
         if tag in (_SET, _FROZENSET):
-            members = (decode_value(v) for v in body)
+            members = (_decode(v) for v in body)
             return set(members) if tag == _SET else frozenset(members)
         if tag == _DICT:
-            return {k: decode_value(v) for k, v in body.items()}
+            return {k: _decode(v) for k, v in body.items()}
     if _OBJECT in encoded:
         return state_converter.structure(encoded["v"], _load_type(encoded[_OBJECT]))
     raise RecordError(f"malformed record value: {sorted(encoded)}")
 
 
 def _load_type(path: str) -> Any:
-    """Import the class at ``module:qualname``."""
+    """The class at ``module:qualname``, from a module this process has already imported.
+
+    Decoding never imports: a path read from the store cannot pull in a
+    module and run its import-time code. The flow reading the record
+    imports its own output types before it runs.
+    """
     module_name, _, qualname = path.partition(":")
-    target: Any = importlib.import_module(module_name)
+    target: Any = sys.modules.get(module_name)
+    if target is None:
+        raise RecordError(f"{path}: module {module_name!r} is not imported; decoding never imports")
     for part in qualname.split("."):
         target = getattr(target, part)
     return target
@@ -138,6 +161,9 @@ def storable(value: Any) -> Any:
     Round-trip means the decoded value equals ``value`` and has its
     exact type — a pydantic model whose ``Any`` field comes back as a
     dict, or a class whose converter hooks drop a field, is refused.
+    Below the top level the check is equality only: an untyped field
+    holding a value equal to its JSON form (an ``IntEnum`` member in an
+    ``Any`` field decodes as ``int``) passes and comes back as that form.
     """
     encoded = encode_value(value)
     try:
@@ -157,9 +183,10 @@ def value_hash(value: Any) -> str:
     """Content hash of ``value``'s encoding — how the record compares inputs.
 
     Needs an encoding, not a round trip. Raises :class:`RecordError` when
-    ``value`` has none. Sets hash order-independently; a set nested in an
-    object is unstructured in iteration order, so its hash can differ
-    across processes.
+    ``value`` has none. Sets hash order-independently, including sets
+    nested in objects the state converter unstructures. Exception: a set
+    field of a pydantic model is dumped by pydantic in iteration order,
+    so its hash can differ across processes (a miss, never a false match).
     """
     try:
         return content_hash(canonical_json(encode_value(value)))
@@ -212,8 +239,8 @@ class ExecutionRecord:
     executor writes from one event loop.
     """
 
-    def __init__(self, entries: dict[str, Any] | None = None) -> None:
-        self._entries: dict[str, Any] = dict(entries or {})
+    def __init__(self, entries: dict[str, Any]) -> None:
+        self._entries: dict[str, Any] = dict(entries)
 
     def get(self, key: str) -> Any | None:
         """The entry at ``key``, or ``None``."""

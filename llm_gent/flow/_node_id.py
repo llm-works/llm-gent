@@ -12,9 +12,10 @@ iterate-body descents extend ``chain_context`` via
 :func:`_descend_context` so a shared subflow used at two call sites
 produces two distinct IDs for the same underlying ``_Node``.
 
-:func:`flow_root_hash` hashes the same inputs over the whole static
-composition tree: one hash per flow definition, recorded on every
-commit a history writes.
+:func:`flow_root_hash` hashes every chain step's kind and target in
+chain order over the whole static composition tree — a superset of the
+id inputs, so equal hashes mean equal ids: one hash per flow
+definition, recorded on every commit a history writes.
 
 The :class:`Flow` isinstance check in :func:`_target_qualname`
 resolves through a localized late import to break the circular

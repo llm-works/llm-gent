@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import enum
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +40,11 @@ class Point:
 class Outcome:
     run_id: str
     points: list[Point] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Tagged:
+    tags: frozenset[str]
 
 
 class Color(enum.Enum):
@@ -150,12 +156,41 @@ class TestRefusal:
             storable(len)
 
 
+class TestMalformed:
+    @pytest.mark.parametrize(
+        "encoded",
+        [
+            {"$o": "tests.unit.flow.test_record:Point"},
+            {"$o": "tests.unit.flow.test_record:Missing", "v": {}},
+            {"$l": 5},
+            {"$d": [1]},
+            {"a": 1, "b": 2},
+        ],
+    )
+    def test_malformed_value_raises_record_error(self, encoded: Any) -> None:
+        with pytest.raises(RecordError, match="malformed"):
+            decode_value(encoded)
+
+    def test_decoding_never_imports(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A stored type path in a module not yet imported is refused, not imported."""
+        module = "wsgiref.simple_server"
+        monkeypatch.delitem(sys.modules, module, raising=False)
+        with pytest.raises(RecordError, match="not imported"):
+            decode_value({"$o": f"{module}:WSGIServer", "v": {}})
+        assert module not in sys.modules
+
+
 class TestValueHash:
     def test_equal_values_hash_equal(self) -> None:
         assert value_hash({"a": 1, "b": [2]}) == value_hash({"b": [2], "a": 1})
 
     def test_set_hash_is_order_independent(self) -> None:
         assert value_hash({"b", "a", "c"}) == value_hash({"c", "a", "b"})
+
+    def test_set_in_object_encodes_sorted(self) -> None:
+        """Converter output for a nested set is sorted, not in per-process hash order."""
+        encoded = encode_value(Tagged(frozenset({"delta", "alpha", "gamma", "beta"})))
+        assert encoded["v"]["tags"] == ["alpha", "beta", "delta", "gamma"]
 
     def test_container_types_hash_differently(self) -> None:
         assert value_hash([1, 2]) != value_hash((1, 2))
@@ -182,7 +217,7 @@ class TestAddresses:
 
 class TestExecutionRecord:
     def test_shards_round_trip(self) -> None:
-        record = ExecutionRecord()
+        record = ExecutionRecord({})
         for i in range(50):
             record.put(f"step:{i}", {"out": i})
         rebuilt = ExecutionRecord.from_shards(record.shards().values())
