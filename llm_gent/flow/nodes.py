@@ -295,6 +295,7 @@ class _Branch:
     when: WhenFn
     then_flow: Flow
     else_flow: Flow | None
+    name: str | None = None
 
 
 @dataclass
@@ -308,6 +309,7 @@ class _Iterate:
     state_fn: StateProject | None = None
     merge_fn: StateMerge | None = None
     state_factory: StateFactory[Any] | None = None
+    name: str | None = None
 
 
 @dataclass
@@ -325,6 +327,7 @@ class _Map:
     on_item_complete: OnItemCompleteFn | None = None
     max_concurrency: int | None = None
     state_factory: StateFactory[Any] | None = None
+    name: str | None = None
 
 
 @dataclass

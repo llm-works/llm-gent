@@ -6,8 +6,9 @@
 Every ``_Node`` at execution time gets a stable, globally unique ID
 derived from the enclosing Flow's ``chain_context``, the node's kind
 (call / branch / iterate / map), a qualname string identifying its
-target, and its occurrence among same-target steps of the parent
-chain (not its chain position). Subflow / branch-arm /
+target (with the node's label, when it has one), and its occurrence
+among same-target steps of the parent chain (not its chain position).
+Subflow / branch-arm /
 iterate-body descents extend ``chain_context`` via
 :func:`_descend_context` so a shared subflow used at two call sites
 produces two distinct IDs for the same underlying ``_Node``.
@@ -46,38 +47,39 @@ def _target_qualname(target: Any) -> str:
 
     Verb / plain callable → ``verb:<__module__>.<__qualname__>`` (module
     prefix prevents cross-module collisions between two functions with
-    the same qualname). :class:`Flow` subflow → ``flow:<name>`` (or
-    ``flow:<anonymous>`` when unnamed). Composition primitives
-    (:class:`_Branch`, :class:`_Iterate`, :class:`_Map`) → the
-    primitive's kind string; the primitive's identity flows from its
-    occurrence among same-kind steps of the chain and the enclosing
-    ``chain_context``, not from any label on the primitive itself.
+    the same qualname), with ``[<node_label>]`` appended when the target
+    exposes a non-empty ``node_label`` (a :class:`Loop` labels itself
+    with its ``name=`` or its role's name). :class:`Flow` subflow →
+    ``flow:<name>`` (or ``flow:<anonymous>`` when unnamed). Composition
+    primitives (:class:`_Branch`, :class:`_Iterate`, :class:`_Map`) →
+    the primitive's kind string, plus ``:<name>`` when built with
+    ``name=``.
+
+    Targets whose strings are equal — unnamed primitives, two Loops with
+    the same label — are told apart only by their order among
+    themselves, so removing an earlier one hands its id to the next.
+    Labels exist to prevent that.
     """
     from .flow import Flow
 
     if isinstance(target, Flow):
         return f"flow:{target.name or '<anonymous>'}"
-    if isinstance(target, _Branch):
-        return "branch"
-    if isinstance(target, _Iterate):
-        return "iterate"
-    if isinstance(target, _Map):
-        return "map"
+    if isinstance(target, _Branch | _Iterate | _Map):
+        kind = _PRIMITIVE_KINDS[type(target)]
+        return kind if target.name is None else f"{kind}:{target.name}"
     module = getattr(target, "__module__", "?")
     qualname = getattr(target, "__qualname__", type(target).__name__)
-    return f"verb:{module}.{qualname}"
+    label = getattr(target, "node_label", None)
+    base = f"verb:{module}.{qualname}"
+    return f"{base}[{label}]" if isinstance(label, str) and label else base
+
+
+_PRIMITIVE_KINDS: dict[type, str] = {_Branch: "branch", _Iterate: "iterate", _Map: "map"}
 
 
 def _node_kind(node: _Node) -> str:
     """Chain-step kind for the composition tree hash: ``call`` / ``branch`` / ``iterate`` / ``map``."""
-    target = node.target
-    if isinstance(target, _Branch):
-        return "branch"
-    if isinstance(target, _Iterate):
-        return "iterate"
-    if isinstance(target, _Map):
-        return "map"
-    return "call"
+    return _PRIMITIVE_KINDS.get(type(node.target), "call")
 
 
 def _compute_node_ids(chain_context: str, nodes: list[_Node]) -> tuple[str, ...]:

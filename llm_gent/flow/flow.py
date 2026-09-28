@@ -70,7 +70,12 @@ from ._resume import (
     assert_replay_consumed,
     commit_failure,
 )
-from ._validation import _materialize, _require_state_for_merge, _validate_target
+from ._validation import (
+    _check_node_name,
+    _materialize,
+    _require_state_for_merge,
+    _validate_target,
+)
 from .checkpoint import CheckpointPolicy, CheckpointStore, ResumeMode
 from .context import Context
 from .factory import SAIAFactory
@@ -423,6 +428,7 @@ class Flow:
         else_: Any = None,
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
+        name: str | None = None,
     ) -> Flow:
         """Append a conditional node: run ``then`` or ``else_`` based on ``when``.
 
@@ -438,6 +444,7 @@ class Flow:
                 (or the predicate) raises.
             after: Attached to the branch node — fires with the chosen
                 subflow's result (or the pass-through input).
+            name: Stable label for the node's id (see :meth:`iterate`).
 
         The branch node's result is the chosen subflow's output; it becomes
         the next chain step's input like any other node's result. Both bodies
@@ -446,10 +453,11 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
+        _check_node_name(name, ".branch")
         then_flow = _materialize(then, self._lg, "branch.then")
         else_flow = _materialize(else_, self._lg, "branch.else") if else_ is not None else None
         node = _Node(
-            target=_Branch(when=when, then_flow=then_flow, else_flow=else_flow),
+            target=_Branch(when=when, then_flow=then_flow, else_flow=else_flow, name=name),
             rescue=rescue,
             after=after,
         )
@@ -468,6 +476,7 @@ class Flow:
         state: StateProject | None = None,
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
+        name: str | None = None,
     ) -> Flow:
         """Append a bounded iteration: run ``body`` until a stop condition holds.
 
@@ -498,6 +507,11 @@ class Flow:
                 runs once after the block exits successfully (via ``until``,
                 ``max_iters``, or ``deadline``). Skipped if an iteration
                 raises past any ``rescue``. Requires ``state``.
+            name: Stable label folded into the node's id, so its checkpoint
+                record stays bound to it when other iterate steps are added,
+                removed or reordered in the same chain. Omitted → the node
+                is identified by its order among the chain's unnamed iterate
+                steps. Must be non-empty when given.
 
         At least one of ``until`` or ``max_iters`` must be provided so the
         iteration is guaranteed to terminate. An ambient :meth:`with_halt`
@@ -513,6 +527,7 @@ class Flow:
         if deadline is not None and deadline <= 0:
             raise ValueError(f".iterate(deadline=) must be > 0; got {deadline}")
         _require_state_for_merge(state, merge, ".iterate")
+        _check_node_name(name, ".iterate")
         body_flow = _materialize(body, self._lg, "iterate.body")
         node = _Node(
             target=_Iterate(
@@ -523,6 +538,7 @@ class Flow:
                 state_fn=state,
                 merge_fn=merge,
                 state_factory=state_factory,
+                name=name,
             ),
             rescue=rescue,
             after=after,
@@ -543,6 +559,7 @@ class Flow:
         state: StateProject | None = None,
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
+        name: str | None = None,
     ) -> Flow:
         """Append a parallel fan-out: run ``body`` per item concurrently.
 
@@ -583,6 +600,7 @@ class Flow:
                 wanting a single sequential fold should use ``aggregate``
                 (which runs once after every item completes) instead.
                 Requires ``state``.
+            name: Stable label for the node's id (see :meth:`iterate`).
 
         Cancellation propagates unconditionally regardless of ``strict``.
         Sibling items keep running when one fails; the wasted work is the
@@ -591,6 +609,7 @@ class Flow:
         Returns ``self`` for chaining.
         """
         _require_state_for_merge(state, merge, ".map")
+        _check_node_name(name, ".map")
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency < 1
         ):
@@ -606,6 +625,7 @@ class Flow:
                 merge_fn=merge,
                 max_concurrency=max_concurrency,
                 state_factory=state_factory,
+                name=name,
             ),
             rescue=rescue,
             after=after,

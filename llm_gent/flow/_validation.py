@@ -101,6 +101,12 @@ def _require_state_for_merge(
         )
 
 
+def _check_node_name(name: str | None, method: str) -> None:
+    """Enforce that a node label, when given, is a non-empty string."""
+    if name is not None and (not isinstance(name, str) or not name):
+        raise ValueError(f"{method}(name=) must be a non-empty str; got {name!r}")
+
+
 def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
     """Turn a :data:`Buildable` (Flow, verb, or ``lambda f: ...`` callback) into a Flow.
 
