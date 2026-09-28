@@ -171,6 +171,9 @@ class Flow:
         self._nodes: list[_Node] = []
         self._replay_consumed: bool = False
         self._halt_saved: bool = False
+        # Set when halt made the run skip work (a map item never started).
+        # With no halt commit written, the run is then not complete.
+        self._halt_skipped_work: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._pending_paused_turns: PendingPausedTurns = PendingPausedTurns()
         self._resume_paused_turns: ResumePausedTurns = ResumePausedTurns()
@@ -941,6 +944,7 @@ class Flow:
         active_state, replay = await self._start_state(self._wrap_top_state(state), resume)
         self._replay_consumed = False
         self._halt_saved = False
+        self._halt_skipped_work = False
         self._pending_paused_turns.clear()
         try:
             result = await self._run_as_subflow(

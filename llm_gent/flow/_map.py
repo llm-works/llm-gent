@@ -215,6 +215,8 @@ class MapItemRunner:
         strict/non-strict contract.
         """
         if is_halt_signaled(self.env):
+            # Work cut short by halt: the halt anchor must re-run this map.
+            self.env.runtime._halt_skipped_work = True
             skipped = Skipped(item=self.item)
             await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
             return skipped

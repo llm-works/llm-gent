@@ -202,7 +202,10 @@ Three save triggers govern when the framework writes commits:
 - **Halt observation** — always on. Setting the ambient halt event
   causes the executor to save a `halted` commit before returning.
   This is the durability guarantee for pause/resume across process
-  restart.
+  restart. The commit anchors at the work the halt cut short (a
+  paused Loop's step, a map whose items it skipped) and stays the
+  history's head: saves after it are not written. A halt that
+  arrives after all the run's work completed is a clean exit.
 - **Explicit `ctx.checkpoint()`** — always available. Verbs invoke
   the async method to force a save at their current node position.
 - **Implicit multi-execution boundary saves** — off by default.

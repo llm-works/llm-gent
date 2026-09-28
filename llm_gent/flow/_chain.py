@@ -185,13 +185,13 @@ class Chain:
         let halt propagate to iterate boundaries where iteration state
         is consistent.
 
-        When the just-completed step paused SAIA mid-turn (a Loop
-        deposited bytes on ``env.pending_paused_turns``), lands
-        the halt commit at THAT step's node so resume re-dispatches it
-        — its Loop's ``__call__`` then picks up the paused_turn entry
-        and hands SAIA ``resume=True`` with the rebuilt conversation.
-        Otherwise saves at the not-yet-run step (the normal chain-halt
-        case).
+        When the just-completed step was cut short by the halt — it
+        paused SAIA mid-turn (a Loop deposited bytes on
+        ``env.pending_paused_turns``) or halt skipped some of its map
+        items — lands the halt commit at THAT step's node so resume
+        re-dispatches it: a paused Loop picks up its paused_turn entry,
+        a map runs its skipped items. Otherwise saves at the not-yet-run
+        step (the normal chain-halt case).
         """
         env = self.env
         if (
@@ -202,27 +202,23 @@ class Chain:
         ):
             return False
         just_completed = self.ids[index - 1]
-        halt_node_id = (
-            just_completed
-            if _just_completed_owns_paused_turn(env, just_completed)
-            else self.ids[index]
-        )
+        halt_node_id = just_completed if _was_cut_short(env, just_completed) else self.ids[index]
         return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
 
     async def _observe_halt_trailing(self) -> None:
-        """Save a halt commit after the LAST chain step when it paused a Loop.
+        """Save a halt commit after the LAST chain step when halt cut it short.
 
         :meth:`_observe_halt_between` only fires between steps. When
         halt was signaled during the final step's dispatch, no next
         step exists to save at and the walker just returns — losing
-        the paused turn on resume. This mirror observes halt at the
-        trailing edge and, when the last step owns pending paused-turn
-        bytes, saves at its node so resume re-dispatches it and the
-        Loop consumes the paused_turn entry.
+        the paused turn, or the map items halt skipped, on resume. This
+        mirror observes halt at the trailing edge and, when the last
+        step was cut short, saves at its node so resume re-dispatches it.
 
-        No-op when halt is not set, no pending Loop entry is owned by
-        the last step, or the run is nested / has no checkpointer
-        bound.
+        No-op when halt is not set, the last step completed its work,
+        or the run is nested / has no checkpointer bound. A run whose
+        halt arrived after all its work completed writes no halt commit
+        here; it finishes as a clean exit.
         """
         env = self.env
         if (
@@ -233,9 +229,19 @@ class Chain:
         ):
             return
         last = self.ids[-1]
-        if not _just_completed_owns_paused_turn(env, last):
+        if not _was_cut_short(env, last):
             return
         await HaltSaveObserver.save_if_signaled(env, 0, last, env.state)
+
+
+def _was_cut_short(env: _RunEnv, node_id: str) -> bool:
+    """True when halt cut the just-completed step ``node_id`` short.
+
+    Either it owns a paused Loop turn, or halt skipped map items during
+    it. The skip flag is run-wide, but any earlier step that set it
+    would already have ended the walk at its own halt observation.
+    """
+    return _just_completed_owns_paused_turn(env, node_id) or env.runtime._halt_skipped_work
 
 
 def _just_completed_owns_paused_turn(env: _RunEnv, node_id: str) -> bool:

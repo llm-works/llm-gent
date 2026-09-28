@@ -171,16 +171,19 @@ class Resume:
 async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:
     """Apply the store's retention policy on the clean-exit path.
 
-    Halt-triggered exits preserve the history regardless of policy.
-    On a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the
-    record and commits ``final_state`` tagged ``complete`` so a
-    subsequent ``run(resume="replay")`` doesn't replay the last save point
-    and re-execute chain steps after it.
+    A run the halt cut short preserves the history regardless of policy:
+    it wrote a halt commit, halt skipped work, or a paused turn is still
+    pending. A run whose halt arrived after all its work completed is a
+    clean exit. On a clean exit: ``gc_on_success`` prunes; ``retain``
+    keeps the record and commits ``final_state`` tagged ``complete`` so a
+    subsequent resume doesn't replay the last save point and re-execute
+    chain steps after it.
     """
     if (
         flow._checkpoint_ctx is None
         or flow._halt_saved
-        or (flow._halt_event is not None and flow._halt_event.is_set())
+        or flow._halt_skipped_work
+        or bool(flow._pending_paused_turns)
     ):
         return
     ctx = flow._checkpoint_ctx

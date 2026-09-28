@@ -595,8 +595,13 @@ async def _save_scope_commit(
     (:class:`IterateRunner`, :class:`MapItemRunner`,
     :meth:`Context.checkpoint`). Delegates the actual persistence
     machinery to :meth:`CheckpointContext.save_scope_commit`.
+
+    Also a no-op once the run has written its halt commit: work that
+    finishes after the halt (in-flight map items, a trailing ``ok``
+    boundary) must not supersede the halt commit as the history's head.
+    That work re-runs on resume.
     """
-    if env.checkpoint_ctx is None:
+    if env.checkpoint_ctx is None or env.runtime._halt_saved:
         return
     await env.checkpoint_ctx.save_scope_commit(
         env.ancestor_chain, iteration, node_id, current_state, outcome, trace_ref
