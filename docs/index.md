@@ -181,22 +181,26 @@ mid-execution. The checkpoint records the last completed boundary
 - **Mid-step crash**: a chain step is running when the process dies.
   The last checkpoint is at the prior step. Resume re-runs the step.
 
-A clean halt re-runs only the work it cut short. A halt observed
-between iterations or chain steps checkpoints the halt position and
-resume continues from the next boundary. A step the halt cut short
-anchors the checkpoint at itself, and resume re-runs the step whole — a
-map re-runs its completed items too. The framework marks a step cut
-short when a Loop's turn paused or a map skipped items; a verb that
-observes `ctx.halt` and returns before finishing calls
-`ctx.mark_cut_short()`. A step that returned without that call counts
-as done.
+A clean halt writes one `halted` commit carrying the state at the point
+the halt was observed: between iterations, between top-level chain
+steps, or at the last top-level step when the halt was set during it.
+Work that finishes after that point (in-flight map items, nested steps
+still running) is not in the commit and runs again on resume. A halted
+history is never marked complete.
 
-A top-level chain step resumed at index > 0 did not get its
-predecessor's result threaded in. The checkpoint stores the step's
-input when it survives a JSON round trip unchanged, and resume hands it
-back. Otherwise the step receives no `prev_result` and reads from state
-instead — except a cut-short step, whose checkpoint then anchors at the
-step before it so that step re-runs and produces the input again.
+`resume="restart"` runs from the first step with the halt commit's root
+state; verbs that decide from state what is already done skip it. This
+is the resume mode that does not depend on where the halt landed.
+
+`resume="replay"` continues at the halt commit's position, with these
+limits:
+
+- The resumed step receives no `prev_result` (its predecessor did not
+  re-run), so it reads its input from state.
+- A halt that skipped map items in a top-level map followed by another
+  step resumes at that next step; the skipped items do not run.
+- A map that re-runs re-runs its completed items and re-applies their
+  merges.
 
 Consequence: **verbs must be idempotent-in-effects.** Reading state,
 mutating state, and returning a value are all safe to repeat. Side
@@ -214,11 +218,9 @@ Three save triggers govern when the framework writes commits:
 - **Halt observation** — always on. Setting the ambient halt event
   causes the executor to save a `halted` commit before returning.
   This is the durability guarantee for pause/resume across process
-  restart. The commit anchors at the work the halt cut short (see
-  above) and stays the history's head: work still running under the
-  halt does not save over it. A halt that arrives after all the run's
-  work completed is a clean exit, but never deletes the history under
-  `gc_on_success`.
+  restart. The commit stays the history's head: work still running
+  under the halt does not save over it. A run whose halt is set is never
+  marked complete and never deleted under `gc_on_success`.
 - **Explicit `ctx.checkpoint()`** — available to every verb with a
   checkpointer wired. Verbs invoke the async method to force a save at
   their current node position; like the implicit saves, it is not

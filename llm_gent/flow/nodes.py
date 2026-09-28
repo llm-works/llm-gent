@@ -37,7 +37,6 @@ from .state import State, StateFactory
 if TYPE_CHECKING:
     from ._checkpoint_ctx import CheckpointContext
     from .flow import Flow
-    from .state.halt_anchor import CutShortSteps, StepInputs
     from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
 
 from .checkpoint import CheckpointPolicy
@@ -223,11 +222,6 @@ class _ResumeReplay:
     or ``.iterate(state=)`` on the path pops the first entry and uses
     it as the child scope, in place of re-projecting via the state
     factory. Empty when the checkpointed stack was only root + leaf.
-
-    ``step_input`` is ``(step_id, input)`` for the top-level chain step
-    the halt commit landed on, when its input was storable. The chain
-    hands ``input`` to that step on resume in place of the predecessor
-    result it would otherwise lack.
     """
 
     remaining_path: tuple[str, ...]
@@ -235,7 +229,6 @@ class _ResumeReplay:
     iteration: int = 0
     child_state_data: Any = None
     intermediate_scope_data: tuple[Any, ...] = ()
-    step_input: tuple[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -293,16 +286,6 @@ class _RunEnv:
         Companion to :attr:`pending_paused_turns` on the read side.
         """
         return self.runtime._resume_paused_turns
-
-    @property
-    def cut_short(self) -> CutShortSteps:
-        """Typed accessor for the runtime's record of steps the halt cut short."""
-        return self.runtime._cut_short
-
-    @property
-    def step_inputs(self) -> StepInputs:
-        """Typed accessor for the runtime's record of top-level chain step inputs."""
-        return self.runtime._step_inputs
 
 
 @dataclass

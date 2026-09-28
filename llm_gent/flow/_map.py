@@ -215,7 +215,9 @@ class MapItemRunner:
         strict/non-strict contract.
         """
         if is_halt_signaled(self.env):
-            return await self._skip_for_halt()
+            skipped = Skipped(item=self.item)
+            await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
+            return skipped
         item_ctx = self._ctx(self.env.state)
         try:
             child_state = await _project_state(
@@ -240,17 +242,6 @@ class MapItemRunner:
                 raise
             return failure
         return await self._on_success(result, child_state, item_ctx)
-
-    async def _skip_for_halt(self) -> Skipped:
-        """Short-circuit this item as :class:`Skipped` because halt fired.
-
-        Marks the map cut short so a halt commit anchors at the chain
-        step containing it and resume re-runs the map.
-        """
-        self.env.cut_short.mark(self.node_id, self.env.ancestor_chain)
-        skipped = Skipped(item=self.item)
-        await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
-        return skipped
 
     async def _dispatch_body(self, child_state: State[Any]) -> Any:
         """Run the body subflow with per-item composition-tree identity.

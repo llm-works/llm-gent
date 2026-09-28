@@ -25,11 +25,12 @@ from typing import TYPE_CHECKING, Any
 from ._executor import _build_ctx, _execute_node, _step_inputs
 from ._halt_observer import HaltSaveObserver, is_halt_signaled
 from ._node_id import _compute_node_id
-from .nodes import UNSET, _Iterate, _Node, _RunEnv
+from .nodes import UNSET, _Iterate
 
 
 if TYPE_CHECKING:
     from .flow import Flow
+    from .nodes import _RunEnv
 
 
 class Chain:
@@ -106,14 +107,12 @@ class Chain:
         ``self.ids`` before this fires, so the loop is a lookup, not
         a search.
 
-        Contract on the on-path node when ``start_index > 0``: its
-        predecessor didn't re-run, so there is no return value to
-        thread in. At the top-level chain it receives the input stored
-        on the halt commit (``replay.step_input``) when that input
-        survived a JSON round trip; otherwise it runs with no
-        ``prev_result``, as does an on-path step of a nested chain.
-        Steps that depend on their input in those cases must either be
-        at chain index 0 or read from state.
+        Contract on the on-path node when ``start_index > 0``: it
+        runs with no ``prev_result`` — its predecessor didn't re-
+        run, so there is no return value to thread in. Iterate
+        bodies that depend on the outer chain's return value on
+        resume-first-iteration must either be at chain index 0 or
+        read from state.
         """
         replay = self.env.replay
         if replay is None or not replay.remaining_path:
@@ -146,65 +145,35 @@ class Chain:
 
         ``start_index > 0`` on resume: predecessors already completed
         before the checkpoint was written; the on-path step at
-        ``start_index`` runs with the input stored on the halt commit,
-        or none (see :meth:`_resume_start_index` for the contract).
+        ``start_index`` runs with no ``prev_result`` (see
+        :meth:`_resume_start_index` for the contract).
 
         Halt observation: between chain steps (never at the very
         first iteration of this walk, so resume runs at least the
         halted step), if ``env.halt`` is set, stamp a halted commit
-        and break. On a subsequent ``run(resume="replay")``, that ref
-        resolves to this commit and the walk restarts at the step it
-        anchors at.
+        at the not-yet-run step's position and break. On a subsequent
+        ``run(resume="replay")``, that ref resolves to this commit and
+        the walk restarts at the halted step.
         """
         result: Any = UNSET
         for index in range(start_index, len(self.flow._nodes)):
-            node = self.flow._nodes[index]
-            node_args, node_kwargs = self._inputs_for(
-                index, start_index, node, result, args, kwargs
-            )
             if await self._observe_halt_between(index, start_index):
                 break
+            node = self.flow._nodes[index]
             node_id = self.ids[index]
+            node_args: tuple[Any, ...]
+            node_kwargs: dict[str, Any]
+            if index == start_index and start_index > 0:
+                node_args, node_kwargs = (), {}
+            else:
+                node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             ctx = _build_ctx(node.target, self.env, node_id)
             result = await _execute_node(node, ctx, self.env, node_args, node_kwargs, node_id)
         else:
-            # for-else: chain exhausted without a between-steps halt-save. If halt
-            # cut the LAST step short, save there — no next step exists to save at.
+            # for-else: chain exhausted without a between-steps halt-save. A halt
+            # set during the LAST step saves at that step — no next step exists.
             await self._observe_halt_trailing()
         return result
-
-    def _inputs_for(
-        self,
-        index: int,
-        start_index: int,
-        node: _Node,
-        result: Any,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        """Return step ``index``'s (args, kwargs); record a top-level step's input.
-
-        The resumed step (``index == start_index > 0``) gets the input
-        its halt commit carried, or none. Top-level steps past index 0
-        record their input so a halt commit landing on them can store
-        it; index 0 re-receives the run's own inputs on resume.
-        """
-        if index == start_index and start_index > 0:
-            node_args: tuple[Any, ...] = self._restored_input(index)
-            node_kwargs: dict[str, Any] = {}
-        else:
-            node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
-        if index > 0 and node_args and self.env.runtime is self.flow:
-            self.env.step_inputs.record(self.ids[index], node_args[0])
-        return node_args, node_kwargs
-
-    def _restored_input(self, index: int) -> tuple[Any, ...]:
-        """The input the replayed halt commit stored for step ``index``, as args; else ``()``."""
-        replay = self.env.replay
-        step_input = replay.step_input if replay is not None else None
-        if step_input is None or step_input[0] != self.ids[index]:
-            return ()
-        return (step_input[1],)
 
     async def _observe_halt_between(self, index: int, start_index: int) -> bool:
         """Save a halt commit between chain steps when appropriate; return True if saved.
@@ -215,12 +184,13 @@ class Chain:
         let halt propagate to iterate boundaries where iteration state
         is consistent.
 
-        When the just-completed step was cut short by the halt (it owns
-        an ``env.cut_short`` entry: a paused Loop, a map that skipped
-        items, a verb that called :meth:`Context.mark_cut_short`), the
-        halt commit anchors per :meth:`_cut_short_anchor` so resume
-        re-runs it. Otherwise saves at the not-yet-run step (the
-        normal chain-halt case).
+        When the just-completed step paused SAIA mid-turn (a Loop
+        deposited bytes on ``env.pending_paused_turns``), lands
+        the halt commit at THAT step's node so resume re-dispatches it
+        — its Loop's ``__call__`` then picks up the paused_turn entry
+        and hands SAIA ``resume=True`` with the rebuilt conversation.
+        Otherwise saves at the not-yet-run step (the normal chain-halt
+        case).
         """
         env = self.env
         if (
@@ -230,28 +200,33 @@ class Chain:
             or not is_halt_signaled(env)
         ):
             return False
-        just_completed = index - 1
-        anchor = (
-            self._cut_short_anchor(just_completed)
-            if env.cut_short.owns(self.ids[just_completed])
-            else index
+        just_completed = self.ids[index - 1]
+        halt_node_id = (
+            just_completed
+            if _just_completed_owns_paused_turn(env, just_completed)
+            else self.ids[index]
         )
-        return await HaltSaveObserver.save_if_signaled(env, 0, self.ids[anchor], env.state)
+        return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
 
     async def _observe_halt_trailing(self) -> None:
-        """Save a halt commit after the LAST chain step when halt cut it short.
+        """Save a halt commit at the LAST chain step when halt was signaled during it.
 
         :meth:`_observe_halt_between` only fires between steps. When
         halt was signaled during the final step's dispatch, no next
-        step exists to save at and the walker just returns — losing
-        the work halt cut short on resume. This mirror observes halt
-        at the trailing edge and, when the last step was cut short,
-        saves per :meth:`_cut_short_anchor` so resume re-runs it.
+        step exists to save at. Without a commit here the head would
+        be an older save point, and a later run would start from
+        stale state.
 
-        No-op when halt is not set, the last step was not cut short,
-        or the run is nested / has no checkpointer bound. A run whose
-        halt arrived after all its work completed writes no halt commit
-        here; it finishes as a clean exit.
+        The commit carries the run's final state, and the history is
+        not marked complete: the framework cannot tell whether the
+        last step finished its work or returned early because of the
+        halt. ``resume="restart"`` continues from that state;
+        ``resume="replay"`` re-runs the last step (and a Loop in it
+        picks up its paused_turn entry).
+
+        No-op when halt is not set, a halt commit was already written
+        (the save kernel latches), or the run is nested / has no
+        checkpointer bound.
         """
         env = self.env
         if (
@@ -261,27 +236,18 @@ class Chain:
             or not self.ids
         ):
             return
-        last = len(self.ids) - 1
-        if not env.cut_short.owns(self.ids[last]):
-            return
-        anchor = self._cut_short_anchor(last)
-        await HaltSaveObserver.save_if_signaled(env, 0, self.ids[anchor], env.state)
+        await HaltSaveObserver.save_if_signaled(env, 0, self.ids[-1], env.state)
 
-    def _cut_short_anchor(self, index: int) -> int:
-        """Chain index a halt commit anchors at when step ``index`` was cut short.
 
-        The step itself when resume can hand it what it needs: at index
-        0 (the run's own inputs), when it owns a paused turn (whose
-        envelope carries the Loop's task), or when its input is storable
-        with the commit. Otherwise the step before it, which re-runs to
-        produce that input again.
-        """
-        step_id = self.ids[index]
-        env = self.env
-        if (
-            index == 0
-            or env.pending_paused_turns.owns(step_id)
-            or env.step_inputs.storable(step_id)
-        ):
-            return index
-        return index - 1
+def _just_completed_owns_paused_turn(env: _RunEnv, node_id: str) -> bool:
+    """True when ``node_id`` is a pending Loop's own id or an ancestor of one.
+
+    Direct match covers the ``.call(loop_verb)`` case (Loop's
+    ``ctx._node_id`` IS the chain step's id). Ancestry match covers
+    nested Loops — Loop paused inside an iterate body inside the
+    chain step, where the pending entry's key is the Loop's
+    descendant id computed under the chain step's descent context.
+    Either match means resume should re-dispatch the chain step so
+    the Loop's ``__call__`` picks up the paused_turn entry.
+    """
+    return env.pending_paused_turns.owns(node_id)

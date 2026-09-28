@@ -1,31 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""A halted run leaves exactly one correct resume point.
+"""A halted run leaves exactly one halt commit, carrying the latest state.
 
-- Halt that arrives after all work completed is a clean exit: the final
-  state is committed at ``$end`` and the history is complete, and never
-  deleted under ``gc_on_success``.
-- A step the halt cut short (map items skipped, a Loop turn paused, a
-  verb's ``ctx.mark_cut_short()``) anchors the halt commit, so resume
-  re-runs it instead of moving past it.
-- A resumed top-level step gets back the input it had, when that input
-  survives a JSON round trip; otherwise a cut-short step anchors at the
-  step before it.
+- Halt set during the last top-level step writes a halt commit there
+  with the run's final state; the history is not marked complete and is
+  never deleted under ``gc_on_success``.
 - Once the halt commit is written, later work does not supersede it as
   the history's head.
+- A subflow's own ``.with_halt`` stops that subtree only; the run's
+  later saves and its completion are unaffected.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, Loop, Role, verb
+from llm_gent.flow import Context, FlowFactory, History, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from .conftest import make_test_logger
@@ -44,11 +39,11 @@ def _with_halt(flow: Any, halt: asyncio.Event | None) -> Any:
     return flow.with_halt(halt) if halt is not None else flow
 
 
-class TestHaltAfterAllWork:
-    async def test_halt_in_last_step_completes_the_run(
+class TestHaltInLastStep:
+    async def test_halt_commit_carries_the_final_state(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """No step was skipped, so the run is complete and restart continues from its end."""
+        """The head is a halt commit with the final state; restart continues from it."""
         calls: list[str] = []
 
         def build(halt: asyncio.Event | None) -> Any:
@@ -75,9 +70,10 @@ class TestHaltAfterAllWork:
 
         await build(asyncio.Event()).run()
         history = History(store, "late-halt")
-        assert await history.is_complete()
+        assert not await history.is_complete()
         head = await history.head()
-        assert head is not None and await history.scopes(head) == [{"s1": 1, "s2": 1}]
+        assert head is not None and head.meta.outcome == "halted"
+        assert await history.scopes(head) == [{"s1": 1, "s2": 1}]
 
         calls.clear()
         await build(None).run(resume="restart")
@@ -109,244 +105,35 @@ class TestHaltAfterAllWork:
 
         history = History(store, "gc-late-halt")
         head = await history.head()
-        assert head is not None and await history.scopes(head) == [{"s1": 1}]
-        assert await history.is_complete()
-
-
-class TestMarkCutShort:
-    async def test_marked_last_step_reruns_with_its_input(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        """A verb that stops early on halt and marks itself re-runs, handed its input again."""
-        received: list[Any] = []
-
-        def build(halt: asyncio.Event | None) -> Any:
-            @verb
-            async def produce(ctx: Context[dict[str, Any]], _p: Any = None) -> dict[str, int]:
-                received.append("produce")
-                return {"n": 7}
-
-            @verb
-            async def consume(ctx: Context[dict[str, Any]], prev: Any = None) -> None:
-                received.append(prev)
-                if halt is not None:
-                    halt.set()  # halt arrives mid-step; the verb stops before its work
-                    ctx.mark_cut_short()
-                    return
-                ctx.state.data["done"] = prev["n"]
-
-            flow = (
-                FlowFactory(make_test_logger())
-                .create(state={})
-                .with_checkpointer(store, "marked")
-                .call(produce)
-                .call(consume)
-            )
-            return _with_halt(flow, halt)
-
-        await build(asyncio.Event()).run()
-        history = History(store, "marked")
-        head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
+        assert await history.scopes(head) == [{"s1": 1}]
         assert not await history.is_complete()
 
-        received.clear()
-        await build(None).run(resume="replay")
-        assert received == [{"n": 7}]
-        head = await history.head()
-        assert head is not None and await history.scopes(head) == [{"done": 7}]
-        assert await history.is_complete()
+    async def test_map_as_last_step_is_not_complete(self, store: JsonFileCheckpointStore) -> None:
+        """Items the halt skipped leave the run halted, not complete."""
+        halt = asyncio.Event()
+        ran: list[int] = []
 
-
-class TestHaltSkippedMapItems:
-    @staticmethod
-    def _map_flow(
-        store: JsonFileCheckpointStore,
-        name: str,
-        halt: asyncio.Event | None,
-        ran: list[int],
-        received: list[Any],
-        *,
-        with_next_step: bool,
-    ) -> Any:
         @verb
         async def item(ctx: Context[dict[str, Any]], x: int) -> int:
             ran.append(x)
-            if halt is not None and x == 1:
-                halt.set()
-            await asyncio.sleep(0)
+            halt.set()
             return x
-
-        @verb
-        async def after(ctx: Context[dict[str, Any]], prev: Any = None) -> None:
-            received.append(prev)
 
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, name)
+            .with_checkpointer(store, "map-last")
+            .with_halt(halt)
             .map(lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1)
         )
-        if with_next_step:
-            flow = flow.call(after)
-        return _with_halt(flow, halt)
+        await flow.run()
 
-    async def test_replay_runs_items_the_halt_skipped(self, store: JsonFileCheckpointStore) -> None:
-        """The halt anchors at the map, not the next step, so no item is silently lost."""
-        ran: list[int] = []
-        received: list[Any] = []
-        await self._map_flow(
-            store, "map-then-call", asyncio.Event(), ran, received, with_next_step=True
-        ).run()
-        assert ran == [1] and received == []
-
-        ran.clear()
-        replay = self._map_flow(store, "map-then-call", None, ran, received, with_next_step=True)
-        await replay.run(resume="replay")
-        # Positional replay re-runs the whole map (completed item 1 included).
-        assert ran == [1, 2, 3]
-        assert received == [[1, 2, 3]]
-
-    async def test_map_as_last_step_is_not_complete(self, store: JsonFileCheckpointStore) -> None:
-        ran: list[int] = []
-        await self._map_flow(
-            store, "map-last", asyncio.Event(), ran, [], with_next_step=False
-        ).run()
-
+        assert ran == [1]
         history = History(store, "map-last")
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
         assert not await history.is_complete()
-
-
-class TestResumedStepInput:
-    """A map fed by the previous step's result gets its items back on replay."""
-
-    @staticmethod
-    def _flow(
-        store: JsonFileCheckpointStore,
-        halt: asyncio.Event | None,
-        calls: list[str],
-        *,
-        items: Any,
-        halt_in: str,
-    ) -> Any:
-        @verb
-        async def produce(ctx: Context[dict[str, Any]], _p: Any = None) -> Any:
-            calls.append("produce")
-            if halt is not None and halt_in == "produce":
-                halt.set()
-            return items
-
-        @verb
-        async def item(ctx: Context[dict[str, Any]], x: int) -> int:
-            calls.append(f"item:{x}")
-            if halt is not None and halt_in == "item":
-                halt.set()
-            return x
-
-        @verb
-        async def after(ctx: Context[dict[str, Any]], prev: Any = None) -> None:
-            ctx.state.data["after"] = prev
-
-        flow = (
-            FlowFactory(make_test_logger())
-            .create(state={})
-            .with_checkpointer(store, "input")
-            .call(produce)
-            .map(lambda b: b.call(item), max_concurrency=1)
-            .call(after)
-        )
-        return _with_halt(flow, halt)
-
-    async def _run_then_replay(
-        self, store: JsonFileCheckpointStore, *, items: Any, halt_in: str
-    ) -> list[str]:
-        calls: list[str] = []
-        await self._flow(store, asyncio.Event(), calls, items=items, halt_in=halt_in).run()
-        calls.clear()
-        await self._flow(store, None, calls, items=items, halt_in=halt_in).run(resume="replay")
-        head = await History(store, "input").head()
-        assert head is not None and await History(store, "input").scopes(head) == [
-            {"after": [1, 2, 3]}
-        ]
-        return calls
-
-    async def test_map_cut_short_replays_with_its_items(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        calls = await self._run_then_replay(store, items=[1, 2, 3], halt_in="item")
-        assert calls == ["item:1", "item:2", "item:3"]
-
-    async def test_halt_before_map_replays_with_its_items(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        """Halt during the step before the map anchors at the map, which gets its input back."""
-        calls = await self._run_then_replay(store, items=[1, 2, 3], halt_in="produce")
-        assert calls == ["item:1", "item:2", "item:3"]
-
-    async def test_unstorable_input_anchors_at_the_previous_step(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        """A tuple does not survive JSON, so the step producing it re-runs instead."""
-        calls = await self._run_then_replay(store, items=(1, 2, 3), halt_in="item")
-        assert calls == ["produce", "item:1", "item:2", "item:3"]
-
-
-class TestLoopPauseWithoutFactory:
-    async def test_paused_last_step_reruns_with_its_task(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        """No ConversationFactory means no paused turn to save; the step still re-runs."""
-        role = Role(name="r", backend="openai", model="gpt-4o-mini")
-        tasks: list[str] = []
-
-        @dataclass
-        class _Result:
-            paused: bool
-
-        class _SAIA:
-            def __init__(self, halt: asyncio.Event | None) -> None:
-                self.role = role
-                self.halt = halt
-
-            async def complete(self, task: str, **kwargs: Any) -> _Result:
-                tasks.append(task)
-                if self.halt is not None:
-                    self.halt.set()
-                    return _Result(paused=True)
-                return _Result(paused=False)
-
-        def build(halt: asyncio.Event | None) -> Any:
-            loop = Loop(role, saia=_SAIA(halt))
-
-            @verb(role=role)
-            async def plan(ctx: Context[dict[str, Any]], _p: Any = None) -> str:
-                return "the task"
-
-            @verb(role=role)
-            async def act(ctx: Context[dict[str, Any]], task: Any = None) -> Any:
-                return await loop(ctx, task)
-
-            flow = (
-                FlowFactory(make_test_logger())
-                .create(state={})
-                .with_checkpointer(store, "loop-pause")
-                .call(plan)
-                .call(act)
-            )
-            return _with_halt(flow, halt)
-
-        await build(asyncio.Event()).run()
-        history = History(store, "loop-pause")
-        head = await history.head()
-        assert head is not None and head.meta.outcome == "halted"
-        assert not await history.is_complete()
-
-        tasks.clear()
-        await build(None).run(resume="replay")
-        assert tasks == ["the task"]
-        assert await history.is_complete()
 
 
 class TestHaltCommitStaysHead:

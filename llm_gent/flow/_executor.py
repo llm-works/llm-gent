@@ -565,18 +565,11 @@ async def _persist_halt(
     node_id: str,
     current_state: State[Any],
 ) -> tuple[str, ...]:
-    """Stash pending paused turns + save the halted commit; return stashed node_ids.
-
-    Also stashes the input of the top-level chain step the commit's
-    path starts at, so that step re-runs with it on resume.
-    """
-    ctx = env.checkpoint_ctx
-    assert ctx is not None
-    top_step_id = (env.ancestor_chain + (node_id,))[0]
+    """Stash pending paused turns + save the halted commit; return stashed node_ids."""
+    assert env.checkpoint_ctx is not None
     try:
-        paused_refs, stashed_ids = await env.pending_paused_turns.stash_to_ctx(ctx)
-        trace_ref = paused_refs + await env.step_inputs.stash_to_ctx(ctx, top_step_id)
-        await ctx.save_scope_commit(
+        trace_ref, stashed_ids = await env.pending_paused_turns.stash_to_ctx(env.checkpoint_ctx)
+        await env.checkpoint_ctx.save_scope_commit(
             env.ancestor_chain, iteration, node_id, current_state, "halted", trace_ref
         )
     except Exception as e:

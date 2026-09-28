@@ -97,7 +97,6 @@ from .nodes import (
 )
 from .role import Role
 from .state import State, StateFactory
-from .state.halt_anchor import CutShortSteps, StepInputs
 from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
 
 
@@ -175,8 +174,6 @@ class Flow:
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._pending_paused_turns: PendingPausedTurns = PendingPausedTurns()
         self._resume_paused_turns: ResumePausedTurns = ResumePausedTurns()
-        self._cut_short: CutShortSteps = CutShortSteps()
-        self._step_inputs: StepInputs = StepInputs()
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -945,8 +942,6 @@ class Flow:
         self._replay_consumed = False
         self._halt_saved = False
         self._pending_paused_turns.clear()
-        self._cut_short.clear()
-        self._step_inputs.clear()
         try:
             result = await self._run_as_subflow(
                 *args,
