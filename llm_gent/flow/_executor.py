@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import dataclasses
 import inspect
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from .context import Context
@@ -42,6 +43,7 @@ from .state.cas import (
     CommitOutcome,
     TraceRef,
 )
+from .state.snapshot import ScopePath
 
 
 if TYPE_CHECKING:
@@ -291,22 +293,46 @@ async def _run_subflow(
     else:
         effective_factory = state_factory if state_factory is not None else env.state._factory
         child_state = _restore_scope_state(env.state, raw, effective_factory)
-    result = await body._run_as_subflow(
-        *node_args,
-        state=child_state,
-        runtime=env.runtime,
-        parent_halt=env.halt,
-        parent_budget=env.budget,
-        parent_checkpoint_ctx=env.checkpoint_ctx,
-        parent_chain_context=_descend_context(node_id, "call"),
-        parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=child_replay,
-        parent_extra=env.extra,
-        parent_policy=env.policy,
-        **node_kwargs,
-    )
-    await _merge_state(merge_fn, env.state, child_state)
+    path = env.owner_path(node_id)
+    with _live_scope(env, path, state_fn, child_state):
+        result = await body._run_as_subflow(
+            *node_args,
+            state=child_state,
+            runtime=env.runtime,
+            parent_halt=env.halt,
+            parent_budget=env.budget,
+            parent_checkpoint_ctx=env.checkpoint_ctx,
+            parent_chain_context=_descend_context(node_id, "call"),
+            parent_ancestor_chain=env.ancestor_chain + (node_id,),
+            parent_replay=child_replay,
+            parent_extra=env.extra,
+            parent_policy=env.policy,
+            parent_path=path,
+            **node_kwargs,
+        )
+        await _merge_state(merge_fn, env.state, child_state)
     return result
+
+
+@contextlib.contextmanager
+def _live_scope(
+    env: _RunEnv, path: ScopePath, state_fn: StateProject | None, scope: State[Any]
+) -> Iterator[None]:
+    """Keep ``scope`` registered at ``path`` for the block when a ``state=`` projection made it.
+
+    Without a projection the block shares its parent's scope, which is
+    already registered (or is the root). The scope is dropped once the
+    block ends — after its merge, so a snapshot taken meanwhile never
+    misses its data — or when the block raises.
+    """
+    if state_fn is None:
+        yield
+        return
+    env.scopes.open(path, scope)
+    try:
+        yield
+    finally:
+        env.scopes.close(path)
 
 
 def _consume_scope_data(
@@ -466,6 +492,7 @@ async def _run_branch(
         parent_replay=_pop_replay_for(env, node_id),
         parent_extra=env.extra,
         parent_policy=env.policy,
+        parent_path=env.owner_path(node_id),
     )
 
 
@@ -569,7 +596,13 @@ async def _persist_halt(
     try:
         trace_ref, stashed_ids = await env.pending_paused_turns.stash_to_ctx(env.checkpoint_ctx)
         await env.checkpoint_ctx.save_scope_commit(
-            env.ancestor_chain, iteration, node_id, current_state, "halted", trace_ref
+            env.ancestor_chain,
+            iteration,
+            node_id,
+            env.scopes,
+            current_state,
+            "halted",
+            trace_ref,
         )
     except Exception as e:
         env.lg.warning(
@@ -599,7 +632,7 @@ async def _save_scope_commit(
     if env.checkpoint_ctx is None:
         return
     await env.checkpoint_ctx.save_scope_commit(
-        env.ancestor_chain, iteration, node_id, current_state, outcome, trace_ref
+        env.ancestor_chain, iteration, node_id, env.scopes, current_state, outcome, trace_ref
     )
 
 

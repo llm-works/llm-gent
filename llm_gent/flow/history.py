@@ -20,9 +20,8 @@ Every method works with sync and async stores alike.
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from .checkpoint import (
     COMPLETE_TAG,
@@ -34,7 +33,8 @@ from .checkpoint import (
     maybe_await,
 )
 from .state import StateFactory, restore_state_data
-from .state.cas import Commit, Tree
+from .state.cas import Commit
+from .state.snapshot import Snapshot, read_snapshot
 
 
 T = TypeVar("T")
@@ -131,30 +131,30 @@ class History:
                 return
             commit = await self._commit(commit.meta.flow_id, commit.parent_hashes[0])
 
-    async def scopes(self, commit: Commit) -> list[Any]:
-        """State payloads ``commit`` holds, root scope first, as stored (JSON).
+    async def snapshot(self, commit: Commit) -> Snapshot:
+        """The run state ``commit`` holds, as stored (JSON-compatible values).
 
-        One entry per state scope on the path to the save point; empty for
-        a commit that carries no state.
+        The root scope, every child scope live at the save point keyed by
+        its path, and each running iterate's pass counter. ``has_state`` is
+        ``False`` for a commit that carries no state.
         """
         flow_id = commit.meta.flow_id
-        tree = Tree.from_bytes(await self._object(flow_id, "tree", commit.root_tree_hash))
-        payloads: list[Any] = []
-        for entry in tree.entries:
-            blob = await self._object(flow_id, "blob", entry.child_hash)
-            payloads.append(json.loads(blob.decode("utf-8")))
-        return payloads
+
+        async def load(kind: Kind, content_hash: str) -> bytes:
+            return await self._object(flow_id, kind, content_hash)
+
+        return await read_snapshot(commit.root_tree_hash, load)
 
     async def root_state(self, commit: Commit, factory: StateFactory[T]) -> T | None:
         """Top-level state ``commit`` holds, restored through ``factory``.
 
         ``None`` for a commit that carries no state. For dict-state flows,
-        read ``(await scopes(commit))[0]`` instead.
+        read ``(await snapshot(commit)).root`` instead.
         """
-        payloads = await self.scopes(commit)
-        if not payloads:
+        snapshot = await self.snapshot(commit)
+        if not snapshot.has_state:
             return None
-        return restore_state_data(factory, payloads[0])
+        return restore_state_data(factory, snapshot.root)
 
     async def _commit(self, flow_id: str, commit_hash: str) -> Commit:
         """Load and parse one commit object."""

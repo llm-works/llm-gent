@@ -103,6 +103,7 @@ from .nodes import (
 from .role import Role
 from .state import State, StateFactory
 from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
+from .state.snapshot import ScopePath, ScopeRegistry
 
 
 class Flow:
@@ -179,6 +180,7 @@ class Flow:
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._pending_paused_turns: PendingPausedTurns = PendingPausedTurns()
         self._resume_paused_turns: ResumePausedTurns = ResumePausedTurns()
+        self._scopes: ScopeRegistry = ScopeRegistry()
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -959,6 +961,7 @@ class Flow:
         self._begin_checkpoint_run()
         self._resume_paused_turns.clear()
         active_state, replay = await self._start_state(self._wrap_top_state(state), resume)
+        self._scopes.begin(active_state)
         self._replay_consumed = False
         self._halt_saved = False
         self._pending_paused_turns.clear()
@@ -1018,6 +1021,7 @@ class Flow:
         parent_replay: _ResumeReplay | None = None,
         parent_extra: dict[str, Any] | None = None,
         parent_policy: CheckpointPolicy | None = None,
+        parent_path: ScopePath = (),
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -1042,7 +1046,8 @@ class Flow:
         from root down to the ``_Node`` whose descent entered this Flow;
         it grows by one on every recursion. ``parent_replay`` carries a
         pending checkpoint replay when :meth:`run` was invoked with
-        ``resume="replay"``; ``None`` otherwise.
+        ``resume="replay"``; ``None`` otherwise. ``parent_path`` is this
+        Flow's snapshot path (see :attr:`_RunEnv.path`).
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
@@ -1057,6 +1062,7 @@ class Flow:
             parent_replay=parent_replay,
             parent_extra=parent_extra,
             parent_policy=parent_policy,
+            parent_path=parent_path,
         )
         label = self._name or "<anonymous>"
         is_subflow = runtime is not self
@@ -1081,6 +1087,7 @@ class Flow:
         parent_replay: _ResumeReplay | None = None,
         parent_extra: dict[str, Any] | None = None,
         parent_policy: CheckpointPolicy | None = None,
+        parent_path: ScopePath = (),
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
@@ -1117,6 +1124,7 @@ class Flow:
             replay=parent_replay,
             extra=parent_extra if parent_extra is not None else {},
             policy=policy,
+            path=parent_path,
         )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:

@@ -32,6 +32,7 @@ from appinfra.log import Logger
 from ..core.budget import Tracker
 from .context import Context
 from .state import State, StateFactory
+from .state.snapshot import ScopePath, ScopeRegistry
 
 
 if TYPE_CHECKING:
@@ -253,6 +254,11 @@ class _RunEnv:
     entered this Flow. Extended pairwise on every subflow / branch-arm /
     iterate-body descent. The pair is what the checkpoint layer walks to
     address any point in the composition tree.
+
+    ``path`` is the snapshot path of this Flow's position — node ids plus
+    the iterate pass and map item coordinates that tell repeated
+    executions apart (:mod:`llm_gent.flow.state.snapshot`). Scopes opened
+    under this Flow register at ``path`` extended by their owner.
     """
 
     runtime: Flow
@@ -266,6 +272,16 @@ class _RunEnv:
     replay: _ResumeReplay | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
+    path: ScopePath = ()
+
+    @property
+    def scopes(self) -> ScopeRegistry:
+        """The run's live-scope registry, owned by the top-level Flow."""
+        return self.runtime._scopes
+
+    def owner_path(self, node_id: str) -> ScopePath:
+        """Snapshot path of the step ``node_id`` of this Flow."""
+        return (*self.path, "n", node_id)
 
     @property
     def pending_paused_turns(self) -> PendingPausedTurns:

@@ -24,13 +24,16 @@ returns a rebound env is safe.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import time
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from ._executor import (
     _check_until,
     _consume_scope_data,
+    _live_scope,
     _merge_state,
     _pop_replay_for,
     _project_state,
@@ -41,6 +44,7 @@ from ._halt_observer import HaltSaveObserver
 from ._node_id import _descend_context
 from .nodes import UNSET
 from .state import State
+from .state.snapshot import ScopePath
 
 
 if TYPE_CHECKING:
@@ -92,9 +96,20 @@ class IterateRunner:
         iteration, restored_child = self._resume_iteration()
         env, child_state = await self._resolve_child_scope(restored_child)
         self.env = env
+        path = env.owner_path(self.node_id)
+        with _live_scope(env, path, self.it.state_fn, child_state), self._pass_counter(path):
+            result = await self._loop(path, iteration, child_state, node_args)
+            await _merge_state(self.it.merge_fn, self.env.state, child_state)
+        return result
+
+    async def _loop(
+        self, path: ScopePath, iteration: int, child_state: State[Any], node_args: tuple[Any, ...]
+    ) -> Any:
+        """Run passes from ``iteration`` until a bound, the halt or ``until`` stops them."""
         result: Any = node_args[0] if node_args else None
         started = time.monotonic()
         while True:
+            self.env.scopes.set_pass(path, iteration)
             if self.it.max_iters is not None and iteration >= self.it.max_iters:
                 break
             if self.it.deadline is not None and time.monotonic() - started >= self.it.deadline:
@@ -103,14 +118,22 @@ class IterateRunner:
                 self.env, iteration, self.node_id, child_state
             ):
                 break
-            result = await self._dispatch_body(child_state, result)
+            result = await self._dispatch_body(child_state, result, (*path, "p", str(iteration)))
             iteration += 1
+            self.env.scopes.set_pass(path, iteration)
             if self.env.policy.on_iterate:
                 await _save_scope_commit(self.env, iteration, self.node_id, child_state, "ok")
             if await _check_until(self.it.until, result, child_state, self.env, self.node_id):
                 break
-        await _merge_state(self.it.merge_fn, self.env.state, child_state)
         return result
+
+    @contextlib.contextmanager
+    def _pass_counter(self, path: ScopePath) -> Iterator[None]:
+        """Keep this iterate's pass counter in the run's snapshot while it runs."""
+        try:
+            yield
+        finally:
+            self.env.scopes.clear_pass(path)
 
     def _resume_iteration(self) -> tuple[int, Any]:
         """Return the starting iteration count and restored child state.
@@ -175,15 +198,18 @@ class IterateRunner:
                 return env, _restore_scope_state(env.state, raw, effective_factory)
         return env, await _project_state(it.state_fn, env.state, it.state_factory)
 
-    async def _dispatch_body(self, child_state: State[Any], prev_result: Any) -> Any:
+    async def _dispatch_body(
+        self, child_state: State[Any], prev_result: Any, pass_path: ScopePath
+    ) -> Any:
         """Run one pass of the body under the current env.
 
         Descends into the body with
         ``chain_context = _descend_context(node_id, "body")`` and
         ``ancestor_chain`` extended by ``node_id`` — the same context
         every pass, so the body's chain steps have iteration-
-        invariant IDs (the runtime pass counter is stored alongside
-        the path, not baked into node identity).
+        invariant IDs. The pass number enters the snapshot path instead
+        (``pass_path``), so scopes opened in different passes have
+        different paths.
         """
         env = self.env
         return await self.it.body._run_as_subflow(
@@ -198,4 +224,5 @@ class IterateRunner:
             parent_replay=_pop_replay_for(env, self.node_id),
             parent_extra=env.extra,
             parent_policy=env.policy,
+            parent_path=pass_path,
         )
