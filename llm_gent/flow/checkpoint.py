@@ -152,19 +152,29 @@ The framework writes both itself — no node produced them — following the
 """
 
 
-ResumeMode = Literal["off", "replay", "restart"]
+ResumeMode = Literal["off", "latest", "replay", "restart"]
 """How :meth:`Flow.run` starts from a checkpointed history.
 
 - ``"off"`` — run from ``state=`` as given; new commits still append to
   the history.
+- ``"latest"`` — check out the newest commit that has usable state
+  (``$failed`` and stateless commits are skipped) and continue from it:
+  every scope comes back, and every chain, iterate and branch that was
+  running continues where its cursor was — at the same step with the same
+  input, in the same pass with the same carried value, on the same arm.
+  Only the step that was running when the checkpoint was taken runs again.
+  Paused turns are not offered yet. Starts from ``state=`` when the
+  history is empty; raises :class:`~llm_gent.flow.history.HistoryCorrupt`
+  on a corrupt history.
 - ``"replay"`` — positional resume: rebuild the scope tree of the last save
   point and fast-forward to it. Starts from ``state=`` when the history is
   empty or complete; raises :class:`~llm_gent.flow.history.HistoryCorrupt`
   on a corrupt history.
 - ``"restart"`` — run from the first node with the root state of the
   newest commit that has usable state (halted, ok or final; ``$failed``
-  and stateless commits are skipped). Child scopes are not restored,
-  iterate counters start at zero, and paused turns are not offered.
+  and stateless commits are skipped). Child scopes are restored, but
+  every step runs again, iterate counters start at zero, and paused
+  turns are not offered.
   Starts from ``state=`` when the history is empty; raises
   :class:`~llm_gent.flow.history.HistoryCorrupt` on a corrupt history.
 """

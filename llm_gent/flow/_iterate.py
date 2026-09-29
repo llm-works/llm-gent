@@ -84,11 +84,13 @@ class IterateRunner:
         pass. The snapshot holds every live scope, including the child
         scope ``state=`` projects, and the pass counter.
 
+        ``resume="latest"``: the iterate continues in the saved pass with
+        the saved carried value (:meth:`_take_saved_position`); completed
+        passes do not run again, and ``max_iters`` is a bound across runs.
+
         Restart: the child scope is restored from the snapshot, but the
-        counter starts at 0 and every pass runs again. A pass's input is
-        the previous pass's result, which the snapshot does not hold, so
-        passes cannot be skipped; state-driven bodies make the repeated
-        passes skip their completed work.
+        counter starts at 0 and every pass runs again; state-driven bodies
+        make the repeated passes skip their completed work.
 
         Replay: when the resume replay's ``remaining_path`` has been
         head-popped down to a single entry equal to this iterate's
@@ -106,13 +108,23 @@ class IterateRunner:
             self.carry = restored_carry
         else:
             self.carry = node_args[0] if node_args else None
+        path = self.env.owner_path(self.node_id)
+        self._take_saved_position(path)
         env, child_state = await self._resolve_child_scope(restored_child)
         self.env = env
-        path = env.owner_path(self.node_id)
         with _live_scope(env, path, self.it.state_fn, child_state), _running(env, path, self):
             result = await self._loop(path, child_state)
             await _merge_state(self.it.merge_fn, self.env.state, child_state)
         return result
+
+    def _take_saved_position(self, path: ScopePath) -> None:
+        """Continue at the pass and carried value a checkout saved at ``path``, when there is one."""
+        found, saved_pass = self.env.scopes.take_cursor(path, PASS)
+        if found:
+            self.iteration = saved_pass
+        found, saved_carry = self.env.scopes.take_cursor(path, CARRY)
+        if found:
+            self.carry = saved_carry
 
     async def _loop(self, path: ScopePath, child_state: State[Any]) -> Any:
         """Run passes until a bound, the halt or ``until`` stops them; return the last result.

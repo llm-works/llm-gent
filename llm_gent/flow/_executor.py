@@ -500,9 +500,7 @@ async def _run_branch(
     share a target Flow.
     """
     prev_result = node_args[0] if node_args else None
-    verdict = br.when(prev_result, ctx)
-    if inspect.isawaitable(verdict):
-        verdict = await verdict
+    verdict = await _branch_verdict(br, ctx, env, node_id, prev_result)
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
         _assert_replay_allows_skip(
@@ -515,6 +513,23 @@ async def _run_branch(
         return prev_result
     arm = _BranchArm("then" if verdict else "else")
     return await _run_arm(chosen, arm, env, node_id, prev_result)
+
+
+async def _branch_verdict(
+    br: _Branch, ctx: Context[Any], env: _RunEnv, node_id: str, prev_result: Any
+) -> bool:
+    """True for the ``then`` arm: the arm a checkout saved at this branch, else ``when``'s verdict.
+
+    A saved arm is taken as is: ``when`` is not evaluated again, since the
+    state it reads may have changed since the branch chose.
+    """
+    found, arm = env.scopes.take_cursor(env.owner_path(node_id), ARM)
+    if found:
+        return bool(arm == "then")
+    verdict = br.when(prev_result, ctx)
+    if inspect.isawaitable(verdict):
+        verdict = await verdict
+    return bool(verdict)
 
 
 async def _run_arm(

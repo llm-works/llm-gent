@@ -63,6 +63,10 @@ CURSOR_ENTRIES = frozenset({PASS, CARRY, CHAIN, ARM})
 """Tree entries that hold cursor values rather than a scope."""
 
 
+_NOT_SAVED = object()
+"""Marker for "no saved cursor entry": a saved value can be ``None``."""
+
+
 class Cursor(Protocol):
     """A running primitive that reports where it is.
 
@@ -98,18 +102,31 @@ class ScopeRegistry:
         self._scopes: dict[ScopePath, State[Any]] = {}
         self._cursors: dict[tuple[ScopePath, int], Cursor] = {}
         self._saved: dict[ScopePath, Any] = {}
+        self._saved_cursors: dict[tuple[ScopePath, str], Any] = {}
 
-    def begin(self, root: State[Any], saved: Snapshot | None = None) -> None:
+    def begin(
+        self, root: State[Any], saved: Snapshot | None = None, *, cursors: bool = False
+    ) -> None:
         """Start a run whose root scope is ``root``; forget the previous run.
 
-        ``saved`` is the snapshot a restart continues from: its child scopes
-        are handed out by :meth:`take_saved` as the run reaches their paths.
+        ``saved`` is the snapshot the run continues from: its child scopes
+        are handed out by :meth:`take_saved` as the run reaches their paths,
+        and with ``cursors`` its cursor entries by :meth:`take_cursor`.
         """
         self._root = root
         self._scopes.clear()
         self._cursors.clear()
         self._saved = (
             {} if saved is None else {path_from_str(p): v for p, v in saved.scopes.items()}
+        )
+        self._saved_cursors = (
+            {}
+            if saved is None or not cursors
+            else {
+                (path_from_str(p), name): raw
+                for p, entries in saved.cursors.items()
+                for name, raw in entries.items()
+            }
         )
 
     def take_saved(self, path: ScopePath) -> tuple[bool, Any]:
@@ -122,10 +139,26 @@ class ScopeRegistry:
             return False, None
         return True, self._saved.pop(path)
 
+    def take_cursor(self, path: ScopePath, name: str) -> tuple[bool, Any]:
+        """Pop the saved cursor entry ``name`` at ``path``, decoded; ``(False, None)`` when none.
+
+        Like a saved scope, each entry is handed out once, to the first
+        runner that reaches ``path``.
+
+        Raises:
+            TypeError: The stored value cannot be rebuilt (see
+                :func:`.codec.decode`); the message names the path.
+        """
+        raw = self._saved_cursors.pop((path, name), _NOT_SAVED)
+        if raw is _NOT_SAVED:
+            return False, None
+        return True, codec.decode(raw, f"cursor at {path_str((*path, name))!r}")
+
     def drop_saved(self) -> list[ScopePath]:
-        """Forget the saved scopes no block has taken; return their paths."""
-        dropped = list(self._saved)
+        """Forget the saved scopes and cursor entries nothing has taken; return their paths."""
+        dropped = [*self._saved, *((*path, name) for path, name in self._saved_cursors)]
         self._saved.clear()
+        self._saved_cursors.clear()
         return dropped
 
     def open(self, path: ScopePath, scope: State[Any]) -> None:
@@ -157,9 +190,9 @@ class ScopeRegistry:
 
         Returns tree paths (ending in :data:`STATE` or a cursor entry)
         mapped to JSON-compatible values. Nothing awaits in between, so
-        every value comes from the same moment. Saved scopes the run has
-        not reached yet are included as saved, so a checkpoint taken early
-        in a restart keeps them.
+        every value comes from the same moment. Saved scopes and cursor
+        entries the run has not reached yet are included as saved, so a
+        checkpoint taken early in a resumed run keeps them.
 
         Raises:
             TypeError: A scope's payload cannot be serialized, or a cursor
@@ -171,6 +204,8 @@ class ScopeRegistry:
         flat: dict[ScopePath, Any] = {(STATE,): _to_json(self._root, ())}
         for path, value in self._saved.items():
             flat[(*path, STATE)] = value
+        for (path, name), raw in self._saved_cursors.items():
+            flat[(*path, name)] = raw
         for path, scope in self._scopes.items():
             flat[(*path, STATE)] = _to_json(scope, path)
         for (path, _), runner in self._cursors.items():

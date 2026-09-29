@@ -417,7 +417,7 @@ class TestScopesFromSnapshot:
         assert head is not None and await history.is_complete()
         assert (await history.snapshot(head)).scopes == {}
         assert [msg for msg, _ in warnings] == [
-            "restart finished without reaching saved scopes; dropped them"
+            "resumed run finished without reaching saved entries; dropped them"
         ]
 
     async def test_halted_restart_keeps_scopes_it_has_not_reached(

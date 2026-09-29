@@ -26,7 +26,7 @@ from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import HaltSaveObserver, is_halt_signaled
 from ._node_id import _compute_node_ids
 from .nodes import UNSET, _Iterate
-from .state.snapshot import CHAIN
+from .state.snapshot import CHAIN, path_str
 
 
 if TYPE_CHECKING:
@@ -55,12 +55,9 @@ class Chain:
     def cursor(self) -> dict[str, Any]:
         """The step this chain is at (its node id) and that step's input.
 
-        Capture-only: the cursor is stored in checkpoints for debugging
-        and inspection, but NOT restored on resume. The resume path
-        finds the step index from the node path and runs the step with
-        no ``prev_result`` — resumed steps must read from persisted
-        state, not from a threaded return value. See
-        :meth:`_resume_start_index` for the contract.
+        ``resume="latest"`` continues the chain at this step with this
+        input (:meth:`_saved_step`). ``resume="replay"`` does not read it:
+        it starts the step with no input (:meth:`_resume_start_index`).
         """
         if self.index is None:
             return {}
@@ -82,8 +79,33 @@ class Chain:
         """
         self._assert_replay_reachable()
         start_index = self._resume_start_index()
+        first_input = None
+        saved = self._saved_step()
+        if saved is not None:
+            start_index, first_input = saved
         with _running(self.env, self.env.path, self):
-            return await self._walk_steps(start_index, args, kwargs)
+            return await self._walk_steps(start_index, args, kwargs, first_input)
+
+    def _saved_step(self) -> tuple[int, tuple[tuple[Any, ...], dict[str, Any]]] | None:
+        """The step and input a checkout continues this chain at; ``None`` when not resuming.
+
+        Steps before it completed before the checkpoint and do not run
+        again; the step itself runs with the input it had.
+
+        Raises:
+            RuntimeError: The saved step is no longer in this chain.
+        """
+        found, step = self.env.scopes.take_cursor(self.env.path, CHAIN)
+        if not found:
+            return None
+        if step["step"] not in self.ids:
+            where = path_str((*self.env.path, CHAIN))
+            label = self.flow._name or "<anonymous>"
+            raise RuntimeError(
+                f"Flow {label!r}: the checkpoint's cursor at {where!r} is at step "
+                f"{step['step']!r}, which this chain no longer has"
+            )
+        return self.ids.index(step["step"]), (tuple(step["args"]), step["kwargs"])
 
     def _assert_replay_reachable(self) -> None:
         """Fail-fast: raise if the replay's remaining head is unreachable at this level.
@@ -165,13 +187,15 @@ class Chain:
         start_index: int,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        first_input: tuple[tuple[Any, ...], dict[str, Any]] | None = None,
     ) -> Any:
         """Execute chain steps from ``start_index`` onward, threading returns.
 
-        ``start_index > 0`` on resume: predecessors already completed
-        before the checkpoint was written; the on-path step at
-        ``start_index`` runs with no ``prev_result`` (see
-        :meth:`_resume_start_index` for the contract).
+        On resume, predecessors already completed before the checkpoint
+        was written. With ``first_input`` (``resume="latest"``) the step
+        at ``start_index`` gets the input it had; under replay
+        (``start_index > 0``) it runs with no ``prev_result`` (see
+        :meth:`_resume_start_index` for that contract).
 
         Halt observation: between chain steps (never at the very
         first iteration of this walk, so resume runs at least the
@@ -190,7 +214,9 @@ class Chain:
             node_id = self.ids[index]
             node_args: tuple[Any, ...]
             node_kwargs: dict[str, Any]
-            if index == start_index and start_index > 0:
+            if index == start_index and first_input is not None:
+                node_args, node_kwargs = first_input
+            elif index == start_index and start_index > 0:
                 node_args, node_kwargs = (), {}
             else:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)

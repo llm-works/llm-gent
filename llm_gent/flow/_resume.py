@@ -13,10 +13,13 @@ the flow being resumed, and reads the history through the public
   :class:`State`, every non-root scope payload rides on
   ``_ResumeReplay.intermediate_scope_data`` so descent sites
   (``_consume_scope_data``) restore their own scope in order.
-- :meth:`Resume.restart` (``resume="restart"``) checks out the snapshot
-  of the newest commit with usable state: its root scope hydrates the
-  top-level :class:`State`, and each child scope goes back to the block
-  that owns it when the run, started at the first node, reaches its path.
+- :meth:`Resume.checkout` (``resume="latest"`` and ``"restart"``) checks
+  out the snapshot of the newest commit with usable state: its root scope
+  hydrates the top-level :class:`State`, and each child scope goes back to
+  the block that owns it when the run reaches its path. Under
+  ``"latest"`` the snapshot's cursors come back too, so every running
+  chain, iterate and branch continues where it was; under ``"restart"``
+  the run starts at the first node and every step runs again.
 
 Write side — :func:`apply_clean_exit_retention` and
 :func:`commit_completion` commit the final state on clean exit and move
@@ -114,17 +117,17 @@ class Resume:
             f"from the saved state."
         )
 
-    async def restart(self, fallback: State[Any]) -> tuple[State[Any], Snapshot | None]:
-        """Restart: check out the snapshot of the newest commit that has usable state.
+    async def checkout(self, fallback: State[Any]) -> tuple[State[Any], Snapshot | None]:
+        """Check out the snapshot of the newest commit that has usable state.
 
-        Walks back from the head past ``$failed`` commits (the state at a
-        failure may be half-updated) and commits with an empty tree (state
-        that could not be serialized). Returns the snapshot's root as the
-        top-level :class:`State` together with the snapshot itself: the run
-        starts at the first node, and each block that owns a scope in the
-        snapshot gets it back when the run first reaches its path. No replay
-        context is built, so every step runs again. Paused turns are not
-        offered — a step's node id does not identify a map item across runs.
+        Used by ``resume="latest"`` and ``resume="restart"``. Walks back from
+        the head past ``$failed`` commits (the state at a failure may be
+        half-updated) and commits with an empty tree (state that could not
+        be serialized). Returns the snapshot's root as the top-level
+        :class:`State` together with the snapshot itself: each block that
+        owns a scope in the snapshot gets it back when the run first reaches
+        its path, and under ``"latest"`` each running chain, iterate and
+        branch continues at its saved cursor. Paused turns are not offered.
 
         Skipping is logged: the restored state may predate the head by
         whole runs (a stateless ``$end`` sends the walk into the previous
@@ -254,9 +257,9 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
 
 
 def _drop_unreached_scopes(flow: Flow, client_flow_id: str) -> None:
-    """Forget the saved scopes a finished restart never reached, with a warning naming them.
+    """Forget saved scopes and cursors a finished run never reached, with a warning naming them.
 
-    The run executed every step it was going to, so a saved scope no block
+    The run executed every step it was going to, so a saved entry nothing
     took belongs to no step of this flow: its step was removed, or the run
     took another branch arm or fewer map items or iterate passes. Kept, it
     would ride along in every later snapshot and could be handed to a step
@@ -265,7 +268,7 @@ def _drop_unreached_scopes(flow: Flow, client_flow_id: str) -> None:
     dropped = flow._scopes.drop_saved()
     if dropped:
         flow._lg.warning(
-            "restart finished without reaching saved scopes; dropped them",
+            "resumed run finished without reaching saved entries; dropped them",
             extra={"client_flow_id": client_flow_id, "paths": [path_str(p) for p in dropped]},
         )
 

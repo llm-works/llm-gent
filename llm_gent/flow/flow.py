@@ -923,6 +923,13 @@ class Flow:
             resume: How to start from the checkpointed history
                 (:data:`~llm_gent.flow.checkpoint.ResumeMode`).
                 ``"off"`` (default) runs from ``state`` as given.
+                ``"latest"`` checks out the newest commit with usable state
+                (skipping ``$failed`` and stateless commits) and continues
+                where it was: its root state replaces ``state``, every
+                scope comes back, and every chain, iterate and branch that
+                was running continues at its saved step, pass and arm, so
+                only the step running at the checkpoint runs again; paused
+                turns are not offered yet.
                 ``"replay"`` reads the last save point (skipping ``$failed``
                 commits) and, unless the history is empty or complete,
                 reconstructs the scope tree, replaces ``state`` with the
@@ -962,7 +969,7 @@ class Flow:
         self._begin_checkpoint_run()
         self._resume_paused_turns.clear()
         active_state, replay, saved = await self._start_state(self._wrap_top_state(state), resume)
-        self._scopes.begin(active_state, saved)
+        self._scopes.begin(active_state, saved, cursors=resume == "latest")
         self._replay_consumed = False
         self._halt_saved = False
         self._pending_paused_turns.clear()
@@ -1002,11 +1009,11 @@ class Flow:
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode
     ) -> tuple[State[Any], _ResumeReplay | None, Snapshot | None]:
-        """The run's initial state, replay plan and restart snapshot for ``resume``."""
+        """The run's initial state, replay plan and checked-out snapshot for ``resume``."""
         if resume == "replay":
             return (*await Resume(self).replay(fallback), None)
-        if resume == "restart":
-            root, snapshot = await Resume(self).restart(fallback)
+        if resume in ("latest", "restart"):
+            root, snapshot = await Resume(self).checkout(fallback)
             return root, None, snapshot
         return fallback, None, None
 
