@@ -137,6 +137,19 @@ class TestRegistry:
         scopes.begin(State(data={}))
         assert scopes.take_saved(("n", "x")) == (False, None)
 
+    def test_untouched_saved_scopes_persist_through_capture(self) -> None:
+        """Saved scopes not yet reached are included in the snapshot."""
+        scopes = ScopeRegistry()
+        saved = Snapshot(has_state=True, root={}, scopes={"n/a": {"a": 1}, "n/b": {"b": 2}})
+        scopes.begin(State(data={"root": True}), saved)
+        # Take path a, leaving b untouched
+        scopes.take_saved(("n", "a"))
+        scopes.open(("n", "a"), State(data={"a": 1, "touched": True}))
+        flat = scopes.capture()
+        # b is preserved from saved, a is from the live scope
+        assert flat[("n", "a", "state")] == {"a": 1, "touched": True}
+        assert flat[("n", "b", "state")] == {"b": 2}
+
 
 class TestFlowSnapshots:
     async def test_a_checkpoint_in_one_map_item_holds_every_live_item_scope(self) -> None:

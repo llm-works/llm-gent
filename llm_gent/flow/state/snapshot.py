@@ -127,6 +127,8 @@ class ScopeRegistry:
         if self._root is None:
             raise RuntimeError("ScopeRegistry.capture() before begin()")
         flat: dict[ScopePath, Any] = {(STATE,): _to_json(self._root, ())}
+        for path, value in self._saved.items():
+            flat[(*path, STATE)] = value
         for path, scope in self._scopes.items():
             flat[(*path, STATE)] = _to_json(scope, path)
         for path, count in self._passes.items():
