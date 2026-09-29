@@ -357,6 +357,36 @@ def _scoped_map_flow(
     )
 
 
+@verb
+async def _work_then_crash(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+    """Record work in the scope, checkpoint it, then the process dies."""
+    ctx.state.data["w"] = 1
+    await ctx.checkpoint()
+    raise _Crash()
+
+
+@verb
+async def _plain(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+    ctx.state.data["plain"] = True
+    return x
+
+
+def _scoped_step_flow(
+    store: JsonFileCheckpointStore, name: str, lg: Any, before: Any = None
+) -> Any:
+    """``[before] → .call(sub, state=)`` whose leaf checkpoints its scope and crashes."""
+    flow = FlowFactory(lg).create(state={}).with_checkpointer(store, name)
+    if before is not None:
+        flow = flow.call(before)
+    sub = FlowFactory(lg).create().call(_work_then_crash)
+    return flow.call(sub, state=lambda _p: {}, merge=lambda p, c: p.update(c))
+
+
+def _plain_step_flow(store: JsonFileCheckpointStore, name: str, lg: Any) -> Any:
+    """The same history after a deploy that replaced the scoped step with a plain one."""
+    return FlowFactory(lg).create(state={}).with_checkpointer(store, name).call(_plain)
+
+
 class TestScopesFromSnapshot:
     @pytest.mark.parametrize("mode", ["replay", "restart"])
     async def test_scope_under_map_item_gets_its_own_payload(
@@ -369,6 +399,47 @@ class TestScopesFromSnapshot:
         seen: list[dict[str, Any]] = []
         await _scoped_map_flow(store, "nested", seen, crash=False).run(resume=mode)
         assert seen == [{"tag": "call", "hit": True}]
+
+    async def test_finished_restart_drops_scopes_it_never_reached(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A deploy removed the scoped step: the final commit holds the root alone."""
+        with pytest.raises(_Crash):
+            await _scoped_step_flow(store, "deploy", make_test_logger()).run()
+        history = History(store, "deploy")
+        head = await history.head()
+        assert head is not None and (await history.snapshot(head)).scopes
+
+        lg, warnings = _capturing_logger()
+        await _plain_step_flow(store, "deploy", lg).run(resume="restart")
+
+        head = await history.head()
+        assert head is not None and await history.is_complete()
+        assert (await history.snapshot(head)).scopes == {}
+        assert [msg for msg, _ in warnings] == [
+            "restart finished without reaching saved scopes; dropped them"
+        ]
+
+    async def test_halted_restart_keeps_scopes_it_has_not_reached(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A run that halts before a saved scope's step keeps it for the next restart."""
+        with pytest.raises(_Crash):
+            await _scoped_step_flow(store, "halt-early", make_test_logger()).run()
+        halt = asyncio.Event()
+
+        @verb
+        async def stop(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+            halt.set()
+            return x
+
+        flow = _scoped_step_flow(store, "halt-early", make_test_logger(), before=stop)
+        await flow.with_halt(halt).run(resume="restart")
+
+        history = History(store, "halt-early")
+        head = await history.head()
+        assert head is not None and head.meta.outcome == "halted"
+        assert list((await history.snapshot(head)).scopes.values()) == [{"w": 1}]
 
 
 class TestResumeModeValidation:

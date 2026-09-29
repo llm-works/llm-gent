@@ -131,6 +131,14 @@ class TestRegistry:
         assert scopes.take_saved(("n", "x")) == (False, None)
         assert scopes.take_saved(("n", "x", "i", "0")) == (True, None)  # a None payload is saved
 
+    def test_drop_saved_forgets_the_scopes_no_block_took(self) -> None:
+        scopes = ScopeRegistry()
+        saved = Snapshot(has_state=True, root={}, scopes={"n/a": {"a": 1}, "n/b": {"b": 2}})
+        scopes.begin(State(data={}), saved)
+        scopes.take_saved(("n", "a"))
+        assert scopes.drop_saved() == [("n", "b")]
+        assert list(scopes.capture()) == [("state",)]
+
     def test_begin_forgets_the_previous_runs_saved_scopes(self) -> None:
         scopes = ScopeRegistry()
         scopes.begin(State(data={}), Snapshot(has_state=True, root={}, scopes={"n/x": {}}))
