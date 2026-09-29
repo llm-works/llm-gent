@@ -316,6 +316,61 @@ class TestReplayPastFailure:
         assert result == 11
 
 
+class _Crash(BaseException):
+    """The process died: not an ``Exception``, so no failure commit follows the checkpoint."""
+
+
+def _scoped_map_flow(
+    store: JsonFileCheckpointStore, name: str, seen: list[dict[str, Any]], *, crash: bool
+) -> Any:
+    """``.map(state=)`` item → ``.call(state=)`` → a leaf recording the scope it runs under.
+
+    With ``crash``, the leaf marks its scope, checkpoints, and the process dies.
+    """
+
+    @verb
+    async def leaf(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+        seen.append(dict(ctx.state.data))
+        if crash:
+            ctx.state.data["hit"] = True
+            await ctx.checkpoint()
+            raise _Crash()
+        return x
+
+    sub = FlowFactory(make_test_logger()).create().call(leaf)
+    item = (
+        FlowFactory(make_test_logger())
+        .create()
+        .call(sub, state=lambda _p: {"tag": "call"}, merge=lambda _p, _c: None)
+    )
+    return (
+        FlowFactory(make_test_logger())
+        .create(state={})
+        .with_checkpointer(store, name)
+        .map(
+            lambda b: b.call(item),
+            items=lambda _p, _c: [1],
+            max_concurrency=1,
+            state=lambda _p: {"tag": "item"},
+            merge=lambda _p, _c: None,
+        )
+    )
+
+
+class TestScopesFromSnapshot:
+    @pytest.mark.parametrize("mode", ["replay", "restart"])
+    async def test_scope_under_map_item_gets_its_own_payload(
+        self, store: JsonFileCheckpointStore, mode: ResumeMode
+    ) -> None:
+        """Each saved scope comes back to the block that owns it, not to the one above it."""
+        with pytest.raises(_Crash):
+            await _scoped_map_flow(store, "nested", [], crash=True).run()
+
+        seen: list[dict[str, Any]] = []
+        await _scoped_map_flow(store, "nested", seen, crash=False).run(resume=mode)
+        assert seen == [{"tag": "call", "hit": True}]
+
+
 class TestResumeModeValidation:
     async def test_boolean_resume_is_rejected(self, store: JsonFileCheckpointStore) -> None:
         with pytest.raises(ValueError, match="resume must be one of"):

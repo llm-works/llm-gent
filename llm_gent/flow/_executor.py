@@ -286,14 +286,10 @@ async def _run_subflow(
     """
     from ._node_id import _descend_context
 
-    child_replay = _pop_replay_for(env, node_id)
-    raw, child_replay = _consume_scope_data(child_replay, state_fn)
-    if raw is UNSET:
-        child_state = await _project_state(state_fn, env.state, state_factory)
-    else:
-        effective_factory = state_factory if state_factory is not None else env.state._factory
-        child_state = _restore_scope_state(env.state, raw, effective_factory)
     path = env.owner_path(node_id)
+    child_state, child_replay = await _enter_scope(
+        env, path, state_fn, state_factory, _pop_replay_for(env, node_id)
+    )
     with _live_scope(env, path, state_fn, child_state):
         result = await body._run_as_subflow(
             *node_args,
@@ -361,6 +357,35 @@ def _consume_scope_data(
         replay, intermediate_scope_data=replay.intermediate_scope_data[1:]
     )
     return raw, updated
+
+
+async def _enter_scope(
+    env: _RunEnv,
+    path: ScopePath,
+    state_fn: StateProject | None,
+    state_factory: StateFactory[Any] | None,
+    replay: _ResumeReplay | None,
+) -> tuple[State[Any], _ResumeReplay | None]:
+    """The scope a block at ``path`` runs under, and the replay left for its body.
+
+    A block with a ``state=`` projection takes its scope from, in order:
+
+    1. ``replay`` — the next saved scope on the replayed path
+       (:func:`_consume_scope_data`); the returned replay carries the rest.
+    2. The snapshot a restart continues from, which hands the scope saved
+       at ``path`` back the first time the run reaches that path.
+    3. The projection itself.
+
+    Without a projection the block shares its parent's scope.
+    """
+    raw, replay = _consume_scope_data(replay, state_fn)
+    if raw is UNSET and state_fn is not None:
+        found, saved = env.scopes.take_saved(path)
+        raw = saved if found else UNSET
+    if raw is UNSET:
+        return await _project_state(state_fn, env.state, state_factory), replay
+    factory = state_factory if state_factory is not None else env.state._factory
+    return _restore_scope_state(env.state, raw, factory), replay
 
 
 def _restore_scope_state(
