@@ -17,7 +17,7 @@ Exercises the Flow-level checkpointer end-to-end without touching an LLM:
    checkpointer + client_flow_id) is called with ``resume="latest"``. The
    framework checks out the latest checkpoint, reconstructs ``state.data``
    via :meth:`Counter.from_dict`, and continues where run 1 stopped: the
-   halted step runs again, then the remaining passes.
+   next pass runs, then any remaining passes.
 
 ``max_iters=5`` is the cumulative bound across resumes — run 1 does 3
 iterations, run 2 does 2, total 5. On a natural completion the checkpoint
@@ -95,9 +95,9 @@ async def tick(ctx: Context[Counter]) -> int:
 async def stop_at_limit(ctx: Context[Counter], count: int) -> int:
     """Simulate a crash via ``ctx.halt`` once the count reaches ``HALT_AFTER``.
 
-    A separate step from :func:`tick` because the step during which the
-    halt arrives runs again on resume: this one only passes its input
-    through, so running it twice changes nothing.
+    A separate step from :func:`tick` so the halt fires after the count
+    mutation completes. The cursor moves to the next pass once this step
+    returns, so resume continues from there.
     """
     if count == HALT_AFTER and ctx.halt is not None:
         print(f"  halt fired at count={HALT_AFTER}")

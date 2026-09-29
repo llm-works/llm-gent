@@ -695,8 +695,10 @@ class Flow:
         - a :class:`Failure` under both ``strict`` modes when the body
           raises a non-cancellation exception (in ``strict=True`` the
           hook fires before the exception propagates);
-        - a :class:`Skipped` when the guard predicate returns falsy or
-          when an ambient halt short-circuited the item before its body ran.
+        - a :class:`Skipped` when the guard predicate returns falsy.
+
+        A halted map raises :class:`Interrupted` and does not fire the hook
+        for items stopped by the halt.
 
         Cancellation is unconditional and does not fire the hook. A hook
         exception is logged and swallowed so the item's outcome is never
@@ -723,10 +725,11 @@ class Flow:
         Threads ``event`` through the execution environment as ``ctx.halt``,
         available to any verb that wants to observe it. :meth:`map` and
         :meth:`iterate` also check the event at their natural boundaries:
-        map short-circuits any per-item runner that hasn't yet passed its
-        halt check to :class:`Skipped`; iterate exits the loop between
-        iterations. In-flight bodies are not interrupted — a verb that
-        needs mid-request cancellation should read ``ctx.halt`` itself.
+        map raises :class:`Interrupted` when the halt stops an item before
+        its body ran; iterate exits the loop between passes. In-flight
+        bodies are not interrupted — a verb that needs mid-request
+        cancellation should read ``ctx.halt`` itself. A halted
+        :meth:`~Flow.run` returns ``None``; state is in the halt checkpoint.
 
         A subflow inherits the outer runtime's halt event automatically;
         calling ``.with_halt`` on a subflow overrides the ambient event for
@@ -1070,7 +1073,7 @@ class Flow:
         try:
             result = await Chain(self, env).walk(args, kwargs)
         except Interrupted:
-            if not is_subflow or self._halt_event is None:
+            if not is_subflow or self._halt_event is None or self._halt_event is parent_halt:
                 raise
             # This subflow's own halt stopped it: the subtree ends here and the
             # run carries on, with no result from it.
