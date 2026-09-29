@@ -334,6 +334,8 @@ class JsonFileCheckpointStore:
 
     def _ref_file(self, flow_id: str, name: str) -> Path:
         """Return ``<history>/refs/<encoded-name>``; a ``/`` in the name stays one segment."""
+        if name == ".lock":
+            raise ValueError("ref name '.lock' is reserved")
         return self._encoded_child(self._history_dir(flow_id) / "refs", name, "ref name")
 
     def _objects_dir(self, flow_id: str, kind: Kind) -> Path:
