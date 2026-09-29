@@ -51,7 +51,6 @@ class TestEmptyHistory:
         assert await history.head() is None
         assert await history.last_complete() is None
         assert not await history.is_complete()
-        assert await history.replay_point() is None
         assert await _all(history) == []
 
 
@@ -64,7 +63,6 @@ class TestCompletedHistory:
         assert head is not None
         assert History.is_final_state(head)
         assert await history.is_complete()
-        assert await history.replay_point() is None
         assert await history.last_complete() == head
         assert head.meta.flow_id == await history.flow_id()
 
@@ -154,7 +152,6 @@ class TestHistoryAcrossRuns:
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
         assert not await history.is_complete()
-        assert await history.replay_point() == head
         assert await history.last_complete() == first_end
         chain = await _all(history)
         assert chain[0] == head

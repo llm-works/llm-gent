@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""A halt set during the last top-level step still leaves a halt commit.
+"""A halt set during the last top-level step.
 
-- The halt commit sits at the last step and carries the run's final
-  state; the history is not marked complete and is never deleted under
-  ``gc_on_success``.
+- When the last step completed, the run finished: the history is marked
+  complete with the final state.
+- When the last step was interrupted (it raised ``Interrupted``), the
+  halt commit keeps the cursor on it: the history is not complete, is
+  never deleted under ``gc_on_success``, and resume runs that step again.
+- A map as the last step with items the halt stopped is interrupted.
 - A subflow's own ``.with_halt`` does not count as the run's halt: the
   run completes normally.
 """
@@ -18,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, verb
+from llm_gent.flow import Context, FlowFactory, History, Interrupted, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from .conftest import make_test_logger
@@ -37,52 +40,67 @@ def _with_halt(flow: Any, halt: asyncio.Event | None) -> Any:
     return flow.with_halt(halt) if halt is not None else flow
 
 
+def _two_steps(
+    store: Any, name: str, halt: asyncio.Event | None, calls: list[str], mode: str
+) -> Any:
+    """``s1 → s2``; with ``halt``, s2 sets it — then completes (``finish``) or not (``bail``)."""
+
+    @verb
+    async def s1(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
+        calls.append("s1")
+        ctx.state.data["s1"] = ctx.state.data.get("s1", 0) + 1
+
+    @verb
+    async def s2(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
+        calls.append("s2")
+        if halt is not None:
+            halt.set()
+            if mode == "bail":
+                raise Interrupted()
+        ctx.state.data["s2"] = ctx.state.data.get("s2", 0) + 1
+
+    flow = (
+        FlowFactory(make_test_logger())
+        .create(state={})
+        .with_checkpointer(store, name)
+        .call(s1)
+        .call(s2)
+    )
+    return _with_halt(flow, halt)
+
+
 class TestHaltInLastStep:
-    async def test_halt_commit_carries_the_final_state(
+    async def test_completed_last_step_finishes_the_run(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """The head is a halt commit with the final state; restart continues from it."""
         calls: list[str] = []
+        assert await _two_steps(store, "finish", asyncio.Event(), calls, "finish").run() is None
+        history = History(store, "finish")
+        assert await history.is_complete()
+        head = await history.head()
+        assert head is not None
+        assert (await history.snapshot(head)).root == {"s1": 1, "s2": 1}
 
-        def build(halt: asyncio.Event | None) -> Any:
-            @verb
-            async def s1(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
-                calls.append("s1")
-                ctx.state.data["s1"] = ctx.state.data.get("s1", 0) + 1
-
-            @verb
-            async def s2(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
-                calls.append("s2")
-                ctx.state.data["s2"] = ctx.state.data.get("s2", 0) + 1
-                if halt is not None:
-                    halt.set()
-
-            flow = (
-                FlowFactory(make_test_logger())
-                .create(state={})
-                .with_checkpointer(store, "late-halt")
-                .call(s1)
-                .call(s2)
-            )
-            return _with_halt(flow, halt)
-
-        await build(asyncio.Event()).run()
-        history = History(store, "late-halt")
+    async def test_interrupted_last_step_runs_again_on_resume(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        calls: list[str] = []
+        await _two_steps(store, "bail", asyncio.Event(), calls, "bail").run()
+        history = History(store, "bail")
         assert not await history.is_complete()
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
         snapshot = await history.snapshot(head)
-        assert (snapshot.root, snapshot.scopes) == ({"s1": 1, "s2": 1}, {})
+        assert (snapshot.root, snapshot.scopes) == ({"s1": 1}, {})
 
         calls.clear()
-        await build(None).run(resume="latest")
-        assert calls == ["s1", "s2"]
+        await _two_steps(store, "bail", None, calls, "bail").run(resume="latest")
+        assert calls == ["s2"]
         head = await history.head()
-        assert head is not None
-        snapshot = await history.snapshot(head)
-        assert (snapshot.root, snapshot.scopes) == ({"s1": 2, "s2": 2}, {})
+        assert head is not None and await history.is_complete()
+        assert (await history.snapshot(head)).root == {"s1": 1, "s2": 1}
 
-    async def test_late_halt_never_deletes_history_under_gc_on_success(
+    async def test_interrupted_run_is_never_deleted_under_gc_on_success(
         self, tmp_path: Path
     ) -> None:
         store = JsonFileCheckpointStore(
@@ -94,6 +112,7 @@ class TestHaltInLastStep:
         async def s1(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
             ctx.state.data["s1"] = 1
             halt.set()
+            raise Interrupted()
 
         flow = (
             FlowFactory(make_test_logger())

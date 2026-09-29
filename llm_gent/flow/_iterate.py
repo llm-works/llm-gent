@@ -30,6 +30,7 @@ from ._executor import (
 )
 from ._halt_observer import HaltSaveObserver, is_halt_signaled, saves_run_halt
 from ._node_id import _descend_context
+from .nodes import Interrupted
 from .state import State
 from .state.snapshot import CARRY, PASS, ScopePath
 
@@ -97,9 +98,14 @@ class IterateRunner:
 
         ``self.iteration`` and ``self.carry`` advance together after each
         pass, with no await in between, so a checkpoint always sees a pass
-        number and the value carried into that pass. A halt checkpoint
-        written inside a pass keeps the cursor on that pass: the loop stops
-        without advancing it or writing a policy commit after it.
+        number and the value carried into that pass. A halt that stops the
+        loop before its bounds do interrupts it: a body interrupted inside
+        a pass raises :class:`Interrupted` through the loop, which neither
+        advances nor writes a policy commit after it.
+
+        Raises:
+            Interrupted: The halt stopped the loop before its bounds or
+                ``until`` did.
         """
         started = time.monotonic()
         while True:
@@ -108,11 +114,11 @@ class IterateRunner:
             if self.it.deadline is not None and time.monotonic() - started >= self.it.deadline:
                 break
             if await self._halted_before_pass(child_state):
-                break
+                raise Interrupted()
             pass_path = (*path, "p", str(self.iteration))
             result = await self._dispatch_body(child_state, self.carry, pass_path)
             if self.env.runtime._halt_saved:
-                return result
+                raise Interrupted()  # the run halted elsewhere (a sibling map item)
             self.carry, self.iteration = result, self.iteration + 1
             if self.env.policy.on_iterate:
                 await _save_scope_commit(self.env, self.iteration, self.node_id, child_state, "ok")
@@ -124,8 +130,9 @@ class IterateRunner:
         """True when a halt stops the loop before the next pass; the run's halt is saved.
 
         Reached when the halt was set outside any step — before the loop
-        started, or between passes — so the cursor is at the pass that has
-        not run yet. A subflow's own halt stops the loop without a save.
+        started, or during the last step of the previous pass, which
+        completed — so the cursor is at the pass that has not run yet. A
+        subflow's own halt stops the loop without a save.
         """
         if not is_halt_signaled(self.env):
             return False

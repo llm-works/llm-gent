@@ -480,10 +480,19 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     )
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
-    final: Digest = await _build_flow(lg, ff, halt).run(resume="latest" if resuming else "off")
+    result = await _build_flow(lg, ff, halt).run(resume="latest" if resuming else "off")
     halted = await _resume_pending(history)
+    # A halted run returns None; its state is in the halt checkpoint.
+    final = await _halted_state(history) if halted else result
     await _report(history, store_dir, final, halted)
     return final, halted
+
+
+async def _halted_state(history: History) -> Digest:
+    """The state the halt checkpoint at the history's head holds."""
+    head = await history.head()
+    assert head is not None
+    return Digest.from_dict((await history.snapshot(head)).root)
 
 
 async def _report(history: History, store_dir: Path, final: Digest, halted: bool) -> None:

@@ -808,14 +808,14 @@ class TestPausedTurnTraceRef:
             store.get_object(flow_id_for(store, "paused-turn-multi"), "blob", blob_hash) == expected
         )
 
-    @pytest.mark.parametrize("mode", ["replay", "restart"])
     async def test_resume_round_trip_hands_reconstructed_conv_and_resume_true(
-        self, store: JsonFileCheckpointStore, mode: str
+        self, store: JsonFileCheckpointStore
     ) -> None:
-        """Halt mid-Loop-turn on run 1 → replay dispatches SAIA with resume=True + rebuilt conv.
+        """Halt mid-Loop-turn on run 1 → resume dispatches SAIA with resume=True + rebuilt conv.
 
-        Restart does not offer paused turns (a step's node id does not
-        identify a map item across runs): its Loop dispatches start fresh.
+        The paused Loop's step is interrupted, so the halt commit keeps the
+        iterate in pass 0 and the chain at that step: resume re-dispatches
+        it with the paused turn, then runs pass 1 fresh.
         """
         from dataclasses import dataclass, field
 
@@ -919,19 +919,14 @@ class TestPausedTurnTraceRef:
             .iterate(body, max_iters=2)
         )
         await flow2.run(
-            resume=mode,  # type: ignore[arg-type]
+            resume="latest",
             extra={"conv": _Conv(messages=["caller-supplied-but-overridden"])},
         )
 
         resume_calls = [c for c in complete_calls if c["phase"] == "resume"]
-        if mode == "restart":
-            # Counter starts at 0 (two passes); neither dispatch resumes a turn.
-            assert [c["resume"] for c in resume_calls] == [False, False]
-            return
-        # Replay resumes at the halted iteration with max_iters cumulative.
-        assert len(resume_calls) == 1
+        # Pass 0 resumes the paused turn; pass 1 (max_iters=2) dispatches fresh.
+        assert [c["resume"] for c in resume_calls] == [True, False]
         resumed = resume_calls[0]
-        assert resumed["resume"] is True
         assert isinstance(resumed["conversation"], _Conv)
         assert resumed["conversation"].messages == ["from-turn-1"]
 
@@ -1694,7 +1689,7 @@ class TestCompletionTag:
     async def test_commit_after_completion_makes_history_resumable(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """A halt after a completed run leaves the tag behind; the next resume replays the halt."""
+        """A halt after a completed run leaves the tag behind; the next resume continues the halt."""
         from llm_gent.flow.checkpoint import COMPLETE_TAG
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
@@ -1721,14 +1716,16 @@ class TestCompletionTag:
             store=store,
             client_flow_id="tag-behind",
         ).run(resume="latest")
-        assert resumed["iterations_completed"] == 5
+        # First run: 2 passes. Second run continues from its final state with its
+        # own max_iters=5 and halts after its first pass; the resume runs its other 4.
+        assert resumed["iterations_completed"] == 7
         assert resumed["log"][0] == 1
         assert store.get_ref(flow_id, COMPLETE_TAG) == store.get_ref(flow_id, HEAD_REF)
 
-    async def test_untagged_final_state_head_counts_as_complete(
+    async def test_untagged_final_state_head_is_still_the_final_state(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """A crash between the $end commit and the tag write must not replay "$end"."""
+        """A crash between the $end commit and the tag write: resume continues from $end."""
         from llm_gent.flow._checkpoint_ctx import CheckpointContext
         from llm_gent.flow.checkpoint import COMPLETE_TAG
         from llm_gent.flow.state import State
@@ -1749,7 +1746,7 @@ class TestCompletionTag:
             store=store,
             client_flow_id="torn-completion",
         ).run(resume="latest")
-        assert result["log"][0] == 101
+        assert result["log"][0] == 8  # n=7 from $end, not the fallback n=100
 
 
 # ---------------------------------------------------------------------------
@@ -1780,17 +1777,16 @@ class TestResumeDeterminism:
         result = await flow.run(resume="latest")
         assert result["iterations_completed"] == 2
 
-    async def test_resume_after_clean_exit_does_not_replay_final_commit(
+    async def test_resume_after_clean_exit_starts_a_new_run_on_the_final_state(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """A completed run stamps a marker so `resume="latest"` after success is a no-op.
+        """The final commit holds no cursors: resume continues from its state, not a position.
 
-        Without the marker, `run(resume="latest")` after a successful run
-        resolves to the final iterate commit, fast-forwards iteration to
-        `max_iters`, and re-executes any chain steps after the iterate —
-        firing their side effects twice.
+        Resuming from an earlier commit of the finished run — the last
+        iterate commit — would re-enter the run at that position and run
+        the steps after it a second time.
         """
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, FlowFactory, History, verb
 
         tail_calls: list[int] = []
 
@@ -1815,11 +1811,12 @@ class TestResumeDeterminism:
 
         await _flow().run()
         assert tail_calls == [3]
-        # Resume after completion — should be a no-op (fresh run since the
-        # history is marked complete). Tail runs ONCE more from the
-        # fresh state, not twice from the resumed one.
+        history = History(store, "complete-1")
+        head = await history.head()
+        assert head is not None and (await history.snapshot(head)).cursors == {}
+        # A new run on the final state (counter=3): three more passes, then tail once.
         await _flow().run(resume="latest")
-        assert tail_calls == [3, 3], f"tail should have fired only twice total; got {tail_calls}"
+        assert tail_calls == [3, 6], f"tail should fire once per run; got {tail_calls}"
 
     async def test_multiple_resume_boundaries(self, store: JsonFileCheckpointStore) -> None:
         """Interrupt at different iterations, resume each — final state matches uninterrupted."""
@@ -1968,112 +1965,6 @@ class TestResumeErrorPaths:
         with pytest.raises(HistoryCorrupt, match="blob"):
             await flow.run(resume="latest")
 
-    async def test_resume_with_stale_node_path_raises_structural_change(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        """A commit whose node_path lists ids not present in the current
-        composition raises a structural-change error on resume — the
-        head-pop pre-scan fails before any node runs.
-        """
-        from llm_gent.flow.state.cas import (
-            Blob,
-            Commit,
-            CommitMeta,
-            ProducedBy,
-            Tree,
-            TreeEntry,
-            canonical_json,
-        )
-
-        # Fabricate a commit whose node_path names ids that don't exist in
-        # the resume flow's tree.
-        stale_path = "cafebabecafebabe/deadbeefdeadbeef"
-        blob = Blob.from_bytes(canonical_json({}))
-        store.put_object(flow_id_for(store, "stale-1"), "blob", blob.content_hash, blob.payload)
-        tree = Tree.from_entries(
-            [TreeEntry(scope_id="state", kind="blob", child_hash=blob.content_hash)]
-        )
-        store.put_object(flow_id_for(store, "stale-1"), "tree", tree.content_hash, tree.to_bytes())
-        meta = CommitMeta(
-            flow_id=flow_id_for(store, "stale-1"),
-            node_path=stale_path,
-            iteration=2,
-            produced_by=ProducedBy(node_id="x", verb_name=None, role=None, result_hash=None),
-            trace_ref=(),
-            outcome="ok",
-            flow_root_hash="stale-1",
-            timestamp_iso="1970-01-01T00:00:00+00:00",
-            framework_version="test",
-        )
-        commit = Commit.build(root_tree_hash=tree.content_hash, parent_hashes=(), meta=meta)
-        store.put_object(
-            flow_id_for(store, "stale-1"), "commit", commit.content_hash, commit.to_bytes()
-        )
-        store.set_ref(flow_id_for(store, "stale-1"), HEAD_REF, commit.content_hash, None)
-        flow = build_canonical_flow(
-            make_test_logger(), max_iters=3, store=store, client_flow_id="stale-1"
-        )
-        with pytest.raises(RuntimeError) as excinfo:
-            await flow.run(resume="latest")
-        message = str(excinfo.value)
-        assert "structurally changed" in message
-        # Both stale ids appear in the triage message (root→leaf full_path).
-        assert "cafebabecafebabe" in message
-        assert "deadbeefdeadbeef" in message
-
-    @pytest.mark.parametrize(
-        "edited",
-        [["a", "c", "b"], ["a", "b", "x", "c"], ["a", "b", "c", "x"]],
-        ids=["reorder", "insert-before-save-point", "append"],
-    )
-    async def test_replay_refuses_edited_chain(
-        self, store: JsonFileCheckpointStore, edited: list[str]
-    ) -> None:
-        """Halt in ``[a, b, c]`` saves at c; replay of an edited chain raises before any step.
-
-        The saved step's id survives each edit, so only the structure check
-        stops replay from skipping ``x`` or running ``b`` twice.
-        """
-        from llm_gent.flow import Context, FlowFactory, verb
-
-        halt = asyncio.Event()
-        ran: list[str] = []
-
-        @verb
-        async def a(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
-            ran.append("a")
-
-        @verb
-        async def b(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
-            ran.append("b")
-            halt.set()
-
-        @verb
-        async def c(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
-            ran.append("c")
-
-        @verb
-        async def x(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
-            ran.append("x")
-
-        steps = {"a": a, "b": b, "c": c, "x": x}
-
-        def build(names: list[str], halt_event: asyncio.Event) -> Any:
-            flow = ff.create(state={}).with_checkpointer(store, "edited").with_halt(halt_event)
-            flow = flow.call(steps[names[0]])
-            for name in names[1:]:
-                flow = flow.then(steps[name])
-            return flow
-
-        ff = FlowFactory(make_test_logger())
-        await build(["a", "b", "c"], halt).run()
-        assert ran == ["a", "b"]
-
-        ran.clear()
-        with pytest.raises(RuntimeError, match="structurally changed"):
-            await build(edited, asyncio.Event()).run(resume="latest")
-        assert ran == []
-
 
 # ---------------------------------------------------------------------------
 # Scoped state — .call(state=...) round-trip through the CAS commit tree
@@ -2122,7 +2013,7 @@ class TestScopedStateRoundTrip:
         assert halted is not None
         snapshot = await History(store, "scoped-1").snapshot(halted)
         assert list(snapshot.scopes.values()) == [{"counter": 2}]
-        assert snapshot.chain(halted.meta.scope_path) == [{"counter": 2}]
+        assert snapshot.scopes[halted.meta.scope_path] == {"counter": 2}
 
         # Resume — projected scope restores from the commit instead of
         # re-projecting to counter=0; run reaches max_iters=5 cleanly.

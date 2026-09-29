@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, verb
+from llm_gent.flow import Context, FlowFactory, History, Interrupted, verb
 from llm_gent.flow.checkpoint import FAILED_NODE_PATH, FAILURE_PRODUCER
 from llm_gent.flow.stores import JsonFileCheckpointStore
 from llm_gent.flow.testing.checkpoint import (
@@ -274,26 +274,31 @@ class TestCursors:
         with pytest.raises(_Crash):
             await _adding_flow(store, "carry", [], wrap=wrap, crash_after=3).run(0)
         log: list[Any] = []
-        assert await _adding_flow(store, "carry", log, wrap=wrap, crash_after=None).run(
-            0, resume="latest"
-        ) == 40
+        resumed = _adding_flow(store, "carry", log, wrap=wrap, crash_after=None)
+        assert await resumed.run(0, resume="latest") == 40
         assert log == [20, 30]  # passes 3 and 4 only
 
+    @pytest.mark.parametrize(
+        ("mode", "resumed"),
+        [("bail", [10, 20, 30]), ("finish", [20, 30])],
+        ids=["interrupted-step-runs-again", "completed-step-does-not"],
+    )
     @pytest.mark.parametrize("shape", ["chain", "iterate"])
-    async def test_step_that_saw_the_halt_runs_again(
-        self, store: JsonFileCheckpointStore, shape: str
+    async def test_step_during_which_the_halt_arrived(
+        self, store: JsonFileCheckpointStore, shape: str, mode: str, resumed: list[int]
     ) -> None:
-        """A step that returns early because of the halt is the interrupted step."""
+        """The 2nd step sets the halt, then raises ``Interrupted`` or finishes its work."""
 
         def build(halt: asyncio.Event | None, seen: list[Any]) -> Any:
             @verb
             async def step(ctx: Context[dict[str, Any]], prev: Any = None) -> Any:
                 if ctx.halt is not None and ctx.halt.is_set():
-                    return prev  # bails early: a partial result
+                    raise Interrupted()
                 seen.append(prev)
                 if halt is not None and len(seen) == 2:
                     halt.set()
-                    return prev
+                    if mode == "bail":
+                        raise Interrupted()
                 return prev + 10
 
             flow = FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, "h")
@@ -303,10 +308,21 @@ class TestCursors:
                 return flow.call(step).call(step).call(step).call(step)
             return flow.iterate(lambda b: b.call(step), max_iters=4)
 
-        await build(asyncio.Event(), []).run(0)
+        assert await build(asyncio.Event(), []).run(0) is None
         seen: list[Any] = []
         assert await build(None, seen).run(0, resume="latest") == 40
-        assert seen == [10, 20, 30]  # the halted step (input 10) and the two after it
+        assert seen == resumed
+
+    async def test_interrupted_without_a_halt_is_an_error(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        @verb
+        async def step(ctx: Context[dict[str, Any]], prev: Any = None) -> Any:
+            raise Interrupted()
+
+        flow = FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, "no-halt")
+        with pytest.raises(RuntimeError, match="raised Interrupted while no halt is set"):
+            await flow.call(step).run(0)
 
     async def test_branch_takes_its_saved_arm(self, store: JsonFileCheckpointStore) -> None:
         """``when`` is not evaluated again: the state it read has changed since."""
@@ -553,7 +569,9 @@ class TestFailureCommit:
 
 class TestResumeModeValidation:
     @pytest.mark.parametrize("mode", [True, "replay", "restart"])
-    async def test_other_modes_are_rejected(self, store: JsonFileCheckpointStore, mode: Any) -> None:
+    async def test_other_modes_are_rejected(
+        self, store: JsonFileCheckpointStore, mode: Any
+    ) -> None:
         with pytest.raises(ValueError, match="resume must be one of"):
             await _counting_flow(store, "bad-mode", max_iters=1).run(resume=mode)
 

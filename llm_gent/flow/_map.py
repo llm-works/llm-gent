@@ -35,7 +35,7 @@ from ._executor import (
 from ._halt_observer import is_halt_signaled
 from ._node_id import _descend_context
 from .context import Context
-from .nodes import Failure, ItemsFn, Skipped
+from .nodes import Failure, Interrupted, ItemsFn, Skipped
 from .state import serialize_state_data
 from .state.snapshot import ScopePath
 
@@ -43,6 +43,10 @@ from .state.snapshot import ScopePath
 if TYPE_CHECKING:
     from .nodes import _Map, _RunEnv
     from .state import State
+
+
+_INTERRUPTED = object()
+"""Result of a map item the halt stopped before it completed."""
 
 
 class MapRunner:
@@ -75,14 +79,21 @@ class MapRunner:
         ``max_concurrency=N`` caps in-flight per-item runners via an
         :class:`asyncio.Semaphore`; items above the cap wait. When
         the ambient halt event fires, any per-item runner that has
-        not yet passed its halt check short-circuits to
-        :class:`Skipped`, so the remaining queue drains without
-        running any more bodies. Already-in-flight items complete.
+        not yet passed its halt check stops without running its body,
+        so the remaining queue drains; already-in-flight items complete
+        or stop at their own halt. When any item stopped that way, the
+        map is interrupted: it raises :class:`Interrupted` instead of
+        aggregating partial results.
+
+        Raises:
+            Interrupted: The halt stopped at least one item.
         """
         prev_result = node_args[0] if node_args else None
         ctx = self._build_ctx()
         items = await _resolve_items(self.mp.items, prev_result, ctx)
         results = await self._gather_items(items)
+        if any(r is _INTERRUPTED for r in results):
+            raise Interrupted()
         return await self._aggregate(results)
 
     def _build_ctx(self) -> Context[Any]:
@@ -149,16 +160,18 @@ class MapItemRunner:
 
     Terminal states:
 
-    - :class:`Skipped` — halt was signaled before the body ran, or
-      the guard predicate returned falsy.
+    - :class:`Skipped` — the guard predicate returned falsy.
     - :class:`Failure` — the body (or projection / guard) raised;
       non-strict returns the sentinel, strict re-raises after
       firing hooks.
     - Body's return value — the successful path; merges the child
       state into the parent (under the shared lock) and saves a
       per-item boundary commit when policy asks.
+    - :data:`_INTERRUPTED` — the halt stopped the item before it
+      completed (before its body ran, or inside it).
 
-    ``on_item_complete`` fires at every terminal state.
+    ``on_item_complete`` fires at every terminal state but the last: an
+    interrupted item has not completed, and runs again on resume.
     Cancellation is unconditional and never fires the hook.
     """
 
@@ -184,14 +197,17 @@ class MapItemRunner:
 
         Halt is checked first (before projection). Projection,
         guard, and body exceptions are wrapped per the parent map's
-        strict/non-strict contract.
+        strict/non-strict contract. An item the halt stops — before it
+        starts, or inside its body — returns :data:`_INTERRUPTED` without
+        firing ``on_item_complete``: it did not complete, and runs again
+        on resume.
         """
         if is_halt_signaled(self.env):
-            skipped = Skipped(item=self.item)
-            await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
-            return skipped
+            return _INTERRUPTED
         try:
             return await self._run_item()
+        except Interrupted:
+            return _INTERRUPTED
         finally:
             # Merged back, skipped or failed: the item's scope leaves the snapshot.
             self.env.scopes.close(self.path)

@@ -42,6 +42,8 @@ Public surface:
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
 - :class:`Skipped` — sentinel returned for an item gated out by
   ``Flow.guard`` on a ``Flow.map`` node
+- :class:`Interrupted` — raised by a step that stops because of the halt
+  before finishing its work, so it runs again on resume
 - :data:`UNSET` — "no value here" sentinel (distinct from ``None``), used by
   :meth:`Flow.run`'s ``state=`` default and by rescue callbacks'
   ``pending_input`` positional
@@ -64,7 +66,7 @@ from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
 from .history import History, HistoryCorrupt
 from .loop import Loop, LoopFactory
-from .nodes import UNSET, Failure, Skipped, Unset
+from .nodes import UNSET, Failure, Interrupted, Skipped, Unset
 from .panel import Panel
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
@@ -82,6 +84,7 @@ __all__ = [
     "FlowFactory",
     "History",
     "HistoryCorrupt",
+    "Interrupted",
     "Loop",
     "LoopFactory",
     "Panel",

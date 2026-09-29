@@ -190,6 +190,21 @@ class Skipped:
     """The input item that was gated out before the map body ran."""
 
 
+class Interrupted(BaseException):  # noqa: N818 — a signal, like asyncio.CancelledError
+    """Raised by a step that stops because of the halt before finishing its work.
+
+    The halt is cooperative: a step that sees ``ctx.halt`` set either
+    finishes its work and returns, or raises ``Interrupted``. A step that
+    returns is complete — the halt checkpoint moves past it; a step that
+    raises ``Interrupted`` runs again when the run resumes. A Loop whose
+    SAIA turn paused counts as interrupted without raising.
+
+    A :class:`BaseException`, like :class:`asyncio.CancelledError`, so
+    rescue policies and non-strict maps do not catch it as a failure.
+    Raising it while no halt is set is an error.
+    """
+
+
 @dataclass(frozen=True)
 class _RunEnv:
     """Per-run environment threaded through the execution helpers.

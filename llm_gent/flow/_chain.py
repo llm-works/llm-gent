@@ -8,8 +8,8 @@ Flow's ordered node list, threading each step's return into the next,
 and keeps its cursor — the step it is at and that step's input — where
 a checkpoint reads it. On ``resume="latest"`` the chain continues at the
 cursor the checkpoint saved. After every step it observes the run's
-halt and, when set, writes the halt checkpoint with the cursor still on
-that step.
+halt and, when set, writes the halt checkpoint: with the cursor on that
+step when the halt interrupted it, past it when the step completed.
 
 Constructed once per :meth:`Flow._run_as_subflow` entry:
 ``Chain(flow, env)`` eagerly computes ``self.ids`` from
@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import HaltSaveObserver, is_halt_signaled, saves_run_halt
 from ._node_id import _compute_node_ids
-from .nodes import UNSET
+from .nodes import UNSET, Interrupted
 from .state.snapshot import CHAIN, path_str
 
 
@@ -113,6 +113,10 @@ class Chain:
         the input it had when the checkpoint was taken. The cursor moves
         to each step, with the step's input (after ``project``), before the
         step runs; after it returns, :meth:`_halted_after` observes the halt.
+
+        Raises:
+            Interrupted: The halt stopped the chain before its last step
+                completed.
         """
         result: Any = UNSET
         for index in range(start_index, len(self.flow._nodes)):
@@ -125,29 +129,84 @@ class Chain:
             else:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             self.index, self.step_args, self.step_kwargs = index, node_args, node_kwargs
-            ctx = _build_ctx(node.target, self.env, node_id)
-            result = await _execute_node(node, ctx, self.env, node_args, node_kwargs, node_id)
-            if await self._halted_after(node_id):
-                break
+            result, interrupted = await self._run_step(node, node_id, node_args, node_kwargs)
+            if await self._halted_after(index, result, interrupted, args, kwargs):
+                # The chain stops before its end: it is interrupted, so the step
+                # running it (a .call, an iterate pass, a map item) is too.
+                raise Interrupted()
         return result
 
-    async def _halted_after(self, node_id: str) -> bool:
-        """After a step: on the run's halt, write the halt checkpoint and stop; True if halted.
+    async def _run_step(
+        self, node: Any, node_id: str, node_args: tuple[Any, ...], node_kwargs: dict[str, Any]
+    ) -> tuple[Any, bool]:
+        """Run one step; return its result and whether the halt interrupted it.
 
-        The halt arrived while this step ran, and the framework cannot tell
-        whether the step finished its work or returned early because of it.
-        So the cursor stays on this step: a checkout runs it again, with the
-        input it had — the same rule as a checkpoint taken inside a step.
+        Interrupted means the step stopped before finishing its work: it
+        raised :class:`Interrupted` — itself, or a chain, iterate or map it
+        runs that stopped early — or it is (or contains) a Loop whose SAIA
+        turn paused.
+
+        Raises:
+            RuntimeError: The step raised :class:`Interrupted` while no halt
+                was set.
+        """
+        ctx = _build_ctx(node.target, self.env, node_id)
+        try:
+            result = await _execute_node(node, ctx, self.env, node_args, node_kwargs, node_id)
+        except Interrupted:
+            if not is_halt_signaled(self.env):
+                label = self.flow._name or "<anonymous>"
+                raise RuntimeError(
+                    f"Flow {label!r}: step {node_id!r} raised Interrupted while no halt is set"
+                ) from None
+            return None, True
+        return result, self.env.pending_paused_turns.owns(node_id)
+
+    async def _halted_after(
+        self,
+        index: int,
+        result: Any,
+        interrupted: bool,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> bool:
+        """After a step: on the halt, write the halt checkpoint; True when the chain stops here.
+
+        An interrupted step keeps the cursor: a checkout runs it again with
+        the input it had. A completed step moves the cursor to the next step
+        and its input, so a checkout continues there; after the chain's last
+        step nothing is written here — the chain returns and the enclosing
+        structure decides where the run continues (an iterate's next pass,
+        the parent chain's next step, or the end of the run). A chain that
+        stops here raises :class:`Interrupted` to the step running it.
+
         The checkpoint is written by the innermost chain that sees the halt,
         so every enclosing cursor is where it was; the save kernel writes at
         most one halt checkpoint per run, and the enclosing chains and
-        iterates stop as the run unwinds.
-
-        Only the run's halt counts, observed in the run's history: a
-        subflow's own ``.with_halt`` stops that subtree without ending the
-        run, and a subflow with its own checkpointer is a separate history.
+        iterates stop as the run unwinds. Only the run's halt, observed in
+        the run's history, is saved: a subflow's own ``.with_halt`` stops an
+        interrupted step's subtree without a checkpoint, and a subflow with
+        its own checkpointer keeps a separate history.
         """
         env = self.env
-        if not saves_run_halt(env) or not is_halt_signaled(env):
+        if not is_halt_signaled(env):
             return False
-        return await HaltSaveObserver.save_if_signaled(env, 0, node_id, env.state)
+        if env.runtime._halt_saved:
+            return True
+        if not saves_run_halt(env):
+            return interrupted
+        at = index
+        if not interrupted:
+            if index + 1 == len(self.flow._nodes):
+                return False
+            at = index + 1
+            self._move_to(at, result, args, kwargs)
+        return await HaltSaveObserver.save_if_signaled(env, 0, self.ids[at], env.state)
+
+    def _move_to(
+        self, index: int, prev_result: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> None:
+        """Move the cursor to step ``index`` with the input it gets after ``prev_result``."""
+        node = self.flow._nodes[index]
+        self.index = index
+        self.step_args, self.step_kwargs = _step_inputs(index, node, prev_result, args, kwargs)

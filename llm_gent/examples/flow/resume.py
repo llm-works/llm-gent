@@ -143,7 +143,7 @@ async def main() -> int:
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
         flow1 = _build_flow(ff, store, client_flow_id, halt=True)
         result1 = await flow1.run()
-        print(f"run 1 returned: count={result1}")
+        print(f"run 1 returned: {result1} (halted: its state is in the halt checkpoint)")
         print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
 
         print(f"\n--- Run 2: resume=latest (cumulative max_iters={MAX_ITERS}) ---")

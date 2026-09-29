@@ -12,15 +12,17 @@ Each case runs one generated flow shape three ways:
 
 Dimensions: shape (chain, iterate, map, subflow, branch, ``state=``
 scope, up to three levels deep), the leaf where the run stops and
-whether before or after its work, what a halted leaf returns, the
-checkpoint policy (none, ``on_iterate``, ``on_map_item``, or
-``ctx.checkpoint()`` in every leaf), sequential or parallel maps, and
-the store (in-memory; a subset against the file store).
+whether before or after its work, the checkpoint policy (none,
+``on_iterate``, ``on_map_item``, or ``ctx.checkpoint()`` in every leaf),
+sequential or parallel maps, and the store (in-memory; a subset against
+the file store).
 
 Leaves are not state-driven: a leaf does its work every time it runs,
-so a leaf that runs again shows up in the executed list. The resume
-point is the newest commit with state that is not a failure record —
-the commit ``resume="latest"`` checks out.
+so a leaf that runs again shows up in the executed list. They honour the
+halt contract: a leaf halted before its work raises ``Interrupted``, one
+halted after its work returns. The resume point is the newest commit
+with state that is not a failure record — the commit
+``resume="latest"`` checks out.
 
 Properties checked per case:
 
@@ -28,7 +30,8 @@ Properties checked per case:
   an exception raises. Nothing is written after it returns or raises.
 - The resume point holds only work the stopped run did, with the
   baseline's values.
-- A halt writes a halt checkpoint, and the resume point holds every
+- A halt writes a halt checkpoint — unless it was set after the last
+  leaf's work, when the run completes — and the resume point holds every
   leaf the stopped run completed; with a checkpoint in every leaf, so
   does a crash's or an exception's resume point.
 - Resume ends with the baseline's result and ``done`` map, marks the
@@ -54,7 +57,7 @@ from typing import Any, Literal
 
 import pytest
 
-from llm_gent.flow import Context, Flow, FlowFactory, History, verb
+from llm_gent.flow import Context, Flow, FlowFactory, History, Interrupted, verb
 from llm_gent.flow.checkpoint import FAILED_NODE_PATH, CheckpointStore
 from llm_gent.flow.stores import InMemoryCheckpointStore, JsonFileCheckpointStore
 
@@ -262,7 +265,6 @@ class Probe:
     stop: Stop | None = None
     stop_at: int = 0
     mode: str = "before"
-    partial: str = "none"
     halt: asyncio.Event | None = None
     store: CrashableStore | None = None
     crashed: bool = False
@@ -271,16 +273,17 @@ class Probe:
     executed: list[str] = field(default_factory=list)
     checkpointed: list[str] = field(default_factory=list)
 
-    def partial_result(self, x: Any) -> Any:
-        """What a leaf returns when it stops without doing its work."""
-        return None if self.partial == "none" else x
+    def stop_here(self) -> None:
+        """Stop the run at the current leaf.
 
-    def stop_here(self, x: Any) -> Any:
-        """Stop the run at the current leaf; return the halted leaf's result."""
+        A halt is set and the leaf carries on: before its work it raises
+        :class:`Interrupted` (it stops without doing it), after its work it
+        returns normally (it completed). A crash or an exception raises.
+        """
         if self.stop == "halt":
             assert self.halt is not None
             self.halt.set()
-            return self.partial_result(x)
+            return
         if self.stop == "crash":
             assert self.store is not None
             self.crashed = self.store.dead = True
@@ -292,14 +295,19 @@ class Probe:
 
 
 def _leaf_verb(leaf: Leaf, probe: Probe) -> Any:
-    """Return the state-driven verb for ``leaf``, reporting to ``probe``."""
+    """Return the verb for ``leaf``, reporting to ``probe``.
+
+    It does its work every time it runs (not state-driven) and honours the
+    halt contract: a leaf that sees the halt before its work raises
+    :class:`Interrupted`.
+    """
 
     async def body(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
         await asyncio.sleep(0)  # lets parallel map items interleave
         if probe.crashed:
             raise SimulatedCrash("process already dead")
         if ctx.halt is not None and ctx.halt.is_set():
-            return probe.partial_result(x)
+            raise Interrupted()
         key = f"{leaf.name}:{x}"
         done = ctx.state.data.setdefault("done", {})
         probe.entered += 1
@@ -307,14 +315,15 @@ def _leaf_verb(leaf: Leaf, probe: Probe) -> Any:
         if fire:
             probe.stopped = key
         if fire and probe.mode == "before":
-            return probe.stop_here(x)
+            probe.stop_here()
+            raise Interrupted()  # a halt: stops before its work
         done[key] = 3 * x + leaf.c
         probe.executed.append(key)
         if probe.policy == "leaf":
             await ctx.checkpoint()
             probe.checkpointed.append(key)
         if fire:
-            probe.stop_here(x)  # sets the halt, or raises for a crash / an exception
+            probe.stop_here()  # sets the halt, or raises for a crash / an exception
         return done[key]
 
     body.__name__ = body.__qualname__ = leaf.name
@@ -412,17 +421,15 @@ class Case:
     stop: Stop
     stop_at: int
     mode: str
-    partial: str
     policy: Policy
     parallel: bool
     store: str
 
     @property
     def id(self) -> str:
-        partial = f"-{self.partial}" if self.stop == "halt" else ""
         run = "par" if self.parallel else "seq"
         return (
-            f"{self.shape}-{self.stop}-at{self.stop_at}-{self.mode}{partial}"
+            f"{self.shape}-{self.stop}-at{self.stop_at}-{self.mode}"
             f"-{self.policy}-{run}-{self.store}"
         )
 
@@ -450,13 +457,6 @@ def _known_defects() -> dict[str, tuple[str, type[BaseException]]]:
     }
 
 
-def _variants(stop: Stop) -> Iterator[tuple[str, str]]:
-    """``(mode, partial)`` pairs; what a halted leaf returns matters only for a halt."""
-    for mode in ("before", "after"):
-        for partial in ("none", "passthrough") if stop == "halt" else ("none",):
-            yield mode, partial
-
-
 def _memory_cases() -> Iterator[Case]:
     """Every shape × stop point × stop × policy × map mode, in memory."""
     for name, shape in SHAPES.items():
@@ -465,8 +465,8 @@ def _memory_cases() -> Iterator[Case]:
             for policy in ("none", "on_iterate", "on_map_item", "leaf"):
                 for stop in ("halt", "crash", "exception"):
                     for stop_at in range(1, leaves + 1):
-                        for mode, partial in _variants(stop):
-                            yield Case(name, stop, stop_at, mode, partial, policy, parallel, "mem")
+                        for mode in ("before", "after"):
+                            yield Case(name, stop, stop_at, mode, policy, parallel, "mem")
 
 
 def _file_cases() -> Iterator[Case]:
@@ -476,7 +476,7 @@ def _file_cases() -> Iterator[Case]:
         for policy in ("none", "leaf"):
             for stop in ("halt", "crash"):
                 for stop_at in range(1, leaves + 1):
-                    yield Case(name, stop, stop_at, "after", "passthrough", policy, False, "file")
+                    yield Case(name, stop, stop_at, "after", policy, False, "file")
 
 
 def _cases() -> list[Case]:
@@ -534,7 +534,6 @@ async def _run_stopped(case: Case, shape: Seq, store: CrashableStore) -> Probe:
         stop=case.stop,
         stop_at=case.stop_at,
         mode=case.mode,
-        partial=case.partial,
         halt=halt,
         store=store,
     )
@@ -567,13 +566,17 @@ async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path:
     assert captured.items() <= baseline.items(), "resume point holds work never done"
     assert set(captured) <= set(first.executed), "resume point holds work this run never did"
     if case.stop == "halt":
+        lost = [k for k in first.executed if k not in captured]
+        assert not lost, f"completed work missing from the halt checkpoint: {lost}"
+        if await history.is_complete():
+            # The halt was set after the last leaf's work: every step completed,
+            # so the run finished and there is nothing to resume.
+            assert captured == baseline
+            return
         # A save point written after the halt checkpoint (a sibling map item
         # finishing its iteration) is kept: it carries more progress.
         outcomes = [commit.meta.outcome async for commit in history.commits()]
         assert "halted" in outcomes, f"no halt checkpoint; outcomes {outcomes}"
-        assert not await history.is_complete()
-        lost = [k for k in first.executed if k not in captured]
-        assert not lost, f"completed work missing from the halt checkpoint: {lost}"
     if case.policy == "leaf":
         # A leaf that raised inside a state= scope takes its work down with the
         # scope: the block never merges it, and a later save point (a sibling

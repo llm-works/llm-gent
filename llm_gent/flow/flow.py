@@ -83,6 +83,7 @@ from .nodes import (
     AfterHook,
     AggregateFn,
     GuardFn,
+    Interrupted,
     ItemsFn,
     OnErrorFn,
     OnItemCompleteFn,
@@ -935,6 +936,13 @@ class Flow:
                 to the first node.
             **kwargs: Keyword inputs to the first node.
 
+        Returns the last step's result, or ``None`` when the halt stopped
+        the run before its end: a step that stops because of the halt either
+        completes or raises :class:`Interrupted`, and the run then writes
+        its halt checkpoint and returns. The halted run's state is in that
+        checkpoint; ``resume="latest"`` continues from it. A halt set during
+        the last step, which completed, does not stop the run: it finishes.
+
         With a checkpointer wired, a fully successful run under
         ``retention="retain"`` commits its final state (tagged
         ``complete``); ``"gc_on_success"`` deletes the history instead. An
@@ -968,6 +976,8 @@ class Flow:
                 parent_extra=extra,
                 **kwargs,
             )
+        except Interrupted:
+            return None  # halted: the run's state is in the halt checkpoint
         except Exception:
             await commit_failure(self, active_state)
             raise
@@ -1057,7 +1067,14 @@ class Flow:
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
-        result = await Chain(self, env).walk(args, kwargs)
+        try:
+            result = await Chain(self, env).walk(args, kwargs)
+        except Interrupted:
+            if not is_subflow or self._halt_event is None:
+                raise
+            # This subflow's own halt stopped it: the subtree ends here and the
+            # run carries on, with no result from it.
+            result = None
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 

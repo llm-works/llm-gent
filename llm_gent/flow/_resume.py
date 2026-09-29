@@ -110,21 +110,19 @@ class Resume:
 async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:
     """Apply the store's retention policy on the clean-exit path.
 
-    Halt-triggered exits preserve the history regardless of policy: the
-    halt commit is the head. On a clean exit: ``gc_on_success`` prunes;
-    ``retain`` keeps the record and commits ``final_state`` tagged
-    ``complete``, so a later ``run(resume="latest")`` continues from the
-    finished run's final state.
+    A run that wrote a halt checkpoint stopped before its end: the history
+    is kept regardless of policy, with the halt commit as its head. A run
+    that finished every step is clean even when the halt was set during its
+    last step — the step completed, so there is nothing left to resume. On
+    a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the record and
+    commits ``final_state`` tagged ``complete``, so a later
+    ``run(resume="latest")`` continues from the finished run's final state.
 
     A resumed run that finished without reaching some of its saved scopes
     or cursors drops them first (:func:`_drop_unreached_scopes`), so the
     final commit holds the root scope alone.
     """
-    if (
-        flow._checkpoint_ctx is None
-        or flow._halt_saved
-        or (flow._halt_event is not None and flow._halt_event.is_set())
-    ):
+    if flow._checkpoint_ctx is None or flow._halt_saved:
         return
     ctx = flow._checkpoint_ctx
     _drop_unreached_scopes(flow, ctx.client_flow_id)
