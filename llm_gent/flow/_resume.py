@@ -32,9 +32,10 @@ from typing import TYPE_CHECKING, Any
 
 from .checkpoint import COMPLETE_TAG
 from .history import History
-from .state import State, restore_state_data, serialize_state_data
+from .nodes import UNSET
+from .state import State, codec, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
-from .state.snapshot import Snapshot, path_from_str, path_str
+from .state.snapshot import CARRY, Snapshot, path_from_str, path_str
 
 
 if TYPE_CHECKING:
@@ -194,16 +195,33 @@ class Resume:
         leaf_owns_scope = chain and scope_tuple[-2:] == ("n", leaf_id)
         child_state_data = chain.pop() if leaf_owns_scope else None
 
+        # Cursor path: matches scope_path when the leaf owns a scope,
+        # otherwise the cursor is at "n/<leaf_id>" under the parent scope.
+        if leaf_owns_scope:
+            cursor_path = commit.meta.scope_path
+        else:
+            cursor_path = path_str((*scope_tuple, "n", leaf_id))
+
         return (
             self._root_state(root_raw),
             _ResumeReplay(
                 remaining_path=path_tuple,
                 full_path=path_tuple,
                 iteration=commit.meta.iteration,
+                carry=_restore_carry(snapshot, cursor_path),
                 child_state_data=child_state_data,
                 intermediate_scope_data=tuple(chain),
             ),
         )
+
+
+def _restore_carry(snapshot: Snapshot, scope_path: str) -> Any:
+    """Decode the carried value from the leaf iterate's cursor, or UNSET."""
+    cursor = snapshot.cursors.get(scope_path, {})
+    raw = cursor.get(CARRY, UNSET)
+    if raw is UNSET:
+        return UNSET
+    return codec.decode(raw, f"cursor at {scope_path!r}")
 
 
 async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:

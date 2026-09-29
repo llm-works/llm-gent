@@ -1,25 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Run snapshots — every live scope of a run, at a stable path, as one tree.
+"""Run snapshots — every live scope and cursor of a run, at a stable path, as one tree.
 
 A checkpoint captures the whole working tree of a run, the way a git
 commit captures a whole repository: the root scope, every child scope a
-``state=`` projection opened and has not merged back, and each running
-iterate's pass counter. Paths are built from position-independent node
-ids plus the coordinates that tell repeated executions apart::
+``state=`` projection opened and has not merged back, and the cursor of
+every running primitive — where it is and the value it is working on.
+Paths are built from position-independent node ids plus the coordinates
+that tell repeated executions apart::
 
     state                             root scope
+    chain                             cursor of the top-level chain
     n/<node>/state                    scope opened by a .call / .iterate step
-    n/<node>/pass                     pass counter of a running .iterate
+    n/<node>/chain                    cursor of the chain a .call / .branch runs
+    n/<node>/pass, n/<node>/carry     cursor of a running .iterate
+    n/<node>/arm                      arm a running .branch took
     n/<node>/p/<pass>/n/<node>/...    positions inside iterate pass <pass>
     n/<node>/i/<index>/state          scope of map item <index>
+    n/<node>/i/<index>/chain          cursor of map item <index>'s body
 
-A scope's payload is stored as a tree with one blob per top-level key,
-so keys that did not change keep their hash from one commit to the next.
+A dict payload is stored as a tree with one blob per top-level key, so
+keys that did not change keep their hash from one commit to the next.
 
-:class:`ScopeRegistry` tracks the live scopes during a run;
-:func:`build_snapshot_tree` turns it into CAS objects; :func:`read_snapshot`
+:class:`ScopeRegistry` tracks the live scopes and cursors during a run;
+:func:`build_snapshot_tree` turns them into CAS objects; :func:`read_snapshot`
 turns a stored tree back into a :class:`Snapshot`.
 """
 
@@ -28,10 +33,10 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from ..checkpoint import Kind
-from . import serialize_state_data
+from . import codec, serialize_state_data
 from .base import State
 from .cas import Blob, Tree, TreeEntry, TreeEntryKind, canonical_json
 
@@ -43,7 +48,30 @@ STATE = "state"
 """Tree entry holding a scope's payload."""
 
 PASS = "pass"
-"""Tree entry holding a running iterate's pass counter."""
+"""Cursor entry: the pass a running iterate is in (0-based)."""
+
+CARRY = "carry"
+"""Cursor entry: the value a running iterate carries into its current pass."""
+
+CHAIN = "chain"
+"""Cursor entry: the step a running chain is at, and that step's input."""
+
+ARM = "arm"
+"""Cursor entry: the arm a running branch took (``"then"`` or ``"else"``)."""
+
+CURSOR_ENTRIES = frozenset({PASS, CARRY, CHAIN, ARM})
+"""Tree entries that hold cursor values rather than a scope."""
+
+
+class Cursor(Protocol):
+    """A running primitive that reports where it is.
+
+    :meth:`cursor` returns its cursor entries (names from
+    :data:`CURSOR_ENTRIES`) mapped to values :mod:`.codec` can store: everything the
+    primitive needs to continue from this point.
+    """
+
+    def cursor(self) -> dict[str, Any]: ...
 
 
 def path_str(path: ScopePath) -> str:
@@ -57,17 +85,18 @@ def path_from_str(text: str) -> ScopePath:
 
 
 class ScopeRegistry:
-    """The live scopes and iterate pass counters of one run, by path.
+    """The live scopes and cursors of one run, by path.
 
     Descent sites open a scope when a ``state=`` projection creates one and
-    close it once it merged back (or was discarded); iterates record their
-    pass counter the same way. Everything a checkpoint needs is here.
+    close it once it merged back (or was discarded). Running primitives
+    register themselves as a :class:`Cursor` at their path while they run.
+    Everything a checkpoint needs is here.
     """
 
     def __init__(self) -> None:
         self._root: State[Any] | None = None
         self._scopes: dict[ScopePath, State[Any]] = {}
-        self._passes: dict[ScopePath, int] = {}
+        self._cursors: dict[tuple[ScopePath, int], Cursor] = {}
         self._saved: dict[ScopePath, Any] = {}
 
     def begin(self, root: State[Any], saved: Snapshot | None = None) -> None:
@@ -78,7 +107,7 @@ class ScopeRegistry:
         """
         self._root = root
         self._scopes.clear()
-        self._passes.clear()
+        self._cursors.clear()
         self._saved = (
             {} if saved is None else {path_from_str(p): v for p, v in saved.scopes.items()}
         )
@@ -107,30 +136,35 @@ class ScopeRegistry:
         """Drop the scope at ``path``; a no-op when none is registered."""
         self._scopes.pop(path, None)
 
-    def set_pass(self, path: ScopePath, count: int) -> None:
-        """Record the iterate at ``path`` as running pass ``count`` (0-based)."""
-        self._passes[path] = count
+    def open_cursor(self, path: ScopePath, runner: Cursor) -> None:
+        """Register ``runner`` as running at ``path``.
 
-    def clear_pass(self, path: ScopePath) -> None:
-        """Drop the pass counter of the iterate at ``path``."""
-        self._passes.pop(path, None)
+        Several runners can share a path when their entries differ: a
+        branch's ``arm`` and the ``chain`` of the arm it runs.
+        """
+        self._cursors[(path, id(runner))] = runner
+
+    def close_cursor(self, path: ScopePath, runner: Cursor) -> None:
+        """Drop ``runner`` from ``path``; a no-op when it is not registered."""
+        self._cursors.pop((path, id(runner)), None)
 
     def path_of(self, scope: State[Any]) -> ScopePath:
         """Path of the live scope ``scope`` (identity); ``()`` for the root or an unknown scope."""
         return next((p for p, s in self._scopes.items() if s is scope), ())
 
     def capture(self) -> dict[ScopePath, Any]:
-        """Serialize every live scope and pass counter now, in one synchronous pass.
+        """Serialize every live scope and cursor now, in one synchronous pass.
 
-        Returns tree paths (ending in :data:`STATE` or :data:`PASS`) mapped
-        to JSON-compatible values. Nothing awaits in between, so every
-        value comes from the same moment. Saved scopes the run has not
-        reached yet are included as saved, so a checkpoint taken early in
-        a restart keeps them.
+        Returns tree paths (ending in :data:`STATE` or a cursor entry)
+        mapped to JSON-compatible values. Nothing awaits in between, so
+        every value comes from the same moment. Saved scopes the run has
+        not reached yet are included as saved, so a checkpoint taken early
+        in a restart keeps them.
 
         Raises:
-            TypeError: A scope's payload cannot be serialized; the message
-                names its path.
+            TypeError: A scope's payload cannot be serialized, or a cursor
+                holds a value :mod:`.codec` cannot store; the message names the
+                path.
         """
         if self._root is None:
             raise RuntimeError("ScopeRegistry.capture() before begin()")
@@ -139,8 +173,10 @@ class ScopeRegistry:
             flat[(*path, STATE)] = value
         for path, scope in self._scopes.items():
             flat[(*path, STATE)] = _to_json(scope, path)
-        for path, count in self._passes.items():
-            flat[(*path, PASS)] = count
+        for (path, _), runner in self._cursors.items():
+            for name, value in runner.cursor().items():
+                where = f"cursor at {path_str((*path, name))!r}"
+                flat[(*path, name)] = codec.encode(value, where)
         return flat
 
 
@@ -211,14 +247,15 @@ class Snapshot:
     """The run state one commit holds, as stored (JSON-compatible values).
 
     ``root`` is ``None`` when the commit carries no state (``has_state`` is
-    then ``False``); ``scopes`` and ``passes`` are keyed by
-    :func:`path_str` of the owner's path.
+    then ``False``). ``scopes`` and ``cursors`` are keyed by
+    :func:`path_str` of the owner's path; a path's cursor maps its entry
+    names (:data:`CURSOR_ENTRIES`) to their values.
     """
 
     has_state: bool
     root: Any = None
     scopes: dict[str, Any] = field(default_factory=dict)
-    passes: dict[str, int] = field(default_factory=dict)
+    cursors: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def chain(self, scope_path: str) -> list[Any]:
         """Payloads of the live scopes from the root's child down to ``scope_path``, in order.
@@ -242,22 +279,26 @@ async def read_snapshot(root_tree_hash: str, load: Loader) -> Snapshot:
     await _read_level(root_tree_hash, (), load, flat)
     if (STATE,) not in flat:
         return Snapshot(has_state=False)
+    cursors: dict[str, dict[str, Any]] = {}
+    for p, v in flat.items():
+        if p[-1] in CURSOR_ENTRIES:
+            cursors.setdefault(path_str(p[:-1]), {})[p[-1]] = v
     return Snapshot(
         has_state=True,
         root=flat.pop((STATE,)),
         scopes={path_str(p[:-1]): v for p, v in flat.items() if p[-1] == STATE},
-        passes={path_str(p[:-1]): int(v) for p, v in flat.items() if p[-1] == PASS},
+        cursors=cursors,
     )
 
 
 async def _read_level(
     tree_hash: str, path: ScopePath, load: Loader, flat: dict[ScopePath, Any]
 ) -> None:
-    """Collect the :data:`STATE` / :data:`PASS` leaves under the tree at ``path``."""
+    """Collect the :data:`STATE` and cursor leaves under the tree at ``path``."""
     tree = Tree.from_bytes(await load("tree", tree_hash))
     for entry in tree.entries:
         here = (*path, entry.scope_id)
-        if entry.scope_id in (STATE, PASS):
+        if entry.scope_id == STATE or entry.scope_id in CURSOR_ENTRIES:
             flat[here] = await _read_leaf(entry, load)
         elif entry.kind == "tree":
             await _read_level(entry.child_hash, here, load, flat)

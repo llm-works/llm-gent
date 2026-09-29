@@ -228,6 +228,7 @@ class _ResumeReplay:
     remaining_path: tuple[str, ...]
     full_path: tuple[str, ...] = ()
     iteration: int = 0
+    carry: Any = UNSET
     child_state_data: Any = None
     intermediate_scope_data: tuple[Any, ...] = ()
 

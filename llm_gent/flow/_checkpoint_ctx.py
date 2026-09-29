@@ -94,10 +94,12 @@ class CheckpointContext:
         self._head: str | None = None
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
-        # Blob / tree hashes this context already put during the run. Scopes
-        # that did not change since the last commit are content-identical,
-        # so their puts are skipped instead of repeated.
-        self._written: set[str] = set()
+        # (kind, hash) of the blobs / trees this context already put during
+        # the run. Scopes that did not change since the last commit are
+        # content-identical, so their puts are skipped instead of repeated.
+        # The kind is part of the key: a blob and a tree can have the same
+        # bytes (the blob "[]" and the empty tree) and so the same hash.
+        self._written: set[tuple[Kind, str]] = set()
 
     def begin_run(self) -> None:
         """Drop the cached ``flow_id``, head and root hash, and create fresh locks.
@@ -147,21 +149,21 @@ class CheckpointContext:
 
     async def put_blob(self, content_hash: str, payload: bytes) -> None:
         """Put a blob under this history; a no-op when this run already put it."""
-        if content_hash in self._written:
+        if ("blob", content_hash) in self._written:
             return
         flow_id = await self.ensure_flow_id()
         await maybe_await(self.store.put_object(flow_id, "blob", content_hash, payload))
-        self._written.add(content_hash)
+        self._written.add(("blob", content_hash))
 
     async def put_tree(self, tree: Tree) -> None:
         """Serialize + put a Tree under this history; a no-op when this run already put it."""
-        if tree.content_hash in self._written:
+        if ("tree", tree.content_hash) in self._written:
             return
         flow_id = await self.ensure_flow_id()
         await maybe_await(
             self.store.put_object(flow_id, "tree", tree.content_hash, tree.to_bytes())
         )
-        self._written.add(tree.content_hash)
+        self._written.add(("tree", tree.content_hash))
 
     async def put_commit(self, commit: Commit) -> None:
         """Serialize + put a Commit under this history."""

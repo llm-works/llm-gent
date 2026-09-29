@@ -43,7 +43,7 @@ from .state.cas import (
     CommitOutcome,
     TraceRef,
 )
-from .state.snapshot import ScopePath
+from .state.snapshot import ARM, Cursor, ScopePath
 
 
 if TYPE_CHECKING:
@@ -331,6 +331,16 @@ def _live_scope(
         env.scopes.close(path)
 
 
+@contextlib.contextmanager
+def _running(env: _RunEnv, path: ScopePath, runner: Cursor) -> Iterator[None]:
+    """Keep ``runner``'s cursor in the run's snapshots at ``path`` while the block runs."""
+    env.scopes.open_cursor(path, runner)
+    try:
+        yield
+    finally:
+        env.scopes.close_cursor(path, runner)
+
+
 def _consume_scope_data(
     replay: _ResumeReplay | None,
     state_fn: StateProject | None,
@@ -489,8 +499,6 @@ async def _run_branch(
     identity-distinct positions in the composition tree even when they
     share a target Flow.
     """
-    from ._node_id import _descend_context
-
     prev_result = node_args[0] if node_args else None
     verdict = br.when(prev_result, ctx)
     if inspect.isawaitable(verdict):
@@ -505,20 +513,43 @@ async def _run_branch(
             "has changed since checkpoint.",
         )
         return prev_result
-    return await chosen._run_as_subflow(
-        prev_result,
-        state=env.state,
-        runtime=env.runtime,
-        parent_halt=env.halt,
-        parent_budget=env.budget,
-        parent_checkpoint_ctx=env.checkpoint_ctx,
-        parent_chain_context=_descend_context(node_id, "then" if verdict else "else"),
-        parent_ancestor_chain=env.ancestor_chain + (node_id,),
-        parent_replay=_pop_replay_for(env, node_id),
-        parent_extra=env.extra,
-        parent_policy=env.policy,
-        parent_path=env.owner_path(node_id),
-    )
+    arm = _BranchArm("then" if verdict else "else")
+    return await _run_arm(chosen, arm, env, node_id, prev_result)
+
+
+async def _run_arm(
+    chosen: Flow, arm: _BranchArm, env: _RunEnv, node_id: str, prev_result: Any
+) -> Any:
+    """Run the arm a branch took, with the branch's cursor in every snapshot meanwhile."""
+    from ._node_id import _descend_context
+
+    path = env.owner_path(node_id)
+    with _running(env, path, arm):
+        return await chosen._run_as_subflow(
+            prev_result,
+            state=env.state,
+            runtime=env.runtime,
+            parent_halt=env.halt,
+            parent_budget=env.budget,
+            parent_checkpoint_ctx=env.checkpoint_ctx,
+            parent_chain_context=_descend_context(node_id, arm.arm),
+            parent_ancestor_chain=env.ancestor_chain + (node_id,),
+            parent_replay=_pop_replay_for(env, node_id),
+            parent_extra=env.extra,
+            parent_policy=env.policy,
+            parent_path=path,
+        )
+
+
+class _BranchArm:
+    """Cursor of a running ``.branch``: the arm it took, so resume never re-evaluates ``when``."""
+
+    def __init__(self, arm: str) -> None:
+        self.arm = arm
+
+    def cursor(self) -> dict[str, Any]:
+        """The arm taken, ``"then"`` or ``"else"``."""
+        return {ARM: self.arm}
 
 
 def _pop_replay_for(env: _RunEnv, node_id: str) -> _ResumeReplay | None:
