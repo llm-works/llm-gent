@@ -195,13 +195,20 @@ class Resume:
         leaf_owns_scope = chain and scope_tuple[-2:] == ("n", leaf_id)
         child_state_data = chain.pop() if leaf_owns_scope else None
 
+        # Cursor path: matches scope_path when the leaf owns a scope,
+        # otherwise the cursor is at "n/<leaf_id>" under the parent scope.
+        if leaf_owns_scope:
+            cursor_path = commit.meta.scope_path
+        else:
+            cursor_path = path_str((*scope_tuple, "n", leaf_id))
+
         return (
             self._root_state(root_raw),
             _ResumeReplay(
                 remaining_path=path_tuple,
                 full_path=path_tuple,
                 iteration=commit.meta.iteration,
-                carry=_restore_carry(snapshot, commit.meta.scope_path),
+                carry=_restore_carry(snapshot, cursor_path),
                 child_state_data=child_state_data,
                 intermediate_scope_data=tuple(chain),
             ),

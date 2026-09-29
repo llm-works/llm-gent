@@ -1834,6 +1834,47 @@ class TestResumeDeterminism:
             )
             assert final["iterations_completed"] == 5
 
+    async def test_scope_less_iterate_restores_carry_from_cursor(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A scope-less iterate (no state=) restores the carried value from its cursor on resume.
+
+        The cursor is registered at ``n/<node_id>`` under the parent scope, not at
+        ``scope_path`` (which equals the parent scope's path when the iterate has no
+        scope of its own). Without the cursor-path fix, _restore_carry would look up
+        the parent's path and find nothing, causing the carry to reset to the run() arg.
+        """
+        from llm_gent.flow import Context, FlowFactory, verb
+
+        halt = asyncio.Event()
+        calls: list[tuple[int, int]] = []
+
+        @verb
+        async def step(ctx: Context[dict[str, Any]], prev: int) -> int:
+            calls.append((ctx.state.data.get("iter", 0), prev))
+            ctx.state.data["iter"] = ctx.state.data.get("iter", 0) + 1
+            if ctx.state.data["iter"] == 2:
+                halt.set()
+            return prev + 10
+
+        def _flow() -> Any:
+            return (
+                FlowFactory(make_test_logger())
+                .create(state={"iter": 0})
+                .with_checkpointer(store, "scopeless-carry")
+                .with_halt(halt)
+                .iterate(lambda b: b.call(step), max_iters=4)
+            )
+
+        await _flow().run(0)
+        assert calls == [(0, 0), (1, 10)]
+
+        halt.clear()
+        calls.clear()
+        result = await _flow().run(resume="replay")
+        assert calls == [(2, 20), (3, 30)]
+        assert result == 40
+
 
 # ---------------------------------------------------------------------------
 # Resume error paths — no client_flow_id, corruption, structural drift
