@@ -206,7 +206,13 @@ class CheckpointContext:
         return result
 
     async def put_tag(self, name: str, commit_hash: str) -> None:
-        """Point tag ref ``name`` at ``commit_hash``, moving it from wherever it points now."""
+        """Point tag ref ``name`` at ``commit_hash``, moving it from wherever it points now.
+
+        Raises:
+            ConcurrentWriteError: Another writer moved the tag between the
+                read and the CAS. This is intentional: a history has one
+                writer at a time, and the failure detects a violation.
+        """
         await self.move_ref(name, commit_hash, await self.get_ref(name))
 
     async def gc_history(self) -> None:
