@@ -53,7 +53,15 @@ class Chain:
         self.step_kwargs: dict[str, Any] = {}
 
     def cursor(self) -> dict[str, Any]:
-        """The step this chain is at (its node id) and that step's input."""
+        """The step this chain is at (its node id) and that step's input.
+
+        Capture-only: the cursor is stored in checkpoints for debugging
+        and inspection, but NOT restored on resume. The resume path
+        finds the step index from the node path and runs the step with
+        no ``prev_result`` — resumed steps must read from persisted
+        state, not from a threaded return value. See
+        :meth:`_resume_start_index` for the contract.
+        """
         if self.index is None:
             return {}
         step = {

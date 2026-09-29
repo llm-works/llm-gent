@@ -101,8 +101,11 @@ class IterateRunner:
         up by an outer loop) do not re-apply the fast-forward.
         ``deadline`` is not restored — the wall clock resets each run.
         """
-        self.iteration, restored_child = self._resume_iteration()
-        self.carry = node_args[0] if node_args else None
+        self.iteration, restored_child, restored_carry = self._resume_iteration()
+        if restored_carry is not UNSET:
+            self.carry = restored_carry
+        else:
+            self.carry = node_args[0] if node_args else None
         env, child_state = await self._resolve_child_scope(restored_child)
         self.env = env
         path = env.owner_path(self.node_id)
@@ -137,30 +140,31 @@ class IterateRunner:
                 break
         return self.carry
 
-    def _resume_iteration(self) -> tuple[int, Any]:
-        """Return the starting iteration count and restored child state.
+    def _resume_iteration(self) -> tuple[int, Any, Any]:
+        """Return the starting iteration, restored child state, and carried value.
 
-        ``(0, None)`` for a fresh run. On resume, when ``env.replay``
+        ``(0, None, UNSET)`` for a fresh run. On resume, when ``env.replay``
         is set and ``remaining_path == (node_id,)`` — the head-pop
         path has shrunk to a single entry equal to this iterate's
         ``node_id`` — this iterate IS the save-point leaf: returns
-        the saved iteration and ``child_state_data`` (if present) and
-        flips :attr:`Flow._replay_consumed` on the top-level runtime
+        the saved iteration, ``child_state_data`` (if present), and the
+        ``carry`` value from the cursor, then flips
+        :attr:`Flow._replay_consumed` on the top-level runtime
         so the fast-forward fires exactly once. Any longer remaining
         path means this iterate is an ancestor of the leaf (its body
         descent will head-pop and thread the tail); a non-matching
         head, empty path, or already-consumed replay all yield
-        ``(0, None)`` and the iterate runs from scratch.
+        ``(0, None, UNSET)`` and the iterate runs from scratch.
         """
         replay = self.env.replay
         if replay is None or not replay.remaining_path:
-            return 0, None
+            return 0, None, UNSET
         if self.env.runtime._replay_consumed:
-            return 0, None
+            return 0, None, UNSET
         if replay.remaining_path[0] != self.node_id or len(replay.remaining_path) != 1:
-            return 0, None
+            return 0, None, UNSET
         self.env.runtime._replay_consumed = True
-        return replay.iteration, replay.child_state_data
+        return replay.iteration, replay.child_state_data, replay.carry
 
     async def _resolve_child_scope(self, restored_child: Any) -> tuple[_RunEnv, State[Any]]:
         """Build the iterate body's child :class:`State` for this run.
