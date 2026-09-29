@@ -41,10 +41,21 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 @dataclass
 class SaiaResult:
-    """Stand-in for SAIA's task result, passed between Loop steps."""
+    """Stand-in for SAIA's task result, passed between Loop steps.
+
+    Round-trips through ``to_dict`` / ``from_dict`` like SAIA's ``TaskResult``,
+    so a checkpoint can hold it.
+    """
 
     paused: bool = False
     reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"paused": self.paused, "reason": self.reason}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SaiaResult:
+        return cls(**data)
 
 
 @dataclass

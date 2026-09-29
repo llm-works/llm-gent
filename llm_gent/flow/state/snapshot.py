@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..checkpoint import Kind
-from . import serialize_state_data
+from . import codec, serialize_state_data
 from .base import State
 from .cas import Blob, Tree, TreeEntry, TreeEntryKind, canonical_json
 
@@ -67,7 +67,7 @@ class Cursor(Protocol):
     """A running primitive that reports where it is.
 
     :meth:`cursor` returns its cursor entries (names from
-    :data:`CURSOR_ENTRIES`) mapped to plain JSON values: everything the
+    :data:`CURSOR_ENTRIES`) mapped to values :mod:`.codec` can store: everything the
     primitive needs to continue from this point.
     """
 
@@ -163,7 +163,7 @@ class ScopeRegistry:
 
         Raises:
             TypeError: A scope's payload cannot be serialized, or a cursor
-                holds a value that is not plain JSON; the message names the
+                holds a value :mod:`.codec` cannot store; the message names the
                 path.
         """
         if self._root is None:
@@ -175,7 +175,8 @@ class ScopeRegistry:
             flat[(*path, STATE)] = _to_json(scope, path)
         for (path, _), runner in self._cursors.items():
             for name, value in runner.cursor().items():
-                flat[(*path, name)] = _cursor_json(value, (*path, name))
+                where = f"cursor at {path_str((*path, name))!r}"
+                flat[(*path, name)] = codec.encode(value, where)
         return flat
 
 
@@ -186,40 +187,6 @@ def _to_json(scope: State[Any], path: ScopePath) -> Any:
     except (TypeError, ValueError) as e:
         where = path_str(path) or "root"
         raise TypeError(f"scope at {where!r} cannot be checkpointed: {e}") from e
-
-
-def _cursor_json(value: Any, path: ScopePath) -> Any:
-    """A detached copy of cursor ``value``, which must be plain JSON.
-
-    A cursor value comes back unchanged on resume only if it is built from
-    ``dict`` (``str`` keys), ``list``, ``str``, ``int``, ``float``, ``bool``
-    and ``None``: anything else (a tuple, an object with ``to_dict``) would
-    come back as a different type.
-    """
-    _require_json(value, path)
-    try:
-        return json.loads(canonical_json(value))
-    except ValueError as e:  # NaN / infinity
-        raise TypeError(f"cursor at {path_str(path)!r} cannot be checkpointed: {e}") from e
-
-
-def _require_json(value: Any, path: ScopePath) -> None:
-    """Raise :class:`TypeError` naming ``path`` when ``value`` is not plain JSON."""
-    if value is None or isinstance(value, str | int | float | bool):
-        return
-    if isinstance(value, list):
-        for item in value:
-            _require_json(item, path)
-        return
-    if isinstance(value, dict) and all(isinstance(k, str) for k in value):
-        for item in value.values():
-            _require_json(item, path)
-        return
-    raise TypeError(
-        f"cursor at {path_str(path)!r} cannot be checkpointed: a value of type "
-        f"{type(value).__name__} is not plain JSON (dict with str keys, list, str, "
-        f"int, float, bool, None)"
-    )
 
 
 def build_snapshot_tree(flat: dict[ScopePath, Any]) -> tuple[Tree, list[Blob | Tree]]:

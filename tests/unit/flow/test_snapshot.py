@@ -296,7 +296,7 @@ class TestFlowSnapshots:
         snapshot = await history.snapshot(commit)
         assert [c["arm"] for c in snapshot.cursors.values() if "arm" in c] == ["else"]
 
-    async def test_non_json_cursor_value_fails_the_checkpoint_naming_its_path(self) -> None:
+    async def test_unstorable_cursor_value_fails_the_checkpoint_naming_its_path(self) -> None:
         @verb
         async def save(ctx: Context[dict[str, Any]], x: Any) -> Any:
             await ctx.checkpoint()
@@ -308,7 +308,7 @@ class TestFlowSnapshots:
             .with_checkpointer(InMemoryCheckpointStore(), "tuple")
             .call(save)
         )
-        with pytest.raises(TypeError, match=r"cursor at 'chain' .* type tuple is not plain JSON"):
+        with pytest.raises(TypeError, match=r"cursor at 'chain': a value of type tuple cannot be"):
             await flow.run((1, 2))
 
     async def test_a_blob_and_a_tree_with_the_same_bytes_are_both_stored(self) -> None:

@@ -499,8 +499,6 @@ async def _run_branch(
     identity-distinct positions in the composition tree even when they
     share a target Flow.
     """
-    from ._node_id import _descend_context
-
     prev_result = node_args[0] if node_args else None
     verdict = br.when(prev_result, ctx)
     if inspect.isawaitable(verdict):
@@ -516,6 +514,15 @@ async def _run_branch(
         )
         return prev_result
     arm = _BranchArm("then" if verdict else "else")
+    return await _run_arm(chosen, arm, env, node_id, prev_result)
+
+
+async def _run_arm(
+    chosen: Flow, arm: _BranchArm, env: _RunEnv, node_id: str, prev_result: Any
+) -> Any:
+    """Run the arm a branch took, with the branch's cursor in every snapshot meanwhile."""
+    from ._node_id import _descend_context
+
     path = env.owner_path(node_id)
     with _running(env, path, arm):
         return await chosen._run_as_subflow(
