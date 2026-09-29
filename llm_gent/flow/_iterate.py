@@ -24,10 +24,8 @@ returns a rebound env is safe.
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import time
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from ._executor import (
@@ -38,13 +36,14 @@ from ._executor import (
     _merge_state,
     _pop_replay_for,
     _restore_scope_state,
+    _running,
     _save_scope_commit,
 )
 from ._halt_observer import HaltSaveObserver
 from ._node_id import _descend_context
 from .nodes import UNSET
 from .state import State
-from .state.snapshot import ScopePath
+from .state.snapshot import CARRY, PASS, ScopePath
 
 
 if TYPE_CHECKING:
@@ -68,6 +67,14 @@ class IterateRunner:
         # read from self.env so the update propagates.
         self.env = env
         self.node_id = node_id
+        # The cursor: the pass the loop is in, and the value it carries into
+        # that pass. Kept here, not in _loop's locals, so a checkpoint reads them.
+        self.iteration = 0
+        self.carry: Any = None
+
+    def cursor(self) -> dict[str, Any]:
+        """The pass this iterate is in (0-based) and the value carried into it."""
+        return {PASS: self.iteration, CARRY: self.carry}
 
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Drive the loop; return the last body result.
@@ -94,47 +101,41 @@ class IterateRunner:
         up by an outer loop) do not re-apply the fast-forward.
         ``deadline`` is not restored — the wall clock resets each run.
         """
-        iteration, restored_child = self._resume_iteration()
+        self.iteration, restored_child = self._resume_iteration()
+        self.carry = node_args[0] if node_args else None
         env, child_state = await self._resolve_child_scope(restored_child)
         self.env = env
         path = env.owner_path(self.node_id)
-        with _live_scope(env, path, self.it.state_fn, child_state), self._pass_counter(path):
-            result = await self._loop(path, iteration, child_state, node_args)
+        with _live_scope(env, path, self.it.state_fn, child_state), _running(env, path, self):
+            result = await self._loop(path, child_state)
             await _merge_state(self.it.merge_fn, self.env.state, child_state)
         return result
 
-    async def _loop(
-        self, path: ScopePath, iteration: int, child_state: State[Any], node_args: tuple[Any, ...]
-    ) -> Any:
-        """Run passes from ``iteration`` until a bound, the halt or ``until`` stops them."""
-        result: Any = node_args[0] if node_args else None
+    async def _loop(self, path: ScopePath, child_state: State[Any]) -> Any:
+        """Run passes until a bound, the halt or ``until`` stops them; return the last result.
+
+        ``self.iteration`` and ``self.carry`` advance together after each
+        pass, with no await in between, so a checkpoint always sees a pass
+        number and the value carried into that pass.
+        """
         started = time.monotonic()
         while True:
-            self.env.scopes.set_pass(path, iteration)
-            if self.it.max_iters is not None and iteration >= self.it.max_iters:
+            if self.it.max_iters is not None and self.iteration >= self.it.max_iters:
                 break
             if self.it.deadline is not None and time.monotonic() - started >= self.it.deadline:
                 break
             if await HaltSaveObserver.save_if_signaled(
-                self.env, iteration, self.node_id, child_state
+                self.env, self.iteration, self.node_id, child_state
             ):
                 break
-            result = await self._dispatch_body(child_state, result, (*path, "p", str(iteration)))
-            iteration += 1
-            self.env.scopes.set_pass(path, iteration)
+            pass_path = (*path, "p", str(self.iteration))
+            result = await self._dispatch_body(child_state, self.carry, pass_path)
+            self.carry, self.iteration = result, self.iteration + 1
             if self.env.policy.on_iterate:
-                await _save_scope_commit(self.env, iteration, self.node_id, child_state, "ok")
+                await _save_scope_commit(self.env, self.iteration, self.node_id, child_state, "ok")
             if await _check_until(self.it.until, result, child_state, self.env, self.node_id):
                 break
-        return result
-
-    @contextlib.contextmanager
-    def _pass_counter(self, path: ScopePath) -> Iterator[None]:
-        """Keep this iterate's pass counter in the run's snapshot while it runs."""
-        try:
-            yield
-        finally:
-            self.env.scopes.clear_pass(path)
+        return self.carry
 
     def _resume_iteration(self) -> tuple[int, Any]:
         """Return the starting iteration count and restored child state.

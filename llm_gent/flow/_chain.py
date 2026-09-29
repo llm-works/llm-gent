@@ -22,10 +22,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ._executor import _build_ctx, _execute_node, _step_inputs
+from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import HaltSaveObserver, is_halt_signaled
 from ._node_id import _compute_node_ids
 from .nodes import UNSET, _Iterate
+from .state.snapshot import CHAIN
 
 
 if TYPE_CHECKING:
@@ -45,6 +46,22 @@ class Chain:
         self.flow = flow
         self.env = env
         self.ids: tuple[str, ...] = _compute_node_ids(env.chain_context, flow._nodes)
+        # The cursor: the step running (or about to run) and the input it
+        # gets. Kept here, not in _walk_steps' locals, so a checkpoint reads it.
+        self.index: int | None = None
+        self.step_args: tuple[Any, ...] = ()
+        self.step_kwargs: dict[str, Any] = {}
+
+    def cursor(self) -> dict[str, Any]:
+        """The step this chain is at (its node id) and that step's input."""
+        if self.index is None:
+            return {}
+        step = {
+            "step": self.ids[self.index],
+            "args": list(self.step_args),
+            "kwargs": dict(self.step_kwargs),
+        }
+        return {CHAIN: step}
 
     async def walk(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Execute chain steps in order, threading returns; return the last result.
@@ -52,11 +69,13 @@ class Chain:
         First asserts the resume replay (if any) can reach a step at
         this level, then selects the start index (0 on a fresh run,
         the on-path index on resume), then walks. Halt observation
-        between steps and after the trailing edge is internal.
+        between steps and after the trailing edge is internal. The
+        chain's cursor is in every snapshot taken while it walks.
         """
         self._assert_replay_reachable()
         start_index = self._resume_start_index()
-        return await self._walk_steps(start_index, args, kwargs)
+        with _running(self.env, self.env.path, self):
+            return await self._walk_steps(start_index, args, kwargs)
 
     def _assert_replay_reachable(self) -> None:
         """Fail-fast: raise if the replay's remaining head is unreachable at this level.
@@ -152,11 +171,13 @@ class Chain:
         at the not-yet-run step's position and break. On a subsequent
         ``run(resume="replay")``, that ref resolves to this commit and
         the walk restarts at the halted step.
+
+        The cursor moves to a step, with the step's input (after
+        ``project``), before the halt check in front of it, so a halt
+        commit there records the step that runs next.
         """
         result: Any = UNSET
         for index in range(start_index, len(self.flow._nodes)):
-            if await self._observe_halt_between(index, start_index):
-                break
             node = self.flow._nodes[index]
             node_id = self.ids[index]
             node_args: tuple[Any, ...]
@@ -165,6 +186,10 @@ class Chain:
                 node_args, node_kwargs = (), {}
             else:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
+            previous = (self.index, self.step_args, self.step_kwargs)
+            self.index, self.step_args, self.step_kwargs = index, node_args, node_kwargs
+            if await self._observe_halt_between(index, start_index, previous):
+                break
             ctx = _build_ctx(node.target, self.env, node_id)
             result = await _execute_node(node, ctx, self.env, node_args, node_kwargs, node_id)
         else:
@@ -173,7 +198,12 @@ class Chain:
             await self._observe_halt_trailing()
         return result
 
-    async def _observe_halt_between(self, index: int, start_index: int) -> bool:
+    async def _observe_halt_between(
+        self,
+        index: int,
+        start_index: int,
+        previous: tuple[int | None, tuple[Any, ...], dict[str, Any]],
+    ) -> bool:
         """Save a halt commit between chain steps when appropriate; return True if saved.
 
         Only fires at the top-level chain (``env.runtime is self.flow``)
@@ -188,7 +218,9 @@ class Chain:
         — its Loop's ``__call__`` then picks up the paused_turn entry
         and hands SAIA ``resume=True`` with the rebuilt conversation.
         Otherwise saves at the not-yet-run step (the normal chain-halt
-        case).
+        case). The cursor follows: back to the just-completed step and
+        its ``previous`` input in the first case, at the next step in
+        the second.
         """
         env = self.env
         if (
@@ -199,11 +231,10 @@ class Chain:
         ):
             return False
         just_completed = self.ids[index - 1]
-        halt_node_id = (
-            just_completed
-            if _just_completed_owns_paused_turn(env, just_completed)
-            else self.ids[index]
-        )
+        halt_node_id = self.ids[index]
+        if _just_completed_owns_paused_turn(env, just_completed):
+            halt_node_id = just_completed
+            self.index, self.step_args, self.step_kwargs = previous
         return await HaltSaveObserver.save_if_signaled(env, 0, halt_node_id, env.state)
 
     async def _observe_halt_trailing(self) -> None:
