@@ -135,8 +135,8 @@ FAILED_NODE_PATH = "$failed"
 
 Records the root state at the moment of failure (``outcome="failed"``)
 for inspection. It is never a starting point: that state may be
-half-updated, so both ``resume="replay"`` and ``resume="restart"`` skip
-such commits and start from the last commit before them.
+half-updated, so ``resume="latest"`` skips such commits and continues
+from the last commit before them.
 """
 
 
@@ -152,19 +152,18 @@ The framework writes both itself — no node produced them — following the
 """
 
 
-ResumeMode = Literal["off", "replay", "restart"]
+ResumeMode = Literal["off", "latest"]
 """How :meth:`Flow.run` starts from a checkpointed history.
 
 - ``"off"`` — run from ``state=`` as given; new commits still append to
   the history.
-- ``"replay"`` — positional resume: rebuild the scope tree of the last save
-  point and fast-forward to it. Starts from ``state=`` when the history is
-  empty or complete; raises :class:`~llm_gent.flow.history.HistoryCorrupt`
-  on a corrupt history.
-- ``"restart"`` — run from the first node with the root state of the
-  newest commit that has usable state (halted, ok or final; ``$failed``
-  and stateless commits are skipped). Child scopes are not restored,
-  iterate counters start at zero, and paused turns are not offered.
+- ``"latest"`` — check out the newest commit that has usable state
+  (halted, ok or final; ``$failed`` and stateless commits are skipped) and
+  continue from it: every scope comes back, and every chain, iterate and
+  branch that was running continues where its cursor was — at the same
+  step with the same input, in the same pass with the same carried value,
+  on the same arm. Only the step that was running when the checkpoint was
+  taken runs again, and a Loop that paused mid-turn resumes that turn.
   Starts from ``state=`` when the history is empty; raises
   :class:`~llm_gent.flow.history.HistoryCorrupt` on a corrupt history.
 """
@@ -184,10 +183,10 @@ class CheckpointPolicy:
     Two save triggers are always on and NOT gated by this policy:
 
     - Halt observation — :meth:`HaltSaveObserver.save_if_signaled`
-      fires whenever the executor observes the halt event set at
-      any of its save sites (iterate boundary, chain between-step,
-      chain tail), provided a checkpointer is wired. This is the durability guarantee that makes
-      ``run(resume="replay")`` reach a halted history.
+      fires whenever the executor observes the run's halt event set
+      (after each chain step, before each iterate pass), provided a
+      checkpointer is wired. This is the durability guarantee that makes
+      ``run(resume="latest")`` reach a halted history.
     - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires
       regardless of policy; when the verb asks to save, we save.
 

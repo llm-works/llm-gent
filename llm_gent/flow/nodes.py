@@ -190,47 +190,19 @@ class Skipped:
     """The input item that was gated out before the map body ran."""
 
 
-@dataclass(frozen=True)
-class _ResumeReplay:
-    """Threaded through the executor when :meth:`Flow.run` resumes.
+class Interrupted(BaseException):  # noqa: N818 — a signal, like asyncio.CancelledError
+    """Raised by a step that stops because of the halt before finishing its work.
 
-    ``remaining_path`` is the ancestor chain of node IDs still to match
-    on descent — a tuple of content-addressed hashes assembled from
-    root to the save-point iterate (the leaf ID is included). Each
-    Flow entry pre-scans its chain-step ids: exactly one must equal
-    ``remaining_path[0]`` (the on-path descent parent), or the entry
-    raises structural-change immediately — no chain step runs at a
-    level whose path head is unreachable. On the matched step's
-    descent, the head is popped and the tail is threaded into the
-    child Flow; every off-path sibling descent threads ``None`` (its
-    subtree cannot contain the leaf). When the matched step is itself
-    the save-point iterate (``len(remaining_path) == 1``), the iterate
-    consumes the replay and fast-forwards to ``iteration``.
+    The halt is cooperative: a step that sees ``ctx.halt`` set either
+    finishes its work and returns, or raises ``Interrupted``. A step that
+    returns is complete — the halt checkpoint moves past it; a step that
+    raises ``Interrupted`` runs again when the run resumes. A Loop whose
+    SAIA turn paused counts as interrupted without raising.
 
-    ``full_path`` is the un-popped path from root to leaf, kept
-    verbatim across descent for triage — a pre-scan raise at depth N
-    can still show the full ancestor chain the checkpoint was written
-    against.
-
-    ``child_state_data`` carries the innermost scoped state from the
-    checkpoint tree. When the target iterate is reached, this data is
-    used instead of projecting fresh — restoring child mutations that
-    occurred before the checkpoint was saved.
-
-    ``intermediate_scope_data`` carries the middle-scope payloads —
-    every scope between root and leaf. Consumed head-first at each
-    scope-creating descent along the replay path: a ``.call(state=)``
-    or ``.iterate(state=)`` on the path pops the first entry and uses
-    it as the child scope, in place of re-projecting via the state
-    factory. Empty when the checkpointed stack was only root + leaf.
+    A :class:`BaseException`, like :class:`asyncio.CancelledError`, so
+    rescue policies and non-strict maps do not catch it as a failure.
+    Raising it while no halt is set is an error.
     """
-
-    remaining_path: tuple[str, ...]
-    full_path: tuple[str, ...] = ()
-    iteration: int = 0
-    carry: Any = UNSET
-    child_state_data: Any = None
-    intermediate_scope_data: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -270,7 +242,6 @@ class _RunEnv:
     checkpoint_ctx: CheckpointContext | None = None
     chain_context: str = ""
     ancestor_chain: tuple[str, ...] = ()
-    replay: _ResumeReplay | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
     path: ScopePath = ()

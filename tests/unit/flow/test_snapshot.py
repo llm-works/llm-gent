@@ -119,16 +119,6 @@ class TestSnapshotTree:
         with pytest.raises(TypeError, match="scope at 'n/call' cannot be checkpointed"):
             scopes.capture()
 
-    async def test_chain_is_the_scopes_on_the_path_root_first(self) -> None:
-        snapshot = Snapshot(
-            has_state=True,
-            root={},
-            scopes={"n/a": {"d": 1}, "n/a/n/b": {"d": 2}, "n/c": {"d": 9}},
-        )
-        assert snapshot.chain("n/a/n/b") == [{"d": 1}, {"d": 2}]
-        assert snapshot.chain("n/c") == [{"d": 9}]
-        assert snapshot.chain("") == []
-
 
 class TestRegistry:
     def test_path_of_finds_a_live_scope_by_identity(self) -> None:

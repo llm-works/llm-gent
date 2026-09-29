@@ -37,7 +37,7 @@ async def _run(store: JsonFileCheckpointStore, name: str, *, halt_at: int | None
         halt_after_iteration=halt_at,
         store=store,
         client_flow_id=name,
-    ).run(resume="replay")
+    ).run(resume="latest")
 
 
 async def _all(history: History) -> list[Commit]:
@@ -51,7 +51,6 @@ class TestEmptyHistory:
         assert await history.head() is None
         assert await history.last_complete() is None
         assert not await history.is_complete()
-        assert await history.replay_point() is None
         assert await _all(history) == []
 
 
@@ -64,7 +63,6 @@ class TestCompletedHistory:
         assert head is not None
         assert History.is_final_state(head)
         assert await history.is_complete()
-        assert await history.replay_point() is None
         assert await history.last_complete() == head
         assert head.meta.flow_id == await history.flow_id()
 
@@ -137,7 +135,7 @@ class TestCorruptHistory:
             client_flow_id="torn-resume",
         )
         with pytest.raises(HistoryCorrupt):
-            await flow.run(resume="replay")
+            await flow.run(resume="latest")
         # Nothing was written past the damage: the ref still names the missing commit.
         with pytest.raises(HistoryCorrupt):
             await History(store, "torn-resume").head()
@@ -154,7 +152,6 @@ class TestHistoryAcrossRuns:
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
         assert not await history.is_complete()
-        assert await history.replay_point() == head
         assert await history.last_complete() == first_end
         chain = await _all(history)
         assert chain[0] == head

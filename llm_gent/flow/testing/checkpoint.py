@@ -161,12 +161,14 @@ def build_canonical_flow(
         lg: Logger.
         state: Initial payload. Defaults to a fresh ``CanonicalCounter()``.
         max_iters: Iterate cap (cumulative across resumes — the resume
-            of an interrupt saved at iteration N runs ``max_iters - N``
-            further passes).
+            of an interrupt saved in pass N runs passes N to
+            ``max_iters - 1``).
         halt: Optional ambient halt event. When paired with
-            ``halt_after_iteration``, iterate exits between passes once
-            the threshold is reached and the checkpoint is preserved
-            (halt-set exit skips the delete-on-success path).
+            ``halt_after_iteration``, the body's last step sets it once
+            the threshold is reached; the run writes a halt checkpoint
+            at that step and stops, and the checkpoint is preserved
+            (halt-set exit skips the delete-on-success path). The step
+            passes its input through, so it can run again on resume.
         halt_after_iteration: Iteration count at which to fire ``halt``.
             Requires ``halt``.
         store: Optional :class:`CheckpointStore`. Wires
@@ -260,7 +262,7 @@ async def assert_resume_determinism(
         max_iters=max_iters,
         store=store,
         client_flow_id=client_flow_id,
-    ).run(resume="replay")
+    ).run(resume="latest")
 
     assert resumed == baseline, (
         f"resumed state differs from baseline:\n  baseline={baseline}\n  resumed={resumed}"
@@ -301,7 +303,7 @@ def resume_in_subprocess(
     flow_builder: str = "build_canonical_flow",
     flow_builder_kwargs: dict[str, Any] | None = None,
     client_flow_id: str = "canonical-multi-stage",
-    resume: ResumeMode = "replay",
+    resume: ResumeMode = "latest",
     subprocess_timeout: float = 30.0,
 ) -> dict[str, Any]:
     """Spawn a fresh Python process, resume the Flow from checkpoint, return final state.

@@ -119,4 +119,4 @@ class TestMemoryStore:
             return FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, "c")
 
         assert await build().call(bump).run() == 1
-        assert await build().call(bump).run(resume="restart") == 2
+        assert await build().call(bump).run(resume="latest") == 2

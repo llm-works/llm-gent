@@ -67,7 +67,6 @@ from ._node_id import flow_root_hash, iter_flows
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
-    assert_replay_consumed,
     commit_failure,
 )
 from ._validation import (
@@ -84,6 +83,7 @@ from .nodes import (
     AfterHook,
     AggregateFn,
     GuardFn,
+    Interrupted,
     ItemsFn,
     OnErrorFn,
     OnItemCompleteFn,
@@ -97,7 +97,6 @@ from .nodes import (
     _Iterate,
     _Map,
     _Node,
-    _ResumeReplay,
     _RunEnv,
 )
 from .role import Role
@@ -153,7 +152,7 @@ class Flow:
                 internal handoff, so mounting on the top-level flow is
                 enough to reach every nested dispatch.
             state_factory: A :class:`StateFactory` the framework calls on
-                :meth:`run` ``resume="replay"``/``"restart"`` to reconstruct ``ctx.state.data``
+                :meth:`run` ``resume="latest"`` to reconstruct ``ctx.state.data``
                 from the loaded checkpoint: ``state_factory.restore(...)``.
                 For state that carries no runtime handles wrap the type in
                 :class:`TypeStateFactory`; for state that binds a Logger /
@@ -175,7 +174,6 @@ class Flow:
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
-        self._replay_consumed: bool = False
         self._halt_saved: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._pending_paused_turns: PendingPausedTurns = PendingPausedTurns()
@@ -697,8 +695,10 @@ class Flow:
         - a :class:`Failure` under both ``strict`` modes when the body
           raises a non-cancellation exception (in ``strict=True`` the
           hook fires before the exception propagates);
-        - a :class:`Skipped` when the guard predicate returns falsy or
-          when an ambient halt short-circuited the item before its body ran.
+        - a :class:`Skipped` when the guard predicate returns falsy.
+
+        A halted map raises :class:`Interrupted` and does not fire the hook
+        for items stopped by the halt.
 
         Cancellation is unconditional and does not fire the hook. A hook
         exception is logged and swallowed so the item's outcome is never
@@ -725,10 +725,11 @@ class Flow:
         Threads ``event`` through the execution environment as ``ctx.halt``,
         available to any verb that wants to observe it. :meth:`map` and
         :meth:`iterate` also check the event at their natural boundaries:
-        map short-circuits any per-item runner that hasn't yet passed its
-        halt check to :class:`Skipped`; iterate exits the loop between
-        iterations. In-flight bodies are not interrupted — a verb that
-        needs mid-request cancellation should read ``ctx.halt`` itself.
+        map raises :class:`Interrupted` when the halt stops an item before
+        its body ran; iterate exits the loop between passes. In-flight
+        bodies are not interrupted — a verb that needs mid-request
+        cancellation should read ``ctx.halt`` itself. A halted
+        :meth:`~Flow.run` returns ``None``; state is in the halt checkpoint.
 
         A subflow inherits the outer runtime's halt event automatically;
         calling ``.with_halt`` on a subflow overrides the ambient event for
@@ -763,9 +764,9 @@ class Flow:
     def with_checkpointer(self, store: CheckpointStore, client_flow_id: str) -> Flow:
         """Attach a :class:`CheckpointStore` + agent-owned ``client_flow_id``.
 
-        Wires save-at-``.iterate``-boundary saves and, on
-        :meth:`run` ``resume="replay"``, a load-at-start that hydrates the
-        run's payload before the first node dispatches. On fully
+        Wires checkpoints (``ctx.checkpoint()``, the checkpoint policy and
+        the halt checkpoint) and, on :meth:`run` ``resume="latest"``, a
+        checkout at start that restores the run's scopes and cursors. On fully
         successful :meth:`run` completion the framework calls
         :meth:`CheckpointStore.gc_history` when the store's
         ``retention`` is ``"gc_on_success"``; the default ``"retain"``
@@ -781,16 +782,16 @@ class Flow:
         automatically; calling ``.with_checkpointer`` on a subflow
         overrides both for that subtree.
 
-        Resume semantics on the wired iterate:
+        Resume semantics:
 
-        - **State** hydrates from the commit's root-scope Blob (via
+        - **State** hydrates from the commit's snapshot (via
           ``state_factory.restore`` if a ``state_factory`` is bound, else
           passthrough for plain dicts).
-        - **Iteration counter** is restored: ``max_iters`` is a
-          cumulative bound across resumes — saving at iteration N and
-          resuming with ``max_iters=M`` runs ``max(0, M - N)`` further
-          passes. A counter that already meets the bound exits without
-          re-running the body.
+        - **Iteration counter** is restored with the iterate's cursor:
+          ``max_iters`` is a cumulative bound across resumes — saving in
+          pass N and resuming with ``max_iters=M`` runs passes N to M-1.
+          A counter that already meets the bound exits without running
+          the body.
         - **Ambients** (halt, budget, saia, traits, logger,
           checkpointer itself) are never serialized — they reattach
           from the current runtime, so a resumed run gets fresh
@@ -923,22 +924,27 @@ class Flow:
             resume: How to start from the checkpointed history
                 (:data:`~llm_gent.flow.checkpoint.ResumeMode`).
                 ``"off"`` (default) runs from ``state`` as given.
-                ``"replay"`` reads the last save point (skipping ``$failed``
-                commits) and, unless the history is empty or complete,
-                reconstructs the scope tree, replaces ``state`` with the
-                hydrated payload and fast-forwards to the save point.
-                ``"restart"`` checks out the newest commit with usable state
-                (skipping ``$failed`` and stateless commits): its root state
-                replaces ``state``, the run starts at the first node, and
-                each ``state=`` block gets its saved scope back when the run
-                reaches it; paused turns are not offered. Payloads are rebuilt via
-                ``state_factory`` when bound, else used as plain dicts. On an
-                empty history (or nothing to replay) the run proceeds with
-                ``state`` as given, appending to the same history; a corrupt
-                history raises :class:`HistoryCorrupt` in either mode. Anything other than
-                ``"off"`` requires :meth:`with_checkpointer`. Bound
-                parameter: not forwarded to the first node.
+                ``"latest"`` checks out the newest commit with usable state
+                (skipping ``$failed`` and stateless commits) and continues
+                where it was: its root state replaces ``state``, every
+                scope comes back, and every chain, iterate and branch that
+                was running continues at its saved step, pass and arm, so
+                only the step running at the checkpoint runs again; a Loop
+                that paused mid-turn resumes that turn. Payloads are rebuilt
+                via ``state_factory`` when bound, else used as plain dicts.
+                On an empty history the run proceeds with ``state`` as
+                given, appending to the same history; a corrupt history
+                raises :class:`HistoryCorrupt`. ``"latest"`` requires
+                :meth:`with_checkpointer`. Bound parameter: not forwarded
+                to the first node.
             **kwargs: Keyword inputs to the first node.
+
+        Returns the last step's result, or ``None`` when the halt stopped
+        the run before its end: a step that stops because of the halt either
+        completes or raises :class:`Interrupted`, and the run then writes
+        its halt checkpoint and returns. The halted run's state is in that
+        checkpoint; ``resume="latest"`` continues from it. A halt set during
+        the last step, which completed, does not stop the run: it finishes.
 
         With a checkpointer wired, a fully successful run under
         ``retention="retain"`` commits its final state (tagged
@@ -946,8 +952,8 @@ class Flow:
         exception raised while the nodes run commits the root state at
         ``$failed`` before it propagates. Errors raised before the walk
         starts (argument checks, loading the history) or after it ends
-        (:func:`assert_replay_consumed`, the final-state commit) write
-        nothing extra, and neither does cancellation.
+        (the final-state commit) write nothing extra, and neither does
+        cancellation.
 
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode
@@ -961,9 +967,8 @@ class Flow:
         self._check_run_args(resume)
         self._begin_checkpoint_run()
         self._resume_paused_turns.clear()
-        active_state, replay, saved = await self._start_state(self._wrap_top_state(state), resume)
+        active_state, saved = await self._start_state(self._wrap_top_state(state), resume)
         self._scopes.begin(active_state, saved)
-        self._replay_consumed = False
         self._halt_saved = False
         self._pending_paused_turns.clear()
         try:
@@ -971,14 +976,14 @@ class Flow:
                 *args,
                 state=active_state,
                 runtime=self,
-                parent_replay=replay,
                 parent_extra=extra,
                 **kwargs,
             )
+        except Interrupted:
+            return None  # halted: the run's state is in the halt checkpoint
         except Exception:
             await commit_failure(self, active_state)
             raise
-        assert_replay_consumed(self, replay)
         await apply_clean_exit_retention(self, active_state)
         return result
 
@@ -1001,14 +1006,11 @@ class Flow:
 
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode
-    ) -> tuple[State[Any], _ResumeReplay | None, Snapshot | None]:
-        """The run's initial state, replay plan and restart snapshot for ``resume``."""
-        if resume == "replay":
-            return (*await Resume(self).replay(fallback), None)
-        if resume == "restart":
-            root, snapshot = await Resume(self).restart(fallback)
-            return root, None, snapshot
-        return fallback, None, None
+    ) -> tuple[State[Any], Snapshot | None]:
+        """The run's initial state and the snapshot it continues from (``None`` for a fresh run)."""
+        if resume == "latest":
+            return await Resume(self).checkout(fallback)
+        return fallback, None
 
     async def _run_as_subflow(
         self,
@@ -1020,7 +1022,6 @@ class Flow:
         parent_checkpoint_ctx: CheckpointContext | None = None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
-        parent_replay: _ResumeReplay | None = None,
         parent_extra: dict[str, Any] | None = None,
         parent_policy: CheckpointPolicy | None = None,
         parent_path: ScopePath = (),
@@ -1046,10 +1047,8 @@ class Flow:
         :func:`_descend_context` at each subflow / arm / body boundary).
         ``parent_ancestor_chain`` is the tuple of ancestor ``_Node`` IDs
         from root down to the ``_Node`` whose descent entered this Flow;
-        it grows by one on every recursion. ``parent_replay`` carries a
-        pending checkpoint replay when :meth:`run` was invoked with
-        ``resume="replay"``; ``None`` otherwise. ``parent_path`` is this
-        Flow's snapshot path (see :attr:`_RunEnv.path`).
+        it grows by one on every recursion. ``parent_path`` is this Flow's
+        snapshot path (see :attr:`_RunEnv.path`).
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
@@ -1061,7 +1060,6 @@ class Flow:
             parent_checkpoint_ctx=parent_checkpoint_ctx,
             parent_chain_context=parent_chain_context,
             parent_ancestor_chain=parent_ancestor_chain,
-            parent_replay=parent_replay,
             parent_extra=parent_extra,
             parent_policy=parent_policy,
             parent_path=parent_path,
@@ -1072,7 +1070,14 @@ class Flow:
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
-        result = await Chain(self, env).walk(args, kwargs)
+        try:
+            result = await Chain(self, env).walk(args, kwargs)
+        except Interrupted:
+            if not is_subflow or self._halt_event is None or self._halt_event is parent_halt:
+                raise
+            # This subflow's own halt stopped it: the subtree ends here and the
+            # run carries on, with no result from it.
+            result = None
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
@@ -1086,7 +1091,6 @@ class Flow:
         parent_checkpoint_ctx: CheckpointContext | None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
-        parent_replay: _ResumeReplay | None = None,
         parent_extra: dict[str, Any] | None = None,
         parent_policy: CheckpointPolicy | None = None,
         parent_path: ScopePath = (),
@@ -1101,7 +1105,6 @@ class Flow:
         ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
         verbatim: the descent sites in :mod:`._executor` are the ones
         that extend them when recursing into a subflow / arm / body.
-        ``parent_replay`` is the pending resume context, if any.
         """
         halt = self._halt_event if self._halt_event is not None else parent_halt
         budget = self._budget_tracker if self._budget_tracker is not None else parent_budget
@@ -1123,7 +1126,6 @@ class Flow:
             checkpoint_ctx=checkpoint_ctx,
             chain_context=parent_chain_context,
             ancestor_chain=parent_ancestor_chain,
-            replay=parent_replay,
             extra=parent_extra if parent_extra is not None else {},
             policy=policy,
             path=parent_path,

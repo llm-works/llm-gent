@@ -10,14 +10,14 @@
 Exercises the Flow-level checkpointer end-to-end without touching an LLM:
 
 1. **Run 1** — a verb increments a typed-state counter each iteration and
-   sets ``ctx.halt`` when ``count == HALT_AFTER`` to request a cooperative halt.
-   The framework saves at every iterate boundary, preserves the checkpoint
-   on halt exit, and returns.
+   the next step sets ``ctx.halt`` when ``count == HALT_AFTER`` to request
+   a cooperative halt. The framework writes a halt checkpoint at that step,
+   preserves it on halt exit, and returns.
 2. **Run 2** — a fresh :class:`~llm_gent.flow.Flow` (new halt event, same
-   checkpointer + client_flow_id) is called with ``resume="replay"``. The
-   framework loads the latest checkpoint, reconstructs ``state.data`` via
-   :meth:`Counter.from_dict`, restores the iteration counter, and runs
-   the remaining passes.
+   checkpointer + client_flow_id) is called with ``resume="latest"``. The
+   framework checks out the latest checkpoint, reconstructs ``state.data``
+   via :meth:`Counter.from_dict`, and continues where run 1 stopped: the
+   next pass runs, then any remaining passes.
 
 ``max_iters=5`` is the cumulative bound across resumes — run 1 does 3
 iterations, run 2 does 2, total 5. On a natural completion the checkpoint
@@ -66,7 +66,7 @@ class Counter(StateDataclass):
     Inherits :class:`~llm_gent.flow.StateDataclass` for ``to_dict`` /
     ``from_dict`` — flat dataclass, no override needed. Bound as
     ``state_factory=TypeStateFactory(Counter)`` on the :class:`~llm_gent.flow.FlowFactory` so
-    the framework calls :meth:`from_dict` on ``run(resume="replay")`` to
+    the framework calls :meth:`from_dict` on ``run(resume="latest")`` to
     reconstruct an instance from the checkpoint payload.
     """
 
@@ -76,46 +76,58 @@ class Counter(StateDataclass):
 
 @verb
 async def tick(ctx: Context[Counter]) -> int:
-    """Increment the counter and simulate a crash via ``ctx.halt``.
+    """Increment the counter.
 
     Pure-Python verb (``@verb`` bare form) — no :class:`Role`, no
     ``ctx.saia`` access. The framework's signature-aware dispatch
     drops the iterate chain's previous value rather than requiring a
     placeholder ``_prev`` parameter. Mutates ``ctx.data`` in
     place (typed as :class:`Counter` via the :class:`Context`
-    parameterization) and returns the new count so the
-    :meth:`Flow.iterate` loop threads it as the next iteration's
-    input.
+    parameterization) and returns the new count.
     """
     ctx.data.count += 1
     ctx.data.log.append(ctx.data.count)
     print(f"  tick: count={ctx.data.count} log={ctx.data.log}")
-    if ctx.data.count == HALT_AFTER and ctx.halt is not None:
+    return ctx.data.count
+
+
+@verb
+async def stop_at_limit(ctx: Context[Counter], count: int) -> int:
+    """Simulate a crash via ``ctx.halt`` once the count reaches ``HALT_AFTER``.
+
+    A separate step from :func:`tick` so the halt fires after the count
+    mutation completes. The cursor moves to the next pass once this step
+    returns, so resume continues from there.
+    """
+    if count == HALT_AFTER and ctx.halt is not None:
         print(f"  halt fired at count={HALT_AFTER}")
         ctx.halt.set()
-    return ctx.data.count
+    return count
 
 
 def _build_flow(
     ff: FlowFactory,
     store: JsonFileCheckpointStore,
     client_flow_id: str,
+    *,
+    halt: bool,
 ) -> Flow:
-    """Assemble a Flow wired to the shared store with its own halt event.
+    """Assemble a Flow wired to the shared store, with a halt event when ``halt``.
 
-    Each call returns a fresh :class:`~llm_gent.flow.Flow`, so the two
-    demo runs can operate on independent halt events while pointing at
-    the same checkpoint history. The halt and checkpointer bindings
-    ride on :meth:`FlowFactory.create` kwargs so this reads as a single
-    construction step rather than a chain of ``.with_*`` setters.
+    Each call returns a fresh :class:`~llm_gent.flow.Flow` pointing at the
+    same checkpoint history. Only run 1 gets a halt event: run 2 resumes at
+    the step that halted, and without an event that step passes through.
+    The halt and checkpointer bindings ride on :meth:`FlowFactory.create`
+    kwargs so this reads as a single construction step rather than a chain
+    of ``.with_*`` setters.
     """
     flow = ff.create(
         "resume-demo",
         state=Counter(),
-        halt=asyncio.Event(),
+        halt=asyncio.Event() if halt else None,
         checkpointer=(store, client_flow_id),
     )
-    flow.iterate(lambda body: body.call(tick), max_iters=MAX_ITERS)
+    flow.iterate(lambda body: body.call(tick).call(stop_at_limit), max_iters=MAX_ITERS)
     return flow
 
 
@@ -129,14 +141,14 @@ async def main() -> int:
         ff = FlowFactory(lg, state_factory=TypeStateFactory(Counter))
 
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
-        flow1 = _build_flow(ff, store, client_flow_id)
+        flow1 = _build_flow(ff, store, client_flow_id, halt=True)
         result1 = await flow1.run()
-        print(f"run 1 returned: count={result1}")
+        print(f"run 1 returned: {result1} (halted: its state is in the halt checkpoint)")
         print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
 
-        print(f"\n--- Run 2: resume=replay (cumulative max_iters={MAX_ITERS}) ---")
-        flow2 = _build_flow(ff, store, client_flow_id)
-        result2 = await flow2.run(resume="replay")
+        print(f"\n--- Run 2: resume=latest (cumulative max_iters={MAX_ITERS}) ---")
+        flow2 = _build_flow(ff, store, client_flow_id, halt=False)
+        result2 = await flow2.run(resume="latest")
         print(f"run 2 returned: count={result2}")
         print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
         print("(empty after run 2 because natural completion deletes the checkpoint)")

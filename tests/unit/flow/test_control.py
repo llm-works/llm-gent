@@ -874,21 +874,20 @@ class TestMapOnItemComplete:
         assert len(skipped) == 1 and skipped[0].item == 2
 
     @pytest.mark.asyncio
-    async def test_fires_on_halt_skipped(self) -> None:
-        """Halt-set-before-run fires the hook with Skipped for every item."""
+    async def test_does_not_fire_for_items_the_halt_stopped(self) -> None:
+        """An item the halt stops has not completed: it runs again on resume."""
         observed: list[Any] = []
         halt = asyncio.Event()
         halt.set()
 
         def hook(_item: int, outcome: Any, _ctx: Context) -> None:
-            """Record outcomes; every item should appear as Skipped."""
+            """Record outcomes; no item completes."""
             observed.append(outcome)
 
         flow = make_ff().create().with_halt(halt)
         flow.call(_identity).map(_double).on_item_complete(hook)
-        results = await flow.run([1, 2, 3])
-        assert all(isinstance(r, Skipped) for r in results)
-        assert len(observed) == 3 and all(isinstance(o, Skipped) for o in observed)
+        assert await flow.run([1, 2, 3]) is None
+        assert observed == []
 
     @pytest.mark.asyncio
     async def test_fires_after_merge_on_success(self) -> None:
@@ -1127,8 +1126,9 @@ class TestMapMaxConcurrency:
 class TestFlowWithHalt:
     """`Flow.with_halt(event)` threads ``ctx.halt`` through every node.
 
-    Map short-circuits queued items to :class:`Skipped` once the event fires;
-    iterate exits between iterations; verbs may observe ``ctx.halt`` directly.
+    Once the event fires, a map runs no more queued items, an iterate runs
+    no more passes, and verbs may observe ``ctx.halt`` directly. A run the
+    halt stopped before its end returns ``None``.
     """
 
     @pytest.mark.asyncio
@@ -1146,14 +1146,12 @@ class TestFlowWithHalt:
 
         flow = make_ff().create().with_halt(halt)
         flow.call(_identity).map(track)
-        results = await flow.run([1, 2, 3])
+        assert await flow.run([1, 2, 3]) is None
         assert ran == []
-        assert all(isinstance(r, Skipped) for r in results)
-        assert [r.item for r in results] == [1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_halt_mid_wave_skips_remaining_queue(self) -> None:
-        """A halt set by an in-flight item drains the remaining queue as Skipped."""
+        """A halt set by an in-flight item stops the remaining queue; the map is interrupted."""
         halt = asyncio.Event()
         ran: list[int] = []
 
@@ -1167,11 +1165,8 @@ class TestFlowWithHalt:
 
         flow = make_ff().create().with_halt(halt)
         flow.call(_identity).map(track, max_concurrency=1)
-        results = await flow.run([1, 2, 3, 4])
+        assert await flow.run([1, 2, 3, 4]) is None
         assert ran == [1]
-        assert results[0] == 10
-        assert all(isinstance(r, Skipped) for r in results[1:])
-        assert [r.item for r in results[1:]] == [2, 3, 4]
 
     @pytest.mark.asyncio
     async def test_halt_does_not_fire_map_merge(self) -> None:
@@ -1203,7 +1198,7 @@ class TestFlowWithHalt:
 
     @pytest.mark.asyncio
     async def test_halt_stops_iterate_between_iterations(self) -> None:
-        """.iterate() exits after the current iteration once ``ctx.halt`` is set."""
+        """.iterate() runs no further pass once ``ctx.halt`` is set during one."""
         halt = asyncio.Event()
         ticks: list[int] = []
 
@@ -1217,10 +1212,9 @@ class TestFlowWithHalt:
 
         flow = make_ff().create().with_halt(halt)
         flow.call(_identity).iterate(lambda f: f.call(tick), max_iters=10)
-        result = await flow.run(1)
-        # Body runs at least once; halt-between-iterations stops before a 4th.
+        # The pass that set the halt completes; the iterate stops before the next.
+        assert await flow.run(1) is None
         assert ticks == [1, 2]
-        assert result == 3
 
     @pytest.mark.asyncio
     async def test_ctx_halt_reaches_verb_body(self) -> None:

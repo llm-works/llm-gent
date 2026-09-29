@@ -35,7 +35,6 @@ from .nodes import (
     _Iterate,
     _Map,
     _Node,
-    _ResumeReplay,
     _RunEnv,
 )
 from .state import State, StateFactory
@@ -287,9 +286,7 @@ async def _run_subflow(
     from ._node_id import _descend_context
 
     path = env.owner_path(node_id)
-    child_state, child_replay = await _enter_scope(
-        env, path, state_fn, state_factory, _pop_replay_for(env, node_id)
-    )
+    child_state = await _enter_scope(env, path, state_fn, state_factory)
     with _live_scope(env, path, state_fn, child_state):
         result = await body._run_as_subflow(
             *node_args,
@@ -300,7 +297,6 @@ async def _run_subflow(
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_chain_context=_descend_context(node_id, "call"),
             parent_ancestor_chain=env.ancestor_chain + (node_id,),
-            parent_replay=child_replay,
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=path,
@@ -341,61 +337,25 @@ def _running(env: _RunEnv, path: ScopePath, runner: Cursor) -> Iterator[None]:
         env.scopes.close_cursor(path, runner)
 
 
-def _consume_scope_data(
-    replay: _ResumeReplay | None,
-    state_fn: StateProject | None,
-) -> tuple[Any, _ResumeReplay | None]:
-    """Head-pop the next intermediate-scope payload from the replay when applicable.
-
-    Returns ``(raw_scope_data, updated_replay)``. Returns
-    ``(UNSET, replay)`` — signaling "no restored data, project fresh" —
-    when any of:
-
-    - ``replay`` is ``None`` (off the replay path).
-    - ``state_fn`` is ``None`` (no scope is being created at this
-      descent, so nothing to consume).
-    - ``replay.intermediate_scope_data`` is empty (all middle scopes
-      already consumed, or the checkpointed stack had no middle scopes).
-
-    On a hit, the returned replay carries the tail so the child scope's
-    intermediate list stays aligned with its own remaining descents.
-    """
-    if replay is None or state_fn is None or not replay.intermediate_scope_data:
-        return UNSET, replay
-    raw = replay.intermediate_scope_data[0]
-    updated = dataclasses.replace(
-        replay, intermediate_scope_data=replay.intermediate_scope_data[1:]
-    )
-    return raw, updated
-
-
 async def _enter_scope(
     env: _RunEnv,
     path: ScopePath,
     state_fn: StateProject | None,
     state_factory: StateFactory[Any] | None,
-    replay: _ResumeReplay | None,
-) -> tuple[State[Any], _ResumeReplay | None]:
-    """The scope a block at ``path`` runs under, and the replay left for its body.
+) -> State[Any]:
+    """The scope a block at ``path`` runs under: restored from a checkout, else projected.
 
-    A block with a ``state=`` projection takes its scope from, in order:
-
-    1. ``replay`` — the next saved scope on the replayed path
-       (:func:`_consume_scope_data`); the returned replay carries the rest.
-    2. The snapshot a restart continues from, which hands the scope saved
-       at ``path`` back the first time the run reaches that path.
-    3. The projection itself.
-
-    Without a projection the block shares its parent's scope.
+    A block with a ``state=`` projection gets back the scope the checked-out
+    snapshot saved at ``path``, the first time the run reaches that path;
+    otherwise the projection runs. Without a projection the block shares
+    its parent's scope.
     """
-    raw, replay = _consume_scope_data(replay, state_fn)
-    if raw is UNSET and state_fn is not None:
-        found, saved = env.scopes.take_saved(path)
-        raw = saved if found else UNSET
-    if raw is UNSET:
-        return await _project_state(state_fn, env.state, state_factory), replay
-    factory = state_factory if state_factory is not None else env.state._factory
-    return _restore_scope_state(env.state, raw, factory), replay
+    if state_fn is not None:
+        found, raw = env.scopes.take_saved(path)
+        if found:
+            factory = state_factory if state_factory is not None else env.state._factory
+            return _restore_scope_state(env.state, raw, factory)
+    return await _project_state(state_fn, env.state, state_factory)
 
 
 def _restore_scope_state(
@@ -500,21 +460,29 @@ async def _run_branch(
     share a target Flow.
     """
     prev_result = node_args[0] if node_args else None
-    verdict = br.when(prev_result, ctx)
-    if inspect.isawaitable(verdict):
-        verdict = await verdict
+    verdict = await _branch_verdict(br, ctx, env, node_id, prev_result)
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
-        _assert_replay_allows_skip(
-            env,
-            node_id,
-            "branch predicate returned falsy with no else_ arm, but resume "
-            "path expected descent through this branch — predicate behavior "
-            "has changed since checkpoint.",
-        )
         return prev_result
     arm = _BranchArm("then" if verdict else "else")
     return await _run_arm(chosen, arm, env, node_id, prev_result)
+
+
+async def _branch_verdict(
+    br: _Branch, ctx: Context[Any], env: _RunEnv, node_id: str, prev_result: Any
+) -> bool:
+    """True for the ``then`` arm: the arm a checkout saved at this branch, else ``when``'s verdict.
+
+    A saved arm is taken as is: ``when`` is not evaluated again, since the
+    state it reads may have changed since the branch chose.
+    """
+    found, arm = env.scopes.take_cursor(env.owner_path(node_id), ARM)
+    if found:
+        return bool(arm == "then")
+    verdict = br.when(prev_result, ctx)
+    if inspect.isawaitable(verdict):
+        verdict = await verdict
+    return bool(verdict)
 
 
 async def _run_arm(
@@ -534,7 +502,6 @@ async def _run_arm(
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_chain_context=_descend_context(node_id, arm.arm),
             parent_ancestor_chain=env.ancestor_chain + (node_id,),
-            parent_replay=_pop_replay_for(env, node_id),
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=path,
@@ -552,51 +519,6 @@ class _BranchArm:
         return {ARM: self.arm}
 
 
-def _pop_replay_for(env: _RunEnv, node_id: str) -> _ResumeReplay | None:
-    """Return the replay to thread through a descent under ``node_id``.
-
-    Head-pop at descent site: when ``env.replay.remaining_path[0]``
-    equals ``node_id``, the descent is on the saved ancestor chain —
-    pop the head and thread the tail to the child Flow. Otherwise the
-    descent is off-path (its subtree cannot contain the leaf) or the
-    replay has already been consumed at the leaf, and no replay is
-    threaded. Called by every descent helper (``_run_subflow``,
-    ``_run_branch``, ``IterateRunner._dispatch_body``, ``_dispatch_map_body``).
-    ``full_path`` is preserved verbatim across the pop so downstream
-    triage messages can show the whole saved ancestor chain.
-    """
-    replay = env.replay
-    if replay is None or not replay.remaining_path:
-        return None
-    if env.runtime._replay_consumed:
-        return None
-    if replay.remaining_path[0] != node_id:
-        return None
-    return dataclasses.replace(replay, remaining_path=replay.remaining_path[1:])
-
-
-def _assert_replay_allows_skip(env: _RunEnv, node_id: str, reason: str) -> None:
-    """Fail-fast when a skipped descent was on the replay's saved path.
-
-    Called when a descent site decides not to descend (e.g., branch with
-    falsy predicate and no ``else_`` arm). If the replay's
-    ``remaining_path[0]`` equals ``node_id``, the checkpoint expected
-    descent through this node — skipping it means the composition
-    graph's runtime behavior has changed since the checkpoint was
-    written. Raising here preserves the head-pop invariant: no chain
-    step after a doomed skip runs before the error.
-    """
-    replay = env.replay
-    if replay is None or not replay.remaining_path:
-        return
-    if env.runtime._replay_consumed:
-        return
-    if replay.remaining_path[0] != node_id:
-        return
-    path_repr = " → ".join(replay.full_path) if replay.full_path else "<empty>"
-    raise RuntimeError(f"{reason} Saved path: {path_repr}")
-
-
 async def _save_halt_checkpoint(
     env: _RunEnv,
     iteration: int,
@@ -605,25 +527,21 @@ async def _save_halt_checkpoint(
 ) -> None:
     """Persist an ``outcome="halted"`` commit at a halt observation point.
 
-    Called from the executor's halt-observation sites — the between-
-    iterations check in :meth:`IterateRunner.run` and the between-chain-
-    steps check in :meth:`Chain._walk_steps` — so a ``run(resume="replay")``
-    after a halted process restart resolves to this commit and re-
-    enters at the halted position.
+    Called from the halt-observation sites — after each step in
+    :meth:`Chain._walk_steps` and before each pass in
+    :meth:`IterateRunner._loop` — so ``run(resume="latest")`` after a
+    halted process restart continues from this commit: every cursor is
+    where it was when the halt was observed.
 
     At most one halt-save fires per run: :attr:`Flow._halt_saved` on
-    the top-level runtime latches after the first save so a halt fires
-    through an inner iterate's boundary check + the outer chain-walk's
-    between-steps check does not double-save (the inner save is the
-    finer-grained resume anchor).
+    the top-level runtime latches after the first save, so the enclosing
+    chains and iterates that observe the same halt as the run unwinds
+    do not write another commit. The first save is the innermost one.
 
-    ``iteration`` is the iterate's current counter at halt time (``0``
-    for a chain-only halt with no enclosing iterate). ``node_id`` is
-    the node the halt was observed against — the iterate's node id for
-    the iterate case; the not-yet-run chain step's id for the chain
-    case. State is captured verbatim; verbs are expected to be
-    idempotent-in-effects to survive re-run on resume, the same
-    contract that already governs iterate re-run-iteration-N.
+    ``iteration`` and ``node_id`` go into the commit's metadata: the
+    enclosing iterate's pass (``0`` at a chain step) and the node the
+    halt was observed at. The step it was observed after runs again on
+    resume, the same contract as a checkpoint taken inside a step.
     """
     if env.runtime._halt_saved or env.checkpoint_ctx is None:
         return

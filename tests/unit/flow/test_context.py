@@ -349,7 +349,7 @@ class TestCtxExtraResume:
         # the post-halt iterations by identity.
         resume_lock = threading.Lock()
         assert resume_lock is not pre_lock
-        await build(halt_event=None).run(resume="replay", extra={"lock": resume_lock})
+        await build(halt_event=None).run(resume="latest", extra={"lock": resume_lock})
         # Every post-resume iteration observed the resume lock, never the
         # pre-halt one (which would prove extra leaked through a blob).
         assert len(seen) == 5, f"expected 5 iterations total, got {len(seen)}"
