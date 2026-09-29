@@ -93,6 +93,12 @@ class ScopeRegistry:
             return False, None
         return True, self._saved.pop(path)
 
+    def drop_saved(self) -> list[ScopePath]:
+        """Forget the saved scopes no block has taken; return their paths."""
+        dropped = list(self._saved)
+        self._saved.clear()
+        return dropped
+
     def open(self, path: ScopePath, scope: State[Any]) -> None:
         """Register ``scope`` as live at ``path``."""
         self._scopes[path] = scope
@@ -118,7 +124,9 @@ class ScopeRegistry:
 
         Returns tree paths (ending in :data:`STATE` or :data:`PASS`) mapped
         to JSON-compatible values. Nothing awaits in between, so every
-        value comes from the same moment.
+        value comes from the same moment. Saved scopes the run has not
+        reached yet are included as saved, so a checkpoint taken early in
+        a restart keeps them.
 
         Raises:
             TypeError: A scope's payload cannot be serialized; the message

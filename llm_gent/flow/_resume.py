@@ -34,7 +34,7 @@ from .checkpoint import COMPLETE_TAG
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
-from .state.snapshot import Snapshot, path_from_str
+from .state.snapshot import Snapshot, path_from_str, path_str
 
 
 if TYPE_CHECKING:
@@ -216,6 +216,10 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
     record and commits ``final_state`` tagged ``complete`` so a
     subsequent ``run(resume="replay")`` doesn't replay the last save point
     and re-execute chain steps after it.
+
+    A restart that finished without reaching some of its saved scopes
+    drops them first (:func:`_drop_unreached_scopes`), so the final
+    commit holds the root scope alone.
     """
     if (
         flow._checkpoint_ctx is None
@@ -224,10 +228,28 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
     ):
         return
     ctx = flow._checkpoint_ctx
+    _drop_unreached_scopes(flow, ctx.client_flow_id)
     if ctx.retention == "gc_on_success":
         await ctx.gc_history()
     else:
         await commit_completion(flow, final_state)
+
+
+def _drop_unreached_scopes(flow: Flow, client_flow_id: str) -> None:
+    """Forget the saved scopes a finished restart never reached, with a warning naming them.
+
+    The run executed every step it was going to, so a saved scope no block
+    took belongs to no step of this flow: its step was removed, or the run
+    took another branch arm or fewer map items or iterate passes. Kept, it
+    would ride along in every later snapshot and could be handed to a step
+    that reuses its node id.
+    """
+    dropped = flow._scopes.drop_saved()
+    if dropped:
+        flow._lg.warning(
+            "restart finished without reaching saved scopes; dropped them",
+            extra={"client_flow_id": client_flow_id, "paths": [path_str(p) for p in dropped]},
+        )
 
 
 async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
