@@ -42,6 +42,21 @@ def is_halt_signaled(env: _RunEnv) -> bool:
     return env.halt is not None and env.halt.is_set()
 
 
+def saves_run_halt(env: _RunEnv) -> bool:
+    """True when a halt observed under ``env`` is the run's halt, saved to the run's history.
+
+    A subflow's own ``.with_halt`` stops that subtree without ending the
+    run, and a subflow with its own checkpointer keeps a separate history:
+    neither writes the run's halt checkpoint.
+    """
+    runtime = env.runtime
+    return (
+        env.halt is runtime._halt_event
+        and env.checkpoint_ctx is not None
+        and env.checkpoint_ctx is runtime._checkpoint_ctx
+    )
+
+
 class HaltSaveObserver:
     """Halt-save kernel: single entrypoint for persisting a halt commit.
 

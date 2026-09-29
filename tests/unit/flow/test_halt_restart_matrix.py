@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Stop, then restart, is equivalent to an uninterrupted run.
+"""Stop, then resume, is equivalent to an uninterrupted run.
 
 Each case runs one generated flow shape three ways:
 
 1. Uninterrupted — the baseline, supplied by a pure-Python model.
 2. Stopped at one leaf: an ambient halt, a simulated crash (the process
    dies; the store sees no further write), or an exception.
-3. ``run(resume="restart")`` against the same store.
+3. ``run(resume="latest")`` against the same store.
 
 Dimensions: shape (chain, iterate, map, subflow, branch, ``state=``
 scope, up to three levels deep), the leaf where the run stops and
@@ -17,23 +17,25 @@ checkpoint policy (none, ``on_iterate``, ``on_map_item``, or
 ``ctx.checkpoint()`` in every leaf), sequential or parallel maps, and
 the store (in-memory; a subset against the file store).
 
-Leaves are state-driven, the contract restart relies on: a leaf whose
-work is already in ``state["done"]`` returns the recorded value without
-executing. The restart point is the newest commit with state that is
-not a failure record — the commit restart continues from.
+Leaves are not state-driven: a leaf does its work every time it runs,
+so a leaf that runs again shows up in the executed list. The resume
+point is the newest commit with state that is not a failure record —
+the commit ``resume="latest"`` checks out.
 
 Properties checked per case:
 
 - The stopped run ends as its stop dictates: a halt returns, a crash or
   an exception raises. Nothing is written after it returns or raises.
-- The restart point holds only work the stopped run did, with the
+- The resume point holds only work the stopped run did, with the
   baseline's values.
-- A halt writes a halt checkpoint, and the restart point holds every
+- A halt writes a halt checkpoint, and the resume point holds every
   leaf the stopped run completed; with a checkpoint in every leaf, so
-  does a crash's or an exception's restart point.
-- Restart ends with the baseline's result and ``done`` map, marks the
-  history complete, and executes exactly the leaves the restart point
-  lacks, none twice.
+  does a crash's or an exception's resume point.
+- Resume ends with the baseline's result and ``done`` map, marks the
+  history complete, and executes every leaf the resume point lacks, in
+  the baseline's order, once. Of the leaves the resume point holds, at
+  most one runs again: the one that was running when the checkpoint was
+  taken.
 
 Cases that fail because of a known defect are listed by id in
 ``halt_restart_known_defects.json`` and run as ``xfail(strict=True)``
@@ -300,8 +302,6 @@ def _leaf_verb(leaf: Leaf, probe: Probe) -> Any:
             return probe.partial_result(x)
         key = f"{leaf.name}:{x}"
         done = ctx.state.data.setdefault("done", {})
-        if key in done:
-            return done[key]
         probe.entered += 1
         fire = probe.stop is not None and probe.entered == probe.stop_at
         if fire:
@@ -384,8 +384,8 @@ async def _snapshot_done(history: History, commit: Any) -> dict[str, int] | None
     return done
 
 
-async def _restart_point_done(history: History) -> dict[str, int]:
-    """The ``done`` map restart continues from: newest commit with state, not a failure."""
+async def _resume_point_done(history: History) -> dict[str, int]:
+    """The ``done`` map resume continues from: newest commit with state, not a failure."""
     async for commit in history.commits():
         if commit.meta.node_path == FAILED_NODE_PATH:
             continue
@@ -556,16 +556,16 @@ async def _run_stopped(case: Case, shape: Seq, store: CrashableStore) -> Probe:
 
 
 @pytest.mark.parametrize("case", list(_params()))
-async def test_restart_after_stop_matches_uninterrupted_run(case: Case, tmp_path: Path) -> None:
+async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path: Path) -> None:
     shape = SHAPES[case.shape]
     expected_result, baseline = model(shape)
     inner = _store(case.store, tmp_path)
     history = History(inner, FLOW_NAME)
 
     first = await _run_stopped(case, shape, CrashableStore(inner))
-    captured = await _restart_point_done(history)
-    assert captured.items() <= baseline.items(), "restart point holds work never done"
-    assert set(captured) <= set(first.executed), "restart point holds work this run never did"
+    captured = await _resume_point_done(history)
+    assert captured.items() <= baseline.items(), "resume point holds work never done"
+    assert set(captured) <= set(first.executed), "resume point holds work this run never did"
     if case.stop == "halt":
         # A save point written after the halt checkpoint (a sibling map item
         # finishing its iteration) is kept: it carries more progress.
@@ -577,18 +577,20 @@ async def test_restart_after_stop_matches_uninterrupted_run(case: Case, tmp_path
     if case.policy == "leaf":
         # A leaf that raised inside a state= scope takes its work down with the
         # scope: the block never merges it, and a later save point (a sibling
-        # map item carrying on) no longer holds it. Restart runs that leaf again.
+        # map item carrying on) no longer holds it. Resume runs that leaf again.
         discarded = {first.stopped} if case.stop == "exception" and _has(shape, Scope) else set()
         lost = [k for k in first.checkpointed if k not in captured and k not in discarded]
-        assert not lost, f"checkpointed work missing from the restart point: {lost}"
+        assert not lost, f"checkpointed work missing from the resume point: {lost}"
 
-    restart = Probe(policy=case.policy)
-    flow = _flow(shape, restart, inner, parallel=case.parallel)
-    assert await flow.run(RUN_INPUT, resume="restart") == expected_result
+    resumed = Probe(policy=case.policy)
+    flow = _flow(shape, resumed, inner, parallel=case.parallel)
+    assert await flow.run(RUN_INPUT, resume="latest") == expected_result
     head = await history.head()
     assert head is not None and await _root_done(history, head) == baseline
     assert await history.is_complete()
-    assert len(restart.executed) == len(set(restart.executed)), "a leaf ran twice on restart"
-    assert set(restart.executed) == set(baseline) - set(captured)
-    if not case.parallel:
-        assert restart.executed == [k for k in baseline if k not in captured]
+    assert len(resumed.executed) == len(set(resumed.executed)), "a leaf ran twice on resume"
+    missing = [k for k in baseline if k not in captured]
+    assert [k for k in resumed.executed if k not in captured] == missing or case.parallel
+    assert set(resumed.executed) - set(captured) == set(missing)
+    again = [k for k in resumed.executed if k in captured]
+    assert len(again) <= 1, f"more than the interrupted step ran again: {again}"

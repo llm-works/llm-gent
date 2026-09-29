@@ -104,14 +104,12 @@ class ScopeRegistry:
         self._saved: dict[ScopePath, Any] = {}
         self._saved_cursors: dict[tuple[ScopePath, str], Any] = {}
 
-    def begin(
-        self, root: State[Any], saved: Snapshot | None = None, *, cursors: bool = False
-    ) -> None:
+    def begin(self, root: State[Any], saved: Snapshot | None = None) -> None:
         """Start a run whose root scope is ``root``; forget the previous run.
 
         ``saved`` is the snapshot the run continues from: its child scopes
-        are handed out by :meth:`take_saved` as the run reaches their paths,
-        and with ``cursors`` its cursor entries by :meth:`take_cursor`.
+        are handed out by :meth:`take_saved` and its cursor entries by
+        :meth:`take_cursor` as the run reaches their paths.
         """
         self._root = root
         self._scopes.clear()
@@ -121,7 +119,7 @@ class ScopeRegistry:
         )
         self._saved_cursors = (
             {}
-            if saved is None or not cursors
+            if saved is None
             else {
                 (path_from_str(p), name): raw
                 for p, entries in saved.cursors.items()
@@ -291,17 +289,6 @@ class Snapshot:
     root: Any = None
     scopes: dict[str, Any] = field(default_factory=dict)
     cursors: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    def chain(self, scope_path: str) -> list[Any]:
-        """Payloads of the live scopes from the root's child down to ``scope_path``, in order.
-
-        The scopes whose path is a prefix of ``scope_path`` (including it);
-        the root itself is not included.
-        """
-        target = path_from_str(scope_path)
-        owners = [path_from_str(p) for p in self.scopes]
-        on_path = sorted((p for p in owners if target[: len(p)] == p), key=len)
-        return [self.scopes[path_str(p)] for p in on_path]
 
 
 Loader = Callable[[Kind, str], Awaitable[bytes]]

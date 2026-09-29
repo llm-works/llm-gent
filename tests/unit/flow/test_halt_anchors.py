@@ -75,7 +75,7 @@ class TestHaltInLastStep:
         assert (snapshot.root, snapshot.scopes) == ({"s1": 1, "s2": 1}, {})
 
         calls.clear()
-        await build(None).run(resume="restart")
+        await build(None).run(resume="latest")
         assert calls == ["s1", "s2"]
         head = await history.head()
         assert head is not None

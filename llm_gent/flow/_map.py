@@ -6,8 +6,7 @@
 Extracted from :mod:`._executor`. Two classes:
 
 - :class:`MapRunner` resolves the input items (via ``items_fn`` or
-  the incoming ``prev_result``), pre-resolves which item (if any)
-  inherits the resume replay, spawns one :class:`MapItemRunner` per
+  the incoming ``prev_result``), spawns one :class:`MapItemRunner` per
   item under an optional concurrency cap, then aggregates results
   through ``mp.aggregate`` when provided. Strict mode re-raises the
   first per-item exception; non-strict swaps failing items for a
@@ -31,11 +30,10 @@ from typing import TYPE_CHECKING, Any
 from ._executor import (
     _enter_scope,
     _merge_state,
-    _pop_replay_for,
     _save_scope_commit,
 )
 from ._halt_observer import is_halt_signaled
-from ._node_id import _compute_node_ids, _descend_context
+from ._node_id import _descend_context
 from .context import Context
 from .nodes import Failure, ItemsFn, Skipped
 from .state import serialize_state_data
@@ -43,7 +41,7 @@ from .state.snapshot import ScopePath
 
 
 if TYPE_CHECKING:
-    from .nodes import _Map, _ResumeReplay, _RunEnv
+    from .nodes import _Map, _RunEnv
     from .state import State
 
 
@@ -119,11 +117,9 @@ class MapRunner:
             if self.mp.max_concurrency is not None
             else None
         )
-        item_replays = self._resolve_item_replays(len(items))
 
         async def _gated(index: int, item: Any) -> Any:
-            replay = item_replays.get(index)
-            runner = MapItemRunner(self.mp, self.env, self.node_id, item, index, replay, merge_lock)
+            runner = MapItemRunner(self.mp, self.env, self.node_id, item, index, merge_lock)
             if sem is None:
                 return await runner.run()
             async with sem:
@@ -145,29 +141,6 @@ class MapRunner:
         result = self.mp.aggregate(results)
         if inspect.isawaitable(result):
             result = await result
-        return result
-
-    def _resolve_item_replays(self, item_count: int) -> dict[int, _ResumeReplay | None]:
-        """Pre-resolve which item (if any) inherits the replay.
-
-        Pop replay once at the map boundary. Then, for each item,
-        check if the popped path's head matches any node_id in that
-        item's body. Only the matching item gets the replay; all
-        others get ``None``. This prevents scheduling-dependent
-        replay failures when concurrent map items race to validate
-        the path.
-        """
-        result: dict[int, _ResumeReplay | None] = {}
-        popped = _pop_replay_for(self.env, self.node_id)
-        if popped is None or not popped.remaining_path:
-            return result
-        head = popped.remaining_path[0]
-        for i in range(item_count):
-            item_ctx = _descend_context(self.node_id, f"map:{i}")
-            item_ids = _compute_node_ids(item_ctx, self.mp.body._nodes)
-            if head in item_ids:
-                result[i] = popped
-                break
         return result
 
 
@@ -196,7 +169,6 @@ class MapItemRunner:
         node_id: str,
         item: Any,
         item_index: int,
-        replay: _ResumeReplay | None,
         merge_lock: asyncio.Lock,
     ) -> None:
         self.mp = mp
@@ -204,7 +176,6 @@ class MapItemRunner:
         self.node_id = node_id
         self.item = item
         self.item_index = item_index
-        self.replay = replay
         self.merge_lock = merge_lock
         self.path: ScopePath = (*env.owner_path(node_id), "i", str(item_index))
 
@@ -229,8 +200,8 @@ class MapItemRunner:
         """Project the item's scope, then guard, body and merge per the map's contract."""
         item_ctx = self._ctx(self.env.state)
         try:
-            child_state, self.replay = await _enter_scope(
-                self.env, self.path, self.mp.state_fn, self.mp.state_factory, self.replay
+            child_state = await _enter_scope(
+                self.env, self.path, self.mp.state_fn, self.mp.state_factory
             )
             if self.mp.state_fn is not None:
                 self.env.scopes.open(self.path, child_state)
@@ -259,12 +230,8 @@ class MapItemRunner:
 
         Each item descends with a distinct ``chain_context`` keyed
         by ``item_index``, so nested iterates produce unique node
-        IDs per item — no checkpoint overwrites and no replay race
-        conditions when the map body contains checkpointed
-        primitives. ``replay`` was pre-resolved at the map boundary
-        (see :meth:`MapRunner._resolve_item_replays`) — only the
-        item whose body contains the replay's path head receives a
-        non-None value.
+        IDs per item, and under its own path (``self.path``), so its
+        scopes and cursors are distinct in every snapshot.
         """
         env = self.env
         return await self.mp.body._run_as_subflow(
@@ -276,7 +243,6 @@ class MapItemRunner:
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_chain_context=_descend_context(self.node_id, f"map:{self.item_index}"),
             parent_ancestor_chain=env.ancestor_chain + (self.node_id,),
-            parent_replay=self.replay,
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=self.path,

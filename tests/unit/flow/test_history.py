@@ -37,7 +37,7 @@ async def _run(store: JsonFileCheckpointStore, name: str, *, halt_at: int | None
         halt_after_iteration=halt_at,
         store=store,
         client_flow_id=name,
-    ).run(resume="replay")
+    ).run(resume="latest")
 
 
 async def _all(history: History) -> list[Commit]:
@@ -137,7 +137,7 @@ class TestCorruptHistory:
             client_flow_id="torn-resume",
         )
         with pytest.raises(HistoryCorrupt):
-            await flow.run(resume="replay")
+            await flow.run(resume="latest")
         # Nothing was written past the damage: the ref still names the missing commit.
         with pytest.raises(HistoryCorrupt):
             await History(store, "torn-resume").head()
