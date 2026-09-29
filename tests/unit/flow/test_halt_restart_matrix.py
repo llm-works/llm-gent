@@ -218,7 +218,7 @@ def model(shape: Seq) -> tuple[int, dict[str, int]]:
 
 # --- Store and probe --------------------------------------------------------
 
-_WRITES = frozenset({"bind_flow_id", "put_object", "put_ref", "put_tag", "gc_history"})
+_WRITES = frozenset({"bind_flow_id", "put_object", "set_ref", "gc_history"})
 
 
 class CrashableStore:

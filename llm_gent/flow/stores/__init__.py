@@ -12,10 +12,9 @@ Protocol:
   caller-owned root, atomic writes, trivial :meth:`gc_history` via
   ``rmtree``, no external dependency.
 - :class:`PgCheckpointStore` — Postgres via :class:`appinfra.db.pg.PG`,
-  ``ON CONFLICT DO NOTHING`` for object puts, ``ON CONFLICT DO UPDATE``
-  for ref puts, a database sequence for latest-ref lookup. DDL is owned
-  by llm-gent's package-level alembic (:func:`llm_gent.ensure_schema`);
-  the store never issues DDL.
+  ``ON CONFLICT DO NOTHING`` for object puts, single-statement
+  compare-and-set for refs. DDL is owned by llm-gent's package-level
+  alembic (:func:`llm_gent.ensure_schema`); the store never issues DDL.
 """
 
 from .json_file import JsonFileCheckpointStore

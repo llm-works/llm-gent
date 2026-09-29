@@ -31,9 +31,8 @@ class _History:
     client_flow_id: str
     """The name bound to this history; empty while written to without a binding."""
     objects: dict[tuple[Kind, str], bytes] = field(default_factory=dict)
-    refs: dict[tuple[str, int], tuple[str, int]] = field(default_factory=dict)
-    """``(node_path, iteration)`` → ``(commit_hash, write sequence)``."""
-    tags: dict[str, str] = field(default_factory=dict)
+    refs: dict[str, str] = field(default_factory=dict)
+    """Ref name → commit hash."""
 
 
 def _require_non_empty(**keys: str | None) -> None:
@@ -59,7 +58,6 @@ class InMemoryCheckpointStore:
         self.retention = retention
         self._names: dict[str, str] = {}
         self._histories: dict[str, _History] = {}
-        self._seq = 0
         self._lock = threading.Lock()
 
     # --- name map ---
@@ -115,54 +113,24 @@ class InMemoryCheckpointStore:
         """Return ``True`` when the object exists."""
         return self.get_object(flow_id, kind, content_hash) is not None
 
-    # --- ref store ---
+    # --- refs ---
 
-    def put_ref(self, flow_id: str, node_path: str, iteration: int, commit_hash: str) -> None:
-        """Point ``(node_path, iteration)`` at ``commit_hash``; a re-put is the newest write."""
-        _require_non_empty(flow_id=flow_id, node_path=node_path)
-        with self._lock:
-            self._seq += 1
-            self._history(flow_id).refs[(node_path, iteration)] = (commit_hash, self._seq)
-
-    def resolve_ref(
-        self,
-        flow_id: str,
-        node_path: str | None = None,
-        iteration: int | None = None,
-    ) -> str | None:
-        """Return the commit hash for the key; see :meth:`CheckpointStore.resolve_ref`.
-
-        No ``node_path``: the newest write in the history. ``node_path``
-        alone: its highest iteration. Both: the exact ref.
-        """
-        if node_path is None and iteration is not None:
-            raise ValueError("iteration requires node_path; use both or neither")
-        _require_non_empty(flow_id=flow_id, node_path=node_path)
+    def get_ref(self, flow_id: str, name: str) -> str | None:
+        """Return the commit hash ref ``name`` points at, or ``None``."""
+        _require_non_empty(flow_id=flow_id, ref_name=name)
         with self._lock:
             history = self._histories.get(flow_id)
-            refs = {} if history is None else history.refs
-            if node_path is None:
-                return max(refs.values(), key=lambda ref: ref[1])[0] if refs else None
-            if iteration is not None:
-                ref = refs.get((node_path, iteration))
-                return None if ref is None else ref[0]
-            under = [(it, ref) for (path, it), ref in refs.items() if path == node_path]
-            return max(under, key=lambda entry: entry[0])[1][0] if under else None
+            return None if history is None else history.refs.get(name)
 
-    # --- tags ---
-
-    def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None:
-        """Point tag ``name`` at ``commit_hash``, moving it if it exists."""
-        _require_non_empty(flow_id=flow_id, tag_name=name)
+    def set_ref(self, flow_id: str, name: str, commit_hash: str, expected: str | None) -> bool:
+        """Point ref ``name`` at ``commit_hash`` if it points at ``expected`` (``None``: absent)."""
+        _require_non_empty(flow_id=flow_id, ref_name=name, commit_hash=commit_hash)
         with self._lock:
-            self._history(flow_id).tags[name] = commit_hash
-
-    def resolve_tag(self, flow_id: str, name: str) -> str | None:
-        """Return the commit hash tag ``name`` points at, or ``None``."""
-        _require_non_empty(flow_id=flow_id, tag_name=name)
-        with self._lock:
-            history = self._histories.get(flow_id)
-            return None if history is None else history.tags.get(name)
+            refs = self._history(flow_id).refs
+            if refs.get(name) != expected:
+                return False
+            refs[name] = commit_hash
+            return True
 
     # --- history cleanup ---
 

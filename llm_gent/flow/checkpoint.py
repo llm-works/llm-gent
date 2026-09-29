@@ -13,7 +13,7 @@ it:
   generated on the first save. Every object, ref and commit is keyed by
   ``flow_id``; the agent's name never enters stored objects.
 
-The store is a Protocol with five surfaces:
+The store is a Protocol with four surfaces:
 
 - **Name map** — :meth:`get_flow_id` / :meth:`bind_flow_id` map a
   ``client_flow_id`` to its ``flow_id``. At most one history per name;
@@ -28,22 +28,20 @@ The store is a Protocol with five surfaces:
   identical byte payloads produce identical blob hashes, so a resume's
   reconstruction is byte-exact.
 
-- **Ref store** — points ``(flow_id, node_path, iteration)`` at a
-  commit hash. ``put_ref`` records "this history reached this commit
-  at this iterate boundary"; ``resolve_ref`` returns the commit hash for
-  a full or partial key (``node_path=None, iteration=None`` returns the
-  latest commit across the history — the head, where resume starts
-  walking back from).
+- **Refs** — named pointers to commits, as in git. :meth:`get_ref` reads
+  one; :meth:`set_ref` moves it with compare-and-set: the write lands only
+  while the ref still points where the writer expects, so a second writer
+  on the same history is detected instead of silently forking it.
+  :data:`HEAD_REF` is the newest commit of the history, where every new
+  commit is parented and where restart starts. Tags are refs under
+  ``tags/``: on a clean exit the framework commits the final state at
+  :data:`END_NODE_PATH` and moves :data:`COMPLETE_TAG` to it. The history
+  is complete while ``HEAD`` is that final-state commit; the tag keeps
+  pointing at the last finished run's final state after later runs
+  append past it.
 
-- **Tags** — :meth:`put_tag` / :meth:`resolve_tag` point a named label
-  under ``flow_id`` at a commit hash. A tag moves when re-put. On a clean
-  exit the framework commits the final state at :data:`END_NODE_PATH`
-  and moves ``"complete"`` to it. The history is complete while its
-  latest commit is that final-state commit; the tag keeps pointing at
-  the last finished run's final state after later runs append past it.
-
-- **History cleanup** — :meth:`gc_history` removes every object, ref,
-  tag and the name mapping of one ``flow_id``. The framework calls it on a
+- **History cleanup** — :meth:`gc_history` removes every object, ref
+  and the name mapping of one ``flow_id``. The framework calls it on a
   fully successful :meth:`Flow.run` when the store's retention policy is
   ``"gc_on_success"``; the default ``"retain"`` keeps successful
   histories on disk for audit, cross-run diff, and downstream
@@ -92,8 +90,31 @@ Values match :mod:`llm_gent.flow.state.cas`:
 """
 
 
-COMPLETE_TAG = "complete"
-"""Tag the framework moves to a history's final-state commit on clean exit.
+HEAD_REF = "HEAD"
+"""Ref naming a history's newest commit: the parent of the next commit and
+the commit restart starts from."""
+
+
+class ConcurrentWriteError(RuntimeError):
+    """A ref moved under a writer: a second writer is committing to the same history.
+
+    A history has one writer at a time. Every commit moves :data:`HEAD_REF`
+    by compare-and-set from its parent, so a second writer is detected at
+    its next commit instead of silently forking the history.
+    """
+
+    def __init__(self, client_flow_id: str, ref: str, expected: str | None) -> None:
+        super().__init__(
+            f"history {client_flow_id!r}: ref {ref!r} no longer points at {expected!r}; "
+            f"another writer is committing to this history"
+        )
+        self.client_flow_id = client_flow_id
+        self.ref = ref
+        self.expected = expected
+
+
+COMPLETE_TAG = "tags/complete"
+"""Ref the framework moves to a history's final-state commit on clean exit.
 
 It always points at the final state of the most recent run that finished,
 including after a later run appended commits past it.
@@ -201,10 +222,9 @@ class CheckpointPolicy:
 
     Default ``False``: map items do NOT auto-save. Set ``True`` for
     long-running maps with expensive per-item bodies where observing
-    per-item progress is valuable. Each save writes at
-    ``iteration=item_index`` under the map's node_path, so distinct
-    items land in distinct ref slots. Items complete in parallel;
-    save order is not guaranteed to match item order.
+    per-item progress is valuable. Each save's commit records
+    ``iteration=item_index`` under the map's node_path. Items complete
+    in parallel; save order is not guaranteed to match item order.
 
     **Limitation:** per-item commits are currently observability-only.
     Resume does not yet skip completed items — the whole map re-runs,
@@ -241,8 +261,8 @@ class CheckpointStore(Protocol):
     """Content-addressed persistence for Flow histories.
 
     Name map, object store (put / get / has for opaque bytes keyed by
-    content hash), ref store (points a history key at a commit hash),
-    tags, and cleanup on one Protocol. See the module docstring for the
+    content hash), named refs with compare-and-set, and cleanup on one
+    Protocol. See the module docstring for the
     object model and retention policy.
 
     Each method may be declared ``def`` (returning its value directly)
@@ -341,69 +361,31 @@ class CheckpointStore(Protocol):
         """
         ...
 
-    # Ref store
+    # Refs
 
-    def put_ref(
+    def get_ref(self, flow_id: str, name: str) -> str | None | Awaitable[str | None]:
+        """Return the commit hash ref ``name`` points at, or ``None`` when it does not exist.
+
+        Ref names are non-empty strings such as :data:`HEAD_REF` or
+        ``"tags/complete"``; a ``/`` is part of the name, not a hierarchy.
+
+        May be declared ``async def``.
+        """
+        ...
+
+    def set_ref(
         self,
         flow_id: str,
-        node_path: str,
-        iteration: int,
+        name: str,
         commit_hash: str,
-    ) -> None | Awaitable[None]:
-        """Point ``(flow_id, node_path, iteration)`` at ``commit_hash``.
+        expected: str | None,
+    ) -> bool | Awaitable[bool]:
+        """Point ref ``name`` at ``commit_hash`` if it currently points at ``expected``.
 
-        Idempotent overwrite: the same key re-put with a different
-        commit_hash replaces the earlier record. Callers rely on this
-        to record "this iterate boundary reached this commit."
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def resolve_ref(
-        self,
-        flow_id: str,
-        node_path: str | None = None,
-        iteration: int | None = None,
-    ) -> str | None | Awaitable[str | None]:
-        """Return the ``commit_hash`` for the history key, or ``None``.
-
-        Argument combinations:
-
-        - Both ``None`` (default) — return the latest commit across every
-          ``node_path`` under ``flow_id``. This is what
-          :meth:`Flow.run` ``resume=`` calls to find the resume
-          entry point.
-        - ``node_path`` set, ``iteration=None`` — latest iteration under
-          that specific ``node_path``.
-        - Both set — exact record, or ``None``.
-
-        ``iteration`` without ``node_path`` is invalid — implementations
-        raise :class:`ValueError`.
-
-        "Latest" is by save order, and a re-put counts as a new save.
-        Implementations need a write-order signal that does not depend on
-        writer clocks (Postgres: a database sequence; JsonFile: a per-history
-        counter). The framework uses it to pick a commit's parent and the
-        resume point.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    # Tags
-
-    def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None | Awaitable[None]:
-        """Point the tag ``name`` under ``flow_id`` at ``commit_hash``.
-
-        Overwrites: re-putting a tag moves it.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def resolve_tag(self, flow_id: str, name: str) -> str | None | Awaitable[str | None]:
-        """Return the commit hash the tag ``name`` points at, or ``None``.
+        ``expected=None`` means the ref must not exist yet. Returns
+        ``True`` when the write landed, ``False`` when the ref points
+        elsewhere — nothing is written then. MUST be atomic: of concurrent
+        writers passing the same ``expected``, at most one succeeds.
 
         May be declared ``async def``.
         """
@@ -412,7 +394,7 @@ class CheckpointStore(Protocol):
     # History cleanup
 
     def gc_history(self, flow_id: str) -> None | Awaitable[None]:
-        """Remove every object, ref and tag under ``flow_id``, and its name mapping.
+        """Remove every object and ref under ``flow_id``, and its name mapping.
 
         Idempotent: absence is not an error. Called by :meth:`Flow.run`'s
         clean-exit path when :attr:`retention` is ``"gc_on_success"``;

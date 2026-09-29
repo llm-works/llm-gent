@@ -58,52 +58,61 @@ class CheckpointStoreConformance:
         assert store.get_object("history-a", "blob", "hash") == b"a-bytes"
         assert store.get_object("history-b", "blob", "hash") == b"b-bytes"
 
-    # --- ref store ---
+    # --- refs ---
 
-    def test_put_resolve_exact_key(self, store: Any) -> None:
-        store.put_ref("history-1", "node/x", 5, "commit-hash-5")
-        assert store.resolve_ref("history-1", "node/x", 5) == "commit-hash-5"
+    def test_get_ref_returns_none_when_absent(self, store: Any) -> None:
+        assert store.get_ref("history-1", "HEAD") is None
 
-    def test_resolve_ref_returns_none_when_absent(self, store: Any) -> None:
-        assert store.resolve_ref("history-1") is None
-        assert store.resolve_ref("history-1", "node/x") is None
-        assert store.resolve_ref("history-1", "node/x", 5) is None
+    def test_set_ref_creates_when_expected_absent(self, store: Any) -> None:
+        assert store.set_ref("history-1", "HEAD", "commit-1", None) is True
+        assert store.get_ref("history-1", "HEAD") == "commit-1"
 
-    def test_resolve_latest_across_node_paths(self, store: Any) -> None:
-        """No node_path: the newest write across the history."""
-        store.put_ref("history-1", "node/a", 1, "hash-1")
-        store.put_ref("history-1", "node/b", 1, "hash-2")
-        assert store.resolve_ref("history-1") == "hash-2"
+    def test_create_refused_when_ref_exists(self, store: Any) -> None:
+        store.set_ref("history-1", "HEAD", "commit-1", None)
+        assert store.set_ref("history-1", "HEAD", "commit-2", None) is False
+        assert store.get_ref("history-1", "HEAD") == "commit-1"
 
-    def test_re_put_becomes_latest(self, store: Any) -> None:
-        """Re-putting an existing key counts as a new write, so it becomes the newest."""
-        store.put_ref("history-1", "node/a", 1, "hash-a")
-        store.put_ref("history-1", "node/b", 1, "hash-b")
-        store.put_ref("history-1", "node/a", 1, "hash-a2")
-        assert store.resolve_ref("history-1") == "hash-a2"
+    def test_set_ref_moves_from_expected(self, store: Any) -> None:
+        store.set_ref("history-1", "HEAD", "commit-1", None)
+        assert store.set_ref("history-1", "HEAD", "commit-2", "commit-1") is True
+        assert store.get_ref("history-1", "HEAD") == "commit-2"
 
-    def test_resolve_latest_under_node_path(self, store: Any) -> None:
-        """node_path alone: its highest iteration, not its newest write."""
-        store.put_ref("history-1", "node/x", 1, "hash-1")
-        store.put_ref("history-1", "node/x", 3, "hash-3")
-        store.put_ref("history-1", "node/x", 2, "hash-2")
-        assert store.resolve_ref("history-1", "node/x") == "hash-3"
+    def test_move_refused_from_stale_expected(self, store: Any) -> None:
+        """A writer whose view of the ref is stale changes nothing."""
+        store.set_ref("history-1", "HEAD", "commit-1", None)
+        store.set_ref("history-1", "HEAD", "commit-2", "commit-1")
+        assert store.set_ref("history-1", "HEAD", "commit-3", "commit-1") is False
+        assert store.get_ref("history-1", "HEAD") == "commit-2"
 
-    def test_resolve_iteration_without_node_path_raises(self, store: Any) -> None:
-        with pytest.raises(ValueError, match="iteration requires node_path"):
-            store.resolve_ref("history-1", None, 5)
+    def test_move_refused_when_ref_absent(self, store: Any) -> None:
+        assert store.set_ref("history-1", "HEAD", "commit-2", "commit-1") is False
+        assert store.get_ref("history-1", "HEAD") is None
 
-    def test_put_ref_overwrites_same_key(self, store: Any) -> None:
-        store.put_ref("history-1", "node/x", 5, "hash-first")
-        store.put_ref("history-1", "node/x", 5, "hash-second")
-        assert store.resolve_ref("history-1", "node/x", 5) == "hash-second"
+    def test_ref_names_are_independent(self, store: Any) -> None:
+        """A name with a slash is one ref, not a hierarchy."""
+        store.set_ref("history-1", "HEAD", "commit-1", None)
+        store.set_ref("history-1", "tags/complete", "commit-0", None)
+        assert store.get_ref("history-1", "HEAD") == "commit-1"
+        assert store.get_ref("history-1", "tags/complete") == "commit-0"
+        assert store.get_ref("history-1", "tags") is None
 
     def test_refs_do_not_leak_across_histories(self, store: Any) -> None:
-        store.put_ref("history-a", "node/x", 1, "hash-a")
-        store.put_ref("history-b", "node/x", 1, "hash-b")
-        assert store.resolve_ref("history-a", "node/x", 1) == "hash-a"
-        assert store.resolve_ref("history-b", "node/x", 1) == "hash-b"
-        assert store.resolve_ref("history-a") == "hash-a"
+        store.set_ref("history-a", "HEAD", "hash-a", None)
+        store.set_ref("history-b", "HEAD", "hash-b", None)
+        assert store.get_ref("history-a", "HEAD") == "hash-a"
+        assert store.get_ref("history-b", "HEAD") == "hash-b"
+
+    def test_concurrent_moves_from_one_parent_have_one_winner(self, store: Any) -> None:
+        store.set_ref("history-1", "HEAD", "commit-0", None)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(
+                pool.map(
+                    lambda i: store.set_ref("history-1", "HEAD", f"commit-{i}", "commit-0"),
+                    range(1, 17),
+                )
+            )
+        assert results.count(True) == 1
+        assert store.get_ref("history-1", "HEAD") == f"commit-{results.index(True) + 1}"
 
     # --- name map ---
 
@@ -138,35 +147,16 @@ class CheckpointStoreConformance:
         assert len(set(results)) == 1
         assert store.get_flow_id("campaign-1") == results[0]
 
-    # --- tags ---
-
-    def test_tag_put_resolve_round_trip(self, store: Any) -> None:
-        store.put_tag("history-1", "complete", "commit-h")
-        assert store.resolve_tag("history-1", "complete") == "commit-h"
-
-    def test_resolve_tag_returns_none_when_absent(self, store: Any) -> None:
-        assert store.resolve_tag("history-1", "complete") is None
-
-    def test_re_put_moves_the_tag(self, store: Any) -> None:
-        store.put_tag("history-1", "complete", "commit-1")
-        store.put_tag("history-1", "complete", "commit-2")
-        assert store.resolve_tag("history-1", "complete") == "commit-2"
-
-    def test_tags_do_not_leak_across_histories(self, store: Any) -> None:
-        store.put_tag("history-a", "complete", "hash-a")
-        assert store.resolve_tag("history-b", "complete") is None
-
     # --- gc_history ---
 
-    def test_gc_removes_objects_refs_and_tags(self, store: Any) -> None:
+    def test_gc_removes_objects_and_refs(self, store: Any) -> None:
         store.put_object("history-1", "blob", "h1", b"payload")
-        store.put_ref("history-1", "node/x", 1, "commit-h")
-        store.put_tag("history-1", "complete", "commit-h")
+        store.set_ref("history-1", "HEAD", "commit-h", None)
+        store.set_ref("history-1", "tags/complete", "commit-h", None)
         store.gc_history("history-1")
         assert store.get_object("history-1", "blob", "h1") is None
-        assert store.resolve_ref("history-1", "node/x", 1) is None
-        assert store.resolve_ref("history-1") is None
-        assert store.resolve_tag("history-1", "complete") is None
+        assert store.get_ref("history-1", "HEAD") is None
+        assert store.get_ref("history-1", "tags/complete") is None
 
     def test_gc_frees_the_name(self, store: Any) -> None:
         store.bind_flow_id("campaign-1", "history-1")
@@ -183,11 +173,11 @@ class CheckpointStoreConformance:
         store.bind_flow_id("campaign-b", "history-b")
         store.put_object("history-a", "blob", "h", b"a-bytes")
         store.put_object("history-b", "blob", "h", b"b-bytes")
-        store.put_ref("history-b", "node/x", 1, "hash-b")
+        store.set_ref("history-b", "HEAD", "hash-b", None)
         store.gc_history("history-a")
         assert store.get_object("history-a", "blob", "h") is None
         assert store.get_object("history-b", "blob", "h") == b"b-bytes"
-        assert store.resolve_ref("history-b") == "hash-b"
+        assert store.get_ref("history-b", "HEAD") == "hash-b"
         assert store.get_flow_id("campaign-b") == "history-b"
 
     # --- retention ---

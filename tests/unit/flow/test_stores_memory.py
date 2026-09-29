@@ -52,28 +52,26 @@ class TestMemoryStore:
             lambda s: s.bind_flow_id("", "history-1"),
             lambda s: s.bind_flow_id("campaign-1", ""),
             lambda s: s.put_object("", "blob", "h", b"x"),
-            lambda s: s.put_ref("history-1", "", 1, "c"),
-            lambda s: s.put_tag("history-1", "", "c"),
+            lambda s: s.set_ref("history-1", "", "c", None),
+            lambda s: s.set_ref("history-1", "HEAD", "", None),
             lambda s: s.get_flow_id(""),
             lambda s: s.get_object("", "blob", "h"),
             lambda s: s.has_object("", "blob", "h"),
-            lambda s: s.resolve_ref(""),
-            lambda s: s.resolve_ref("history-1", ""),
-            lambda s: s.resolve_tag("history-1", ""),
+            lambda s: s.get_ref("", "HEAD"),
+            lambda s: s.get_ref("history-1", ""),
             lambda s: s.gc_history(""),
         ],
         ids=[
             "bind-client-flow-id",
             "bind-flow-id",
             "put-object",
-            "put-ref",
-            "put-tag",
+            "set-ref-name",
+            "set-ref-commit",
             "get-flow-id",
             "get-object",
             "has-object",
-            "resolve-ref-flow-id",
-            "resolve-ref-node-path",
-            "resolve-tag",
+            "get-ref-flow-id",
+            "get-ref-name",
             "gc",
         ],
     )
@@ -82,22 +80,24 @@ class TestMemoryStore:
             call(store)  # type: ignore[operator]
 
     def test_reads_and_writes_from_many_threads(self, store: InMemoryCheckpointStore) -> None:
-        """Resolving the newest ref while other threads add refs neither raises nor loses one."""
+        """Reads interleaved with writes from other threads neither raise nor lose a write."""
         from concurrent.futures import ThreadPoolExecutor
 
         def write(i: int) -> None:
-            store.put_ref("history-1", f"node/{i}", i, f"hash-{i}")
+            store.set_ref("history-1", f"ref-{i}", f"hash-{i}", None)
             store.put_object("history-1", "blob", f"h{i}", b"x")
 
-        def read(_i: int) -> None:
-            store.resolve_ref("history-1")
-            store.resolve_ref("history-1", "node/0")
+        def read(i: int) -> None:
+            store.get_ref("history-1", f"ref-{i - 1}")
+            store.has_object("history-1", "blob", f"h{i - 1}")
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = [pool.submit(write if i % 2 else read, i) for i in range(4000)]
             for future in futures:
                 future.result()
-        assert all(store.has_object("history-1", "blob", f"h{i}") for i in range(1, 4000, 2))
+        odd = range(1, 4000, 2)
+        assert all(store.get_ref("history-1", f"ref-{i}") == f"hash-{i}" for i in odd)
+        assert all(store.has_object("history-1", "blob", f"h{i}") for i in odd)
 
     def test_explicit_gc_on_success(self) -> None:
         assert InMemoryCheckpointStore(retention="gc_on_success").retention == "gc_on_success"

@@ -3,7 +3,7 @@
 
 """Postgres-backed :class:`CheckpointStore` — content-addressed object + ref store.
 
-Four tables:
+Three tables:
 
 - :class:`FlowName` — ``client_flow_id`` PK → ``flow_id`` (unique): the
   agent's name for a history mapped to gent's internal id.
@@ -11,17 +11,14 @@ Four tables:
   ``BYTEA payload``. Idempotent puts via ``ON CONFLICT DO NOTHING``:
   content-hashing guarantees same-hash → same bytes, so a re-put is a
   no-op.
-- :class:`FlowRef` — ``(flow_id, node_path, iteration)`` PK,
-  ``VARCHAR(64) commit_hash``, ``BIGINT seq``, ``TIMESTAMPTZ
-  created_at``. Idempotent overwrite via ``ON CONFLICT DO UPDATE``
-  drawing a new ``seq`` from a database sequence, so the latest ref is
-  ``ORDER BY seq DESC`` — write order independent of writer clocks.
-- :class:`FlowTag` — ``(flow_id, name)`` PK → ``commit_hash``. Upsert
-  moves the tag.
+- :class:`FlowRef` — ``(flow_id, name)`` PK → ``commit_hash``. Created
+  with ``INSERT ... ON CONFLICT DO NOTHING`` and moved with ``UPDATE ...
+  WHERE commit_hash = <expected>``: each is one atomic statement, so of
+  concurrent compare-and-set writers at most one lands.
 
-Object, ref and tag tables scope everything by ``flow_id`` —
-history-scoped storage; blobs are deliberately not shared across
-histories. :meth:`gc_history` is four DELETE statements.
+Object and ref tables scope everything by ``flow_id`` — history-scoped
+storage; blobs are deliberately not shared across histories.
+:meth:`gc_history` is three DELETE statements.
 
 Schema is not managed by the store. Consumers call
 :func:`llm_gent.ensure_schema` (or :class:`llm_gent.schema.SchemaManager`
@@ -32,20 +29,13 @@ the store just uses the tables.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any, cast
 
 from appinfra.db.pg import PG
 from appinfra.log import Logger
-from sqlalchemy import (
-    BigInteger,
-    DateTime,
-    Integer,
-    LargeBinary,
-    Sequence,
-    String,
-    delete,
-    select,
-)
+from sqlalchemy import DateTime, LargeBinary, String, delete, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,9 +46,6 @@ from ..checkpoint import Kind, Retention
 
 _FLOW_ID_LEN = 36
 """Length of a ``flow_id`` column — a canonical UUID string."""
-
-_REF_SEQ = Sequence("gent_flow_ref_seq", metadata=Base.metadata)
-"""Sequence feeding :attr:`FlowRef.seq` (write order of refs)."""
 
 
 class FlowName(Base):
@@ -94,36 +81,14 @@ class FlowObject(Base):
 
 
 class FlowRef(Base):
-    """One row = one ``(flow_id, node_path, iteration)`` → commit_hash.
-
-    ``seq`` is drawn from :data:`_REF_SEQ` on insert and redrawn on every
-    re-put, so :meth:`resolve_ref` returns the newest ref across a history
-    via ``ORDER BY seq DESC`` — database write order, not writer clocks.
-    """
+    """One row = one named ref ``(flow_id, name)`` → commit_hash (``HEAD``, ``tags/...``)."""
 
     __tablename__ = "gent_flow_ref"
 
     flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
-    node_path: Mapped[str] = mapped_column(String(1024), primary_key=True)
-    iteration: Mapped[int] = mapped_column(Integer, primary_key=True)
-    commit_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    seq: Mapped[int] = mapped_column(
-        BigInteger, _REF_SEQ, nullable=False, server_default=_REF_SEQ.next_value()
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
-
-
-class FlowTag(Base):
-    """One row = one named tag ``(flow_id, name)`` → commit_hash; re-put moves it."""
-
-    __tablename__ = "gent_flow_tag"
-
-    flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), primary_key=True)
     commit_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
@@ -241,92 +206,51 @@ class PgCheckpointStore:
             return session.execute(stmt).first() is not None
 
     # ------------------------------------------------------------------
-    # Ref store
+    # Refs
     # ------------------------------------------------------------------
 
-    def put_ref(
-        self,
-        flow_id: str,
-        node_path: str,
-        iteration: int,
-        commit_hash: str,
-    ) -> None:
-        """Idempotent overwrite — a re-put draws a new ``seq`` and refreshes ``created_at``."""
-        stmt = insert(FlowRef).values(
-            flow_id=flow_id,
-            node_path=node_path,
-            iteration=iteration,
-            commit_hash=commit_hash,
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["flow_id", "node_path", "iteration"],
-            set_={
-                "commit_hash": stmt.excluded.commit_hash,
-                "seq": _REF_SEQ.next_value(),
-                "created_at": datetime.now(UTC),
-            },
-        )
+    def get_ref(self, flow_id: str, name: str) -> str | None:
+        """Return the commit hash ref ``name`` points at, or ``None``."""
+        stmt = select(FlowRef.commit_hash).where(FlowRef.flow_id == flow_id, FlowRef.name == name)
         with self._pg.session() as session:
-            session.execute(stmt)
+            row = session.execute(stmt).first()
+        return None if row is None else str(row[0])
 
-    def resolve_ref(
-        self,
-        flow_id: str,
-        node_path: str | None = None,
-        iteration: int | None = None,
-    ) -> str | None:
-        """Return the commit hash for the history key, or ``None``.
+    def set_ref(self, flow_id: str, name: str, commit_hash: str, expected: str | None) -> bool:
+        """Point ref ``name`` at ``commit_hash`` if it points at ``expected`` (``None``: absent).
 
-        See :class:`~llm_gent.flow.checkpoint.CheckpointStore.resolve_ref`.
+        One statement either way — ``INSERT ... ON CONFLICT DO NOTHING`` to
+        create, ``UPDATE ... WHERE commit_hash = expected`` to move — so
+        the row count says whether this writer won.
         """
-        if node_path is None and iteration is not None:
-            raise ValueError("iteration requires node_path; use both or neither")
-        stmt = select(FlowRef.commit_hash).where(FlowRef.flow_id == flow_id)
-        if node_path is not None:
-            stmt = stmt.where(FlowRef.node_path == node_path)
-        if iteration is not None:
-            stmt = stmt.where(FlowRef.iteration == iteration)
-        elif node_path is not None:
-            # Latest under a specific node_path = highest iteration, not
-            # newest write — matches the JsonFile helper's semantics and
-            # the Protocol contract.
-            stmt = stmt.order_by(FlowRef.iteration.desc()).limit(1)
+        stmt: Any
+        if expected is None:
+            stmt = (
+                insert(FlowRef)
+                .values(flow_id=flow_id, name=name, commit_hash=commit_hash)
+                .on_conflict_do_nothing(index_elements=["flow_id", "name"])
+            )
         else:
-            # Latest across the whole history = newest write, by database sequence.
-            stmt = stmt.order_by(FlowRef.seq.desc()).limit(1)
+            stmt = (
+                update(FlowRef)
+                .where(
+                    FlowRef.flow_id == flow_id,
+                    FlowRef.name == name,
+                    FlowRef.commit_hash == expected,
+                )
+                .values(commit_hash=commit_hash, updated_at=datetime.now(UTC))
+            )
         with self._pg.session() as session:
-            row = session.execute(stmt).first()
-        return None if row is None else str(row[0])
-
-    # ------------------------------------------------------------------
-    # Tags
-    # ------------------------------------------------------------------
-
-    def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None:
-        """Upsert — re-put moves the tag and refreshes ``created_at``."""
-        stmt = insert(FlowTag).values(flow_id=flow_id, name=name, commit_hash=commit_hash)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["flow_id", "name"],
-            set_={"commit_hash": stmt.excluded.commit_hash, "created_at": datetime.now(UTC)},
-        )
-        with self._pg.session() as session:
-            session.execute(stmt)
-
-    def resolve_tag(self, flow_id: str, name: str) -> str | None:
-        """Return the commit hash tag ``name`` points at, or ``None``."""
-        stmt = select(FlowTag.commit_hash).where(FlowTag.flow_id == flow_id, FlowTag.name == name)
-        with self._pg.session() as session:
-            row = session.execute(stmt).first()
-        return None if row is None else str(row[0])
+            result = cast(CursorResult[Any], session.execute(stmt))
+        return bool(result.rowcount == 1)
 
     # ------------------------------------------------------------------
     # History cleanup
     # ------------------------------------------------------------------
 
     def gc_history(self, flow_id: str) -> None:
-        """Delete every object, ref and tag under ``flow_id`` and its name binding. Idempotent."""
+        """Delete every object and ref under ``flow_id`` and its name binding. Idempotent."""
         with self._pg.session() as session:
-            session.execute(delete(FlowTag).where(FlowTag.flow_id == flow_id))
             session.execute(delete(FlowRef).where(FlowRef.flow_id == flow_id))
             session.execute(delete(FlowObject).where(FlowObject.flow_id == flow_id))
             session.execute(delete(FlowName).where(FlowName.flow_id == flow_id))

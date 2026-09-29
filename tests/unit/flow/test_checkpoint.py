@@ -12,7 +12,7 @@ iterated) through a real :class:`JsonFileCheckpointStore` and asserts:
 - the retention policy toggles gc-on-clean-exit;
 - halt-triggered exit always preserves the history.
 
-Direct-Protocol tests (put/get/put_ref/resolve_ref/gc) live in
+Direct-Protocol tests (objects, refs, gc) live in
 :mod:`tests.unit.flow.test_stores_json` (and the PG equivalent in
 :mod:`tests.integration.flow.test_stores_pg`).
 """
@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.stores import JsonFileCheckpointStore
 from llm_gent.flow.testing.checkpoint import (
     assert_resume_determinism,
@@ -123,7 +124,7 @@ class TestFreshRunSaves:
             make_test_logger(), max_iters=3, store=store, client_flow_id="freshrun"
         ).run()
         # A resolvable ref exists — the history reached at least one commit.
-        assert store.resolve_ref(flow_id_for(store, "freshrun")) is not None
+        assert store.get_ref(flow_id_for(store, "freshrun"), HEAD_REF) is not None
 
     async def test_default_retention_keeps_history_on_success(
         self, store: JsonFileCheckpointStore
@@ -133,7 +134,7 @@ class TestFreshRunSaves:
             make_test_logger(), max_iters=2, store=store, client_flow_id="retain-1"
         ).run()
         # Successful run — but retention="retain" so the ref survives.
-        assert store.resolve_ref(flow_id_for(store, "retain-1")) is not None
+        assert store.get_ref(flow_id_for(store, "retain-1"), HEAD_REF) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +170,7 @@ class TestRetention:
             store=store,
             client_flow_id="halt-preserve",
         ).run()
-        assert store.resolve_ref(flow_id_for(store, "halt-preserve")) is not None
+        assert store.get_ref(flow_id_for(store, "halt-preserve"), HEAD_REF) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -690,7 +691,7 @@ class TestPausedTurnTraceRef:
         )
         await flow.run()
 
-        halted_hash = store.resolve_ref(flow_id_for(store, "paused-turn-1"))
+        halted_hash = store.get_ref(flow_id_for(store, "paused-turn-1"), HEAD_REF)
         assert halted_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "paused-turn-1"), "commit", halted_hash) or b""
@@ -781,7 +782,7 @@ class TestPausedTurnTraceRef:
         )
         await flow.run()
 
-        halted_hash = store.resolve_ref(flow_id_for(store, "paused-turn-multi"))
+        halted_hash = store.get_ref(flow_id_for(store, "paused-turn-multi"), HEAD_REF)
         assert halted_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "paused-turn-multi"), "commit", halted_hash) or b""
@@ -1140,7 +1141,7 @@ class TestSaveOnHaltChain:
         )
         await pre.run()
 
-        halted_hash = store.resolve_ref(flow_id_for(store, "chain-halt"))
+        halted_hash = store.get_ref(flow_id_for(store, "chain-halt"), HEAD_REF)
         assert halted_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "chain-halt"), "commit", halted_hash) or b""
@@ -1223,7 +1224,7 @@ class TestSaveOnHaltChain:
         await pre.run()
 
         # Halt fired after step_a, commit saved at the branch position.
-        halted_hash = store.resolve_ref(flow_id_for(store, "branch-halt"))
+        halted_hash = store.get_ref(flow_id_for(store, "branch-halt"), HEAD_REF)
         assert halted_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "branch-halt"), "commit", halted_hash) or b""
@@ -1274,7 +1275,7 @@ class TestSaveOnHaltChain:
         await pre.run([1, 2, 3])
 
         # Checkpoint saved at step_b (halt observed after step_a)
-        halted_hash = store.resolve_ref(flow_id_for(store, "pre-set-halt"))
+        halted_hash = store.get_ref(flow_id_for(store, "pre-set-halt"), HEAD_REF)
         assert halted_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "pre-set-halt"), "commit", halted_hash) or b""
@@ -1334,7 +1335,7 @@ class TestSaveOnHaltChain:
 
         # Checkpoint saved at outer_b (halt observed between outer's call(inner) and outer_b)
         # NOT at inner_b (nested flow's chain-walk skips halt observation)
-        halted_hash = store.resolve_ref(flow_id_for(store, "nested-halt"))
+        halted_hash = store.get_ref(flow_id_for(store, "nested-halt"), HEAD_REF)
         assert halted_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "nested-halt"), "commit", halted_hash) or b""
@@ -1376,7 +1377,7 @@ class TestSaveOnHaltIterate:
             client_flow_id="halt-iter-0",
         ).run()
 
-        halted_hash = store.resolve_ref(flow_id_for(store, "halt-iter-0"))
+        halted_hash = store.get_ref(flow_id_for(store, "halt-iter-0"), HEAD_REF)
         assert halted_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "halt-iter-0"), "commit", halted_hash) or b""
@@ -1407,7 +1408,7 @@ class TestSaveOnHaltIterate:
             client_flow_id="halt-iter-mid",
         ).run()
 
-        halted_hash = store.resolve_ref(flow_id_for(store, "halt-iter-mid"))
+        halted_hash = store.get_ref(flow_id_for(store, "halt-iter-mid"), HEAD_REF)
         assert halted_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "halt-iter-mid"), "commit", halted_hash) or b""
@@ -1436,7 +1437,7 @@ def _chain_from_head(store: JsonFileCheckpointStore, client_flow_id: str) -> lis
 
     flow_id = flow_id_for(store, client_flow_id)
     chain: list[Commit] = []
-    commit_hash = store.resolve_ref(flow_id)
+    commit_hash = store.get_ref(flow_id, HEAD_REF)
     while commit_hash is not None:
         commit = Commit.from_bytes(store.get_object(flow_id, "commit", commit_hash) or b"")
         chain.append(commit)
@@ -1503,7 +1504,7 @@ class TestHistoryLineage:
             store=store,
             client_flow_id="lineage-resume",
         ).run()
-        halted_head = store.resolve_ref(flow_id_for(store, "lineage-resume"))
+        halted_head = store.get_ref(flow_id_for(store, "lineage-resume"), HEAD_REF)
         assert halted_head is not None
 
         halt.clear()
@@ -1653,9 +1654,9 @@ class TestCompletionTag:
         )
 
         flow_id = flow_id_for(store, "final-state")
-        head = store.resolve_ref(flow_id)
+        head = store.get_ref(flow_id, HEAD_REF)
         assert head is not None
-        assert store.resolve_tag(flow_id, COMPLETE_TAG) == head
+        assert store.get_ref(flow_id, COMPLETE_TAG) == head
         (commit,) = _chain_from_head(store, "final-state")
         assert commit.meta.node_path == "$end"
         assert commit.meta.produced_by.node_id == COMPLETION_PRODUCER
@@ -1674,7 +1675,7 @@ class TestCompletionTag:
             make_test_logger(), max_iters=2, store=store, client_flow_id="rerun"
         ).run()
         flow_id = flow_id_for(store, "rerun")
-        first_end = store.resolve_ref(flow_id)
+        first_end = store.get_ref(flow_id, HEAD_REF)
 
         await build_canonical_flow(
             make_test_logger(), max_iters=2, store=store, client_flow_id="rerun"
@@ -1682,7 +1683,7 @@ class TestCompletionTag:
 
         assert flow_id_for(store, "rerun") == flow_id
         chain = _chain_from_head(store, "rerun")
-        assert store.resolve_tag(flow_id, COMPLETE_TAG) == chain[0].content_hash
+        assert store.get_ref(flow_id, COMPLETE_TAG) == chain[0].content_hash
         assert first_end in {c.content_hash for c in chain[1:]}
         assert [c.meta.node_path for c in chain].count("$end") == 2
 
@@ -1706,7 +1707,7 @@ class TestCompletionTag:
             client_flow_id="tag-behind",
         ).run(resume="replay")
         flow_id = flow_id_for(store, "tag-behind")
-        assert store.resolve_tag(flow_id, COMPLETE_TAG) != store.resolve_ref(flow_id)
+        assert store.get_ref(flow_id, COMPLETE_TAG) != store.get_ref(flow_id, HEAD_REF)
 
         # A fresh run would start from this fallback state (n=100); resume ignores it.
         resumed = await build_canonical_flow(
@@ -1718,7 +1719,7 @@ class TestCompletionTag:
         ).run(resume="replay")
         assert resumed["iterations_completed"] == 5
         assert resumed["log"][0] == 1
-        assert store.resolve_tag(flow_id, COMPLETE_TAG) == store.resolve_ref(flow_id)
+        assert store.get_ref(flow_id, COMPLETE_TAG) == store.get_ref(flow_id, HEAD_REF)
 
     async def test_untagged_final_state_head_counts_as_complete(
         self, store: JsonFileCheckpointStore
@@ -1732,7 +1733,7 @@ class TestCompletionTag:
         ctx = CheckpointContext(store, "torn-completion", lambda: "")
         tree = await ctx.put_state_tree(State(data={"n": 7}))
         await ctx.save_completion_commit(tree)
-        assert store.resolve_tag(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
+        assert store.get_ref(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
 
         result = await build_canonical_flow(
             make_test_logger(),
@@ -1839,8 +1840,8 @@ class TestResumeErrorPaths:
         """Ref points at a commit that isn't stored → HistoryCorrupt, not a fresh run."""
         from llm_gent.flow import HistoryCorrupt
 
-        # Seed a ref pointing at a non-existent commit hash.
-        store.put_ref(flow_id_for(store, "orphan-ref"), "some/node", 0, "0" * 64)
+        # Seed HEAD pointing at a non-existent commit hash.
+        store.set_ref(flow_id_for(store, "orphan-ref"), HEAD_REF, "0" * 64, None)
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-ref"
         )
@@ -1873,7 +1874,7 @@ class TestResumeErrorPaths:
         store.put_object(
             flow_id_for(store, "orphan-tree"), "commit", commit.content_hash, commit.to_bytes()
         )
-        store.put_ref(flow_id_for(store, "orphan-tree"), "root", 0, commit.content_hash)
+        store.set_ref(flow_id_for(store, "orphan-tree"), HEAD_REF, commit.content_hash, None)
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-tree"
         )
@@ -1912,7 +1913,7 @@ class TestResumeErrorPaths:
         store.put_object(
             flow_id_for(store, "orphan-blob"), "commit", commit.content_hash, commit.to_bytes()
         )
-        store.put_ref(flow_id_for(store, "orphan-blob"), "root", 0, commit.content_hash)
+        store.set_ref(flow_id_for(store, "orphan-blob"), HEAD_REF, commit.content_hash, None)
         flow = build_canonical_flow(
             make_test_logger(), max_iters=1, store=store, client_flow_id="orphan-blob"
         )
@@ -1960,7 +1961,7 @@ class TestResumeErrorPaths:
         store.put_object(
             flow_id_for(store, "stale-1"), "commit", commit.content_hash, commit.to_bytes()
         )
-        store.put_ref(flow_id_for(store, "stale-1"), stale_path, 2, commit.content_hash)
+        store.set_ref(flow_id_for(store, "stale-1"), HEAD_REF, commit.content_hash, None)
         flow = build_canonical_flow(
             make_test_logger(), max_iters=3, store=store, client_flow_id="stale-1"
         )
@@ -2072,7 +2073,7 @@ class TestScopedStateRoundTrip:
         await outer_pre.run()
 
         # Halt-commit's leaf scope (the .call scope) carries counter=2.
-        halted_hash = store.resolve_ref(flow_id_for(store, "scoped-1"))
+        halted_hash = store.get_ref(flow_id_for(store, "scoped-1"), HEAD_REF)
         assert halted_hash is not None
         halted_commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "scoped-1"), "commit", halted_hash) or b""
@@ -2159,7 +2160,7 @@ class TestScopedStateRoundTrip:
             .call(mid_flow, state=lambda _p: {})
         )
         await outer_pre.run()
-        assert store.resolve_ref(flow_id_for(store, "3-level-1")) is not None
+        assert store.get_ref(flow_id_for(store, "3-level-1"), HEAD_REF) is not None
 
         # Load the commit and inspect the middle scope's blob directly —
         # end-to-end verification that scope_id "01" carries the witness
@@ -2167,7 +2168,7 @@ class TestScopedStateRoundTrip:
         # the load side.
         from llm_gent.flow.state.cas import Commit, Tree
 
-        commit_hash = store.resolve_ref(flow_id_for(store, "3-level-1"))
+        commit_hash = store.get_ref(flow_id_for(store, "3-level-1"), HEAD_REF)
         assert commit_hash is not None
         commit = Commit.from_bytes(
             store.get_object(flow_id_for(store, "3-level-1"), "commit", commit_hash) or b""
@@ -2202,16 +2203,16 @@ class TestScopedStateRoundTrip:
             .call(mid_flow, state=lambda _p: {})
         )
         await outer_resume.run(resume="replay")
-        # Inspect the FINAL commit under the iterate's node_path (the
-        # final-state commit at "$end" is skipped by this specific
-        # lookup — it's written on clean exit).
-        final_commit_hash = store.resolve_ref(
-            flow_id_for(store, "3-level-1"), commit.meta.node_path
-        )
-        assert final_commit_hash is not None
-        final_commit = Commit.from_bytes(
-            store.get_object(flow_id_for(store, "3-level-1"), "commit", final_commit_hash) or b""
-        )
+        # Inspect the newest commit under the iterate's node_path (the
+        # final-state commit at "$end", written on clean exit, sits after it).
+        from llm_gent.flow import History
+
+        final_commit = None
+        async for candidate in History(store, "3-level-1").commits():
+            if candidate.meta.node_path == commit.meta.node_path:
+                final_commit = candidate
+                break
+        assert final_commit is not None
         final_tree = Tree.from_bytes(
             store.get_object(flow_id_for(store, "3-level-1"), "tree", final_commit.root_tree_hash)
             or b""
@@ -2274,21 +2275,13 @@ class TestAsyncStore:
                 await asyncio.sleep(0)
                 return self._inner.has_object(*a, **kw)
 
-            async def put_ref(self, *a: Any, **kw: Any) -> None:
+            async def get_ref(self, *a: Any, **kw: Any) -> str | None:
                 await asyncio.sleep(0)
-                self._inner.put_ref(*a, **kw)
+                return self._inner.get_ref(*a, **kw)
 
-            async def resolve_ref(self, *a: Any, **kw: Any) -> str | None:
+            async def set_ref(self, *a: Any, **kw: Any) -> bool:
                 await asyncio.sleep(0)
-                return self._inner.resolve_ref(*a, **kw)
-
-            async def put_tag(self, *a: Any, **kw: Any) -> None:
-                await asyncio.sleep(0)
-                self._inner.put_tag(*a, **kw)
-
-            async def resolve_tag(self, *a: Any, **kw: Any) -> str | None:
-                await asyncio.sleep(0)
-                return self._inner.resolve_tag(*a, **kw)
+                return self._inner.set_ref(*a, **kw)
 
             async def gc_history(self, *a: Any, **kw: Any) -> None:
                 await asyncio.sleep(0)
@@ -2302,10 +2295,8 @@ class TestAsyncStore:
             "bind_flow_id",
             "put_object",
             "get_object",
-            "put_ref",
-            "resolve_ref",
-            "put_tag",
-            "resolve_tag",
+            "get_ref",
+            "set_ref",
             "gc_history",
         ):
             assert inspect.iscoroutinefunction(getattr(wrap, m))

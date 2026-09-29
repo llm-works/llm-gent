@@ -26,6 +26,7 @@ from llm_saia.core.logger import NullLogger
 from llm_saia.core.types import ChatResponse, Message, ToolCall, ToolDef
 
 from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
+from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from ...unit.flow.conftest import flow_id_for, make_test_logger
@@ -222,7 +223,7 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     # that encodes the paused task + conversation-state envelope.
     from llm_gent.flow.state.cas import Commit
 
-    halted_hash = store.resolve_ref(flow_id_for(store, "real-saia-resume"))
+    halted_hash = store.get_ref(flow_id_for(store, "real-saia-resume"), HEAD_REF)
     assert halted_hash is not None
     commit = Commit.from_bytes(
         store.get_object(flow_id_for(store, "real-saia-resume"), "commit", halted_hash) or b""
@@ -315,7 +316,7 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
     )
     await flow.run()
 
-    head = store.resolve_ref(flow_id_for(store, "no-caller-conv"))
+    head = store.get_ref(flow_id_for(store, "no-caller-conv"), HEAD_REF)
     assert head is not None
     commit = Commit.from_bytes(
         store.get_object(flow_id_for(store, "no-caller-conv"), "commit", head) or b""

@@ -10,17 +10,14 @@ Layout under the caller-owned root::
         <encoded-client-flow-id>          # text: the history's flow_id
       histories/<encoded-flow-id>/
         _client_flow_id                   # text: the name bound to this history
-        _seq                              # ref sequence counter
         objects/
           blob/<content_hash>             # raw payload bytes
           tree/<content_hash>             # canonical JSON bytes
           commit/<content_hash>           # canonical JSON bytes
         refs/
-          <encoded-node-path>/<iteration>.json    # {"commit_hash": "...", "seq": N}
-        tags/
-          <encoded-tag-name>              # text: commit hash
+          <encoded-ref-name>              # text: commit hash
 
-``client_flow_id``, ``flow_id``, ``node_path`` and tag names are URL-quoted
+``client_flow_id``, ``flow_id`` and ref names are URL-quoted
 (``quote(..., safe="")``) so arbitrary strings survive round-trip as
 single directory / file names.
 ``.`` and ``..`` are rejected up front; a resolved-path containment check
@@ -38,29 +35,27 @@ load would misread. Puts are idempotent — the same
 ``(flow_id, kind, content_hash)`` re-put is a no-op when the
 file already exists with the same bytes.
 
-Concurrent access safety is left to the caller: a single-writer
-contract per history holds at the framework level. Intended for
-local dev / small-scale ops; for a shared-fleet setup use
+A history has one writer at a time: :meth:`set_ref` is a compare-and-set
+under an exclusive ``flock`` on ``refs/.lock``, so a second writer's move
+of ``HEAD`` fails instead of forking the history. Intended for local dev /
+small-scale ops; for a shared-fleet setup use
 :class:`llm_gent.flow.stores.PgCheckpointStore`.
 """
 
 from __future__ import annotations
 
 import contextlib
-import json
+import fcntl
 import os
-import re
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import quote, unquote
 
 from appinfra.log import Logger
 
 from ..checkpoint import Kind, Retention
-
-
-_ITER_RE = re.compile(r"^(\d+)\.json$")
 
 
 def _atomic_write_text(target: Path, text: str) -> None:
@@ -74,6 +69,17 @@ def _atomic_write_text(target: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
         raise
+
+
+@contextlib.contextmanager
+def _locked(lock_file: Path) -> Iterator[None]:
+    """Hold an exclusive ``flock`` on ``lock_file`` (created if absent) for the block."""
+    fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def _create_exclusive_text(target: Path, text: str) -> bool:
@@ -243,111 +249,32 @@ class JsonFileCheckpointStore:
         return (self._objects_dir(flow_id, kind) / content_hash).is_file()
 
     # ------------------------------------------------------------------
-    # Ref store
+    # Refs
     # ------------------------------------------------------------------
 
-    def put_ref(
-        self,
-        flow_id: str,
-        node_path: str,
-        iteration: int,
-        commit_hash: str,
-    ) -> None:
-        """Write ``refs/{node_path}/{iteration}.json`` with the commit hash.
-
-        Also stamps a strictly-increasing per-history sequence number
-        (``seq``) into the JSON so :meth:`_latest_across_history` picks
-        the newest ref by write order, independent of mtimes and clocks.
-        """
-        ref_dir = self._refs_dir(flow_id, node_path)
-        ref_dir.mkdir(parents=True, exist_ok=True)
-        seq = self._next_ref_seq(flow_id)
-        target = ref_dir / f"{iteration}.json"
-        payload = json.dumps({"commit_hash": commit_hash, "seq": seq})
-        fd, tmp_path = tempfile.mkstemp(dir=ref_dir, prefix=f"{iteration}.", suffix=".tmp")
+    def get_ref(self, flow_id: str, name: str) -> str | None:
+        """Return the commit hash ref ``name`` points at, or ``None``."""
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(payload)
-            os.replace(tmp_path, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_path)
-            raise
-
-    def _next_ref_seq(self, flow_id: str) -> int:
-        """Return the next per-history ref sequence.
-
-        Single-writer contract per history (see module docstring), so
-        read+increment+write without file locking is safe. The seq
-        counter file lives at ``<history>/_seq``.
-        """
-        history_dir = self._history_dir(flow_id)
-        history_dir.mkdir(parents=True, exist_ok=True)
-        seq_file = history_dir / "_seq"
-        current = 0
-        if seq_file.is_file():
-            try:
-                current = int(seq_file.read_text(encoding="utf-8").strip() or "0")
-            except (OSError, ValueError):
-                current = 0
-        next_seq = current + 1
-        fd, tmp_path = tempfile.mkstemp(dir=history_dir, prefix="_seq.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(str(next_seq))
-            os.replace(tmp_path, seq_file)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_path)
-            raise
-        return next_seq
-
-    def resolve_ref(
-        self,
-        flow_id: str,
-        node_path: str | None = None,
-        iteration: int | None = None,
-    ) -> str | None:
-        """Return the commit hash for the history key, or ``None``.
-
-        See :class:`~llm_gent.flow.checkpoint.CheckpointStore.resolve_ref`
-        for the (``None``, ``iteration``) contract — invalid, raises
-        :class:`ValueError`.
-        """
-        if node_path is None and iteration is not None:
-            raise ValueError("iteration requires node_path; use both or neither")
-        history_refs = self._history_dir(flow_id) / "refs"
-        if not history_refs.is_dir():
-            return None
-
-        if node_path is None:
-            return self._latest_across_history(history_refs)
-
-        ref_dir = self._refs_dir(flow_id, node_path)
-        if not ref_dir.is_dir():
-            return None
-
-        if iteration is not None:
-            return self._read_ref(ref_dir / f"{iteration}.json")
-
-        return self._latest_under_node_path(ref_dir)
-
-    # ------------------------------------------------------------------
-    # Tags
-    # ------------------------------------------------------------------
-
-    def put_tag(self, flow_id: str, name: str, commit_hash: str) -> None:
-        """Point tag ``name`` at ``commit_hash`` (atomic overwrite)."""
-        tag_file = self._tag_file(flow_id, name)
-        tag_file.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(tag_file, commit_hash)
-
-    def resolve_tag(self, flow_id: str, name: str) -> str | None:
-        """Return the commit hash tag ``name`` points at, or ``None``."""
-        try:
-            return self._tag_file(flow_id, name).read_text(encoding="utf-8").strip() or None
+            return self._ref_file(flow_id, name).read_text(encoding="utf-8").strip() or None
         except FileNotFoundError:
             return None
+
+    def set_ref(self, flow_id: str, name: str, commit_hash: str, expected: str | None) -> bool:
+        """Point ref ``name`` at ``commit_hash`` if it points at ``expected`` (``None``: absent).
+
+        The compare and the atomic replace run under an exclusive
+        ``flock`` on ``refs/.lock``, so the pair is atomic across threads
+        and processes.
+        """
+        if not commit_hash:
+            raise ValueError("commit_hash must not be empty")
+        ref_file = self._ref_file(flow_id, name)
+        ref_file.parent.mkdir(parents=True, exist_ok=True)
+        with _locked(ref_file.parent / ".lock"):
+            if self.get_ref(flow_id, name) != expected:
+                return False
+            _atomic_write_text(ref_file, commit_hash)
+            return True
 
     # ------------------------------------------------------------------
     # History cleanup
@@ -405,28 +332,15 @@ class JsonFileCheckpointStore:
             raise ValueError(f"{field_name} must not be {raw!r} (path-traversal risk)")
         return self._checked(base / quote(raw, safe=""), base, field_name, raw)
 
-    def _tag_file(self, flow_id: str, name: str) -> Path:
-        """Return ``<history>/tags/<encoded-name>``."""
-        return self._encoded_child(self._history_dir(flow_id) / "tags", name, "tag name")
+    def _ref_file(self, flow_id: str, name: str) -> Path:
+        """Return ``<history>/refs/<encoded-name>``; a ``/`` in the name stays one segment."""
+        if name == ".lock":
+            raise ValueError("ref name '.lock' is reserved")
+        return self._encoded_child(self._history_dir(flow_id) / "refs", name, "ref name")
 
     def _objects_dir(self, flow_id: str, kind: Kind) -> Path:
         """Return ``<history>/objects/<kind>`` (``kind`` is a fixed enum, no encode)."""
         return self._history_dir(flow_id) / "objects" / kind
-
-    def _refs_dir(self, flow_id: str, node_path: str) -> Path:
-        """Return ``<history>/refs/<encoded-node-path>``.
-
-        ``node_path`` is the ``"/"``-joined content-addressed node-id chain from
-        the run root down to the saving iterate. Encode it as a single directory
-        name so slashes don't create a deeper hierarchy on disk.
-        """
-        if not node_path:
-            raise ValueError("node_path must not be empty")
-        if node_path in (".", ".."):
-            raise ValueError(f"node_path must not be {node_path!r} (path-traversal risk)")
-        history_refs = self._history_dir(flow_id) / "refs"
-        candidate = history_refs / quote(node_path, safe="")
-        return self._checked(candidate, history_refs, "node_path", node_path)
 
     @staticmethod
     def _checked(candidate: Path, base: Path, field_name: str, raw: str) -> Path:
@@ -436,76 +350,6 @@ class JsonFileCheckpointStore:
         if base_resolved != candidate_resolved and base_resolved not in candidate_resolved.parents:
             raise ValueError(f"{field_name} resolves outside store root; got {raw!r}")
         return candidate
-
-    # ------------------------------------------------------------------
-    # Ref resolution helpers
-    # ------------------------------------------------------------------
-
-    def _latest_across_history(self, history_refs: Path) -> str | None:
-        """Return the ref with the highest persisted ``seq`` under a history.
-
-        Ref files whose ``seq`` is missing or unreadable are skipped;
-        ``None`` when no ref in the history has one.
-        """
-        best_seq = -1
-        best_path: Path | None = None
-        for node_dir in history_refs.iterdir():
-            if not node_dir.is_dir():
-                continue
-            for entry in node_dir.iterdir():
-                if not _ITER_RE.match(entry.name):
-                    continue
-                seq = self._read_ref_seq(entry)
-                if seq is None:
-                    continue
-                if seq > best_seq:
-                    best_seq = seq
-                    best_path = entry
-        if best_path is None:
-            return None
-        return self._read_ref(best_path)
-
-    @staticmethod
-    def _read_ref_seq(path: Path) -> int | None:
-        """Return the ``seq`` value stored in a ref file, or ``None`` if absent/unreadable."""
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        raw = payload.get("seq")
-        if not isinstance(raw, int):
-            return None
-        return raw
-
-    def _latest_under_node_path(self, ref_dir: Path) -> str | None:
-        """Return the highest-iteration ref under ``ref_dir``, or ``None``."""
-        best_iter = -1
-        best_path: Path | None = None
-        for entry in ref_dir.iterdir():
-            m = _ITER_RE.match(entry.name)
-            if m is None:
-                continue
-            n = int(m.group(1))
-            if n > best_iter:
-                best_iter = n
-                best_path = entry
-        if best_path is None:
-            return None
-        return self._read_ref(best_path)
-
-    def _read_ref(self, path: Path) -> str | None:
-        """Load one ref file; warn and skip on parse failure."""
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            return str(payload["commit_hash"])
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
-            self._lg.warning(
-                "ref file unreadable; treating as absent",
-                extra={"exception": e, "path": str(path)},
-            )
-            return None
 
     @staticmethod
     def _decode_id(dirname: str) -> str:
