@@ -13,9 +13,10 @@ the flow being resumed, and reads the history through the public
   :class:`State`, every non-root scope payload rides on
   ``_ResumeReplay.intermediate_scope_data`` so descent sites
   (``_consume_scope_data``) restore their own scope in order.
-- :meth:`Resume.restart` (``resume="restart"``) returns only the root
-  :class:`State` of the newest commit with usable state; the run starts
-  at the first node.
+- :meth:`Resume.restart` (``resume="restart"``) checks out the snapshot
+  of the newest commit with usable state: its root scope hydrates the
+  top-level :class:`State`, and each child scope goes back to the block
+  that owns it when the run, started at the first node, reaches its path.
 
 Write side — :func:`apply_clean_exit_retention` and
 :func:`commit_completion` commit the final state on clean exit and move
@@ -112,20 +113,22 @@ class Resume:
             f"from the saved state."
         )
 
-    async def restart(self, fallback: State[Any]) -> State[Any]:
-        """Restart: the root state of the newest commit that has usable state.
+    async def restart(self, fallback: State[Any]) -> tuple[State[Any], Snapshot | None]:
+        """Restart: check out the snapshot of the newest commit that has usable state.
 
         Walks back from the head past ``$failed`` commits (the state at a
         failure may be half-updated) and commits with an empty tree (state
-        that could not be serialized). The run then starts at the first
-        node: child scopes are not restored and no replay context is built,
-        so iterate counters start at zero. Paused turns are not offered —
-        a step's node id does not identify a map item across runs.
+        that could not be serialized). Returns the snapshot's root as the
+        top-level :class:`State` together with the snapshot itself: the run
+        starts at the first node, and each block that owns a scope in the
+        snapshot gets it back when the run first reaches its path. No replay
+        context is built, so every step runs again. Paused turns are not
+        offered — a step's node id does not identify a map item across runs.
 
         Skipping is logged: the restored state may predate the head by
         whole runs (a stateless ``$end`` sends the walk into the previous
-        run). Returns ``fallback`` when the history is empty or holds no
-        commit with usable state (warning in the latter case).
+        run). Returns ``(fallback, None)`` when the history is empty or
+        holds no commit with usable state (warning in the latter case).
         """
         skipped: list[str] = []
         async for commit in self._history.commits():
@@ -134,14 +137,14 @@ class Resume:
                 if snapshot.has_state:
                     if skipped:
                         self._warn_restart_skipped(skipped, commit)
-                    return self._root_state(snapshot.root)
+                    return self._root_state(snapshot.root), snapshot
             skipped.append(commit.meta.node_path)
         if skipped:
             self.flow._lg.warning(
                 "no commit with usable state to restart from; starting from state=",
                 extra={"client_flow_id": self._history.client_flow_id, "skipped": skipped},
             )
-        return fallback
+        return fallback, None
 
     def _warn_restart_skipped(self, skipped: list[str], restored: Commit) -> None:
         """Log the ``$failed`` / stateless commits restart walked past, and where it landed."""

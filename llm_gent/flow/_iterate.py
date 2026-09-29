@@ -33,10 +33,10 @@ from typing import TYPE_CHECKING, Any
 from ._executor import (
     _check_until,
     _consume_scope_data,
+    _enter_scope,
     _live_scope,
     _merge_state,
     _pop_replay_for,
-    _project_state,
     _restore_scope_state,
     _save_scope_commit,
 )
@@ -72,17 +72,18 @@ class IterateRunner:
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Drive the loop; return the last body result.
 
-        Save-at-iterate-boundary: when the runtime carries a
-        checkpointer + ``client_flow_id``, the framework builds a
-        content-addressed commit after each successful iteration with
-        the parent-scope payload (``env.state``, which persists across
-        iterations). When ``state=`` projects a child scope, only the
-        parent state is checkpointed — progress in the child state is
-        lost on resume. To preserve iteration progress, accumulate
-        results in the parent state or use ``until=`` with state-driven
-        termination.
+        Save-at-iterate-boundary: under the ``on_iterate`` policy, the
+        framework commits a snapshot of the run after each successful
+        pass. The snapshot holds every live scope, including the child
+        scope ``state=`` projects, and the pass counter.
 
-        Resume: when the resume replay's ``remaining_path`` has been
+        Restart: the child scope is restored from the snapshot, but the
+        counter starts at 0 and every pass runs again. A pass's input is
+        the previous pass's result, which the snapshot does not hold, so
+        passes cannot be skipped; state-driven bodies make the repeated
+        passes skip their completed work.
+
+        Replay: when the resume replay's ``remaining_path`` has been
         head-popped down to a single entry equal to this iterate's
         runtime ``node_id`` (this iterate IS the save-point leaf), the
         counter starts at the saved iteration instead of 0 — so
@@ -196,7 +197,9 @@ class IterateRunner:
             if raw is not UNSET:
                 env = dataclasses.replace(env, replay=updated_replay)
                 return env, _restore_scope_state(env.state, raw, effective_factory)
-        return env, await _project_state(it.state_fn, env.state, it.state_factory)
+        path = env.owner_path(self.node_id)
+        child_state, _ = await _enter_scope(env, path, it.state_fn, it.state_factory, None)
+        return env, child_state
 
     async def _dispatch_body(
         self, child_state: State[Any], prev_result: Any, pass_path: ScopePath

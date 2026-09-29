@@ -29,9 +29,9 @@ import inspect
 from typing import TYPE_CHECKING, Any
 
 from ._executor import (
+    _enter_scope,
     _merge_state,
     _pop_replay_for,
-    _project_state,
     _save_scope_commit,
 )
 from ._halt_observer import is_halt_signaled
@@ -229,8 +229,8 @@ class MapItemRunner:
         """Project the item's scope, then guard, body and merge per the map's contract."""
         item_ctx = self._ctx(self.env.state)
         try:
-            child_state = await _project_state(
-                self.mp.state_fn, self.env.state, self.mp.state_factory
+            child_state, self.replay = await _enter_scope(
+                self.env, self.path, self.mp.state_fn, self.mp.state_factory, self.replay
             )
             if self.mp.state_fn is not None:
                 self.env.scopes.open(self.path, child_state)

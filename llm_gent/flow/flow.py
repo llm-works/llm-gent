@@ -103,7 +103,7 @@ from .nodes import (
 from .role import Role
 from .state import State, StateFactory
 from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
-from .state.snapshot import ScopePath, ScopeRegistry
+from .state.snapshot import ScopePath, ScopeRegistry, Snapshot
 
 
 class Flow:
@@ -927,10 +927,11 @@ class Flow:
                 commits) and, unless the history is empty or complete,
                 reconstructs the scope tree, replaces ``state`` with the
                 hydrated payload and fast-forwards to the save point.
-                ``"restart"`` replaces ``state`` with the root state of the
-                newest commit with usable state (skipping ``$failed`` and
-                stateless commits) and runs from the first node; paused
-                turns are not offered. Payloads are rebuilt via
+                ``"restart"`` checks out the newest commit with usable state
+                (skipping ``$failed`` and stateless commits): its root state
+                replaces ``state``, the run starts at the first node, and
+                each ``state=`` block gets its saved scope back when the run
+                reaches it; paused turns are not offered. Payloads are rebuilt via
                 ``state_factory`` when bound, else used as plain dicts. On an
                 empty history (or nothing to replay) the run proceeds with
                 ``state`` as given, appending to the same history; a corrupt
@@ -960,8 +961,8 @@ class Flow:
         self._check_run_args(resume)
         self._begin_checkpoint_run()
         self._resume_paused_turns.clear()
-        active_state, replay = await self._start_state(self._wrap_top_state(state), resume)
-        self._scopes.begin(active_state)
+        active_state, replay, saved = await self._start_state(self._wrap_top_state(state), resume)
+        self._scopes.begin(active_state, saved)
         self._replay_consumed = False
         self._halt_saved = False
         self._pending_paused_turns.clear()
@@ -1000,13 +1001,14 @@ class Flow:
 
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode
-    ) -> tuple[State[Any], _ResumeReplay | None]:
-        """The run's initial state (and replay plan) for ``resume``."""
+    ) -> tuple[State[Any], _ResumeReplay | None, Snapshot | None]:
+        """The run's initial state, replay plan and restart snapshot for ``resume``."""
         if resume == "replay":
-            return await Resume(self).replay(fallback)
+            return (*await Resume(self).replay(fallback), None)
         if resume == "restart":
-            return await Resume(self).restart(fallback), None
-        return fallback, None
+            root, snapshot = await Resume(self).restart(fallback)
+            return root, None, snapshot
+        return fallback, None, None
 
     async def _run_as_subflow(
         self,

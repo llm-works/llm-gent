@@ -68,12 +68,30 @@ class ScopeRegistry:
         self._root: State[Any] | None = None
         self._scopes: dict[ScopePath, State[Any]] = {}
         self._passes: dict[ScopePath, int] = {}
+        self._saved: dict[ScopePath, Any] = {}
 
-    def begin(self, root: State[Any]) -> None:
-        """Start a run whose root scope is ``root``; forget the previous run."""
+    def begin(self, root: State[Any], saved: Snapshot | None = None) -> None:
+        """Start a run whose root scope is ``root``; forget the previous run.
+
+        ``saved`` is the snapshot a restart continues from: its child scopes
+        are handed out by :meth:`take_saved` as the run reaches their paths.
+        """
         self._root = root
         self._scopes.clear()
         self._passes.clear()
+        self._saved = (
+            {} if saved is None else {path_from_str(p): v for p, v in saved.scopes.items()}
+        )
+
+    def take_saved(self, path: ScopePath) -> tuple[bool, Any]:
+        """Pop the saved payload of the scope at ``path``; ``(False, None)`` when there is none.
+
+        Each saved scope is handed out once: a block entered again at the
+        same path projects a fresh scope.
+        """
+        if path not in self._saved:
+            return False, None
+        return True, self._saved.pop(path)
 
     def open(self, path: ScopePath, scope: State[Any]) -> None:
         """Register ``scope`` as live at ``path``."""
@@ -109,6 +127,8 @@ class ScopeRegistry:
         if self._root is None:
             raise RuntimeError("ScopeRegistry.capture() before begin()")
         flat: dict[ScopePath, Any] = {(STATE,): _to_json(self._root, ())}
+        for path, value in self._saved.items():
+            flat[(*path, STATE)] = value
         for path, scope in self._scopes.items():
             flat[(*path, STATE)] = _to_json(scope, path)
         for path, count in self._passes.items():

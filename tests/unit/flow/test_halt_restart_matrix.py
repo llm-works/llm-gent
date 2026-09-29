@@ -264,6 +264,7 @@ class Probe:
     halt: asyncio.Event | None = None
     store: CrashableStore | None = None
     crashed: bool = False
+    stopped: str | None = None
     entered: int = 0
     executed: list[str] = field(default_factory=list)
     checkpointed: list[str] = field(default_factory=list)
@@ -303,6 +304,8 @@ def _leaf_verb(leaf: Leaf, probe: Probe) -> Any:
             return done[key]
         probe.entered += 1
         fire = probe.stop is not None and probe.entered == probe.stop_at
+        if fire:
+            probe.stopped = key
         if fire and probe.mode == "before":
             return probe.stop_here(x)
         done[key] = 3 * x + leaf.c
@@ -370,12 +373,23 @@ async def _root_done(history: History, commit: Any) -> dict[str, int] | None:
     return dict(snapshot.root.get("done", {})) if snapshot.has_state else None
 
 
+async def _snapshot_done(history: History, commit: Any) -> dict[str, int] | None:
+    """Every leaf ``commit``'s snapshot records: the root's and each saved scope's ``done``."""
+    snapshot = await history.snapshot(commit)
+    if not snapshot.has_state:
+        return None
+    done = dict(snapshot.root.get("done", {}))
+    for scope in snapshot.scopes.values():
+        done.update(scope.get("done", {}))
+    return done
+
+
 async def _restart_point_done(history: History) -> dict[str, int]:
     """The ``done`` map restart continues from: newest commit with state, not a failure."""
     async for commit in history.commits():
         if commit.meta.node_path == FAILED_NODE_PATH:
             continue
-        done = await _root_done(history, commit)
+        done = await _snapshot_done(history, commit)
         if done is not None:
             return done
     return {}
@@ -561,7 +575,11 @@ async def test_restart_after_stop_matches_uninterrupted_run(case: Case, tmp_path
         lost = [k for k in first.executed if k not in captured]
         assert not lost, f"completed work missing from the halt checkpoint: {lost}"
     if case.policy == "leaf":
-        lost = [k for k in first.checkpointed if k not in captured]
+        # A leaf that raised inside a state= scope takes its work down with the
+        # scope: the block never merges it, and a later save point (a sibling
+        # map item carrying on) no longer holds it. Restart runs that leaf again.
+        discarded = {first.stopped} if case.stop == "exception" and _has(shape, Scope) else set()
+        lost = [k for k in first.checkpointed if k not in captured and k not in discarded]
         assert not lost, f"checkpointed work missing from the restart point: {lost}"
 
     restart = Probe(policy=case.policy)
