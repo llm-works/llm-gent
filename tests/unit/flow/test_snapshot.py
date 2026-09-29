@@ -51,6 +51,16 @@ def _blobs(objects: dict[str, Blob | Tree]) -> set[str]:
     return {h for h, obj in objects.items() if isinstance(obj, Blob)}
 
 
+class _FixedCursor:
+    """A cursor reporting fixed entries."""
+
+    def __init__(self, entries: dict[str, Any]) -> None:
+        self.entries = entries
+
+    def cursor(self) -> dict[str, Any]:
+        return self.entries
+
+
 def _registry(root: Any) -> tuple[ScopeRegistry, State[Any]]:
     scopes = ScopeRegistry()
     root_state: State[Any] = State(data=root)
@@ -59,17 +69,29 @@ def _registry(root: Any) -> tuple[ScopeRegistry, State[Any]]:
 
 
 class TestSnapshotTree:
-    async def test_round_trip_root_scopes_and_passes(self) -> None:
+    async def test_round_trip_root_scopes_and_cursors(self) -> None:
         scopes, root = _registry({"a": 1, "b": [1, 2]})
         scopes.open(("n", "call"), State(data={"x": "y"}, _parent=root))
         scopes.open(("n", "map", "i", "0"), State(data={"k": 0}, _parent=root))
-        scopes.set_pass(("n", "it"), 3)
+        scopes.open_cursor(("n", "it"), _FixedCursor({"pass": 3, "carry": {"v": [1]}}))
+        scopes.open_cursor((), _FixedCursor({"chain": {"step": "s", "args": [], "kwargs": {}}}))
 
         snapshot, _ = await _round_trip(scopes)
         assert snapshot.has_state
         assert snapshot.root == {"a": 1, "b": [1, 2]}
         assert snapshot.scopes == {"n/call": {"x": "y"}, "n/map/i/0": {"k": 0}}
-        assert snapshot.passes == {"n/it": 3}
+        assert snapshot.cursors == {
+            "n/it": {"pass": 3, "carry": {"v": [1]}},
+            "": {"chain": {"step": "s", "args": [], "kwargs": {}}},
+        }
+
+    async def test_closed_cursor_leaves_the_snapshot(self) -> None:
+        scopes, _ = _registry({})
+        runner = _FixedCursor({"arm": "then"})
+        scopes.open_cursor(("n", "br"), runner)
+        scopes.close_cursor(("n", "br"), runner)
+        snapshot, _ = await _round_trip(scopes)
+        assert snapshot.cursors == {}
 
     async def test_non_dict_root_round_trips(self) -> None:
         scopes, _ = _registry(None)
@@ -198,28 +220,117 @@ class TestFlowSnapshots:
         assert sorted(v["item"] for v in snapshot.scopes.values()) == [0, 1, 2]
         assert snapshot.scopes[commit.meta.scope_path] == {"item": 0}
 
-    async def test_iterate_pass_counter_is_in_the_snapshot(self) -> None:
+    async def test_iterate_cursor_holds_the_pass_and_the_carried_value(self) -> None:
         store = InMemoryCheckpointStore()
 
         @verb
-        async def step(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+        async def step(ctx: Context[dict[str, Any]], prev: int) -> int:
             ctx.state.data["n"] = ctx.state.data.get("n", 0) + 1
             if ctx.state.data["n"] == 3:
                 await ctx.checkpoint()
+            return prev + 10
 
         await (
             FlowFactory(LG)
             .create(state={})
             .with_checkpointer(store, "passes")
             .iterate(lambda b: b.call(step), max_iters=5)
-            .run()
+            .run(0)
         )
         history = History(store, "passes")
         saved = [c async for c in history.commits() if c.meta.node_path != "$end"]
         (commit,) = saved
         snapshot = await history.snapshot(commit)
-        assert list(snapshot.passes.values()) == [2]  # third pass, 0-based
+        iterate = [c for c in snapshot.cursors.values() if "pass" in c]
+        assert iterate == [{"pass": 2, "carry": 20}]  # third pass, carrying the second's result
         assert snapshot.root == {"n": 3}
+
+    async def test_chain_cursor_holds_the_step_and_its_input(self) -> None:
+        store = InMemoryCheckpointStore()
+
+        @verb
+        async def first(ctx: Context[dict[str, Any]], x: int) -> int:
+            return x + 1
+
+        @verb
+        async def second(ctx: Context[dict[str, Any]], x: int) -> int:
+            await ctx.checkpoint()
+            return x
+
+        flow = (
+            FlowFactory(LG)
+            .create(state={})
+            .with_checkpointer(store, "chain")
+            .call(first)
+            .call(second, project=lambda r: r * 10)
+        )
+        await flow.run(1)
+        history = History(store, "chain")
+        (commit,) = [c async for c in history.commits() if c.meta.node_path != "$end"]
+        snapshot = await history.snapshot(commit)
+        step = snapshot.cursors[""]["chain"]
+        assert step["args"] == [20] and step["kwargs"] == {}  # input after project
+        assert step["step"] == commit.meta.node_path.split("/")[-1]
+
+    async def test_branch_cursor_holds_the_arm_it_took(self) -> None:
+        store = InMemoryCheckpointStore()
+
+        @verb
+        async def save(ctx: Context[dict[str, Any]], x: int) -> int:
+            await ctx.checkpoint()
+            return x
+
+        await (
+            FlowFactory(LG)
+            .create(state={})
+            .with_checkpointer(store, "arm")
+            .branch(
+                when=lambda prev, _c: prev > 0,
+                then=lambda b: b.call(save),
+                else_=lambda b: b.call(save),
+            )
+            .run(-1)
+        )
+        history = History(store, "arm")
+        (commit,) = [c async for c in history.commits() if c.meta.node_path != "$end"]
+        snapshot = await history.snapshot(commit)
+        assert [c["arm"] for c in snapshot.cursors.values() if "arm" in c] == ["else"]
+
+    async def test_non_json_cursor_value_fails_the_checkpoint_naming_its_path(self) -> None:
+        @verb
+        async def save(ctx: Context[dict[str, Any]], x: Any) -> Any:
+            await ctx.checkpoint()
+            return x
+
+        flow = (
+            FlowFactory(LG)
+            .create(state={})
+            .with_checkpointer(InMemoryCheckpointStore(), "tuple")
+            .call(save)
+        )
+        with pytest.raises(TypeError, match=r"cursor at 'chain' .* type tuple is not plain JSON"):
+            await flow.run((1, 2))
+
+    async def test_a_blob_and_a_tree_with_the_same_bytes_are_both_stored(self) -> None:
+        """The blob ``[]`` and the empty tree share a hash; neither put may skip the other."""
+        store = InMemoryCheckpointStore()
+
+        @verb
+        async def save(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
+            await ctx.checkpoint()
+
+        sub = FlowFactory(LG).create().call(save)
+        await (
+            FlowFactory(LG)
+            .create(state={"items": []})
+            .with_checkpointer(store, "same-bytes")
+            .call(sub, state=lambda _p: {}, merge=lambda _p, _c: None)
+            .run()
+        )
+        history = History(store, "same-bytes")
+        snapshots = [await history.snapshot(c) async for c in history.commits()]
+        assert [s.root for s in snapshots] == [{"items": []}, {"items": []}]
+        assert list(snapshots[1].scopes.values()) == [{}]
 
     async def test_final_state_commit_holds_only_the_root(self) -> None:
         store = InMemoryCheckpointStore()
@@ -242,4 +353,4 @@ class TestFlowSnapshots:
         head = await history.head()
         assert head is not None
         snapshot = await history.snapshot(head)
-        assert (snapshot.root, snapshot.scopes, snapshot.passes) == ({}, {}, {})
+        assert (snapshot.root, snapshot.scopes, snapshot.cursors) == ({}, {}, {})

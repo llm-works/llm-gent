@@ -1656,7 +1656,7 @@ class TestCompletionTag:
         assert commit.meta.node_path == "$end"
         assert commit.meta.produced_by.node_id == COMPLETION_PRODUCER
         snapshot = await History(store, "final-state").snapshot(commit)
-        assert (snapshot.root, snapshot.scopes, snapshot.passes) == ({"n": 3}, {}, {})
+        assert (snapshot.root, snapshot.scopes, snapshot.cursors) == ({"n": 3}, {}, {})
 
     async def test_rerun_after_completion_appends_to_same_history(
         self, store: JsonFileCheckpointStore
