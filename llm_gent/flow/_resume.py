@@ -33,7 +33,7 @@ from .checkpoint import COMPLETE_TAG
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
-from .state.snapshot import Snapshot
+from .state.snapshot import Snapshot, path_from_str
 
 
 if TYPE_CHECKING:
@@ -182,16 +182,23 @@ class Resume:
         from .nodes import _ResumeReplay
 
         root_raw = snapshot.root if snapshot.has_state else None
-        intermediate_raw = tuple(snapshot.chain(commit.meta.scope_path))
+        chain = list(snapshot.chain(commit.meta.scope_path))
         path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
+
+        # Leaf node owns a scope (state=) → pop it into child_state_data.
+        scope_tuple = path_from_str(commit.meta.scope_path)
+        leaf_id = path_tuple[-1] if path_tuple else ""
+        leaf_owns_scope = chain and scope_tuple[-2:] == ("n", leaf_id)
+        child_state_data = chain.pop() if leaf_owns_scope else None
+
         return (
             self._root_state(root_raw),
             _ResumeReplay(
                 remaining_path=path_tuple,
                 full_path=path_tuple,
                 iteration=commit.meta.iteration,
-                child_state_data=None,
-                intermediate_scope_data=intermediate_raw,
+                child_state_data=child_state_data,
+                intermediate_scope_data=tuple(chain),
             ),
         )
 

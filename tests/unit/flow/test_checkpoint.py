@@ -2187,6 +2187,71 @@ class TestScopedStateRoundTrip:
             f"— re-projected middle would land at 3 instead"
         )
 
+    async def test_leaf_iterate_with_state_survives_resume(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A leaf iterate with its own ``state=`` projection restores on resume.
+
+        Regression test for the case where the leaf iterate (not just its
+        parent .call) has a ``state=`` projection. The iterate's scope must
+        be placed in ``child_state_data`` by ``_split_scopes`` so that
+        ``_resume_iteration`` returns it correctly.
+        """
+        from llm_gent.flow import Context, FlowFactory, History, verb
+
+        @verb
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["counter"] = ctx.state.data.get("counter", 0) + 1
+            return ctx.state.data["counter"]
+
+        halt = asyncio.Event()
+
+        @verb
+        async def maybe_halt(ctx: Context[dict[str, int]], _prev: Any = None) -> Any:
+            if ctx.state.data["counter"] >= 2:
+                halt.set()
+            return _prev
+
+        ff = FlowFactory(make_test_logger())
+
+        # Leaf iterate with its own state= projection (not inherited from .call)
+        flow_pre = (
+            ff.create(state={"root": True})
+            .with_checkpointer(store, "leaf-iterate-state")
+            .with_halt(halt)
+            .iterate(
+                lambda body: body.call(bump).then(maybe_halt),
+                max_iters=5,
+                state=lambda _p: {"counter": 0},  # leaf iterate's own scope
+            )
+        )
+        await flow_pre.run()
+
+        # Verify the halt commit's snapshot has the iterate's scope
+        history = History(store, "leaf-iterate-state")
+        halted = await history.head()
+        assert halted is not None
+        snapshot = await history.snapshot(halted)
+        assert list(snapshot.scopes.values()) == [{"counter": 2}]
+
+        # Resume — the iterate's scope should restore from the commit,
+        # not re-project to counter=0
+        halt.clear()
+        flow_resume = (
+            ff.create(state={"root": True})
+            .with_checkpointer(store, "leaf-iterate-state")
+            .iterate(
+                lambda body: body.call(bump).then(maybe_halt),
+                max_iters=5,
+                state=lambda _p: {"counter": 0},
+            )
+        )
+        await flow_resume.run(resume="replay")
+
+        # Final commit should exist (run completed without structural-drift error)
+        final = await history.head()
+        assert final is not None and History.is_final_state(final)
+
 
 # ---------------------------------------------------------------------------
 # Async-store round-trip — sync-or-async Protocol contract
