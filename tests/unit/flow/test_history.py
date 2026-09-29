@@ -79,8 +79,8 @@ class TestCompletedHistory:
         state = await history.root_state(head, TypeStateFactory(CanonicalCounter))
         assert isinstance(state, CanonicalCounter)
         assert state.iterations_completed == 4
-        scopes = await history.scopes(head)
-        assert scopes is not None and scopes[0] == state.to_dict()
+        snapshot = await history.snapshot(head)
+        assert snapshot.has_state and snapshot.root == state.to_dict()
 
 
 class TestCorruptHistory:
@@ -101,7 +101,7 @@ class TestCorruptHistory:
             await _all(history)
         assert (err.value.kind, err.value.content_hash) == ("commit", head.parent_hashes[0])
 
-    async def test_missing_blob_raises_in_scopes(self, store: JsonFileCheckpointStore) -> None:
+    async def test_missing_blob_raises_in_snapshot(self, store: JsonFileCheckpointStore) -> None:
         await _run(store, "torn-state")
         history = History(store, "torn-state")
         head = await history.head()
@@ -110,7 +110,7 @@ class TestCorruptHistory:
             blob.unlink()
 
         with pytest.raises(HistoryCorrupt, match="blob"):
-            await history.scopes(head)
+            await history.snapshot(head)
 
     async def test_ref_to_missing_commit_raises(self, store: JsonFileCheckpointStore) -> None:
         await _run(store, "torn-head")

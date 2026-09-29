@@ -39,6 +39,7 @@ from ._node_id import _compute_node_ids, _descend_context
 from .context import Context
 from .nodes import Failure, ItemsFn, Skipped
 from .state import serialize_state_data
+from .state.snapshot import ScopePath
 
 
 if TYPE_CHECKING:
@@ -205,6 +206,7 @@ class MapItemRunner:
         self.item_index = item_index
         self.replay = replay
         self.merge_lock = merge_lock
+        self.path: ScopePath = (*env.owner_path(node_id), "i", str(item_index))
 
     async def run(self) -> Any:
         """Drive this item through the run pipeline.
@@ -217,11 +219,21 @@ class MapItemRunner:
             skipped = Skipped(item=self.item)
             await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
             return skipped
+        try:
+            return await self._run_item()
+        finally:
+            # Merged back, skipped or failed: the item's scope leaves the snapshot.
+            self.env.scopes.close(self.path)
+
+    async def _run_item(self) -> Any:
+        """Project the item's scope, then guard, body and merge per the map's contract."""
         item_ctx = self._ctx(self.env.state)
         try:
             child_state = await _project_state(
                 self.mp.state_fn, self.env.state, self.mp.state_factory
             )
+            if self.mp.state_fn is not None:
+                self.env.scopes.open(self.path, child_state)
             item_ctx = self._ctx(child_state)
             if self.mp.guard is not None and not await _run_guard(
                 self.mp.guard, self.item, item_ctx
@@ -267,6 +279,7 @@ class MapItemRunner:
             parent_replay=self.replay,
             parent_extra=env.extra,
             parent_policy=env.policy,
+            parent_path=self.path,
         )
 
     async def _on_success(

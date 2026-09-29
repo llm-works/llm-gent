@@ -25,6 +25,7 @@ Every store call below the context is keyed by ``flow_id``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -42,16 +43,8 @@ from .checkpoint import (
     Retention,
     maybe_await,
 )
-from .state import serialize_state_data
-from .state.cas import (
-    Blob,
-    Commit,
-    CommitMeta,
-    ProducedBy,
-    Tree,
-    TreeEntry,
-    canonical_json,
-)
+from .state.cas import Blob, Commit, CommitMeta, ProducedBy, Tree
+from .state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
 
 
 if TYPE_CHECKING:
@@ -268,23 +261,19 @@ class CheckpointContext:
         ancestor_chain: tuple[str, ...],
         iteration: int,
         node_id: str,
+        scopes: ScopeRegistry,
         current_state: State[Any],
         outcome: CommitOutcome,
         trace_ref: tuple[TraceRef, ...] = (),
     ) -> Commit:
-        """Persist a content-addressed scope commit at ``node_id``; return it.
+        """Persist a full snapshot of the run as a commit at ``node_id``; return it.
 
-        Walks the scope stack from root to ``current_state``. For
-        each scope: serialize its ``data`` via the state-data
-        contract (dict passthrough or ``StateData.to_dict``) to
-        canonical JSON bytes and :meth:`put_blob` a Blob keyed by
-        content hash. Bundle every scope's blob hash into a Tree
-        (one :class:`TreeEntry` per scope, ordered by depth via a
-        two-digit ``scope_id``). Wrap the Tree in a Commit whose
-        :class:`CommitMeta` pins ``(flow_id, node_path,
-        iteration)`` and the provenance triple (``produced_by``,
-        ``trace_ref``, ``outcome``). Finally :meth:`append_commit`
-        chains it onto the head and points this boundary at it.
+        The snapshot holds every live scope of the run (see
+        :func:`put_snapshot`), not only the ones above ``current_state``.
+        :class:`CommitMeta` pins ``(flow_id, node_path, iteration)``, the
+        path of the scope ``current_state`` is, and the provenance triple
+        (``produced_by``, ``trace_ref``, ``outcome``). :meth:`append_commit`
+        then chains the commit onto ``HEAD``.
 
         ``node_path`` is the ``"/"``-joined ancestor chain (from run
         root to this node, inclusive). blake2b hex has no ``"/"``,
@@ -294,33 +283,28 @@ class CheckpointContext:
         successful iterate boundary, ``"halted"`` when the
         halt-observation site triggered the save.
         """
-        tree = await self.put_state_tree(current_state)
+        tree = await self.put_snapshot(scopes)
         node_path = "/".join(ancestor_chain + (node_id,))
         flow_id = await self.ensure_flow_id()
         meta = self._build_commit_meta(flow_id, node_path, iteration, node_id, outcome, trace_ref)
+        meta = dataclasses.replace(meta, scope_path=path_str(scopes.path_of(current_state)))
         return await self.append_commit(tree.content_hash, meta)
 
-    async def put_state_tree(self, current_state: State[Any]) -> Tree:
-        """Put one blob per scope from run root to ``current_state`` and their Tree.
+    async def put_snapshot(self, scopes: ScopeRegistry) -> Tree:
+        """Put the snapshot tree of every live scope in ``scopes``; return its root tree.
 
-        Entries ``"00"``, ``"01"``, ... are ordered root → leaf, so
-        canonical sort order matches depth order. Every scope is
-        serialized before the first write: the writes await the store,
-        and other tasks (concurrent map items) change the scopes
-        meanwhile, so serializing between writes could commit scopes
-        from different moments.
+        Every scope is serialized before the first write
+        (:meth:`ScopeRegistry.capture` is synchronous): the writes await
+        the store, and other tasks (concurrent map items) change the
+        scopes meanwhile, so serializing between writes could commit
+        scopes from different moments.
         """
-        stack = {
-            f"{depth:02d}": canonical_json(serialize_state_data(scope.data))
-            for depth, scope in enumerate(self._collect_scope_stack(current_state))
-        }
-        entries: list[TreeEntry] = []
-        for scope_id, payload in stack.items():
-            blob = Blob.from_bytes(payload)
-            await self.put_blob(blob.content_hash, blob.payload)
-            entries.append(TreeEntry(scope_id=scope_id, kind="blob", child_hash=blob.content_hash))
-        tree = Tree.from_entries(entries)
-        await self.put_tree(tree)
+        tree, objects = build_snapshot_tree(scopes.capture())
+        for obj in objects:
+            if isinstance(obj, Blob):
+                await self.put_blob(obj.content_hash, obj.payload)
+            else:
+                await self.put_tree(obj)
         return tree
 
     async def save_completion_commit(self, tree: Tree) -> Commit:
@@ -343,17 +327,6 @@ class CheckpointContext:
         return await self.append_commit(tree.content_hash, meta)
 
     # --- private helpers used by save_scope_commit ---
-
-    @staticmethod
-    def _collect_scope_stack(current: State[Any]) -> list[State[Any]]:
-        """Return the ``State`` chain from run-root down to ``current``."""
-        scopes: list[State[Any]] = []
-        node: State[Any] | None = current
-        while node is not None:
-            scopes.append(node)
-            node = node._parent
-        scopes.reverse()
-        return scopes
 
     def _build_commit_meta(
         self,

@@ -71,13 +71,16 @@ class TestHaltInLastStep:
         assert not await history.is_complete()
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
-        assert await history.scopes(head) == [{"s1": 1, "s2": 1}]
+        snapshot = await history.snapshot(head)
+        assert (snapshot.root, snapshot.scopes) == ({"s1": 1, "s2": 1}, {})
 
         calls.clear()
         await build(None).run(resume="restart")
         assert calls == ["s1", "s2"]
         head = await history.head()
-        assert head is not None and await history.scopes(head) == [{"s1": 2, "s2": 2}]
+        assert head is not None
+        snapshot = await history.snapshot(head)
+        assert (snapshot.root, snapshot.scopes) == ({"s1": 2, "s2": 2}, {})
 
     async def test_late_halt_never_deletes_history_under_gc_on_success(
         self, tmp_path: Path
@@ -104,7 +107,8 @@ class TestHaltInLastStep:
         history = History(store, "gc-late-halt")
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
-        assert await history.scopes(head) == [{"s1": 1}]
+        snapshot = await history.snapshot(head)
+        assert (snapshot.root, snapshot.scopes) == ({"s1": 1}, {})
         assert not await history.is_complete()
 
     async def test_map_as_last_step_is_not_complete(self, store: JsonFileCheckpointStore) -> None:

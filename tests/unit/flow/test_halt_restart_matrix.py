@@ -366,8 +366,8 @@ def _flow(
 
 async def _root_done(history: History, commit: Any) -> dict[str, int] | None:
     """The ``done`` map in ``commit``'s root scope; ``None`` when it holds no state."""
-    scopes = await history.scopes(commit)
-    return dict(scopes[0].get("done", {})) if scopes else None
+    snapshot = await history.snapshot(commit)
+    return dict(snapshot.root.get("done", {})) if snapshot.has_state else None
 
 
 async def _restart_point_done(history: History) -> dict[str, int]:

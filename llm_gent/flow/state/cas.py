@@ -4,12 +4,12 @@
 """Content-addressed state model — the CAS substrate.
 
 Blob / Tree / Commit form a Git-shaped provenance store for gent
-histories. State at every save-point becomes a :class:`Blob` keyed by
-its content hash; an ordered :class:`Tree` of scope entries binds those
-blobs to the state stack; a :class:`Commit` stamps the tree with its
-position in the history (``flow_id``, ``node_path``,
-``iteration``) and provenance metadata (``produced_by``, ``trace_ref``,
-``outcome``, ``flow_root_hash``).
+histories. At every save point the run's live state becomes a tree of
+:class:`Tree` / :class:`Blob` objects keyed by content hash — the layout
+is :mod:`llm_gent.flow.state.snapshot`'s; a :class:`Commit` stamps the
+root tree with its position in the history (``flow_id``, ``node_path``,
+``iteration``, ``scope_path``) and provenance metadata (``produced_by``,
+``trace_ref``, ``outcome``, ``flow_root_hash``).
 
 This module ships only the object model and the hash discipline.
 Persistence (the :class:`CheckpointStore` Protocol redesign) and the
@@ -96,9 +96,8 @@ class Blob:
 
 
 TreeEntryKind = Literal["blob", "tree"]
-"""Kind slot on :class:`TreeEntry` — a scope-level entry points at either
-a leaf blob (that scope's serialized data) or a subtree (nested scope
-tree). Closed enum: the recursion has two shapes, no third.
+"""Kind slot on :class:`TreeEntry` — an entry points at either a blob or a
+subtree. Closed enum: the recursion has two shapes, no third.
 """
 
 
@@ -106,10 +105,10 @@ tree). Closed enum: the recursion has two shapes, no third.
 class TreeEntry:
     """One ``(scope_id, kind, child_hash)`` triple inside a :class:`Tree`.
 
-    :attr:`scope_id` is the scope's stable identifier — typically the
-    scope-defining node's content-addressed id (as computed elsewhere in
-    :mod:`llm_gent.flow`). :attr:`kind` discriminates between a leaf blob
-    and a subtree, mirroring git's tree-entry model.
+    :attr:`scope_id` is the entry's name within its tree, like a file name
+    in git: a path segment of the snapshot layout, or a key of a scope's
+    payload. :attr:`kind` discriminates between a blob and a subtree,
+    mirroring git's tree-entry model.
     """
 
     scope_id: str
@@ -252,6 +251,9 @@ class CommitMeta:
     commit; empty only in hand-built commits."""
     timestamp_iso: str
     framework_version: str
+    scope_path: str = ""
+    """Snapshot path of the scope the saving node ran in (``""`` for the root
+    scope); see :mod:`llm_gent.flow.state.snapshot`."""
 
 
 @dataclass(frozen=True)
@@ -341,6 +343,7 @@ def _parse_commit_meta(meta_body: dict[str, Any]) -> CommitMeta:
         flow_root_hash=meta_body["flow_root_hash"],
         timestamp_iso=meta_body["timestamp_iso"],
         framework_version=meta_body["framework_version"],
+        scope_path=meta_body.get("scope_path", ""),
     )
 
 
@@ -384,4 +387,5 @@ def _meta_body(meta: CommitMeta) -> dict[str, Any]:
         "flow_root_hash": meta.flow_root_hash,
         "timestamp_iso": meta.timestamp_iso,
         "framework_version": meta.framework_version,
+        "scope_path": meta.scope_path,
     }

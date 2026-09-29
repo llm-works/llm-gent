@@ -78,7 +78,7 @@ async def _head(store: JsonFileCheckpointStore, name: str) -> Any:
     history = History(store, name)
     head = await history.head()
     assert head is not None
-    return head, await history.scopes(head)
+    return head, await history.snapshot(head)
 
 
 class TestRestart:
@@ -174,8 +174,8 @@ class TestRestart:
             )
 
         await _flow().run()
-        head, scopes = await _head(store, "stateless-end")
-        assert History.is_final_state(head) and scopes == []
+        head, snapshot = await _head(store, "stateless-end")
+        assert History.is_final_state(head) and not snapshot.has_state
 
         lg, warnings = _capturing_logger()
         result = await _flow(lg).run(state={"n": 100}, resume="restart")
@@ -218,12 +218,12 @@ class TestFailureCommit:
         with pytest.raises(RuntimeError, match="boom at 2"):
             await _counting_flow(store, "fail-commit", max_iters=5, fail_at=2).run()
 
-        head, scopes = await _head(store, "fail-commit")
+        head, snapshot = await _head(store, "fail-commit")
         assert History.is_failed(head)
         assert head.meta.node_path == FAILED_NODE_PATH
         assert head.meta.outcome == "failed"
         assert head.meta.produced_by.node_id == FAILURE_PRODUCER
-        assert scopes == [{"n": 2}]
+        assert (snapshot.root, snapshot.scopes) == ({"n": 2}, {})
         assert not await History(store, "fail-commit").is_complete()
 
     async def test_store_error_does_not_mask_original_exception(self, tmp_path: Path) -> None:

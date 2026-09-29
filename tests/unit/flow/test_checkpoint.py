@@ -415,7 +415,7 @@ class TestCheckpointPolicyMap:
         history = History(store, "map-siblings")  # type: ignore[arg-type]
         head = await history.head()
         assert head is not None
-        assert (await history.scopes(head))[0] == {"s0": True, "s1": True}
+        assert (await history.snapshot(head)).root == {"s0": True, "s1": True}
 
 
 class TestCommitConsistency:
@@ -448,10 +448,8 @@ class TestCommitConsistency:
             .run()
         )
         history = History(store, "one-moment")  # type: ignore[arg-type]
-        pairs = [
-            [scope["n"] for scope in await history.scopes(commit)]
-            async for commit in history.commits()
-        ]
+        snapshots = [await history.snapshot(commit) async for commit in history.commits()]
+        pairs = [[s.root["n"], *(c["n"] for c in s.scopes.values())] for s in snapshots]
         nested = [p for p in pairs if len(p) == 2]
         assert len(nested) == 6
         assert all(root == child for root, child in nested), nested
@@ -1630,15 +1628,12 @@ class TestCompletionTag:
         head = await history.head()
         assert head is not None and History.is_final_state(head)
         assert await history.is_complete()
-        assert await history.scopes(head) == []
+        assert not (await history.snapshot(head)).has_state
 
     async def test_final_state_commit_is_tagged_head(self, store: JsonFileCheckpointStore) -> None:
         """A halt-only run with no save points still leaves its final state at the head."""
-        import json
-
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, FlowFactory, History, verb
         from llm_gent.flow.checkpoint import COMPLETE_TAG, COMPLETION_PRODUCER
-        from llm_gent.flow.state.cas import Tree
 
         @verb
         async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
@@ -1660,10 +1655,8 @@ class TestCompletionTag:
         (commit,) = _chain_from_head(store, "final-state")
         assert commit.meta.node_path == "$end"
         assert commit.meta.produced_by.node_id == COMPLETION_PRODUCER
-        tree = Tree.from_bytes(store.get_object(flow_id, "tree", commit.root_tree_hash) or b"")
-        (entry,) = tree.entries
-        blob = store.get_object(flow_id, "blob", entry.child_hash) or b""
-        assert json.loads(blob.decode()) == {"n": 3}
+        snapshot = await History(store, "final-state").snapshot(commit)
+        assert (snapshot.root, snapshot.scopes, snapshot.passes) == ({"n": 3}, {}, {})
 
     async def test_rerun_after_completion_appends_to_same_history(
         self, store: JsonFileCheckpointStore
@@ -1728,10 +1721,13 @@ class TestCompletionTag:
         from llm_gent.flow._checkpoint_ctx import CheckpointContext
         from llm_gent.flow.checkpoint import COMPLETE_TAG
         from llm_gent.flow.state import State
+        from llm_gent.flow.state.snapshot import ScopeRegistry
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
         ctx = CheckpointContext(store, "torn-completion", lambda: "")
-        tree = await ctx.put_state_tree(State(data={"n": 7}))
+        scopes = ScopeRegistry()
+        scopes.begin(State(data={"n": 7}))
+        tree = await ctx.put_snapshot(scopes)
         await ctx.save_completion_commit(tree)
         assert store.get_ref(flow_id_for(store, "torn-completion"), COMPLETE_TAG) is None
 
@@ -1893,7 +1889,7 @@ class TestResumeErrorPaths:
         )
 
         # Build a tree with an entry pointing at a nonexistent blob.
-        entry = TreeEntry(scope_id="00", kind="blob", child_hash="c0ffee" * 10 + "1234")
+        entry = TreeEntry(scope_id="state", kind="blob", child_hash="c0ffee" * 10 + "1234")
         tree = Tree.from_entries([entry])
         meta = CommitMeta(
             flow_id=flow_id_for(store, "orphan-blob"),
@@ -1943,7 +1939,7 @@ class TestResumeErrorPaths:
         blob = Blob.from_bytes(canonical_json({}))
         store.put_object(flow_id_for(store, "stale-1"), "blob", blob.content_hash, blob.payload)
         tree = Tree.from_entries(
-            [TreeEntry(scope_id="00", kind="blob", child_hash=blob.content_hash)]
+            [TreeEntry(scope_id="state", kind="blob", child_hash=blob.content_hash)]
         )
         store.put_object(flow_id_for(store, "stale-1"), "tree", tree.content_hash, tree.to_bytes())
         meta = CommitMeta(
@@ -2043,10 +2039,7 @@ class TestScopedStateRoundTrip:
         inspecting the pre-resume commit's leaf blob and confirming the
         resume completes without a structural-drift error.
         """
-        import json
-
-        from llm_gent.flow import Context, FlowFactory, verb
-        from llm_gent.flow.state.cas import Commit, Tree
+        from llm_gent.flow import Context, FlowFactory, History, verb
 
         @verb
         async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
@@ -2072,21 +2065,12 @@ class TestScopedStateRoundTrip:
         )
         await outer_pre.run()
 
-        # Halt-commit's leaf scope (the .call scope) carries counter=2.
-        halted_hash = store.get_ref(flow_id_for(store, "scoped-1"), HEAD_REF)
-        assert halted_hash is not None
-        halted_commit = Commit.from_bytes(
-            store.get_object(flow_id_for(store, "scoped-1"), "commit", halted_hash) or b""
-        )
-        halted_tree = Tree.from_bytes(
-            store.get_object(flow_id_for(store, "scoped-1"), "tree", halted_commit.root_tree_hash)
-            or b""
-        )
-        leaf_hash = halted_tree.entries[-1].child_hash
-        leaf_data = json.loads(
-            (store.get_object(flow_id_for(store, "scoped-1"), "blob", leaf_hash) or b"").decode()
-        )
-        assert leaf_data == {"counter": 2}
+        # The halt commit's snapshot holds the .call scope with counter=2.
+        halted = await History(store, "scoped-1").head()
+        assert halted is not None
+        snapshot = await History(store, "scoped-1").snapshot(halted)
+        assert list(snapshot.scopes.values()) == [{"counter": 2}]
+        assert snapshot.chain(halted.meta.scope_path) == [{"counter": 2}]
 
         # Resume — projected scope restores from the commit instead of
         # re-projecting to counter=0; run reaches max_iters=5 cleanly.
@@ -2108,10 +2092,9 @@ class TestScopedStateRoundTrip:
               .call(mid_flow, state=lambda p: {...})    # depth 1 — middle scope
                 mid_flow.iterate(body, ...)              # depth 2 — leaf iterate
 
-        The middle scope's payload lands as a Blob under scope_id "01"
-        in the commit's tree. Before the fix, ``_hydrate_resume_state``
-        extracted only root ("00") and leaf ("02"); the middle scope
-        was dropped and re-projected via the state factory on resume.
+        The commit's snapshot holds both child scopes, each at its own
+        path. Replay has to restore the middle one too, not re-project it
+        through the state factory.
 
         This test halts mid-run, resumes, and asserts a mutation stored
         in the middle scope during the pre-halt run persists — proving
@@ -2162,33 +2145,19 @@ class TestScopedStateRoundTrip:
         await outer_pre.run()
         assert store.get_ref(flow_id_for(store, "3-level-1"), HEAD_REF) is not None
 
-        # Load the commit and inspect the middle scope's blob directly —
-        # end-to-end verification that scope_id "01" carries the witness
-        # value. This asserts the SAVE side without needing the fix on
-        # the load side.
-        from llm_gent.flow.state.cas import Commit, Tree
+        # The head's snapshot holds the root, the middle (.call) scope and
+        # the leaf (.iterate) scope; the middle one carries the witness.
+        from llm_gent.flow import History
 
-        commit_hash = store.get_ref(flow_id_for(store, "3-level-1"), HEAD_REF)
-        assert commit_hash is not None
-        commit = Commit.from_bytes(
-            store.get_object(flow_id_for(store, "3-level-1"), "commit", commit_hash) or b""
-        )
-        tree = Tree.from_bytes(
-            store.get_object(flow_id_for(store, "3-level-1"), "tree", commit.root_tree_hash) or b""
-        )
-        # Three scope entries: root (00), middle (01), leaf (02).
-        assert [e.scope_id for e in tree.entries] == ["00", "01", "02"]
-        middle_entry = tree.entries[1]
-        import json
-
-        middle_data = json.loads(
-            (
-                store.get_object(flow_id_for(store, "3-level-1"), "blob", middle_entry.child_hash)
-                or b""
-            ).decode()
-        )
+        history = History(store, "3-level-1")
+        commit = await history.head()
+        assert commit is not None
+        snapshot = await history.snapshot(commit)
+        middle_path, leaf_path = sorted(snapshot.scopes, key=len)
+        assert leaf_path.startswith(middle_path + "/")
+        middle_data = snapshot.scopes[middle_path]
         assert middle_data.get(WITNESS_KEY) == 2, (
-            f"middle scope blob should carry the WITNESS mutation; got {middle_data!r}"
+            f"middle scope should carry the WITNESS mutation; got {middle_data!r}"
         )
 
         # Resume without halt — runs to max_iters=5, so 3 more iterations
@@ -2205,29 +2174,83 @@ class TestScopedStateRoundTrip:
         await outer_resume.run(resume="replay")
         # Inspect the newest commit under the iterate's node_path (the
         # final-state commit at "$end", written on clean exit, sits after it).
-        from llm_gent.flow import History
-
         final_commit = None
-        async for candidate in History(store, "3-level-1").commits():
+        async for candidate in history.commits():
             if candidate.meta.node_path == commit.meta.node_path:
                 final_commit = candidate
                 break
         assert final_commit is not None
-        final_tree = Tree.from_bytes(
-            store.get_object(flow_id_for(store, "3-level-1"), "tree", final_commit.root_tree_hash)
-            or b""
-        )
-        final_middle_hash = next(e.child_hash for e in final_tree.entries if e.scope_id == "01")
-        final_middle = json.loads(
-            (
-                store.get_object(flow_id_for(store, "3-level-1"), "blob", final_middle_hash) or b""
-            ).decode()
-        )
+        final_middle = (await history.snapshot(final_commit)).scopes[middle_path]
         assert final_middle.get(WITNESS_KEY) == 5, (
             f"resume should have restored the middle scope (WITNESS=2) and "
             f"continued for 3 more iterations to WITNESS=5; got {final_middle!r} "
             f"— re-projected middle would land at 3 instead"
         )
+
+    async def test_leaf_iterate_with_state_survives_resume(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """A leaf iterate with its own ``state=`` projection restores on resume.
+
+        Regression test for the case where the leaf iterate (not just its
+        parent .call) has a ``state=`` projection. The iterate's scope must
+        be placed in ``child_state_data`` by ``_split_scopes`` so that
+        ``_resume_iteration`` returns it correctly.
+        """
+        from llm_gent.flow import Context, FlowFactory, History, verb
+
+        @verb
+        async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
+            ctx.state.data["counter"] = ctx.state.data.get("counter", 0) + 1
+            return ctx.state.data["counter"]
+
+        halt = asyncio.Event()
+
+        @verb
+        async def maybe_halt(ctx: Context[dict[str, int]], _prev: Any = None) -> Any:
+            if ctx.state.data["counter"] >= 2:
+                halt.set()
+            return _prev
+
+        ff = FlowFactory(make_test_logger())
+
+        # Leaf iterate with its own state= projection (not inherited from .call)
+        flow_pre = (
+            ff.create(state={"root": True})
+            .with_checkpointer(store, "leaf-iterate-state")
+            .with_halt(halt)
+            .iterate(
+                lambda body: body.call(bump).then(maybe_halt),
+                max_iters=5,
+                state=lambda _p: {"counter": 0},  # leaf iterate's own scope
+            )
+        )
+        await flow_pre.run()
+
+        # Verify the halt commit's snapshot has the iterate's scope
+        history = History(store, "leaf-iterate-state")
+        halted = await history.head()
+        assert halted is not None
+        snapshot = await history.snapshot(halted)
+        assert list(snapshot.scopes.values()) == [{"counter": 2}]
+
+        # Resume — the iterate's scope should restore from the commit,
+        # not re-project to counter=0
+        halt.clear()
+        flow_resume = (
+            ff.create(state={"root": True})
+            .with_checkpointer(store, "leaf-iterate-state")
+            .iterate(
+                lambda body: body.call(bump).then(maybe_halt),
+                max_iters=5,
+                state=lambda _p: {"counter": 0},
+            )
+        )
+        await flow_resume.run(resume="replay")
+
+        # Final commit should exist (run completed without structural-drift error)
+        final = await history.head()
+        assert final is not None and History.is_final_state(final)
 
 
 # ---------------------------------------------------------------------------

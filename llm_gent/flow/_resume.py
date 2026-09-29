@@ -33,6 +33,7 @@ from .checkpoint import COMPLETE_TAG
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
+from .state.snapshot import Snapshot, path_from_str
 
 
 if TYPE_CHECKING:
@@ -65,10 +66,10 @@ class Resume:
            newest commit before a run of ``$failed`` commits. A final-state
            commit there is a finished run: fresh run (even if the
            ``complete`` tag write after it never landed).
-        2. :meth:`History.scopes` walks the commit's tree to one JSON
-           payload per scope, root → leaf via the zero-padded ``scope_id``.
-           A commit written by a flow of a different structure is refused
-           (:meth:`_assert_same_structure`).
+        2. :meth:`History.snapshot` reads the commit's full snapshot; the
+           scopes on the saving scope's path (``meta.scope_path``) are the
+           ones replay restores, root first. A commit written by a flow of
+           a different structure is refused (:meth:`_assert_same_structure`).
         3. The commit's ``paused_turn`` trace refs load as resume entries
            for the Loops that paused.
         4. The root scope's payload rehydrates the top-level
@@ -83,10 +84,10 @@ class Resume:
         commit = await self._history.replay_point()
         if commit is None:
             return fallback, None
-        scope_data = await self._history.scopes(commit)
+        snapshot = await self._history.snapshot(commit)
         self._assert_same_structure(commit)
         await self.flow._resume_paused_turns.load_from_commit(self._ctx, commit)
-        return self._split_scopes(commit, scope_data)
+        return self._split_scopes(commit, snapshot)
 
     def _assert_same_structure(self, commit: Commit) -> None:
         """Refuse to replay a commit written by a flow with a different structure.
@@ -128,11 +129,12 @@ class Resume:
         """
         skipped: list[str] = []
         async for commit in self._history.commits():
-            scope_data = [] if History.is_failed(commit) else await self._history.scopes(commit)
-            if scope_data:
-                if skipped:
-                    self._warn_restart_skipped(skipped, commit)
-                return self._root_state(scope_data[0])
+            if not History.is_failed(commit):
+                snapshot = await self._history.snapshot(commit)
+                if snapshot.has_state:
+                    if skipped:
+                        self._warn_restart_skipped(skipped, commit)
+                    return self._root_state(snapshot.root)
             skipped.append(commit.meta.node_path)
         if skipped:
             self.flow._lg.warning(
@@ -164,12 +166,12 @@ class Resume:
         return State(data=data, _factory=factory)
 
     def _split_scopes(
-        self, commit: Commit, scope_data: list[Any]
+        self, commit: Commit, snapshot: Snapshot
     ) -> tuple[State[Any], _ResumeReplay | None]:
         """Split root / non-root scope payloads; return (State, replay).
 
-        Root scope hydrates the top-level :class:`State`. Every
-        non-root scope rides on ``intermediate_scope_data`` in
+        Root scope hydrates the top-level :class:`State`. The scopes on
+        the saving scope's path ride on ``intermediate_scope_data`` in
         order; each scope-creating descent (``.call(state=)``,
         ``.iterate(state=)``, ``.map(state=)``) consumes the next
         entry at its own descent site via
@@ -179,17 +181,24 @@ class Resume:
         """
         from .nodes import _ResumeReplay
 
-        root_raw = scope_data[0] if scope_data else None
-        intermediate_raw = tuple(scope_data[1:])
+        root_raw = snapshot.root if snapshot.has_state else None
+        chain = list(snapshot.chain(commit.meta.scope_path))
         path_tuple = tuple(commit.meta.node_path.split("/")) if commit.meta.node_path else ()
+
+        # Leaf node owns a scope (state=) → pop it into child_state_data.
+        scope_tuple = path_from_str(commit.meta.scope_path)
+        leaf_id = path_tuple[-1] if path_tuple else ""
+        leaf_owns_scope = chain and scope_tuple[-2:] == ("n", leaf_id)
+        child_state_data = chain.pop() if leaf_owns_scope else None
+
         return (
             self._root_state(root_raw),
             _ResumeReplay(
                 remaining_path=path_tuple,
                 full_path=path_tuple,
                 iteration=commit.meta.iteration,
-                child_state_data=None,
-                intermediate_scope_data=intermediate_raw,
+                child_state_data=child_state_data,
+                intermediate_scope_data=tuple(chain),
             ),
         )
 
@@ -258,11 +267,15 @@ async def commit_failure(flow: Flow, failed_state: State[Any]) -> None:
 
 
 async def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
-    """Put ``state``'s scope tree, or an empty tree when it cannot be serialized."""
+    """Put the run's snapshot, or an empty tree when its root ``state`` cannot be serialized.
+
+    At the end of a run every child scope has closed, so the snapshot
+    holds the root scope alone.
+    """
     ctx = flow._checkpoint_ctx
     assert ctx is not None
     if _serializable(flow, state):
-        return await ctx.put_state_tree(state)
+        return await ctx.put_snapshot(flow._scopes)
     tree = Tree.from_entries([])
     await ctx.put_tree(tree)
     return tree
