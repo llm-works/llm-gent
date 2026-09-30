@@ -28,7 +28,7 @@ from ._executor import (
     _running,
     _save_scope_commit,
 )
-from ._halt_observer import HaltSaveObserver, is_halt_signaled, saves_run_halt
+from ._halt_observer import is_halt_signaled, note_halt
 from ._node_id import _descend_context
 from .nodes import Interrupted
 from .state import State
@@ -101,7 +101,8 @@ class IterateRunner:
         number and the value carried into that pass. A halt that stops the
         loop before its bounds do interrupts it: a body interrupted inside
         a pass raises :class:`Interrupted` through the loop, which neither
-        advances nor writes a policy commit after it.
+        advances nor writes a policy commit after it, and leaves the
+        iterate registered in that pass.
 
         Raises:
             Interrupted: The halt stopped the loop before its bounds or
@@ -113,34 +114,21 @@ class IterateRunner:
                 break
             if self.it.deadline is not None and time.monotonic() - started >= self.it.deadline:
                 break
-            if await self._halted_before_pass(child_state):
+            if is_halt_signaled(self.env):
+                # Stopped before the next pass: the halt was set outside any
+                # step — before the loop started, or during the last step of
+                # the previous pass, which completed. The cursor is at the pass
+                # that has not run yet.
+                note_halt(self.env, self.iteration, self.node_id)
                 raise Interrupted()
             pass_path = (*path, "p", str(self.iteration))
             result = await self._dispatch_body(child_state, self.carry, pass_path)
-            if self.env.runtime._halt_saved:
-                raise Interrupted()  # the run halted elsewhere (a sibling map item)
             self.carry, self.iteration = result, self.iteration + 1
             if self.env.policy.on_iterate:
                 await _save_scope_commit(self.env, self.iteration, self.node_id, child_state, "ok")
             if await _check_until(self.it.until, result, child_state, self.env, self.node_id):
                 break
         return self.carry
-
-    async def _halted_before_pass(self, child_state: State[Any]) -> bool:
-        """True when a halt stops the loop before the next pass; the run's halt is saved.
-
-        Reached when the halt was set outside any step — before the loop
-        started, or during the last step of the previous pass, which
-        completed — so the cursor is at the pass that has not run yet. A
-        subflow's own halt stops the loop without a save.
-        """
-        if not is_halt_signaled(self.env):
-            return False
-        if saves_run_halt(self.env):
-            await HaltSaveObserver.save_if_signaled(
-                self.env, self.iteration, self.node_id, child_state
-            )
-        return True
 
     async def _dispatch_body(
         self, child_state: State[Any], prev_result: Any, pass_path: ScopePath

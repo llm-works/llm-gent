@@ -207,9 +207,8 @@ class CheckpointPolicy:
 
     Two save triggers are always on and NOT gated by this policy:
 
-    - Halt observation — :meth:`HaltSaveObserver.save_if_signaled`
-      fires whenever the executor observes the run's halt event set
-      (after each chain step, before each iterate pass), provided a
+    - The halt checkpoint — when the run's halt stops it, :meth:`Flow.run`
+      commits the run's position once everything has stopped, provided a
       checkpointer is wired. This is the durability guarantee that makes
       ``run(resume="latest")`` reach a halted history.
     - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires
@@ -250,12 +249,9 @@ class CheckpointPolicy:
     ``iteration=item_index`` under the map's node_path. Items complete
     in parallel; save order is not guaranteed to match item order.
 
-    **Limitation:** per-item commits are currently observability-only.
-    Resume does not yet skip completed items — the whole map re-runs,
-    applying each item's merge again. If merge accumulates state
-    (append, increment, dict update), completed items will double-count.
-    Until per-item resume is implemented, callers relying on
-    ``on_map_item`` should ensure their merge function is idempotent.
+    Each commit holds the map's cursor (its items and completed items
+    with their results): resuming from it does not run a completed item
+    again and does not apply its merge again.
 
     Failed items (:class:`Failure`), guard-skipped items
     (:class:`Skipped`), and cancelled items do NOT save regardless of

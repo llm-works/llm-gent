@@ -710,6 +710,11 @@ async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path:
     assert [k for k in resumed.executed if k not in captured] == missing or case.parallel
     assert set(resumed.executed) - set(captured) == set(missing)
     again = [k for k in resumed.executed if k in captured]
-    assert len(again) <= 1, f"more than the interrupted step ran again: {again}"
+    # A leaf that raised runs again: its step did not complete. A strict map's
+    # other items keep running after it, so a later save can hold it done with
+    # another step running. Besides it, only the step running at the save runs again.
+    raised = {first.stopped} if case.stop == "exception" else set()
+    rerun = [k for k in again if k not in raised]
+    assert len(rerun) <= 1, f"more than the interrupted step ran again: {again}"
     restarted = set(first.turns_paused) & set(resumed.turns_started)
     assert not restarted, f"paused Loop turns started over instead of resuming: {restarted}"

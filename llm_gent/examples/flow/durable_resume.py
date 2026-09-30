@@ -184,7 +184,7 @@ def _make_tool_executor(
     the event via ``abort_signal`` and raises :class:`PauseRequested`
     — SAIA returns ``TaskResult(paused=True)``, Loop keeps the
     task and conversation in the run's snapshots at its call's
-    path, and the halt-observation site writes a CAS commit whose
+    path, and once the run has stopped it writes a CAS commit whose
     snapshot holds that paused turn.
 
     ``arm_halt=False`` (resume invocation): the tool call is
@@ -420,8 +420,8 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
     dispatches through a :class:`Loop` bound to
     :data:`SUMMARIZE_ROLE`. The Loop's
     :class:`~llm_kelt.conversation.ConversationFactory` is what
-    lets the halt-observation site round-trip the paused SAIA
-    conversation through the CAS commit.
+    lets the paused SAIA conversation round-trip through the halt
+    commit.
 
     Termination is state-driven (``until`` on an empty queue).
     ``max_iters`` is only a safety bound, counted across resumes: the

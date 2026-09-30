@@ -25,11 +25,14 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._executor import (
     _enter_scope,
     _merge_state,
+    _restore_scope_state,
+    _running,
     _save_scope_commit,
 )
 from ._halt_observer import is_halt_signaled
@@ -37,7 +40,7 @@ from ._node_id import _descend_context
 from .context import Context
 from .nodes import Failure, Interrupted, ItemsFn, Skipped
 from .state import serialize_state_data
-from .state.snapshot import ScopePath
+from .state.snapshot import DONE, ITEMS, ScopePath
 
 
 if TYPE_CHECKING:
@@ -49,20 +52,42 @@ _INTERRUPTED = object()
 """Result of a map item the halt stopped before it completed."""
 
 
+@dataclass
+class _Done:
+    """A completed item: its result, and whether its scope merged into the parent yet."""
+
+    result: Any
+    merged: bool
+
+
 class MapRunner:
     """Fan out one ``.map`` node's body over its items.
 
-    Constructed with (mp, env, node_id). Public method
-    :meth:`run` takes the map node's :class:`Context` (needed to
-    thread into ``items_fn`` when the user supplied one) plus the
-    incoming ``node_args``, returns the aggregated result (or the
+    Constructed with (mp, env, node_id). Public method :meth:`run` takes
+    the incoming ``node_args`` and returns the aggregated result (or the
     raw list when no aggregator is attached).
+
+    Its cursor — the items it runs over and the completed ones with their
+    results — is state on the runner, in every snapshot taken while it
+    runs. Items that are running keep their own positions under
+    ``<map>/i/<index>``. On ``resume="latest"`` the map runs over the saved
+    items: a completed item does not run again, a running one continues
+    where it was, and the rest run.
     """
 
     def __init__(self, mp: _Map, env: _RunEnv, node_id: str) -> None:
         self.mp = mp
         self.env = env
         self.node_id = node_id
+        self.path: ScopePath = env.owner_path(node_id)
+        # The cursor. Kept here, not in run's locals, so a checkpoint reads it.
+        self.items: list[Any] = []
+        self.done: dict[int, _Done] = {}
+
+    def cursor(self) -> dict[str, Any]:
+        """The items and the completed ones: index to ``{"result", "merged"}``."""
+        done = {str(i): {"result": d.result, "merged": d.merged} for i, d in self.done.items()}
+        return {ITEMS: self.items, DONE: done}
 
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Resolve items, spawn per-item runners, aggregate.
@@ -83,18 +108,34 @@ class MapRunner:
         so the remaining queue drains; already-in-flight items complete
         or stop at their own halt. When any item stopped that way, the
         map is interrupted: it raises :class:`Interrupted` instead of
-        aggregating partial results.
+        aggregating partial results, and stays registered with its
+        completed items for the run's halt checkpoint.
 
         Raises:
             Interrupted: The halt stopped at least one item.
         """
-        prev_result = node_args[0] if node_args else None
-        ctx = self._build_ctx()
-        items = await _resolve_items(self.mp.items, prev_result, ctx)
-        results = await self._gather_items(items)
-        if any(r is _INTERRUPTED for r in results):
-            raise Interrupted()
+        await self._take_saved_or_resolve(node_args)
+        with _running(self.env, self.path, self):
+            results = await self._gather_items(self.items)
+            if any(r is _INTERRUPTED for r in results):
+                raise Interrupted()
         return await self._aggregate(results)
+
+    async def _take_saved_or_resolve(self, node_args: tuple[Any, ...]) -> None:
+        """Continue with the items and completed items a checkout saved; else resolve the items.
+
+        Saved items are used as stored — ``items`` is not evaluated again,
+        since what it reads may have changed since the map started.
+        """
+        scopes = self.env.scopes
+        found, items = scopes.take_cursor(self.path, ITEMS)
+        if found:
+            self.items = items
+            _, done = scopes.take_cursor(self.path, DONE)
+            self.done = {int(i): _Done(d["result"], d["merged"]) for i, d in (done or {}).items()}
+            return
+        prev_result = node_args[0] if node_args else None
+        self.items = await _resolve_items(self.mp.items, prev_result, self._build_ctx())
 
     def _build_ctx(self) -> Context[Any]:
         """Build the :class:`Context` passed to ``items_fn``.
@@ -118,9 +159,10 @@ class MapRunner:
     async def _gather_items(self, items: list[Any]) -> list[Any]:
         """Spawn one runner per item under the concurrency cap; return per-item results.
 
-        Strict mode re-raises the first non-cancellation exception;
-        non-strict returns every item's result (or :class:`Failure`
-        sentinel).
+        A completed item returns its saved result without running; one
+        whose merge had not happened yet merges now. Strict mode re-raises
+        the first non-cancellation exception; non-strict returns every
+        item's result (or :class:`Failure` sentinel).
         """
         merge_lock = asyncio.Lock()
         sem = (
@@ -130,7 +172,10 @@ class MapRunner:
         )
 
         async def _gated(index: int, item: Any) -> Any:
-            runner = MapItemRunner(self.mp, self.env, self.node_id, item, index, merge_lock)
+            runner = MapItemRunner(self, item, index, merge_lock)
+            done = self.done.get(index)
+            if done is not None:
+                return done.result if done.merged else await runner.merge_saved(done.result)
             if sem is None:
                 return await runner.run()
             async with sem:
@@ -164,33 +209,29 @@ class MapItemRunner:
     - :class:`Failure` — the body (or projection / guard) raised;
       non-strict returns the sentinel, strict re-raises after
       firing hooks.
-    - Body's return value — the successful path; merges the child
-      state into the parent (under the shared lock) and saves a
-      per-item boundary commit when policy asks.
+    - Body's return value — the successful path; recorded as completed
+      in the map's cursor, merges the child state into the parent (under
+      the shared lock) and saves a per-item boundary commit when policy
+      asks.
     - :data:`_INTERRUPTED` — the halt stopped the item before it
       completed (before its body ran, or inside it).
 
     ``on_item_complete`` fires at every terminal state but the last: an
-    interrupted item has not completed, and runs again on resume.
+    interrupted item has not completed, and continues on resume.
     Cancellation is unconditional and never fires the hook.
     """
 
     def __init__(
-        self,
-        mp: _Map,
-        env: _RunEnv,
-        node_id: str,
-        item: Any,
-        item_index: int,
-        merge_lock: asyncio.Lock,
+        self, owner: MapRunner, item: Any, item_index: int, merge_lock: asyncio.Lock
     ) -> None:
-        self.mp = mp
-        self.env = env
-        self.node_id = node_id
+        self.owner = owner
+        self.mp = owner.mp
+        self.env = owner.env
+        self.node_id = owner.node_id
         self.item = item
         self.item_index = item_index
         self.merge_lock = merge_lock
-        self.path: ScopePath = (*env.owner_path(node_id), "i", str(item_index))
+        self.path: ScopePath = (*owner.path, "i", str(item_index))
 
     async def run(self) -> Any:
         """Drive this item through the run pipeline.
@@ -199,17 +240,40 @@ class MapItemRunner:
         guard, and body exceptions are wrapped per the parent map's
         strict/non-strict contract. An item the halt stops — before it
         starts, or inside its body — returns :data:`_INTERRUPTED` without
-        firing ``on_item_complete``: it did not complete, and runs again
-        on resume.
+        firing ``on_item_complete``: it did not complete. One stopped
+        inside its body — by the halt, or raising out of a strict map —
+        stays registered where it stopped (its scope and its body's
+        cursors), for the run's halt checkpoint and any checkpoint a
+        sibling takes meanwhile.
         """
         if is_halt_signaled(self.env):
             return _INTERRUPTED
         try:
-            return await self._run_item()
+            outcome = await self._run_item()
         except Interrupted:
             return _INTERRUPTED
+        # Merged back, skipped or failed: the item leaves the snapshot.
+        self.env.scopes.close_under(self.path)
+        return outcome
+
+    async def merge_saved(self, result: Any) -> Any:
+        """Finish an item whose body completed before the checkpoint but whose merge had not.
+
+        Merges the item's saved scope and fires ``on_item_complete``; the
+        body does not run again. Without the saved scope the merge cannot
+        happen, and the item runs from the start.
+        """
+        found, raw = self.env.scopes.take_saved(self.path)
+        if not found:
+            self.owner.done.pop(self.item_index, None)
+            return await self.run()
+        factory = self.mp.state_factory or self.env.state._factory
+        child_state = _restore_scope_state(self.env.state, raw, factory)
+        # Registered until it merges, like the scope of an item that runs.
+        self.env.scopes.open(self.path, child_state)
+        try:
+            return await self._on_success(result, child_state, self._ctx(child_state))
         finally:
-            # Merged back, skipped or failed: the item's scope leaves the snapshot.
             self.env.scopes.close(self.path)
 
     async def _run_item(self) -> Any:
@@ -284,24 +348,24 @@ class MapItemRunner:
         items write the shared state directly, so no snapshot is taken:
         restoring one would erase what siblings wrote while the commit
         was in flight.
+
+        The map's cursor records the item as completed as soon as its body
+        returns, and as merged in the same step as the merge — no await
+        between — so every checkpoint holds a merge together with its
+        record: a completed item never runs again, and its merge is
+        applied exactly once.
         """
-        snapshot = None
+        scoped = self.mp.state_fn is not None
+        self.owner.done[self.item_index] = _Done(result, merged=not scoped)
+        rollback: list[Any] = []
         try:
-            async with self.merge_lock:
-                if self.env.policy.on_map_item and self.mp.state_fn is not None:
-                    # serialize_state_data passes a dict through as-is: copy it,
-                    # or the merge mutates the snapshot the rollback restores from.
-                    snapshot = copy.deepcopy(serialize_state_data(self.env.state.data))
-                await _merge_state(self.mp.merge_fn, self.env.state, child_state)
-                if self.env.policy.on_map_item:
-                    await _save_scope_commit(
-                        self.env, self.item_index, self.node_id, self.env.state, "ok"
-                    )
+            await self._merge_and_save(child_state, scoped, rollback)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if snapshot is not None:
-                _restore_state_data(self.env.state.data, snapshot)
+            self.owner.done.pop(self.item_index, None)
+            if rollback:
+                _restore_state_data(self.env.state.data, rollback[0])
             if self.mp.on_error is not None:
                 await self._run_on_error(exc, item_ctx)
             failure = Failure(exception=exc, item=self.item)
@@ -311,6 +375,28 @@ class MapItemRunner:
             return failure
         await self._fire_on_item_complete(result, item_ctx)
         return result
+
+    async def _merge_and_save(
+        self, child_state: State[Any], scoped: bool, rollback: list[Any]
+    ) -> None:
+        """Under the merge lock: merge, record it in the map's cursor, save per policy.
+
+        With a policy save of a scoped item, the parent's data before the
+        merge is appended to ``rollback`` for the caller to restore if the
+        merge or the save fails.
+        """
+        async with self.merge_lock:
+            if self.env.policy.on_map_item and scoped:
+                # serialize_state_data passes a dict through as-is: copy it,
+                # or the merge mutates the snapshot the rollback restores from.
+                rollback.append(copy.deepcopy(serialize_state_data(self.env.state.data)))
+            await _merge_state(self.mp.merge_fn, self.env.state, child_state)
+            self.owner.done[self.item_index].merged = True
+            self.env.scopes.close(self.path)
+            if self.env.policy.on_map_item:
+                await _save_scope_commit(
+                    self.env, self.item_index, self.node_id, self.env.state, "ok"
+                )
 
     async def _run_on_error(self, exc: BaseException, ctx: Context[Any]) -> None:
         """Invoke on_error and swallow any exception it raises.

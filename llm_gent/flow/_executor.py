@@ -315,27 +315,33 @@ def _live_scope(
 
     Without a projection the block shares its parent's scope, which is
     already registered (or is the root). The scope is dropped once the
-    block ends — after its merge, so a snapshot taken meanwhile never
-    misses its data — or when the block raises.
+    block completes — after its merge, so a snapshot taken meanwhile
+    never misses its data. A block that stops early keeps it (see
+    :func:`_running`).
     """
     if state_fn is None:
         yield
         return
     env.scopes.open(path, scope)
-    try:
-        yield
-    finally:
-        env.scopes.close(path)
+    yield
+    env.scopes.close(path)
 
 
 @contextlib.contextmanager
 def _running(env: _RunEnv, path: ScopePath, runner: Cursor) -> Iterator[None]:
-    """Keep ``runner``'s cursor in the run's snapshots at ``path`` while the block runs."""
+    """Keep ``runner``'s cursor in the run's snapshots at ``path`` while the block runs.
+
+    Dropped once the block completes. A block that stops early — the halt
+    interrupted it, or it raised — keeps it registered where it stopped:
+    the run's halt checkpoint holds it there, and so does any checkpoint a
+    sibling (another map item) takes meanwhile, so resume continues at the
+    step that stopped. What carries on past the block drops it — the
+    enclosing chain moving past the step (e.g. after a rescue policy), a
+    map item finishing, the next run's start.
+    """
     env.scopes.open_cursor(path, runner)
-    try:
-        yield
-    finally:
-        env.scopes.close_cursor(path, runner)
+    yield
+    env.scopes.close_cursor(path, runner)
 
 
 async def _enter_scope(
@@ -518,51 +524,6 @@ class _BranchArm:
     def cursor(self) -> dict[str, Any]:
         """The arm taken, ``"then"`` or ``"else"``."""
         return {ARM: self.arm}
-
-
-async def _save_halt_checkpoint(
-    env: _RunEnv,
-    iteration: int,
-    node_id: str,
-    current_state: State[Any],
-) -> None:
-    """Persist an ``outcome="halted"`` commit at a halt observation point.
-
-    Called from the halt-observation sites — after each step in
-    :meth:`Chain._walk_steps` and before each pass in
-    :meth:`IterateRunner._loop` — so ``run(resume="latest")`` after a
-    halted process restart continues from this commit: every cursor is
-    where it was when the halt was observed.
-
-    At most one halt-save fires per run: :attr:`Flow._halt_saved` on
-    the top-level runtime latches after the first save, so the enclosing
-    chains and iterates that observe the same halt as the run unwinds
-    do not write another commit. The first save is the innermost one.
-
-    ``iteration`` and ``node_id`` go into the commit's metadata: the
-    enclosing iterate's pass (``0`` at a chain step) and the node the
-    halt was observed at. The step it was observed after runs again on
-    resume, the same contract as a checkpoint taken inside a step.
-    """
-    if env.runtime._halt_saved or env.checkpoint_ctx is None:
-        return
-    env.runtime._halt_saved = True
-    try:
-        await env.checkpoint_ctx.save_scope_commit(
-            env.ancestor_chain, iteration, node_id, env.scopes, current_state, "halted"
-        )
-    except Exception as e:
-        env.lg.warning(
-            "halt-save failed; un-latching for retry at next observation",
-            extra={"exception": e},
-        )
-        env.runtime._halt_saved = False
-        raise
-    except BaseException:
-        # asyncio.CancelledError also un-latches so a later halt-observation
-        # site can retry.
-        env.runtime._halt_saved = False
-        raise
 
 
 async def _save_scope_commit(

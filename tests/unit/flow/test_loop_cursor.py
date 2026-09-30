@@ -103,14 +103,6 @@ def _map_flow(store: Any, halt: asyncio.Event, saia: _PausingSAIA) -> Any:
 
 
 class TestLoopInMap:
-    @pytest.mark.xfail(
-        reason=(
-            "the halt checkpoint is written when the first map item stops, while sibling "
-            "items still run: a sibling's paused Loop turn is not in it"
-        ),
-        raises=AssertionError,
-        strict=True,
-    )
     async def test_each_item_resumes_its_own_paused_turn(self, tmp_path: Path) -> None:
         store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
         halt1 = asyncio.Event()
