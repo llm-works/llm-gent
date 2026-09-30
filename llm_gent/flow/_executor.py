@@ -39,6 +39,7 @@ from .nodes import (
 )
 from .state import State, StateFactory
 from .state.cas import (
+    Commit,
     CommitOutcome,
     TraceRef,
 )
@@ -571,8 +572,8 @@ async def _save_scope_commit(
     current_state: State[Any],
     outcome: CommitOutcome,
     trace_ref: tuple[TraceRef, ...] = (),
-) -> None:
-    """Persist a scope commit via ``env.checkpoint_ctx``; no-op when unbound.
+) -> Commit | None:
+    """Persist a scope commit via ``env.checkpoint_ctx`` and return it; ``None`` when unbound.
 
     Thin wrapper that resolves the ``env → checkpoint context`` reach
     for callers that already have an ``env`` in scope
@@ -581,8 +582,8 @@ async def _save_scope_commit(
     machinery to :meth:`CheckpointContext.save_scope_commit`.
     """
     if env.checkpoint_ctx is None:
-        return
-    await env.checkpoint_ctx.save_scope_commit(
+        return None
+    return await env.checkpoint_ctx.save_scope_commit(
         env.ancestor_chain, iteration, node_id, env.scopes, current_state, outcome, trace_ref
     )
 

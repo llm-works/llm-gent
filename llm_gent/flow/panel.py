@@ -140,13 +140,14 @@ class Panel:
         to completion; that's an authoring responsibility, not framework
         behavior.
 
-        Resume semantics under an enclosing :meth:`Flow.iterate` —
-        the checkpoint boundary is the iterate iteration, not the Panel.
-        Iterate honors halt at its next between-iterations check, and
-        the preserved checkpoint reflects the completion of the
-        iteration containing this Panel. On resume, iterate proceeds at
-        the next iteration and dispatches a fresh Panel there; the
-        halted iteration's Panel is never partially re-dispatched.
+        Resume semantics — the Panel's verbs are not in the run's
+        snapshots: the checkpoint boundary is the step whose verb runs
+        the Panel. A verb that returns the aggregate has completed, and
+        resume moves past it; a verb that stops because of the halt
+        should raise :class:`~llm_gent.flow.Interrupted`, and resume
+        runs it again with a fresh Panel — every inner verb runs again,
+        the ones that finished included. A Loop inside an inner verb
+        does not save its paused turn.
         """
         results = await asyncio.gather(
             *[

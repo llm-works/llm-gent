@@ -33,12 +33,12 @@ The store is a Protocol with four surfaces:
   while the ref still points where the writer expects, so a second writer
   on the same history is detected instead of silently forking it.
   :data:`HEAD_REF` is the newest commit of the history, where every new
-  commit is parented and where restart starts. Tags are refs under
-  ``tags/``: on a clean exit the framework commits the final state at
-  :data:`END_NODE_PATH` and moves :data:`COMPLETE_TAG` to it. The history
-  is complete while ``HEAD`` is that final-state commit; the tag keeps
-  pointing at the last finished run's final state after later runs
-  append past it.
+  commit is parented. Tags are refs under ``tags/``: on a clean exit the
+  framework commits the final state at :data:`END_NODE_PATH` and moves
+  :data:`COMPLETE_TAG` to it. The history is complete while ``HEAD`` is
+  that final-state commit; the tag keeps pointing at the last finished
+  run's final state after later runs append past it. A named checkpoint
+  (``ctx.checkpoint(name)``) is the tag ``tags/<name>``.
 
 - **History cleanup** — :meth:`gc_history` removes every object, ref
   and the name mapping of one ``flow_id``. The framework calls it on a
@@ -92,7 +92,7 @@ Values match :mod:`llm_gent.flow.state.cas`:
 
 HEAD_REF = "HEAD"
 """Ref naming a history's newest commit: the parent of the next commit and
-the commit restart starts from."""
+the commit ``resume="latest"`` starts its walk from."""
 
 
 class ConcurrentWriteError(RuntimeError):
@@ -119,6 +119,27 @@ COMPLETE_TAG = "tags/complete"
 It always points at the final state of the most recent run that finished,
 including after a later run appended commits past it.
 """
+
+
+RESERVED_CHECKPOINT_NAMES = frozenset({"off", "latest", "complete"})
+"""Names a checkpoint cannot take: the :data:`ResumeMode` values and the
+framework's own ``complete`` tag."""
+
+
+def checkpoint_tag(name: str) -> str:
+    """Ref of the named checkpoint ``name``: ``tags/<name>``.
+
+    Raises:
+        ValueError: ``name`` is not a non-empty ``str``, or is one of
+            :data:`RESERVED_CHECKPOINT_NAMES`.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"a checkpoint name must be a non-empty str; got {name!r}")
+    if name in RESERVED_CHECKPOINT_NAMES:
+        raise ValueError(
+            f"{name!r} cannot name a checkpoint; reserved: {sorted(RESERVED_CHECKPOINT_NAMES)}"
+        )
+    return f"tags/{name}"
 
 
 END_NODE_PATH = "$end"
@@ -166,6 +187,10 @@ ResumeMode = Literal["off", "latest"]
   taken runs again, and a Loop that paused mid-turn resumes that turn.
   Starts from ``state=`` when the history is empty; raises
   :class:`~llm_gent.flow.history.HistoryCorrupt` on a corrupt history.
+
+Any other string names a checkpoint taken with ``ctx.checkpoint(name)``
+(see :func:`checkpoint_tag`): the run checks it out the same way and
+moves ``HEAD`` back to it, so its commits continue from there.
 """
 
 

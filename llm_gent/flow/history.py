@@ -30,6 +30,7 @@ from .checkpoint import (
     HEAD_REF,
     CheckpointStore,
     Kind,
+    checkpoint_tag,
     maybe_await,
 )
 from .state import StateFactory, restore_state_data
@@ -104,6 +105,20 @@ class History:
         if flow_id is None:
             return None
         commit_hash = await maybe_await(self.store.get_ref(flow_id, COMPLETE_TAG))
+        return None if commit_hash is None else await self._commit(flow_id, commit_hash)
+
+    async def checkpoint(self, name: str) -> Commit | None:
+        """Commit of the named checkpoint ``name`` (``ctx.checkpoint(name)``), or ``None``.
+
+        Raises:
+            ValueError: ``name`` cannot name a checkpoint (see
+                :func:`~llm_gent.flow.checkpoint.checkpoint_tag`).
+        """
+        tag = checkpoint_tag(name)
+        flow_id = await self.flow_id()
+        if flow_id is None:
+            return None
+        commit_hash = await maybe_await(self.store.get_ref(flow_id, tag))
         return None if commit_hash is None else await self._commit(flow_id, commit_hash)
 
     async def commits(self) -> AsyncIterator[Commit]:

@@ -568,11 +568,18 @@ class TestFailureCommit:
 
 
 class TestResumeModeValidation:
-    @pytest.mark.parametrize("mode", [True, "replay", "restart"])
-    async def test_other_modes_are_rejected(
+    @pytest.mark.parametrize("mode", [True, "", "complete"])
+    async def test_values_that_are_neither_mode_nor_checkpoint_name_are_rejected(
         self, store: JsonFileCheckpointStore, mode: Any
     ) -> None:
         with pytest.raises(ValueError, match="resume must be one of"):
+            await _counting_flow(store, "bad-mode", max_iters=1).run(resume=mode)
+
+    @pytest.mark.parametrize("mode", ["replay", "restart"])
+    async def test_removed_modes_name_missing_checkpoints(
+        self, store: JsonFileCheckpointStore, mode: str
+    ) -> None:
+        with pytest.raises(ValueError, match=f"no checkpoint named {mode!r}"):
             await _counting_flow(store, "bad-mode", max_iters=1).run(resume=mode)
 
     async def test_resume_requires_checkpointer(self) -> None:
