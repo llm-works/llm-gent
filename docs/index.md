@@ -142,10 +142,13 @@ other than a single-hop hand-off:
 - Loop and branch predicates. `until=` and `when=` receive `ctx` and
   read `ctx.data.<field>` when the deciding signal isn't in the just-
   returned value.
-- Checkpoint / resume. Only `ctx.state.data` is serialized; return
-  values are transient and don't survive resume. The state type is
-  declared via `state_type=` on the factory; the initial payload comes
-  from construction or from `run(state=...)` override.
+- Checkpoint / resume. A checkpoint holds `ctx.state.data` and the
+  values in flight between steps: the input of the step a chain is at,
+  the value an iterate carries into its pass. Those values must be plain
+  JSON, pydantic models, or objects with `to_dict()` and a classmethod
+  `from_dict()`. The state type is declared via `state_type=` on the
+  factory; the initial payload comes from construction or from
+  `run(state=...)` override.
 - Aggregation across concurrent items. Under `.map(state=proj, merge=fn)`
   each item projects an isolated child payload and folds back through
   `merge` — cross-item accumulation lives in state, not in the returned
@@ -165,55 +168,58 @@ different consumer.
 Rubric for picking a channel when only one consumer needs the value:
 
 - Next verb is the only consumer → return; skip the state slot.
-- The consumer is >1 step downstream, is a loop/branch predicate, or the
-  value must survive resume → state.
+- The consumer is >1 step downstream or is a loop/branch predicate →
+  state.
 - Two consumers of different kinds → both.
 
-### Verb idempotency and resume
+### Halt, interruption and resume
 
-Verbs may re-run on `run(resume="replay")` when the process terminates
-mid-execution. The checkpoint records the last completed boundary
-(iteration or chain step); work after that boundary re-runs on resume:
+A checkpoint is a snapshot of the whole run, as a git commit is of a
+repository: every live scope, and the cursor of every running
+structure — the step a chain is at and that step's input, the pass an
+iterate is in and the value it carries, the arm a branch took, a Loop
+call's paused SAIA turn. Resume checks the snapshot out and continues
+every structure at its cursor, so **only the step that was running when
+the checkpoint was taken runs again**; completed steps and passes do not.
 
-- **Mid-body crash**: iteration N's body is running when the process
-  dies. The last checkpoint is at iteration N (post-body-N-1). Resume
-  restarts at iteration N, re-running body N from scratch.
-- **Mid-step crash**: a chain step is running when the process dies.
-  The last checkpoint is at the prior step. Resume re-runs the step.
+The halt is cooperative. Under it, **a step either completes or is
+interrupted**:
 
-A clean halt writes one `halted` commit carrying the state at the point
-the halt was observed: between iterations, between top-level chain
-steps, or at the last top-level step when the halt was set during it.
-Work that finishes after that point (in-flight map items, nested steps
-still running) is not in the halt commit; its own saves (`on_map_item`,
-`on_iterate`, `ctx.checkpoint()`) are still written after it. A halted
+- A step that returns has completed; its work is kept.
+- A step that stops before finishing its work raises
+  `llm_gent.flow.Interrupted` (a `BaseException`, so rescue policies and
+  non-strict maps don't treat it as a failure). A Loop call that leaves
+  a paused SAIA turn makes its step interrupted without raising.
+  `Interrupted` raised while no halt is set is a `RuntimeError`.
+
+The innermost chain that sees the run's halt after a step writes one
+`halted` commit: its cursor stays on an interrupted step and moves past
+a completed one. A completed last step does not stop the run — it
+finishes and is committed complete. Chains, iterates and maps that stop
+before their end raise `Interrupted` to the step running them; a subflow
+with its own `.with_halt` ends the interruption at its boundary. A
+halted `run()` returns `None`: its state is in the halt commit. A halted
 history is never marked complete.
 
-`resume="restart"` runs from the first step with the root state of the
-newest commit that has usable state; verbs that decide from state what
-is already done skip it. This is the resume mode that does not depend
-on where the halt landed.
+A step that runs again gets the input it had. Consequence: **verbs must
+be idempotent-in-effects** at the step level. Reading state, mutating
+state, and returning a value are all safe to repeat. Side effects that
+are not — outbound HTTP writes, message sends, ledger appends — must be
+guarded by the verb itself (idempotency keys, "did I already do this"
+checks against state or an external record), or split into their own
+step so a rerun of a later step does not repeat them.
 
-`resume="replay"` continues at the halt commit's position, with these
-limits:
+Current limits:
 
-- The resumed step receives no `prev_result` (its predecessor did not
-  re-run), so it reads its input from state.
-- A halt that skipped map items in a top-level map followed by another
-  step resumes at that next step; the skipped items do not run.
-- A map that re-runs re-runs its completed items and re-applies their
-  merges.
-- A save written after the halt commit becomes the head, and replay
-  continues at that save's position instead.
-
-Consequence: **verbs must be idempotent-in-effects.** Reading state,
-mutating state, and returning a value are all safe to repeat. Side
-effects that are not — outbound HTTP writes, message sends, ledger
-appends — must be guarded by the verb itself (idempotency keys, "did
-I already do this" checks against state or an external record).
-
-The framework offers no automatic once-only guarantee. Non-idempotent
-side effects are the verb author's responsibility.
+- A map records no progress of its own: resuming into a running map
+  runs its items again, completed ones included, and re-applies their
+  merges. Under `max_concurrency > 1` the halt commit is written when
+  the first item stops, while other items may still be running.
+- A `Panel`'s verbs are not in the snapshot: a halted Panel runs again
+  in full, and a Loop inside a Panel verb does not save its paused turn.
+- Positions are recorded by node id. A deploy that inserts steps keeps
+  them valid; resuming into a flow that no longer has the saved step
+  raises, naming its path. Reordering steps can make a step run again.
 
 ### Checkpoint cadence
 
@@ -225,7 +231,10 @@ Three save triggers govern when the framework writes commits:
   restart. A run whose halt is set is never marked complete and never
   deleted under `gc_on_success`.
 - **Explicit `ctx.checkpoint()`** — always available. Verbs invoke
-  the async method to force a save at their current node position.
+  the async method to force a save; the chain running the verb is at
+  its step, so resuming from that save runs the step again.
+  `ctx.checkpoint(name)` also tags the save as a named checkpoint (see
+  below).
 - **Implicit multi-execution boundary saves** — off by default.
   Governed by `CheckpointPolicy`:
     - `on_iterate: bool` — save after every iterate body iteration.
@@ -256,38 +265,39 @@ policy governs only implicit auto-saves.
 
 On a clean exit under the default `retain` retention, the framework also
 commits the run's final state and moves the `complete` tag to it. A
-history whose head is that commit is complete: `run(resume="replay")` starts
-fresh, and the new run's commits extend the same history. The tag stays
-on the last finished run's final state when a later run halts past it.
-A final state that cannot be serialized is committed without state (and
-a warning is logged) rather than failing the finished run.
+history whose head is that commit is complete; the tag stays on the last
+finished run's final state when a later run halts past it. A final state
+that cannot be serialized is committed without state (and a warning is
+logged) rather than failing the finished run.
 
 A run whose nodes raise commits its root state at `$failed` (outcome
 `failed`) before the exception propagates. Errors raised before the first
 node runs (invalid arguments, a corrupt history) or after the last one
-(the post-run replay check, the final-state commit) write nothing extra,
-and neither does cancellation.
+(the final-state commit) write nothing extra, and neither does
+cancellation.
 
-### Resume modes
+### Resume
 
 `run(resume=...)` selects how a run starts from the history:
 
 - `"off"` (default) — start from `state=` as given; commits still append
   to the history.
-- `"replay"` — positional resume: rebuild the last save point's scope tree
-  and fast-forward to it. Iteration bounds are cumulative across runs. A
-  complete history starts fresh.
-- `"restart"` — start at the first node with the root state of the newest
-  commit that has usable state (halted, ok or final). Child scopes are not
-  restored, iterate counters start at zero, and paused turns are not
-  offered. Commits walked past to reach it are logged at warning level.
-  Suits long-lived agents that re-enter their flow each session, and
-  survives changes to the flow's structure that would break replay.
+- `"latest"` — check out the newest commit with usable state and continue
+  every structure at its cursor (see above). `$failed` commits record the
+  state at a failure but are never a starting point, and commits without
+  state are skipped; walking past them is logged at warning level. On a
+  finished history the run starts from its first step with the final
+  state — the same call starts the next session of a long-lived agent.
+  Iteration bounds count across runs.
+- `"<name>"` — check out the named checkpoint `ctx.checkpoint("<name>")`
+  took, the same way, and move `HEAD` back to it: the run's commits
+  continue from there, and the commits written after the checkpoint leave
+  the history's line (`"latest"` no longer sees them). `"off"`,
+  `"latest"` and `"complete"` cannot name a checkpoint; an unknown name
+  raises `ValueError`.
 
-`$failed` commits record the state at a failure but are never a starting
-point: both replay and restart resume from the last commit before them.
-A corrupt history (a commit, tree or state blob missing from the store)
-raises `HistoryCorrupt` in either mode rather than starting over.
+A corrupt history (a commit, tree or blob missing from the store) raises
+`HistoryCorrupt` rather than starting over.
 
 Per-session adjustments to the restored state belong in the flow's first
 step.
@@ -308,7 +318,8 @@ head = await history.head()  # latest commit, or None
 if await history.is_complete():  # last run finished
     state = await history.root_state(head, TypeStateFactory(MyState))
 done = await history.last_complete()  # final state of the last finished run
-point = await history.replay_point()  # where resume="replay" starts; None = fresh
+mark = await history.checkpoint("before-review")  # a named checkpoint, or None
+snapshot = await history.snapshot(head)  # root scope, child scopes, cursors
 async for commit in history.commits():  # newest first, via parent links
     if History.is_failed(commit):  # a run that raised
         ...
@@ -320,6 +331,10 @@ Every commit's meta carries the internal `flow_id` (a UUID the store maps
 `flow_root_hash` — the structure hash of the flow that wrote it
 (`Flow.root_hash()`). Equal root hashes mean identical node ids, so a
 history written by one flow can be resumed by the other.
+
+`llm_gent/examples/flow/durable_resume.md` walks through a halted and
+resumed run and the store it leaves on disk: refs, commits, and the
+snapshot tree with its cursors.
 
 ## Related Projects
 

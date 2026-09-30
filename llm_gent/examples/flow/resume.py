@@ -20,9 +20,10 @@ Exercises the Flow-level checkpointer end-to-end without touching an LLM:
    next pass runs, then any remaining passes.
 
 ``max_iters=5`` is the cumulative bound across resumes — run 1 does 3
-iterations, run 2 does 2, total 5. On a natural completion the checkpoint
-is deleted; on halt / cancel / exception it is preserved so a subsequent
-resume can pick up.
+iterations, run 2 does 2, total 5. The history is kept: run 1 ends it with
+a halt commit, run 2 with the final-state commit tagged ``complete`` (the
+store's default ``retain`` retention; ``gc_on_success`` deletes the
+history on a natural completion instead).
 
 Run standalone::
 
@@ -44,7 +45,15 @@ from dataclasses import dataclass, field
 
 from appinfra.log import quick_console_logger
 
-from llm_gent.flow import Context, Flow, FlowFactory, StateDataclass, TypeStateFactory, verb
+from llm_gent.flow import (
+    Context,
+    Flow,
+    FlowFactory,
+    History,
+    StateDataclass,
+    TypeStateFactory,
+    verb,
+)
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 
@@ -131,6 +140,16 @@ def _build_flow(
     return flow
 
 
+async def _describe_head(history: History) -> str:
+    """The head commit's outcome and the count its state holds."""
+    head = await history.head()
+    if head is None:
+        return "none"
+    count = (await history.snapshot(head)).root["count"]
+    done = "complete" if await history.is_complete() else "resumable"
+    return f"{head.meta.outcome} at count={count} ({done})"
+
+
 async def main() -> int:
     """Run the demo end-to-end, printing state progression."""
     lg = quick_console_logger("resume-example", config={"level": "warning"})
@@ -143,15 +162,15 @@ async def main() -> int:
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
         flow1 = _build_flow(ff, store, client_flow_id, halt=True)
         result1 = await flow1.run()
+        history = History(store, client_flow_id)
         print(f"run 1 returned: {result1} (halted: its state is in the halt checkpoint)")
-        print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
+        print(f"history head: {await _describe_head(history)}")
 
         print(f"\n--- Run 2: resume=latest (cumulative max_iters={MAX_ITERS}) ---")
         flow2 = _build_flow(ff, store, client_flow_id, halt=False)
         result2 = await flow2.run(resume="latest")
         print(f"run 2 returned: count={result2}")
-        print(f"checkpoint on disk: {sorted(p.name for p in tmp_root.rglob('*.json'))}")
-        print("(empty after run 2 because natural completion deletes the checkpoint)")
+        print(f"history head: {await _describe_head(history)}")
 
         return 0
     finally:

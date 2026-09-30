@@ -424,9 +424,9 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
     conversation through the CAS commit.
 
     Termination is state-driven (``until`` on an empty queue).
-    ``max_iters`` is only a safety bound, and it counts
-    cumulatively across resumes — the paused pass consumes one
-    iteration without draining a topic, hence ``+ 1``.
+    ``max_iters`` is only a safety bound, counted across resumes: the
+    halt checkpoint keeps the iterate in the paused pass, so resume
+    finishes that pass instead of starting another.
     """
     conv_factory = KeltConversationFactory(lg)
     summarize = _make_summarize(Loop(SUMMARIZE_ROLE, conversation_factory=conv_factory))
@@ -439,7 +439,7 @@ def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
     flow.iterate(
         lambda body: body.call(summarize),
         until=lambda _result, ctx: not ctx.data.pending,
-        max_iters=len(TOPICS) + 1,
+        max_iters=len(TOPICS),
     )
     return flow
 

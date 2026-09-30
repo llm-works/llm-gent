@@ -7,7 +7,9 @@ Read side — :class:`Resume` is constructed per resuming ``run()`` with the
 flow being resumed, and reads the history through the public
 :class:`~llm_gent.flow.history.History` API. :meth:`Resume.checkout`
 (``resume="latest"``) checks out the snapshot of the newest commit with
-usable state: its root scope hydrates the top-level :class:`State`; each
+usable state, :meth:`Resume.checkout_named` (``resume=<name>``) the
+snapshot of a named checkpoint: its root scope hydrates the top-level
+:class:`State`; each
 child scope goes back to the block that owns it, and each cursor to the
 chain, iterate, branch or Loop call that registered it, when the run
 reaches their paths.
@@ -22,7 +24,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import COMPLETE_TAG
+from .checkpoint import COMPLETE_TAG, HEAD_REF
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
@@ -79,6 +81,33 @@ class Resume:
                 extra={"client_flow_id": self._history.client_flow_id, "skipped": skipped},
             )
         return fallback, None
+
+    async def checkout_named(self, name: str) -> tuple[State[Any], Snapshot]:
+        """Check out the checkpoint ``name`` and reset ``HEAD`` to it.
+
+        The run continues from that commit's snapshot as ``latest`` does
+        from the newest one. ``HEAD`` moves back to the commit
+        (compare-and-set), so the run's commits are parented on it: the
+        commits written after the checkpoint leave the history's line,
+        and ``latest`` no longer sees them.
+
+        Raises:
+            ValueError: The history has no checkpoint named ``name``, or
+                ``name`` cannot name one.
+            ConcurrentWriteError: ``HEAD`` moved under the reset.
+        """
+        commit = await self._history.checkpoint(name)
+        if commit is None:
+            raise ValueError(
+                f"history {self._history.client_flow_id!r} has no checkpoint named {name!r}"
+            )
+        snapshot = await self._history.snapshot(commit)
+        ctx = self.flow._checkpoint_ctx
+        assert ctx is not None
+        head = await ctx.get_ref(HEAD_REF)
+        if head != commit.content_hash:
+            await ctx.move_ref(HEAD_REF, commit.content_hash, head)
+        return self._root_state(snapshot.root), snapshot
 
     def _warn_skipped(self, skipped: list[str], restored: Commit) -> None:
         """Log the ``$failed`` / stateless commits the checkout walked past, and where it landed."""

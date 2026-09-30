@@ -41,6 +41,7 @@ from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
+from .checkpoint import checkpoint_tag
 from .role import Role
 from .state import State
 
@@ -249,37 +250,39 @@ class Context(Generic[T]):
         lg: Logger = self.flow._lg
         return lg
 
-    async def checkpoint(self) -> None:
-        """Explicit save trigger — writes a scope commit at the current node.
+    async def checkpoint(self, name: str | None = None) -> None:
+        """Explicit save trigger — writes a snapshot of the whole run as a commit.
 
         Fires regardless of the flow's :class:`CheckpointPolicy`; the
-        policy governs implicit framework-driven saves only. Uses the
-        current scope stack (``ctx.state``) and stamps the commit at
-        the currently executing node's position, iteration ``0`` and
+        policy governs implicit framework-driven saves only. The commit
+        holds every live scope and every running structure's cursor, like
+        any checkpoint: the chain running this step is at this step, so
+        resuming from it runs this step again (with the input it had),
+        and every enclosing iterate continues in its current pass. The
+        commit's metadata records the current node, iteration ``0`` and
         ``outcome="ok"``.
+
+        With ``name``, the checkpoint is also tagged ``tags/<name>``:
+        ``run(resume=name)`` later checks it out. Taking it again (at
+        this step or elsewhere) moves the tag to the new commit.
 
         No-op when:
         - No checkpointer is wired on the enclosing flow.
         - The ctx has no live executor env (e.g. built by
           :meth:`Flow.dispatch` used standalone).
 
-        Repeated calls at the same node write distinct commit objects
-        (framework does not dedupe by state hash beyond the CAS layer
-        already doing so) and refresh the ref timestamp.
-
-        **Limitation:** checkpoints inside an iterate body or until
-        predicate always stamp ``iteration=0``. On resume, the iterate
-        restarts from iteration 0 even though state reflects N
-        iterations of progress. This can violate the cumulative
-        ``max_iters`` contract — the loop may run up to ``max_iters``
-        additional passes. Until iteration-aware checkpoints are
-        implemented, avoid calling ``ctx.checkpoint()`` inside iterate
-        bodies where iteration count matters.
+        Raises:
+            ValueError: ``name`` cannot name a checkpoint (empty, or one of
+                ``"off"``, ``"latest"``, ``"complete"``) — also without a
+                checkpointer.
         """
+        tag = None if name is None else checkpoint_tag(name)
         env = self._env
         node_id = self._node_id
-        if env is None or node_id is None:
+        if env is None or node_id is None or env.checkpoint_ctx is None:
             return
         from ._executor import _save_scope_commit
 
-        await _save_scope_commit(env, 0, node_id, self.state, "ok")
+        commit = await _save_scope_commit(env, 0, node_id, self.state, "ok")
+        if tag is not None and commit is not None:
+            await env.checkpoint_ctx.put_tag(tag, commit.content_hash)

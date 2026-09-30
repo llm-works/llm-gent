@@ -2,8 +2,7 @@
 
 `durable_resume.py` halts a SAIA turn between a model tool call and the model's follow-up
 completion, exits the process, and resumes that same turn from disk in a second process. This
-walkthrough follows one real run against a local OpenAI-compatible server and shows what lands in
-the checkpoint store at each step.
+walkthrough follows one run and shows what lands in the checkpoint store at each step.
 
 ## Running it
 
@@ -21,70 +20,65 @@ python -m llm_gent.examples.flow.durable_resume --smoke
 ```
 
 The two real invocations must be separate processes — that is the point. The store lives at
-`~/.cache/llm-gent-durable-resume`. Every invocation calls `flow.run(resume="replay")`; the
-framework skips `$failed` commits (left by a run that raised), starts fresh on an empty store or
-when the newest remaining commit is the final-state commit of a finished run, and otherwise resumes
-from that commit (here always the halt commit). A third invocation therefore starts a new cycle on
-the same history; `--reset` wipes the store first.
+`~/.cache/llm-gent-durable-resume`. An invocation resumes with `flow.run(resume="latest")` when
+the history's head is a halt commit, and starts fresh (`resume="off"`) on an empty history or a
+finished one. A third invocation therefore starts a new cycle on the same history; `--reset` wipes
+the store first.
 
 ## The flow
 
 ```
-flow ─ .iterate(until=not pending, max_iters=3)     node e62e0596ecc27e3c
-        └─ body ─ .call(summarize)                  node 0b799bf8f1f3498c
+flow ─ .iterate(until=not pending, max_iters=2)     node e62e0596ecc27e3c
+        └─ body ─ .call(summarize)                  node 88299db1fcb56568
                      └─ Loop(summarizer) ─ saia.complete(task)
                           tools: lookup_reference, submit_summary (terminal)
 ```
 
 - State is a `Digest` dataclass: `pending` (topics left) and `summaries`.
-- Each iteration summarizes `pending[0]`. On a completed turn the verb pops the topic and appends
-  the summary; on a paused turn it returns without touching state.
+- Each pass summarizes `pending[0]`. On a completed turn the verb pops the topic and appends the
+  summary; on a paused turn it returns without touching state.
 - The tool executor sets the flow's halt event when the first `lookup_reference` returns. SAIA's
   next `Backend.chat` sees the event through `abort_signal`, raises `PauseRequested`, and
   `saia.complete` returns `TaskResult(paused=True)`.
 
 Node ids are blake2b hashes of each node's position, kind, and target within the flow, so they are
-stable across processes and runs of the same script — which is what lets run 2 find run 1's
-commits. Changing the flow's shape between runs changes the ids and orphans the old commits.
+stable across processes and runs of the same script — which is what lets run 2 find where run 1
+stopped. A checkpoint records positions by node id: resume into a flow that no longer has the saved
+step raises, naming the path.
 
 ## Run 1 — fresh, halts mid-turn
 
 ```
-  model: qwen3.5-27b-gptq-int4 @ http://127.0.0.1:18300/v1
---- Run (fresh, real) ---
-  store: /home/ubuntu/.cache/llm-gent-durable-resume
+--- Run (fresh, smoke) ---
   tool: lookup_reference('content-addressed storage')
   paused mid-turn on 'content-addressed storage'
   pending: ['content-addressed storage', 'async cancellation']
   summaries: []
-  ref files: ['histories/45d814fb-7be0-4b96-b7eb-450e9850c608/refs/e62e0596ecc27e3c/1.json']
-  halted mid-turn (paused_turn saved) — invoke again to resume
+  ref files: ['histories/61815f06-…/refs/HEAD']
+  halted mid-turn (paused turn saved) — invoke again to resume
 ```
 
 Sequence inside the process:
 
 1. `Loop` dispatches with no caller conversation, so it hands SAIA a fresh one from its
    `conversation_factory`. SAIA appends each message of the turn to it.
-2. The model calls `lookup_reference`; the executor returns the blurb and sets halt.
+2. The model calls `lookup_reference`; the executor returns the blurb and sets the halt.
 3. SAIA's follow-up `chat` raises `PauseRequested`; `saia.complete` returns paused.
-4. `Loop` serializes `{"task", "conversation"}` and stashes it on the runtime, keyed by the node
-   id of the step that dispatched it (`0b799bf8f1f3498c`, the `.call(summarize)` step).
-5. `summarize` sees `result.paused` and returns with state untouched.
-6. The iterate body finishes; `IterateRunner` increments its counter to 1, checks `until` (topics
-   remain), then observes halt at the top of the next pass and writes the halt commit — draining
-   the stashed turn into a `paused_turn` blob referenced from that commit.
+4. `Loop` holds `{"task", "conversation"}` in the run's snapshots at its call's path — the first
+   Loop call of the `summarize` step in pass 0.
+5. `summarize` sees `result.paused` and returns with state untouched. A Loop call left a paused
+   turn, so the step counts as interrupted: it stopped before finishing its work.
+6. The body chain sees the halt after that step and writes the halt commit. Its cursor stays on
+   the interrupted step; the iterate stays in pass 0. The run unwinds and `run()` returns `None`:
+   the halted run's state is in the halt commit.
 
 ## Run 2 — resumes the paused turn
 
 ```
---- Run (resume, real) ---
-  summarized 'content-addressed storage' -> 'Content-addressed storage is a system where data is
-    retrieved using a unique identifier derived from its own content, rather than its physical
-    location.'
+--- Run (resume, smoke) ---
+  summarized 'content-addressed storage' -> 'A concise concept from systems research.'
   tool: lookup_reference('async cancellation')
-  summarized 'async cancellation' -> 'Async cancellation is a foundational concept in modern
-    systems software that allows for the interruption and cleanup of ongoing asynchronous
-    operations.'
+  summarized 'async cancellation' -> 'A concise concept from systems research.'
   pending: []
   complete — final state committed and tagged; next invocation starts fresh
 ```
@@ -92,192 +86,203 @@ Sequence inside the process:
 The first topic is summarized with no `lookup_reference` line: the model's first completion in
 run 2 is the one run 1 never got to make. Sequence:
 
-1. `Resume.replay` resolves the latest commit (the halt commit), restores `Digest` from its tree
-   through `TypeStateFactory(Digest)`, and loads each `paused_turn` blob as a resume entry keyed by
-   the dispatching step's node id.
-2. `IterateRunner` sees it is the save-point leaf and fast-forwards its counter to 1.
+1. `resume="latest"` checks out the newest commit with usable state — the halt commit — and
+   restores `Digest` from its snapshot through `TypeStateFactory(Digest)`.
+2. The top-level chain continues at the iterate; the iterate continues in pass 0 with its carried
+   value; the body chain continues at `summarize` with the input it had.
 3. `summarize` runs for `pending[0]` — still the halted topic, because run 1 left state untouched.
-4. `Loop` finds its resume entry, rebuilds the conversation with
+4. Its Loop call takes the turn saved at its path, rebuilds the conversation with
    `conversation_factory.create_from_state`, restores the saved task, and calls
-   `saia.complete(..., resume=True)`. SAIA continues from the tool result; the model calls
-   `submit_summary`.
-5. The next pass handles the second topic normally (counter 2 → 3, within `max_iters=3`). `until`
-   fires on the empty queue.
+   `saia.complete(..., resume=True)`. SAIA continues from the tool result.
+5. Pass 1 handles the second topic normally; `until` fires on the empty queue.
 6. Clean exit under the default `retain` retention commits the final state and moves the
    `complete` tag to it.
 
 ## The on-disk store
 
-After both runs (`~/.cache/llm-gent-durable-resume/`):
+After both runs (`JsonFileCheckpointStore`):
 
 ```
 names/
-└── durable-resume-demo                    # URL-quoted client_flow_id; content: the flow_id
+└── durable-resume-demo                  # client_flow_id -> flow_id
 histories/
-└── 45d814fb-7be0-4b96-b7eb-450e9850c608/  # flow_id: UUID generated on the first save
-    ├── _client_flow_id                    # "durable-resume-demo"
-    ├── _seq                               # "2": monotonic ref counter; newest ref wins
+└── 61815f06-…/                          # flow_id: UUID generated on the first save
+    ├── _client_flow_id                  # "durable-resume-demo"
     ├── refs/
-    │   ├── e62e0596ecc27e3c/1.json        # node_path / iteration -> halt commit (seq 1)
-    │   └── %24end/0.json                  # "$end" / 0 -> final-state commit (seq 2)
-    ├── tags/
-    │   └── complete                       # -> final-state commit
-    └── objects/                           # content-addressed, file name = blake2b hash
-        ├── commit/8f3ce969…               # halt commit
-        ├── commit/bafb01ab…               # final-state commit
-        ├── tree/614ab218…                 # halt commit's tree
-        ├── tree/…                         # final-state commit's tree
-        ├── blob/e6e66548…                 # Digest state at halt
-        ├── blob/…                         # Digest state at the end of run 2
-        └── blob/8f339b74…                 # paused_turn envelope
+    │   ├── HEAD                         # -> final-state commit
+    │   └── tags%2Fcomplete              # "tags/complete" -> final-state commit
+    └── objects/                         # content-addressed, file name = blake2b hash
+        ├── commit/7e55f868…             # halt commit
+        ├── commit/0be5929d…             # final-state commit
+        ├── tree/…                       # snapshot trees
+        └── blob/…                       # values
 ```
 
 `client_flow_id` is the agent's name for the history; the store keys everything by the internal
-`flow_id` it maps to. The name is looked up at the start of each run, and the first save of a new
-history binds a fresh UUID to it; later runs under the same name reuse it, as run 1 and run 2 do
-here. The UUID and every commit hash differ from one history to the next, so the ones shown here
-will not match a local run.
+`flow_id` it maps to. The UUID and every hash differ from one history to the next, so the ones
+shown here will not match a local run.
 
-Only `refs/` and `tags/` are mutable. Everything under `objects/` is immutable and named by the hash
-of its bytes; identical content is stored once. If resume finds the commit, tree, or a state blob
-missing, it raises `HistoryCorrupt`; a missing `paused_turn` blob makes only that Loop restart its
-turn from the task.
+Only `refs/` is mutable. Everything under `objects/` is immutable and named by the hash of its
+bytes; identical content is stored once, so a value that did not change between commits is not
+written again. If resume finds an object missing, it raises `HistoryCorrupt`.
 
 ### Refs
 
-```json
-// refs/e62e0596ecc27e3c/1.json
-{"commit_hash": "8f3ce969…", "seq": 1}
-```
+Refs are named pointers to commits, as in git, moved by compare-and-set: a write lands only while
+the ref still points where the writer expects, so a second writer on the same history raises
+`ConcurrentWriteError` instead of forking it.
 
-A ref maps `(node_path, iteration)` to a commit. `node_path` is the `/`-joined chain of node ids
-from the run root to the save site; here the save site is the top-level iterate, so it is one id.
-`resolve_ref(flow_id)` returns the ref with the highest `seq`, which is how resume picks the latest
-commit — the head of the history. The script reads it through `History(store, CLIENT_FLOW_ID)`
-rather than the store: `head()` for the paused-turn check, `replay_point()` to decide whether the
-next run resumes.
+- `HEAD` — the newest commit. Every new commit is parented on it; `resume="latest"` starts its
+  walk from it.
+- `tags/complete` — the final state of the last run that finished. It stays put while later runs
+  append past it (`History.last_complete()`).
+- `tags/<name>` — a named checkpoint: `ctx.checkpoint("name")` tags the commit it writes, and
+  `run(resume="name")` checks it out (see [Named checkpoints](#named-checkpoints)).
+
+The script reads the history through `History(store, CLIENT_FLOW_ID)` rather than the store:
+`head()` to decide whether the next run resumes, `snapshot(head)` for the halted state.
 
 ### Halt commit
 
 ```json
 {
   "meta": {
-    "flow_id": "45d814fb-7be0-4b96-b7eb-450e9850c608",
-    "node_path": "e62e0596ecc27e3c",
-    "iteration": 1,
+    "flow_id": "61815f06-…",
+    "node_path": "e62e0596ecc27e3c/88299db1fcb56568",
+    "iteration": 0,
     "outcome": "halted",
-    "produced_by": {"node_id": "e62e0596ecc27e3c", "...": null},
-    "trace_ref": [
-      {"kind": "paused_turn", "id": "0b799bf8f1f3498c:8f339b74…"}
-    ]
+    "produced_by": {"node_id": "88299db1fcb56568", "...": null},
+    "trace_ref": []
   },
   "parent_hashes": [],
-  "root_tree_hash": "614ab218…"
+  "root_tree_hash": "208196f5…"
 }
 ```
 
 - `flow_id` — the history's internal id. Commits never carry the agent's `client_flow_id`.
 - `parent_hashes: []` — the first commit of the history has no parent. Every later commit's
-  parent is the commit that was head when it was written.
-- `iteration: 1` — the iterate counter at halt. The paused pass counted as an iteration, which is
-  why the flow bounds `max_iters` at `len(TOPICS) + 1` and terminates on `until` instead.
-- `outcome: "halted"` — written by the halt-observation site. Resume does not branch on it: the
-  newest commit that is neither `$failed` nor a final-state commit is resumed, and the script
-  applies the same rule (`History.replay_point()`) to decide whether to arm the halt on the next
-  invocation.
-- `trace_ref` — one entry per paused dispatch, `"<step node id>:<blob hash>"`. Resume hands the
-  blob back to the Loop called from that step. The key is per step, not per Loop: a verb that
-  calls two Loops that can pause would have them overwrite each other's entry, so keep one
-  resumable Loop per step.
+  parent is the commit that was `HEAD` when it was written.
+- `node_path` — where the halt was observed: the `summarize` step inside the iterate. Metadata
+  only; where the run continues is in the snapshot's cursors.
+- `outcome: "halted"` — written by the halt observation. `resume="latest"` does not branch on it:
+  it checks out the newest commit that is not a `$failed` record and has state.
 
-### Tree and state blob
+### Snapshot
 
-```json
-// tree/614ab218…
-[["00", "blob", "e6e66548…"]]
+The commit's tree is a snapshot of the whole run: every live scope and the cursor of every running
+structure, at paths built from node ids.
 
-// blob/e6e66548…
-{"pending": ["content-addressed storage", "async cancellation"], "summaries": []}
+```
+state/                                   root scope: one blob per top-level key
+  pending      ["content-addressed storage", "async cancellation"]
+  summaries    []
+chain/                                   top-level chain: at the iterate step
+  step "e62e0596ecc27e3c"   args []   kwargs {}
+n/e62e0596ecc27e3c/
+  pass    0                              iterate: in pass 0 ...
+  carry   null                           ... with this value carried into it
+  p/0/chain/                             pass 0's body chain: at summarize
+    step "88299db1fcb56568"   args [null]   kwargs {}
+  p/0/n/88299db1fcb56568/t/0/turn/       the step's first Loop call: its paused turn
+    task           "Summarize the following. term: content-addressed storage"
+    conversation   {"messages": [user task, assistant tool call, tool result], ...}
 ```
 
-The tree holds one blob per state scope, keyed by two-digit depth. This flow has only the root
-scope. The state blob is `Digest.to_dict()` as canonical JSON — both topics pending, no summaries:
-the paused pass did not mutate state.
+| Path | Holds |
+|---|---|
+| `state` | a scope's payload (root, or a `state=` scope at its block's path) |
+| `chain` | a running chain's step and that step's input |
+| `pass`, `carry` | a running iterate's pass and the value carried into it |
+| `arm` | the arm a running branch took |
+| `t/<k>/turn` | the paused SAIA turn of a step's `k`-th Loop call |
+| `p/<pass>/…`, `i/<index>/…` | positions inside an iterate pass, a map item |
 
-### Paused-turn blob
-
-```json
-{
-  "task": "Summarize the following. term: content-addressed storage",
-  "conversation": {
-    "messages": [
-      {"role": "user",      "content": "Summarize the following. term: content-addressed storage"},
-      {"role": "assistant", "content": "",
-       "tool_calls": [{"id": "…", "name": "lookup_reference",
-                       "arguments": {"term": "content-addressed storage"}}]},
-      {"role": "tool",      "tool_call_id": "…",
-       "content": "'content-addressed storage' is a foundational concept in modern systems software."}
-    ],
-    "...": "…"
-  }
-}
-```
-
-This is the turn exactly at the pause: task, the model's tool call, and the tool result — nothing
-after. `conversation` is the `to_dict()` payload of the conversation class the Loop's
+The paused turn is the turn exactly at the pause: task, the model's tool call, and the tool
+result — nothing after. `conversation` is the `to_dict()` payload of the conversation the Loop's
 `ConversationFactory` produces (`llm_kelt.conversation.Conversation` here); the same factory's
 `create_from_state` rebuilds it on resume.
 
-The state blob and the paused-turn blob are separate on purpose: state is the flow's data at the
-save site; the paused-turn blob is the in-flight model turn. Resume needs both.
+A dict value is stored as a tree with one blob per key, so keys that did not change keep their
+hash from one commit to the next.
 
 ### Final-state commit and the `complete` tag
 
 ```json
 {"meta": {"node_path": "$end", "iteration": 0, "outcome": "ok", "trace_ref": []},
- "parent_hashes": ["8f3ce969…"],  // the halt commit
- "root_tree_hash": "…"}           // one blob: Digest with pending [] and both summaries
-
-// tags/complete
-bafb01ab…
+ "parent_hashes": ["7e55f868…"],   // the halt commit
+ "root_tree_hash": "fa7c8a49…"}    // state/ only: Digest with pending [] and both summaries
 ```
 
 The history is the chain final-state commit → halt commit, written by two different processes:
-run 2 read the head from the store before its first commit and parented on it.
+run 2 read `HEAD` before its first commit and parented on it.
 
-Written on clean exit when the store's retention is `retain` (the `JsonFileCheckpointStore`
-default). It is an ordinary scope commit of the top-level state at the reserved `node_path` `$end`,
-so the head always holds the state the last run ended with, even when no save point fired during
-the run. `run(resume="replay")` treats a history whose latest commit is a final-state commit as a
-fresh start instead of replaying the old halt commit; the fresh run's commits extend the same
-history.
-The `complete` tag moves to each final-state commit and stays on it while later runs append past
-it, so `History.last_complete()` finds the last finished run's state even when the head is a
-newer halt. If the final state cannot be serialized, the commit is written with an empty tree and
+Written on clean exit when the store's retention is `retain` (the default). A finished run has no
+running structure, so the snapshot holds the root scope alone. `HEAD` always holds the state the
+last run ended with, and `resume="latest"` on a finished history starts from its first step with
+that state. If the final state cannot be serialized, the commit is written with an empty tree and
 a warning is logged: the history is still complete, but carries no final state. With
 `retention="gc_on_success"` the history is deleted instead.
 
-## Save sites
+## Where a run stops and continues
 
-| Save site | Fires here? | Why |
+**A step either completes or is interrupted.** Under the halt, a step that returns has completed;
+a step that stops before finishing its work raises `Interrupted` (a Loop call that leaves a paused
+turn counts as interrupted without raising). The innermost chain that sees the run's halt writes
+the halt commit: its cursor stays on an interrupted step and moves past a completed one. Chains,
+iterates and maps that stop early raise `Interrupted` to the step running them, and a halted
+`run()` returns `None`.
+
+**Only the interrupted step runs again.** Resume continues every structure at its cursor, so
+completed steps and passes do not run again. The step that was interrupted runs again with the
+input it had, and a Loop call in it resumes its paused turn.
+
+**Save points.**
+
+| Save point | Fires here? | Why |
 |---|---|---|
-| Iterate halt observation (top of each pass) | Yes — run 1 | Halt set during pass 1; observed before pass 2. |
-| Iterate boundary, `outcome="ok"` | No | `CheckpointPolicy.on_iterate` is off by default; enable with `flow.with_checkpoint_policy(CheckpointPolicy(on_iterate=True))`. |
-| Chain between-step / trailing halt | No | Only the top-level chain saves; the body chain is nested, so halt propagates to the iterate boundary where iteration state is consistent. |
+| Halt observation (after each step, before each pass) | Yes — run 1 | The halt arrived during `summarize`. |
+| Iterate boundary, `outcome="ok"` | No | `on_iterate` is off by default; enable with `flow.with_checkpoint_policy(on_iterate=True)`. |
+| Map item, `outcome="ok"` | No | No map here; `on_map_item` is off by default. |
+| Explicit `ctx.checkpoint()` / `ctx.checkpoint(name)` | No | The verb does not call it. |
 | Final-state commit (`$end`, tagged `complete`) | Yes — run 2 | Clean exit, `retain` retention. |
-| Explicit `ctx.checkpoint()` | No | The verb does not call it. |
+| Failure commit (`$failed`) | No | Written when a run raises; `latest` skips it. |
+
+**Maps.** A map does not record its own progress yet: resuming into a running map runs its items
+again, and under `max_concurrency > 1` the halt commit is written when the first item stops, while
+the others may still be running.
+
+## Named checkpoints
+
+```python
+@verb
+async def review(ctx, draft):
+    await ctx.checkpoint("before-review")  # tags this commit tags/before-review
+    ...
+
+
+await flow.run(resume="before-review")
+```
+
+`ctx.checkpoint(name)` writes a checkpoint like any other — the chain running the step is at that
+step — and tags it `tags/<name>`; taking it again moves the tag. `run(resume=name)` checks the
+tagged commit out as `latest` checks out the newest one, so the step that took the checkpoint runs
+again with the input it had. It also moves `HEAD` back to that commit: the run's commits continue
+from there, and the commits written after the checkpoint leave the history's line — `latest` no
+longer sees them.
+
+`"off"`, `"latest"` and `"complete"` cannot name a checkpoint. `run(resume=name)` for a name the
+history does not have raises `ValueError`.
 
 ## Two contracts the example depends on
 
 **Wire a `ConversationFactory` on the Loop.** It supplies the conversation SAIA appends the turn
-to, and rebuilds it on resume. Without one, a pause still writes a halt commit, but with no
-`paused_turn` ref, and resume re-runs the turn from the task.
+to, and rebuilds it on resume. Without one, a paused turn is not captured: the step still counts
+as interrupted and runs again, and the turn starts over from the task.
 
 **Do not mutate state on a paused result.** The halt commit snapshots state after the verb
 returns. A verb that pops its input or appends a placeholder on a paused `TaskResult` checkpoints a
-half-applied iteration; on resume the Loop restores the saved task while the verb reads the next
-item, and the halted item is skipped. `summarize` checks `result.paused` before touching
-`ctx.data`.
+half-applied step; on resume the Loop restores the saved task while the verb reads the next item,
+and the halted item is skipped. `summarize` checks `result.paused` before touching `ctx.data`.
 
 ## What `--smoke` verifies
 
@@ -285,7 +290,7 @@ A scripted `saia.Backend` stands in for the model; SAIA, Loop, Flow, and the sto
 phase rebuilds store, factory, backend, and flow, so only disk carries over. The run fails unless:
 
 - phase 1 halted with state untouched,
-- the halt commit carries a `paused_turn` ref,
+- the halt commit holds the paused turn,
 - phase 2 issued exactly one `lookup_reference` (the second topic only — a restarted first turn
   would make it two),
 - phase 2 drained every topic with non-empty summaries.

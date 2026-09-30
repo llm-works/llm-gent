@@ -75,7 +75,7 @@ from ._validation import (
     _require_state_for_merge,
     _validate_target,
 )
-from .checkpoint import CheckpointPolicy, CheckpointStore, ResumeMode
+from .checkpoint import CheckpointPolicy, CheckpointStore, ResumeMode, checkpoint_tag
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -883,7 +883,7 @@ class Flow:
         self,
         *args: Any,
         state: Any = UNSET,
-        resume: ResumeMode = "off",
+        resume: ResumeMode | str = "off",
         extra: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -931,7 +931,11 @@ class Flow:
                 via ``state_factory`` when bound, else used as plain dicts.
                 On an empty history the run proceeds with ``state`` as
                 given, appending to the same history; a corrupt history
-                raises :class:`HistoryCorrupt`. ``"latest"`` requires
+                raises :class:`HistoryCorrupt`. Any other string names a
+                checkpoint taken with ``ctx.checkpoint(name)``: the run
+                checks it out the same way and moves ``HEAD`` back to it,
+                so its commits continue from there (the commits after the
+                checkpoint leave the history's line). Resuming requires
                 :meth:`with_checkpointer`. Bound parameter: not forwarded
                 to the first node.
             **kwargs: Keyword inputs to the first node.
@@ -959,7 +963,9 @@ class Flow:
                 start — the error surfaces at the first ``ctx.saia``
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
-            ValueError: ``resume`` is not a :data:`ResumeMode` value.
+            ValueError: ``resume`` is neither a :data:`ResumeMode` value
+                nor a valid checkpoint name, or names a checkpoint the
+                history does not have.
         """
         self._check_run_args(resume)
         self._begin_checkpoint_run()
@@ -982,8 +988,8 @@ class Flow:
         await apply_clean_exit_retention(self, active_state)
         return result
 
-    def _check_run_args(self, resume: ResumeMode) -> None:
-        """Reject an empty flow, an unknown mode, or a resume mode without a checkpointer.
+    def _check_run_args(self, resume: ResumeMode | str) -> None:
+        """Reject an empty flow, a bad ``resume``, or resuming without a checkpointer.
 
         Runs before the failure-commit boundary, so a misconfigured run
         leaves no ``$failed`` commit (or new history) behind.
@@ -991,7 +997,13 @@ class Flow:
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
         if resume not in get_args(ResumeMode):
-            raise ValueError(f"resume must be one of {get_args(ResumeMode)}; got {resume!r}")
+            try:
+                checkpoint_tag(resume)
+            except ValueError as e:
+                raise ValueError(
+                    f"resume must be one of {get_args(ResumeMode)} or a checkpoint name; "
+                    f"got {resume!r} ({e})"
+                ) from None
         if resume != "off" and self._checkpoint_ctx is None:
             label = self._name or "<anonymous>"
             raise RuntimeError(
@@ -1000,12 +1012,14 @@ class Flow:
             )
 
     async def _start_state(
-        self, fallback: State[Any], resume: ResumeMode
+        self, fallback: State[Any], resume: ResumeMode | str
     ) -> tuple[State[Any], Snapshot | None]:
         """The run's initial state and the snapshot it continues from (``None`` for a fresh run)."""
+        if resume == "off":
+            return fallback, None
         if resume == "latest":
             return await Resume(self).checkout(fallback)
-        return fallback, None
+        return await Resume(self).checkout_named(resume)
 
     async def _run_as_subflow(
         self,
