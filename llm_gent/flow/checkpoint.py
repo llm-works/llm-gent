@@ -249,12 +249,9 @@ class CheckpointPolicy:
     ``iteration=item_index`` under the map's node_path. Items complete
     in parallel; save order is not guaranteed to match item order.
 
-    **Limitation:** per-item commits are currently observability-only.
-    Resume does not yet skip completed items — the whole map re-runs,
-    applying each item's merge again. If merge accumulates state
-    (append, increment, dict update), completed items will double-count.
-    Until per-item resume is implemented, callers relying on
-    ``on_map_item`` should ensure their merge function is idempotent.
+    Each commit holds the map's cursor (its items and completed items
+    with their results): resuming from it does not run a completed item
+    again and does not apply its merge again.
 
     Failed items (:class:`Failure`), guard-skipped items
     (:class:`Skipped`), and cancelled items do NOT save regardless of

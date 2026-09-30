@@ -215,6 +215,9 @@ async def commit_halt(flow: Flow) -> None:
         await ctx.save_scope_commit(
             at.ancestor_chain, at.iteration, at.node_id, flow._scopes, at.state, "halted"
         )
+    except TypeError:
+        # Serialization failed: no checkpoint exists, don't claim one does.
+        raise
     except Exception as e:
         flow._lg.warning("halt commit could not be written", extra={"exception": e})
 
