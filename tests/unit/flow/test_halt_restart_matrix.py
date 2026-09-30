@@ -23,35 +23,34 @@ Leaves are not state-driven: a leaf does its work every time it runs,
 so a leaf that runs again shows up in the executed list. They honour the
 halt contract: a leaf halted before its work raises ``Interrupted``, one
 halted after its work returns. The resume point is the newest commit
-with state that is not a failure record — the commit
-``resume="latest"`` checks out.
+with state — the commit ``resume="latest"`` checks out. A run that
+raises writes none: its resume point is its last save.
+
+Some cases stop twice: the resume stops again (a halt or a crash at the
+first or second leaf it runs) and a final resume finishes. Each resume
+is checked against its own resume point.
 
 Properties checked per case:
 
 - The stopped run ends as its stop dictates: a halt returns, a crash or
   an exception raises. Nothing is written after it returns or raises.
-- The resume point holds only work the stopped run did, with the
+- The resume point holds only work the runs so far did, with the
   baseline's values.
 - A halt writes a halt checkpoint — unless it was set after the last
   leaf's work, when the run completes — and the resume point holds every
   leaf the stopped run completed; with a checkpoint in every leaf, so
   does a crash's or an exception's resume point.
-- Resume ends with the baseline's result and ``done`` map, marks the
-  history complete, and executes every leaf the resume point lacks, in
-  the baseline's order, once. Of the leaves the resume point holds, at
-  most one runs again: the one that was running when the checkpoint was
-  taken.
-
-Cases that fail because of a known defect are listed by id in
-``halt_restart_known_defects.json`` and run as ``xfail(strict=True)``
-with the defect as the reason: a fix turns them into failures until
-their ids are removed.
+- Resume ends with the baseline's result, ``done`` map and scoped-map
+  merges, marks the history complete, and executes every leaf the resume
+  point lacks, in the baseline's order, once. Of the leaves the resume
+  point holds, at most one runs again: the one that was running when the
+  checkpoint was taken — and the leaf that crashed or raised. A Loop turn
+  the halt paused continues from its saved half; it never starts over.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,7 +59,7 @@ from typing import Any, Literal
 import pytest
 
 from llm_gent.flow import Context, Flow, FlowFactory, History, Interrupted, Loop, Role, verb
-from llm_gent.flow.checkpoint import FAILED_NODE_PATH, CheckpointStore
+from llm_gent.flow.checkpoint import CheckpointStore
 from llm_gent.flow.stores import InMemoryCheckpointStore, JsonFileCheckpointStore
 
 from .conftest import make_test_logger
@@ -77,7 +76,7 @@ Policy = Literal["none", "on_iterate", "on_map_item", "leaf"]
 
 
 class SimulatedCrash(BaseException):
-    """The process died: not an ``Exception``, so no failure commit is written."""
+    """The process died: not an ``Exception``, so nothing handles it on the way out."""
 
 
 class LeafError(Exception):
@@ -583,10 +582,8 @@ async def _snapshot_done(history: History, commit: Any) -> dict[str, int] | None
 
 
 async def _resume_point_done(history: History) -> dict[str, int]:
-    """The ``done`` map resume continues from: newest commit with state, not a failure."""
+    """The ``done`` map resume continues from: the newest commit with state."""
     async for commit in history.commits():
-        if commit.meta.node_path == FAILED_NODE_PATH:
-            continue
         done = await _snapshot_done(history, commit)
         if done is not None:
             return done
@@ -629,29 +626,6 @@ class Case:
         """Each stopped run's (stop, leaf, mode), in order."""
         first = [(self.stop, self.stop_at, self.mode)]
         return first if self.second is None else [*first, (*self.second, "after")]
-
-
-KNOWN_DEFECTS_FILE = Path(__file__).with_name("halt_restart_known_defects.json")
-
-
-_RAISES: dict[str, type[BaseException]] = {"TypeError": TypeError, "AssertionError": AssertionError}
-
-
-def _known_defects() -> dict[str, tuple[str, type[BaseException]]]:
-    """Case id → (reason, exception the defect raises), for every case failing on a known defect.
-
-    The file lists exact case ids per defect: whether a halted map hands
-    ``aggregate`` a partial result depends on which item was running, so
-    no rule over the dimensions matches the failing cases exactly. The
-    exception type keeps a listed case from passing as xfail when it
-    fails for another reason.
-    """
-    defects = json.loads(KNOWN_DEFECTS_FILE.read_text(encoding="utf-8"))
-    return {
-        case_id: (d["reason"], _RAISES[d["raises"]])
-        for d in defects.values()
-        for case_id in d["cases"]
-    }
 
 
 def _stop_kinds(shape: Seq) -> tuple[Stop, ...]:
@@ -706,13 +680,8 @@ def _cases() -> list[Case]:
 
 
 def _params() -> Iterator[Any]:
-    known = _known_defects()
     for case in _cases():
-        defect = known.get(case.id)
-        marks = (
-            [pytest.mark.xfail(reason=defect[0], raises=defect[1], strict=True)] if defect else []
-        )
-        yield pytest.param(case, id=case.id, marks=marks)
+        yield pytest.param(case, id=case.id)
 
 
 # --- Tests ------------------------------------------------------------------
@@ -722,12 +691,6 @@ def _store(kind: str, tmp_path: Path) -> CheckpointStore:
     if kind == "mem":
         return InMemoryCheckpointStore()
     return JsonFileCheckpointStore(LG, tmp_path / "cp")
-
-
-def test_known_defects_name_existing_cases() -> None:
-    """Every listed case id exists in the matrix, so the list cannot go stale unnoticed."""
-    stale = set(_known_defects()) - {case.id for case in _cases()}
-    assert not stale, f"{KNOWN_DEFECTS_FILE.name} lists cases the matrix no longer has: {stale}"
 
 
 @pytest.mark.parametrize("parallel", [False, True], ids=["seq", "par"])

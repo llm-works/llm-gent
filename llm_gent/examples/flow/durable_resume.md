@@ -166,7 +166,7 @@ The script reads the history through `History(store, CLIENT_FLOW_ID)` rather tha
 - `node_path` — where the halt was observed: the `summarize` step inside the iterate. Metadata
   only; where the run continues is in the snapshot's cursors.
 - `outcome: "halted"` — written when the halt stopped the run. `resume="latest"` does not branch on it:
-  it checks out the newest commit that is not a `$failed` record and has state.
+  it checks out the newest commit that has state.
 
 ### Snapshot
 
@@ -249,7 +249,7 @@ input it had, and a Loop call in it resumes its paused turn.
 | Map item, `outcome="ok"` | No | No map here; `on_map_item` is off by default. |
 | Explicit `ctx.checkpoint()` / `ctx.checkpoint(name)` | No | The verb does not call it. |
 | Final-state commit (`$end`, tagged `complete`) | Yes — run 2 | Clean exit, `retain` retention. |
-| Failure commit (`$failed`) | No | Written when a run raises; `latest` skips it. |
+| A run that raises | — | Writes nothing: the head stays at the last save, where `latest` continues. |
 
 **Maps.** A running map's cursor (`n/<map>/items`, `n/<map>/done`) holds its item list and its
 completed items with their results; each running item keeps its own positions under

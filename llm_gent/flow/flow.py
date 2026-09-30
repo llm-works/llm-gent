@@ -68,7 +68,6 @@ from ._node_id import flow_root_hash, iter_flows
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
-    commit_failure,
     commit_halt,
 )
 from ._validation import (
@@ -923,8 +922,8 @@ class Flow:
             resume: How to start from the checkpointed history
                 (:data:`~llm_gent.flow.checkpoint.ResumeMode`).
                 ``"off"`` (default) runs from ``state`` as given.
-                ``"latest"`` checks out the newest commit with usable state
-                (skipping ``$failed`` and stateless commits) and continues
+                ``"latest"`` checks out the newest commit with state
+                (skipping commits without state) and continues
                 where it was: its root state replaces ``state``, every
                 scope comes back, and every chain, iterate and branch that
                 was running continues at its saved step, pass and arm, so
@@ -951,12 +950,9 @@ class Flow:
 
         With a checkpointer wired, a fully successful run under
         ``retention="retain"`` commits its final state (tagged
-        ``complete``); ``"gc_on_success"`` deletes the history instead. An
-        exception raised while the nodes run commits the root state at
-        ``$failed`` before it propagates. Errors raised before the walk
-        starts (argument checks, loading the history) or after it ends
-        (the final-state commit) write nothing extra, and neither does
-        cancellation.
+        ``complete``); ``"gc_on_success"`` deletes the history instead. A
+        run that raises (or is cancelled) writes no commit: its history's
+        head stays its last save, which ``resume="latest"`` continues from.
 
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode
@@ -986,17 +982,14 @@ class Flow:
             # Everything has stopped, each part registered where it stopped.
             await commit_halt(self)
             return None
-        except Exception:
-            await commit_failure(self, active_state)
-            raise
         await apply_clean_exit_retention(self, active_state)
         return result
 
     def _check_run_args(self, resume: ResumeMode | str) -> None:
         """Reject an empty flow, a bad ``resume``, or resuming without a checkpointer.
 
-        Runs before the failure-commit boundary, so a misconfigured run
-        leaves no ``$failed`` commit (or new history) behind.
+        Runs before anything is read or written, so a misconfigured run
+        leaves no new history behind.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")

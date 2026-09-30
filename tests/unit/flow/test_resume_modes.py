@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""``Flow.run(resume="latest")`` and the failure commit.
+"""``Flow.run(resume="latest")``, and what a run that raises leaves behind.
 
-``"latest"`` checks out the newest commit that has usable state, skipping
-``$failed`` and stateless commits, and continues every running chain,
-iterate and branch at its saved cursor. A run that raises commits its
-root state at ``$failed`` before the exception propagates.
+``"latest"`` checks out the newest commit that has state, skipping
+stateless commits, and continues every running chain, iterate and branch
+at its saved cursor. A run that raises writes no commit: its history's
+head is its last save.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import Context, FlowFactory, History, Interrupted, verb
-from llm_gent.flow.checkpoint import FAILED_NODE_PATH, FAILURE_PRODUCER
 from llm_gent.flow.stores import JsonFileCheckpointStore
 from llm_gent.flow.testing.checkpoint import (
     CanonicalCounter,
@@ -81,7 +80,7 @@ async def _head(store: JsonFileCheckpointStore, name: str) -> Any:
 
 
 class _Crash(BaseException):
-    """The process died: not an ``Exception``, so no failure commit follows the checkpoint."""
+    """The process died: not an ``Exception``, so nothing handles it on the way out."""
 
 
 class TestLatest:
@@ -127,7 +126,7 @@ class TestLatest:
     async def test_after_failure_continues_from_last_save_point(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """The $failed state may be half-updated; resume continues from the commit before it."""
+        """A run that raises writes nothing: the head is its last save, where resume continues."""
         with pytest.raises(RuntimeError, match="boom at 3"):
             await _counting_flow(store, "failed", max_iters=5, fail_at=3, on_iterate=True).run()
 
@@ -136,34 +135,33 @@ class TestLatest:
             state={"n": 100}, resume="latest"
         )
         assert result == 5  # the save point after pass 2 (n=2), then passes 2-4
-        skipped = [extra for msg, extra in warnings if msg.startswith("resume skipped")]
-        assert len(skipped) == 1 and skipped[0]["skipped"] == ["$failed"]
+        assert not warnings
 
     async def test_failure_before_any_save_point_uses_given_state(
         self, store: JsonFileCheckpointStore
     ) -> None:
         with pytest.raises(RuntimeError):
             await _counting_flow(store, "failed-early", max_iters=5, fail_at=2).run()
+        assert await History(store, "failed-early").head() is None
 
-        lg, warnings = _capturing_logger()
-        result = await _counting_flow(store, "failed-early", max_iters=1, lg=lg).run(
+        result = await _counting_flow(store, "failed-early", max_iters=1).run(
             state={"n": 10}, resume="latest"
         )
         assert result == 11
-        assert any("no commit with usable state" in msg for msg, _ in warnings)
 
     async def test_failure_after_completion_continues_from_the_final_state(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """``$end`` then ``$failed``: the finished run's final state is the resume point."""
+        """A run that raised after a finished one leaves the finished run's final state as head."""
         await _counting_flow(store, "end-then-fail", max_iters=2).run()
+        history = History(store, "end-then-fail")
+        finished = await history.head()
         with pytest.raises(RuntimeError):
             await _counting_flow(store, "end-then-fail", max_iters=5, fail_at=1).run()
 
-        history = History(store, "end-then-fail")
         head = await history.head()
-        assert head is not None and History.is_failed(head)
-        assert not await history.is_complete()
+        assert head is not None and finished is not None
+        assert head.content_hash == finished.content_hash
 
         result = await _counting_flow(store, "end-then-fail", max_iters=1).run(
             state={"n": 10}, resume="latest"
@@ -545,44 +543,26 @@ class TestScopesFromSnapshot:
         assert [v for p, v in scopes.items() if "/p/2/" in p] == [{"x": 2}]
 
 
-class TestFailureCommit:
-    async def test_failure_commits_root_state_and_reraises(
+class TestFailure:
+    async def test_failure_writes_no_commit_and_reraises(
         self, store: JsonFileCheckpointStore
     ) -> None:
         with pytest.raises(RuntimeError, match="boom at 2"):
-            await _counting_flow(store, "fail-commit", max_iters=5, fail_at=2).run()
+            await _counting_flow(store, "fail", max_iters=5, fail_at=2).run()
+        assert await History(store, "fail").head() is None
 
-        head, snapshot = await _head(store, "fail-commit")
-        assert History.is_failed(head)
-        assert head.meta.node_path == FAILED_NODE_PATH
-        assert head.meta.outcome == "failed"
-        assert head.meta.produced_by.node_id == FAILURE_PRODUCER
-        assert (snapshot.root, snapshot.scopes) == ({"n": 2}, {})
-        assert not await History(store, "fail-commit").is_complete()
-
-    async def test_store_error_does_not_mask_original_exception(self, tmp_path: Path) -> None:
-        """The run's own exception propagates even if the failure commit cannot be written."""
-
-        class _NoCommits(JsonFileCheckpointStore):
-            def put_object(
-                self, flow_id: str, kind: Any, content_hash: str, payload: bytes
-            ) -> None:
-                if kind == "commit":
-                    raise OSError("store unavailable")
-                super().put_object(flow_id, kind, content_hash, payload)
-
-        lg = make_test_logger()
-        warnings: list[str] = []
-        lg.warning = lambda msg, *_a, **_kw: warnings.append(msg)  # type: ignore[method-assign]
-        store = _NoCommits(make_test_logger(), tmp_path / "cp")
-
-        with pytest.raises(RuntimeError, match="boom at 1"):
-            await _counting_flow(store, "masked", max_iters=3, fail_at=1, lg=lg).run()
-        assert "failure commit could not be written" in warnings
-
-    async def test_cancellation_writes_no_failure_commit(
+    async def test_failure_leaves_the_last_save_as_head(
         self, store: JsonFileCheckpointStore
     ) -> None:
+        with pytest.raises(RuntimeError, match="boom at 2"):
+            await _counting_flow(store, "fail-saved", max_iters=5, fail_at=2, on_iterate=True).run()
+
+        head, snapshot = await _head(store, "fail-saved")
+        assert head.meta.outcome == "ok"
+        assert snapshot.root == {"n": 1}  # the save after pass 0, not the half-done pass 1
+        assert not await History(store, "fail-saved").is_complete()
+
+    async def test_cancellation_writes_no_commit(self, store: JsonFileCheckpointStore) -> None:
         @verb
         async def cancel(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
             raise asyncio.CancelledError()

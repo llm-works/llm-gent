@@ -34,8 +34,6 @@ from typing import TYPE_CHECKING, Any
 from .checkpoint import (
     COMPLETION_PRODUCER,
     END_NODE_PATH,
-    FAILED_NODE_PATH,
-    FAILURE_PRODUCER,
     HEAD_REF,
     CheckpointStore,
     ConcurrentWriteError,
@@ -312,10 +310,6 @@ class CheckpointContext:
     async def save_completion_commit(self, tree: Tree) -> Commit:
         """Commit an already-put ``tree`` as the final-state commit (``$end``, outcome ``ok``)."""
         return await self._save_framework_commit(END_NODE_PATH, COMPLETION_PRODUCER, "ok", tree)
-
-    async def save_failure_commit(self, tree: Tree) -> Commit:
-        """Commit an already-put ``tree`` as the failure commit (``$failed``, outcome ``failed``)."""
-        return await self._save_framework_commit(FAILED_NODE_PATH, FAILURE_PRODUCER, "failed", tree)
 
     async def _save_framework_commit(
         self, node_path: str, producer: str, outcome: CommitOutcome, tree: Tree

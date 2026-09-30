@@ -26,7 +26,6 @@ from typing import TypeVar
 from .checkpoint import (
     COMPLETE_TAG,
     END_NODE_PATH,
-    FAILED_NODE_PATH,
     HEAD_REF,
     CheckpointStore,
     Kind,
@@ -76,11 +75,10 @@ class History:
         return None if commit_hash is None else await self._commit(flow_id, commit_hash)
 
     async def is_complete(self) -> bool:
-        """True when the last run finished: the head is its final-state commit.
+        """True when the head is a final-state commit: the last run that wrote one finished.
 
-        A history whose head is a ``$failed`` commit is not complete;
-        ``run(resume="latest")`` continues from the newest commit before it
-        that has usable state.
+        A run that raises writes nothing, so after a run that raised this
+        still reports what the run before it left.
         """
         head = await self.head()
         return head is not None and self.is_final_state(head)
@@ -89,11 +87,6 @@ class History:
     def is_final_state(commit: Commit) -> bool:
         """True for a final-state commit — written when a run finished cleanly."""
         return commit.meta.node_path == END_NODE_PATH
-
-    @staticmethod
-    def is_failed(commit: Commit) -> bool:
-        """True for a failure commit — written when a run raised."""
-        return commit.meta.node_path == FAILED_NODE_PATH
 
     async def last_complete(self) -> Commit | None:
         """Final-state commit of the most recent run that finished, or ``None``.
@@ -125,7 +118,7 @@ class History:
         """Walk the chain from the head through parent links, newest first.
 
         Parents are in write order across runs; a run's commits end at a
-        ``halted``, ``$end`` or ``$failed`` commit.
+        ``halted`` or ``$end`` commit, or at its last save when it raised.
         """
         commit = await self.head()
         while commit is not None:

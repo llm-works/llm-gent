@@ -281,11 +281,10 @@ finished run's final state when a later run halts past it. A final state
 that cannot be serialized is committed without state (and a warning is
 logged) rather than failing the finished run.
 
-A run whose nodes raise commits its root state at `$failed` (outcome
-`failed`) before the exception propagates. Errors raised before the first
-node runs (invalid arguments, a corrupt history) or after the last one
-(the final-state commit) write nothing extra, and neither does
-cancellation.
+A run that raises — or is cancelled — writes no commit: the state at a
+failure may be half-updated, so the history's head stays at its last
+save, which is where `resume="latest"` continues. The steps that were
+running then run again.
 
 ### Resume
 
@@ -293,10 +292,10 @@ cancellation.
 
 - `"off"` (default) — start from `state=` as given; commits still append
   to the history.
-- `"latest"` — check out the newest commit with usable state and continue
-  every structure at its cursor (see above). `$failed` commits record the
-  state at a failure but are never a starting point, and commits without
-  state are skipped; walking past them is logged at warning level. On a
+- `"latest"` — check out the newest commit with state and continue every
+  structure at its cursor (see above). Commits without state (a final
+  state that could not be serialized) are skipped; walking past them is
+  logged at warning level. On a
   finished history the run starts from its first step with the final
   state — the same call starts the next session of a long-lived agent.
   Iteration bounds count across runs.
@@ -318,8 +317,8 @@ step.
 A history is the chain of commits one `client_flow_id` accumulates across
 runs: each commit's parent is the previous head, in time order. A run
 ends in a `halted` commit (halt), the `$end` final-state commit (clean
-exit) or a `$failed` commit (raised), which is where the next run's
-commits pick up. `History` reads it:
+exit), or at its last save when it raised; the next run's commits pick
+up there. `History` reads it:
 
 ```python
 from llm_gent.flow import History, TypeStateFactory
@@ -332,8 +331,6 @@ done = await history.last_complete()  # final state of the last finished run
 mark = await history.checkpoint("before-review")  # a named checkpoint, or None
 snapshot = await history.snapshot(head)  # root scope, child scopes, cursors
 async for commit in history.commits():  # newest first, via parent links
-    if History.is_failed(commit):  # a run that raised
-        ...
     print(commit.meta.node_path, commit.meta.outcome, commit.meta.timestamp_iso)
 ```
 
