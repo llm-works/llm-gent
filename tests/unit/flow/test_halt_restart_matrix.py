@@ -11,8 +11,10 @@ Each case runs one generated flow shape three ways:
 3. ``run(resume="latest")`` against the same store.
 
 Dimensions: shape (chain, iterate, map, subflow, branch, ``state=``
-scope, up to three levels deep), the leaf where the run stops and
-whether before or after its work, the checkpoint policy (none,
+scope, up to three levels deep; leaves that are plain verbs or Loop
+turns), the leaf where the run stops and whether before or after its
+work (before a Loop turn's work is mid-turn, where the halt pauses the
+turn), the checkpoint policy (none,
 ``on_iterate``, ``on_map_item``, or ``ctx.checkpoint()`` in every leaf),
 sequential or parallel maps, and the store (in-memory; a subset against
 the file store).
@@ -57,7 +59,7 @@ from typing import Any, Literal
 
 import pytest
 
-from llm_gent.flow import Context, Flow, FlowFactory, History, Interrupted, verb
+from llm_gent.flow import Context, Flow, FlowFactory, History, Interrupted, Loop, Role, verb
 from llm_gent.flow.checkpoint import FAILED_NODE_PATH, CheckpointStore
 from llm_gent.flow.stores import InMemoryCheckpointStore, JsonFileCheckpointStore
 
@@ -91,6 +93,11 @@ class Leaf:
 
     name: str
     c: int
+
+
+@dataclass(frozen=True)
+class Turn(Leaf):
+    """A leaf whose work is a Loop turn: half of it, then (unless paused there) the rest."""
 
 
 @dataclass(frozen=True)
@@ -134,13 +141,14 @@ class Scope:
 Node = Leaf | Seq | Iter | Fan | Branch | Scope
 
 _L = Leaf("", 0)
+_T = Turn("", 0)
 
 
 def _label(node: Node, counter: list[int]) -> Node:
     """Return ``node`` with its leaves named ``l1, l2, ...`` in depth-first order."""
     if isinstance(node, Leaf):
         counter[0] += 1
-        return Leaf(f"l{counter[0]}", counter[0])
+        return type(node)(f"l{counter[0]}", counter[0])
     if isinstance(node, Seq):
         return Seq(tuple(_label(child, counter) for child in node.children))
     if isinstance(node, Iter):
@@ -169,6 +177,13 @@ _INNER: dict[str, Node] = {
     "iter(fan(sub))": Iter(Fan(Seq((_L, _L)), 2), 2),
     "fan(iter(fan))": Fan(Iter(Fan(_L, 2), 2), 2),
     "sub(iter(branch))": Seq((Iter(Branch(_L, _L), 2), _L)),
+    "turn": _T,
+    "sub(turn,turn)": Seq((_T, _T)),
+    "iter(turn)": Iter(_T, 2),
+    "fan(turn)": Fan(_T, 2),
+    "branch(turn)": Branch(_T, _T),
+    "scope(turn)": Scope(Seq((_T, _L))),
+    "iter(fan(turn))": Iter(Fan(_T, 2), 2),
 }
 
 SHAPES: dict[str, Seq] = {}
@@ -272,6 +287,10 @@ class Probe:
     entered: int = 0
     executed: list[str] = field(default_factory=list)
     checkpointed: list[str] = field(default_factory=list)
+    mid_turn: str | None = None
+    turns_started: list[str] = field(default_factory=list)
+    turns_paused: list[str] = field(default_factory=list)
+    turns_resumed: list[str] = field(default_factory=list)
 
     def stop_here(self) -> None:
         """Stop the run at the current leaf.
@@ -330,8 +349,103 @@ def _leaf_verb(leaf: Leaf, probe: Probe) -> Any:
     return verb(body)
 
 
+ROLE = Role(name="matrix", backend="openai", model="none")
+
+
+@dataclass
+class _Conv:
+    messages: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"messages": list(self.messages)}
+
+
+class _ConvFactory:
+    def create(self) -> _Conv:
+        return _Conv()
+
+    def create_from_state(self, state: dict[str, Any]) -> _Conv:
+        return _Conv(list(state["messages"]))
+
+
+@dataclass
+class _TurnResult:
+    paused: bool
+
+
+class _TurnSAIA:
+    """A SAIA turn in two halves; it pauses between them when the halt is set.
+
+    A fresh turn does the first half, then pauses if it is where the run
+    stops mid-turn or if the halt is already set (as a real backend does
+    through ``abort_signal``). A resumed turn must arrive with the saved
+    first half and does only the second.
+    """
+
+    def __init__(self, probe: Probe) -> None:
+        self._probe = probe
+
+    async def complete(self, task: str, **kwargs: Any) -> _TurnResult:
+        conv: _Conv = kwargs["conversation"]
+        probe = self._probe
+        if kwargs.get("resume", False):
+            assert conv.messages == [f"half:{task}"], f"resumed {task} with {conv.messages}"
+            probe.turns_resumed.append(task)
+        else:
+            probe.turns_started.append(task)
+            conv.messages.append(f"half:{task}")
+            if probe.mid_turn == task:
+                probe.stop_here()  # sets the halt, or raises for a crash / an exception
+            await asyncio.sleep(0)  # lets parallel map items interleave
+            halt = kwargs.get("abort_signal")
+            if halt is not None and halt.is_set():
+                probe.turns_paused.append(task)
+                return _TurnResult(paused=True)
+        conv.messages.append(f"rest:{task}")
+        return _TurnResult(paused=False)
+
+
+def _turn_verb(leaf: Turn, probe: Probe) -> Any:
+    """Return the verb for a :class:`Turn` leaf: its work is one Loop call.
+
+    A stop "before" its work lands mid-turn, between the turn's halves; a
+    paused turn leaves the step interrupted with nothing recorded.
+    """
+    loop = Loop(ROLE, saia=_TurnSAIA(probe), conversation_factory=_ConvFactory())
+
+    async def body(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+        await asyncio.sleep(0)
+        if probe.crashed:
+            raise SimulatedCrash("process already dead")
+        if ctx.halt is not None and ctx.halt.is_set():
+            raise Interrupted()
+        key = f"{leaf.name}:{x}"
+        probe.entered += 1
+        fire = probe.stop is not None and probe.entered == probe.stop_at
+        if fire:
+            probe.stopped = key
+            if probe.mode == "before":
+                probe.mid_turn = key
+        if (await loop(ctx, key)).paused:
+            return None
+        done = ctx.state.data.setdefault("done", {})
+        done[key] = 3 * x + leaf.c
+        probe.executed.append(key)
+        if probe.policy == "leaf":
+            await ctx.checkpoint()
+            probe.checkpointed.append(key)
+        if fire and probe.mode == "after":
+            probe.stop_here()
+        return done[key]
+
+    body.__name__ = body.__qualname__ = leaf.name
+    return verb(body)
+
+
 def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     """Append ``node`` to ``flow`` as one chain step."""
+    if isinstance(node, Turn):
+        return flow.call(_turn_verb(node, probe))
     if isinstance(node, Leaf):
         return flow.call(_leaf_verb(node, probe))
     if isinstance(node, Seq | Scope):
@@ -597,3 +711,5 @@ async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path:
     assert set(resumed.executed) - set(captured) == set(missing)
     again = [k for k in resumed.executed if k in captured]
     assert len(again) <= 1, f"more than the interrupted step ran again: {again}"
+    restarted = set(first.turns_paused) & set(resumed.turns_started)
+    assert not restarted, f"paused Loop turns started over instead of resuming: {restarted}"

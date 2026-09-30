@@ -25,7 +25,7 @@ from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import HaltSaveObserver, is_halt_signaled, saves_run_halt
 from ._node_id import _compute_node_ids
 from .nodes import UNSET, Interrupted
-from .state.snapshot import CHAIN, path_str
+from .state.snapshot import CHAIN, TURN, path_str
 
 
 if TYPE_CHECKING:
@@ -130,7 +130,11 @@ class Chain:
                 node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
             self.index, self.step_args, self.step_kwargs = index, node_args, node_kwargs
             result, interrupted = await self._run_step(node, node_id, node_args, node_kwargs)
-            if await self._halted_after(index, result, interrupted, args, kwargs):
+            halted = await self._halted_after(index, result, interrupted, args, kwargs)
+            # The step is done at this chain: a paused turn left under it is in
+            # the halt checkpoint already, or was paused by a halt not the run's.
+            self.env.scopes.close_cursors_under(self.env.owner_path(node_id))
+            if halted:
                 # The chain stops before its end: it is interrupted, so the step
                 # running it (a .call, an iterate pass, a map item) is too.
                 raise Interrupted()
@@ -143,8 +147,8 @@ class Chain:
 
         Interrupted means the step stopped before finishing its work: it
         raised :class:`Interrupted` — itself, or a chain, iterate or map it
-        runs that stopped early — or it is (or contains) a Loop whose SAIA
-        turn paused.
+        runs that stopped early — or a Loop call in it left a paused SAIA
+        turn.
 
         Raises:
             RuntimeError: The step raised :class:`Interrupted` while no halt
@@ -160,7 +164,7 @@ class Chain:
                     f"Flow {label!r}: step {node_id!r} raised Interrupted while no halt is set"
                 ) from None
             return None, True
-        return result, self.env.pending_paused_turns.owns(node_id)
+        return result, self.env.scopes.holds_under(self.env.owner_path(node_id), TURN)
 
     async def _halted_after(
         self,

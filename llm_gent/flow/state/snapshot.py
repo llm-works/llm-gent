@@ -16,6 +16,7 @@ that tell repeated executions apart::
     n/<node>/chain                    cursor of the chain a .call / .branch runs
     n/<node>/pass, n/<node>/carry     cursor of a running .iterate
     n/<node>/arm                      arm a running .branch took
+    n/<node>/t/<k>/turn               paused turn of the step's <k>-th Loop call
     n/<node>/p/<pass>/n/<node>/...    positions inside iterate pass <pass>
     n/<node>/i/<index>/state          scope of map item <index>
     n/<node>/i/<index>/chain          cursor of map item <index>'s body
@@ -59,7 +60,10 @@ CHAIN = "chain"
 ARM = "arm"
 """Cursor entry: the arm a running branch took (``"then"`` or ``"else"``)."""
 
-CURSOR_ENTRIES = frozenset({PASS, CARRY, CHAIN, ARM})
+TURN = "turn"
+"""Cursor entry: a Loop's paused SAIA turn — its task and conversation."""
+
+CURSOR_ENTRIES = frozenset({PASS, CARRY, CHAIN, ARM, TURN})
 """Tree entries that hold cursor values rather than a scope."""
 
 
@@ -103,6 +107,7 @@ class ScopeRegistry:
         self._cursors: dict[tuple[ScopePath, int], Cursor] = {}
         self._saved: dict[ScopePath, Any] = {}
         self._saved_cursors: dict[tuple[ScopePath, str], Any] = {}
+        self._turns: dict[ScopePath, int] = {}
 
     def begin(self, root: State[Any], saved: Snapshot | None = None) -> None:
         """Start a run whose root scope is ``root``; forget the previous run.
@@ -114,6 +119,7 @@ class ScopeRegistry:
         self._root = root
         self._scopes.clear()
         self._cursors.clear()
+        self._turns.clear()
         self._saved = (
             {} if saved is None else {path_from_str(p): v for p, v in saved.scopes.items()}
         )
@@ -178,6 +184,31 @@ class ScopeRegistry:
     def close_cursor(self, path: ScopePath, runner: Cursor) -> None:
         """Drop ``runner`` from ``path``; a no-op when it is not registered."""
         self._cursors.pop((path, id(runner)), None)
+
+    def close_cursors_under(self, prefix: ScopePath) -> None:
+        """Drop every runner registered at ``prefix`` or below it."""
+        n = len(prefix)
+        for key in [k for k in self._cursors if k[0][:n] == prefix]:
+            del self._cursors[key]
+
+    def holds_under(self, prefix: ScopePath, name: str) -> bool:
+        """True when a runner at ``prefix`` or below it reports the cursor entry ``name``."""
+        n = len(prefix)
+        return any(
+            path[:n] == prefix and name in runner.cursor()
+            for (path, _), runner in self._cursors.items()
+        )
+
+    def next_turn(self, step: ScopePath) -> ScopePath:
+        """Path of the next Loop call inside the step at ``step``: ``<step>/t/<k>``.
+
+        A step runs at most once per run at a given path, so numbering the
+        Loop calls in the order they start gives a rerun of the step the
+        same path for the same call.
+        """
+        k = self._turns.get(step, 0)
+        self._turns[step] = k + 1
+        return (*step, "t", str(k))
 
     def path_of(self, scope: State[Any]) -> ScopePath:
         """Path of the live scope ``scope`` (identity); ``()`` for the root or an unknown scope."""

@@ -101,7 +101,6 @@ from .nodes import (
 )
 from .role import Role
 from .state import State, StateFactory
-from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
 from .state.snapshot import ScopePath, ScopeRegistry, Snapshot
 
 
@@ -176,8 +175,6 @@ class Flow:
         self._nodes: list[_Node] = []
         self._halt_saved: bool = False
         self._checkpoint_policy: CheckpointPolicy | None = None
-        self._pending_paused_turns: PendingPausedTurns = PendingPausedTurns()
-        self._resume_paused_turns: ResumePausedTurns = ResumePausedTurns()
         self._scopes: ScopeRegistry = ScopeRegistry()
 
     # -------------------------------------------------------------------------
@@ -966,11 +963,9 @@ class Flow:
         """
         self._check_run_args(resume)
         self._begin_checkpoint_run()
-        self._resume_paused_turns.clear()
         active_state, saved = await self._start_state(self._wrap_top_state(state), resume)
         self._scopes.begin(active_state, saved)
         self._halt_saved = False
-        self._pending_paused_turns.clear()
         try:
             result = await self._run_as_subflow(
                 *args,

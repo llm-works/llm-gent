@@ -9,8 +9,8 @@ flow being resumed, and reads the history through the public
 (``resume="latest"``) checks out the snapshot of the newest commit with
 usable state: its root scope hydrates the top-level :class:`State`; each
 child scope goes back to the block that owns it, and each cursor to the
-chain, iterate or branch that registered it, when the run reaches their
-paths; paused turns go back to the Loops that paused.
+chain, iterate, branch or Loop call that registered it, when the run
+reaches their paths.
 
 Write side — :func:`apply_clean_exit_retention` and
 :func:`commit_completion` commit the final state on clean exit and move
@@ -48,7 +48,6 @@ class Resume:
         ctx = flow._checkpoint_ctx
         assert ctx is not None
         self.flow = flow
-        self._ctx = ctx
         self._history = History(ctx.store, ctx.client_flow_id)
 
     async def checkout(self, fallback: State[Any]) -> tuple[State[Any], Snapshot | None]:
@@ -58,9 +57,7 @@ class Resume:
         failure may be half-updated) and commits with an empty tree (state
         that could not be serialized). Returns the snapshot's root as the
         top-level :class:`State` together with the snapshot itself, whose
-        scopes and cursors the run takes as it reaches their paths. The
-        commit's paused turns load as resume entries for the Loops that
-        paused: the halted step reruns, so its Loop finds its entry.
+        scopes and cursors the run takes as it reaches their paths.
 
         Skipping is logged: the restored state may predate the head by
         whole runs (a stateless ``$end`` sends the walk into the previous
@@ -74,7 +71,6 @@ class Resume:
                 if snapshot.has_state:
                     if skipped:
                         self._warn_skipped(skipped, commit)
-                    await self.flow._resume_paused_turns.load_from_commit(self._ctx, commit)
                     return self._root_state(snapshot.root), snapshot
             skipped.append(commit.meta.node_path)
         if skipped:
