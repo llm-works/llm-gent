@@ -219,7 +219,9 @@ async def commit_halt(flow: Flow) -> None:
         # Serialization failed: no checkpoint exists, don't claim one does.
         raise
     except Exception as e:
+        # Store/IO errors propagate: the caller expects the halt checkpoint to exist.
         flow._lg.warning("halt commit could not be written", extra={"exception": e})
+        raise
 
 
 async def commit_failure(flow: Flow, failed_state: State[Any]) -> None:
