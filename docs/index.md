@@ -203,8 +203,10 @@ history is never marked complete.
 
 A step that runs again gets the input it had. Consequence: **verbs must
 be idempotent-in-effects** at the step level. Reading state, mutating
-state, and returning a value are all safe to repeat. Side effects that
-are not — outbound HTTP writes, message sends, ledger appends — must be
+state, and returning a value are safe to repeat only when the repeated
+work is idempotent. Checkpoints preserve mutations already made. Side
+effects that are not idempotent — outbound HTTP writes, message sends,
+ledger appends — must be
 guarded by the verb itself (idempotency keys, "did I already do this"
 checks against state or an external record), or split into their own
 step so a rerun of a later step does not repeat them.

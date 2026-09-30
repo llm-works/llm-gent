@@ -102,12 +102,13 @@ class Resume:
                 f"history {self._history.client_flow_id!r} has no checkpoint named {name!r}"
             )
         snapshot = await self._history.snapshot(commit)
+        root = self._root_state(snapshot.root)
         ctx = self.flow._checkpoint_ctx
         assert ctx is not None
         head = await ctx.get_ref(HEAD_REF)
         if head != commit.content_hash:
             await ctx.move_ref(HEAD_REF, commit.content_hash, head)
-        return self._root_state(snapshot.root), snapshot
+        return root, snapshot
 
     def _warn_skipped(self, skipped: list[str], restored: Commit) -> None:
         """Log the ``$failed`` / stateless commits the checkout walked past, and where it landed."""
