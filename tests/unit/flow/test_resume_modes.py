@@ -266,6 +266,41 @@ def _adding_flow(
 
 
 class TestCursors:
+    async def test_iterate_stopped_by_until_does_not_run_again(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        """``until`` stopped the loop after pass 1; resume from its ``on_iterate`` commit ends it."""
+        passes: list[int] = []
+
+        def build(crash: bool) -> Any:
+            @verb
+            async def step(ctx: Context[dict[str, Any]], x: int) -> int:
+                passes.append(x)
+                return x + 1
+
+            @verb
+            async def after(ctx: Context[dict[str, Any]], x: int) -> int:
+                if crash:
+                    raise _Crash()
+                return x
+
+            return (
+                FlowFactory(make_test_logger())
+                .create(state={})
+                .with_checkpointer(store, "until")
+                .with_checkpoint_policy(on_iterate=True)
+                .iterate(lambda b: b.call(step), max_iters=5, until=lambda r, _c: r == 2)
+                .then(after)
+            )
+
+        with pytest.raises(_Crash):
+            await build(crash=True).run(0)
+        assert passes == [0, 1]
+        passes.clear()
+
+        assert await build(crash=False).run(0, resume="latest") == 2
+        assert passes == []
+
     @pytest.mark.parametrize("wrap", ["top", "call", "outer-iterate"])
     async def test_iterate_continues_with_its_carried_value(
         self, store: JsonFileCheckpointStore, wrap: str

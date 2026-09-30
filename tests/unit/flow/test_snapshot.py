@@ -232,7 +232,8 @@ class TestFlowSnapshots:
         (commit,) = saved
         snapshot = await history.snapshot(commit)
         iterate = [c for c in snapshot.cursors.values() if "pass" in c]
-        assert iterate == [{"pass": 2, "carry": 20}]  # third pass, carrying the second's result
+        # Third pass, carrying the second's result, which until did not stop on.
+        assert iterate == [{"pass": 2, "carry": 20, "until": False}]
         assert snapshot.root == {"n": 3}
 
     async def test_chain_cursor_holds_the_step_and_its_input(self) -> None:

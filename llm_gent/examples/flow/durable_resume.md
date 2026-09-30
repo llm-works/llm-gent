@@ -182,6 +182,7 @@ chain/                                   top-level chain: at the iterate step
 n/e62e0596ecc27e3c/
   pass    0                              iterate: in pass 0 ...
   carry   null                           ... with this value carried into it
+  until   false                          ... which until did not stop on
   p/0/chain/                             pass 0's body chain: at summarize
     step "88299db1fcb56568"   args [null]   kwargs {}
   p/0/n/88299db1fcb56568/t/0/turn/       the step's first Loop call: its paused turn
@@ -193,7 +194,7 @@ n/e62e0596ecc27e3c/
 |---|---|
 | `state` | a scope's payload (root, or a `state=` scope at its block's path) |
 | `chain` | a running chain's step and that step's input |
-| `pass`, `carry` | a running iterate's pass and the value carried into it |
+| `pass`, `carry`, `until` | a running iterate's pass, the value carried into it, and `until`'s verdict on that value |
 | `arm` | the arm a running branch took |
 | `t/<k>/turn` | the paused SAIA turn of a step's `k`-th Loop call |
 | `items`, `done` | a running map's items and its completed items with their results |
