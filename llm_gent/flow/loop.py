@@ -320,11 +320,10 @@ class Loop:
             if self._on_executor_ready is not None:
                 await maybe_await(self._on_executor_ready(saia, ctx))
             result = await self._run_saia_complete(saia, task, complete_kwargs, ctx)
+            # A raise leaves a resuming turn held: the step stopped early, and
+            # resume tries the saved turn again.
             override = await self._after_run(result, ctx, task, conversation, turn)
             return override if override is not None else result
-        except BaseException:
-            turn.release()
-            raise
         finally:
             if self._on_finally is not None:
                 await maybe_await(self._on_finally(ctx))

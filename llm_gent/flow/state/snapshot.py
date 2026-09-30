@@ -18,6 +18,7 @@ that tell repeated executions apart::
     n/<node>/arm                      arm a running .branch took
     n/<node>/t/<k>/turn               paused turn of the step's <k>-th Loop call
     n/<node>/p/<pass>/n/<node>/...    positions inside iterate pass <pass>
+    n/<node>/items, n/<node>/done     cursor of a running .map
     n/<node>/i/<index>/state          scope of map item <index>
     n/<node>/i/<index>/chain          cursor of map item <index>'s body
 
@@ -63,7 +64,13 @@ ARM = "arm"
 TURN = "turn"
 """Cursor entry: a Loop's paused SAIA turn — its task and conversation."""
 
-CURSOR_ENTRIES = frozenset({PASS, CARRY, CHAIN, ARM, TURN})
+ITEMS = "items"
+"""Cursor entry: the items a running map runs over, resolved once."""
+
+DONE = "done"
+"""Cursor entry: a running map's completed items — index to result and whether it merged."""
+
+CURSOR_ENTRIES = frozenset({PASS, CARRY, CHAIN, ARM, TURN, ITEMS, DONE})
 """Tree entries that hold cursor values rather than a scope."""
 
 
@@ -185,9 +192,16 @@ class ScopeRegistry:
         """Drop ``runner`` from ``path``; a no-op when it is not registered."""
         self._cursors.pop((path, id(runner)), None)
 
-    def close_cursors_under(self, prefix: ScopePath) -> None:
-        """Drop every runner registered at ``prefix`` or below it."""
+    def close_under(self, prefix: ScopePath) -> None:
+        """Drop every scope and runner registered at ``prefix`` or below it.
+
+        For a block that ended while things under it stayed registered —
+        positions the halt stopped, which the run's halt checkpoint was
+        not written from, because the block ended the interruption.
+        """
         n = len(prefix)
+        for path in [p for p in self._scopes if p[:n] == prefix]:
+            del self._scopes[path]
         for key in [k for k in self._cursors if k[0][:n] == prefix]:
             del self._cursors[key]
 

@@ -34,8 +34,8 @@ Public surface:
   :class:`FlowFactory` for ``with_halt``); pair on the same halt event to
   thread it across a mixed Loop-and-Flow tree
 - :class:`CheckpointStore` — Flow-level pause/resume Protocol; persists
-  composition-graph state at ``.iterate`` boundaries and mid-SAIA-turn
-  state at halt observation
+  snapshots of a run — every scope and running structure's position,
+  paused SAIA turns included — at save points and when the halt stops it
 - :class:`History` — read API over one checkpointed history: head, last
   completed run, commit chain, per-commit state; :class:`HistoryCorrupt`
   when a referenced object is missing from the store

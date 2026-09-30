@@ -207,9 +207,8 @@ class CheckpointPolicy:
 
     Two save triggers are always on and NOT gated by this policy:
 
-    - Halt observation — :meth:`HaltSaveObserver.save_if_signaled`
-      fires whenever the executor observes the run's halt event set
-      (after each chain step, before each iterate pass), provided a
+    - The halt checkpoint — when the run's halt stops it, :meth:`Flow.run`
+      commits the run's position once everything has stopped, provided a
       checkpointer is wired. This is the durability guarantee that makes
       ``run(resume="latest")`` reach a halted history.
     - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires

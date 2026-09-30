@@ -282,8 +282,8 @@ class CheckpointContext:
         so split round-trips on resume.
 
         ``outcome`` records why the commit fired — ``"ok"`` for a
-        successful iterate boundary, ``"halted"`` when the
-        halt-observation site triggered the save.
+        policy save or ``ctx.checkpoint()``, ``"halted"`` for the run's
+        halt checkpoint.
         """
         tree = await self.put_snapshot(scopes)
         node_path = "/".join(ancestor_chain + (node_id,))

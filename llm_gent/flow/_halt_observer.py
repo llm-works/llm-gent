@@ -1,30 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Halt observation seam: detection primitive + save-site kernel.
+"""Halt observation: detection, and where the run's halt was first observed.
 
-Three halt-observation sites in the executor persist a halt commit
-when the ambient halt event fires: the iterate boundary check
-(:meth:`IterateRunner.run`), the chain between-step walker
-(:meth:`Chain._observe_halt_between`), and the chain trailing edge
-(:meth:`Chain._observe_halt_trailing`). Two additional sites in
-map-item dispatch (strict + non-strict) observe halt to short-
-circuit the item as :class:`Skipped` without persisting; they use
-:func:`is_halt_signaled` only.
+A halt stops the run at the next place the framework looks: a chain
+after each step, an iterate before each pass, a map item before it
+starts. An LLM call in flight finishes (or its SAIA turn pauses) and
+its step ends. A structure that stops leaves its position registered
+and raises :class:`~llm_gent.flow.Interrupted` to the step running it;
+once everything has stopped, :meth:`Flow.run` writes the run's one halt
+checkpoint from those positions (:func:`~llm_gent.flow._resume.commit_halt`).
 
-:class:`HaltSaveObserver` owns the shared kernel of the save sites:
-halt detection + delegation to :func:`_save_halt_checkpoint`. Each
-save site keeps its own walker-side context (which ``node_id``,
-which ``iteration``, which state, and site-specific guards like
-top-level runtime identity and checkpointer bindings) and hands it
-to :meth:`HaltSaveObserver.save_if_signaled`. Because every save-
-site routes through this one call, the set of halt-save sites is
-the set of :meth:`save_if_signaled` callers — the coverage matrix
-is grep-discoverable and adding a new site means adding a call.
+:func:`note_halt` records where the run's halt was first observed, for
+that commit's metadata.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 
@@ -33,64 +26,35 @@ if TYPE_CHECKING:
     from .state import State
 
 
-def is_halt_signaled(env: _RunEnv) -> bool:
-    """True when the run's ambient halt event is set.
+@dataclass(frozen=True)
+class HaltPoint:
+    """Where the run's halt was first observed: the halt commit's metadata.
 
-    Shared detection primitive for every halt-observation site,
-    save and skip alike.
+    ``node_id`` is the step a chain stopped at (the interrupted step, or
+    the next one after a completed step), the iterate or the map that
+    stopped; ``ancestor_chain`` leads to it from the run's root, and
+    ``iteration`` is the stopped iterate's pass (``0`` elsewhere).
+    ``state`` is the scope it ran under — still registered when the halt
+    commit is written, which records its path.
     """
+
+    ancestor_chain: tuple[str, ...]
+    iteration: int
+    node_id: str
+    state: State[Any]
+
+
+def is_halt_signaled(env: _RunEnv) -> bool:
+    """True when the halt event in effect under ``env`` is set."""
     return env.halt is not None and env.halt.is_set()
 
 
-def saves_run_halt(env: _RunEnv) -> bool:
-    """True when a halt observed under ``env`` is the run's halt, saved to the run's history.
+def note_halt(env: _RunEnv, iteration: int, node_id: str) -> None:
+    """Record where the run's halt was observed, unless an earlier observation was recorded.
 
-    A subflow's own ``.with_halt`` stops that subtree without ending the
-    run, and a subflow with its own checkpointer keeps a separate history:
-    neither writes the run's halt checkpoint.
+    A subflow's own ``.with_halt`` is not the run's halt: it stops that
+    subtree, which then ends the interruption without a halt checkpoint.
     """
     runtime = env.runtime
-    return (
-        env.halt is runtime._halt_event
-        and env.checkpoint_ctx is not None
-        and env.checkpoint_ctx is runtime._checkpoint_ctx
-    )
-
-
-class HaltSaveObserver:
-    """Halt-save kernel: single entrypoint for persisting a halt commit.
-
-    The three save-site callers (iterate boundary, chain between-
-    step, chain tail) each hold their own walker-side context — the
-    ``node_id`` to save at, the iteration counter, the child state,
-    plus site-specific pre-conditions like top-level runtime
-    identity and node-id selection between the just-completed and
-    not-yet-run chain steps. They resolve those first and then
-    call :meth:`save_if_signaled` with the resolved values. This
-    class holds the shared detection + save kernel that used to be
-    inlined at each site.
-    """
-
-    @staticmethod
-    async def save_if_signaled(
-        env: _RunEnv,
-        iteration: int,
-        node_id: str,
-        state: State[Any],
-    ) -> bool:
-        """Save a halt commit at ``node_id`` when halt is signaled.
-
-        Returns ``True`` when the save fired (caller should
-        ``break``/``return`` its walker); ``False`` otherwise.
-        Idempotency comes from the ``_halt_saved`` latch on
-        ``env.runtime`` — a redundant call after a first save is
-        a no-op inside :func:`_save_halt_checkpoint`.
-        """
-        if not is_halt_signaled(env):
-            return False
-        # Local import to avoid an import cycle: _halt_observer is
-        # imported by _executor.py which owns _save_halt_checkpoint.
-        from ._executor import _save_halt_checkpoint
-
-        await _save_halt_checkpoint(env, iteration, node_id, state)
-        return True
+    if env.halt is runtime._halt_event and runtime._halt_at is None:
+        runtime._halt_at = HaltPoint(env.ancestor_chain, iteration, node_id, env.state)

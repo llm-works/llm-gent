@@ -192,14 +192,27 @@ interrupted**:
   a paused SAIA turn makes its step interrupted without raising.
   `Interrupted` raised while no halt is set is a `RuntimeError`.
 
-The innermost chain that sees the run's halt after a step writes one
-`halted` commit: its cursor stays on an interrupted step and moves past
-a completed one. A completed last step does not stop the run — it
-finishes and is committed complete. Chains, iterates and maps that stop
-before their end raise `Interrupted` to the step running them; a subflow
-with its own `.with_halt` ends the interruption at its boundary. A
-halted `run()` returns `None`: its state is in the halt commit. A halted
-history is never marked complete.
+When the halt is set, every part of the run stops at the next place the
+framework looks — a chain after its step, an iterate before its next
+pass, a map item before it starts — however deeply nested and however
+many map items run at once; an LLM call in flight finishes (or its SAIA
+turn pauses) first. A chain's cursor stays on an interrupted step and
+moves past a completed one; a completed last step does not stop the
+chain. Chains, iterates and maps that stop before their end raise
+`Interrupted` to the step running them, and each part stays registered
+where it stopped. Once everything has stopped, `run()` writes one
+`halted` commit holding every position and returns `None`: the halted
+run's state is in that commit. A subflow with its own `.with_halt` ends
+the interruption at its boundary, without a commit. A halted history is
+never marked complete.
+
+A map's cursor is its item list — resolved once, never evaluated again
+on resume — and its completed items with their results. On resume a
+completed item does not run again and its merge is not applied again, a
+running item continues where it was, and items that had not started,
+failed or were skipped by the guard run. Items and their results must be
+plain JSON, pydantic models, or objects with `to_dict()` and a
+classmethod `from_dict()`.
 
 A step that runs again gets the input it had. Consequence: **verbs must
 be idempotent-in-effects** at the step level. Reading state, mutating
@@ -213,10 +226,6 @@ step so a rerun of a later step does not repeat them.
 
 Current limits:
 
-- A map records no progress of its own: resuming into a running map
-  runs its items again, completed ones included, and re-applies their
-  merges. Under `max_concurrency > 1` the halt commit is written when
-  the first item stops, while other items may still be running.
 - A `Panel`'s verbs are not in the snapshot: a halted Panel runs again
   in full, and a Loop inside a Panel verb does not save its paused turn.
 - Positions are recorded by node id. A deploy that inserts steps keeps

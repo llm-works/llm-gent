@@ -431,30 +431,31 @@ def _plain_step_flow(store: JsonFileCheckpointStore, name: str, lg: Any) -> Any:
     return FlowFactory(lg).create(state={}).with_checkpointer(store, name).call(_plain)
 
 
-def _shrinking_map_flow(
-    store: JsonFileCheckpointStore, name: str, lg: Any, items: list[int], halt: Any = None
+def _bounded_iterate_flow(
+    store: JsonFileCheckpointStore, name: str, lg: Any, max_iters: int, halt: Any = None
 ) -> Any:
-    """``.map(state=)`` over ``items``; item 2 checkpoints and crashes, item 1 sets ``halt``."""
+    """``.iterate`` over a ``.call(state=)`` pass; the pass that gets 2 checkpoints and crashes.
+
+    Run with ``0``: passes 0 and 1 complete, pass 2 saves its scope and
+    cursors and crashes. A resume with a lower ``max_iters`` never
+    reaches pass 2.
+    """
 
     @verb
-    async def work(ctx: Context[dict[str, Any]], item: int) -> int:
-        ctx.state.data["item"] = item
-        if item == 2:
+    async def work(ctx: Context[dict[str, Any]], x: int) -> int:
+        ctx.state.data["x"] = x
+        if x == 2:
             await ctx.checkpoint()
             raise _Crash()
-        if halt is not None:
-            halt.set()
-        return item
+        return x + 1
 
+    body = FlowFactory(lg).create().call(work)
     flow = FlowFactory(lg).create(state={}).with_checkpointer(store, name)
     if halt is not None:
         flow = flow.with_halt(halt)
-    return flow.map(
-        lambda b: b.call(work),
-        items=lambda _p, _c: items,
-        max_concurrency=1,
-        state=lambda _p: {},
-        merge=lambda _p, _c: None,
+    return flow.iterate(
+        lambda b: b.call(body, state=lambda _p: {}, merge=lambda _p, _c: None),
+        max_iters=max_iters,
     )
 
 
@@ -473,15 +474,15 @@ class TestScopesFromSnapshot:
     async def test_finished_run_drops_entries_it_never_reached(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """The map's items shrank: item 2's saved scope and cursor go, with a warning."""
+        """The iterate's bound dropped below the saved pass: its scope and cursors go, with a warning."""
         with pytest.raises(_Crash):
-            await _shrinking_map_flow(store, "shrink", make_test_logger(), [1, 2]).run()
+            await _bounded_iterate_flow(store, "shrink", make_test_logger(), 5).run(0)
         history = History(store, "shrink")
         head = await history.head()
         assert head is not None and (await history.snapshot(head)).scopes
 
         lg, warnings = _capturing_logger()
-        await _shrinking_map_flow(store, "shrink", lg, [1]).run(resume="latest")
+        await _bounded_iterate_flow(store, "shrink", lg, 2).run(resume="latest")
 
         head = await history.head()
         assert head is not None and await history.is_complete()
@@ -495,17 +496,18 @@ class TestScopesFromSnapshot:
     ) -> None:
         """A run that halts before reaching a saved scope keeps it for the next resume."""
         with pytest.raises(_Crash):
-            await _shrinking_map_flow(store, "halt-early", make_test_logger(), [1, 2]).run()
+            await _bounded_iterate_flow(store, "halt-early", make_test_logger(), 5).run(0)
 
         halt = asyncio.Event()
-        flow = _shrinking_map_flow(store, "halt-early", make_test_logger(), [1, 2], halt=halt)
+        halt.set()
+        flow = _bounded_iterate_flow(store, "halt-early", make_test_logger(), 5, halt=halt)
         await flow.run(resume="latest")
 
         history = History(store, "halt-early")
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
         scopes = (await history.snapshot(head)).scopes
-        assert [v for p, v in scopes.items() if p.endswith("i/1")] == [{"item": 2}]
+        assert [v for p, v in scopes.items() if "/p/2/" in p] == [{"x": 2}]
 
 
 class TestFailureCommit:

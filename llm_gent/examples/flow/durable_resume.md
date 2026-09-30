@@ -68,9 +68,10 @@ Sequence inside the process:
    Loop call of the `summarize` step in pass 0.
 5. `summarize` sees `result.paused` and returns with state untouched. A Loop call left a paused
    turn, so the step counts as interrupted: it stopped before finishing its work.
-6. The body chain sees the halt after that step and writes the halt commit. Its cursor stays on
-   the interrupted step; the iterate stays in pass 0. The run unwinds and `run()` returns `None`:
-   the halted run's state is in the halt commit.
+6. The body chain sees the halt after that step and stops, its cursor on the interrupted step; the
+   iterate stops in pass 0. Each stays registered where it stopped. Once the run has unwound,
+   `run()` writes the halt commit from those positions and returns `None`: the halted run's state
+   is in the halt commit.
 
 ## Run 2 — resumes the paused turn
 
@@ -164,7 +165,7 @@ The script reads the history through `History(store, CLIENT_FLOW_ID)` rather tha
   parent is the commit that was `HEAD` when it was written.
 - `node_path` — where the halt was observed: the `summarize` step inside the iterate. Metadata
   only; where the run continues is in the snapshot's cursors.
-- `outcome: "halted"` — written by the halt observation. `resume="latest"` does not branch on it:
+- `outcome: "halted"` — written when the halt stopped the run. `resume="latest"` does not branch on it:
   it checks out the newest commit that is not a `$failed` record and has state.
 
 ### Snapshot
@@ -195,6 +196,7 @@ n/e62e0596ecc27e3c/
 | `pass`, `carry` | a running iterate's pass and the value carried into it |
 | `arm` | the arm a running branch took |
 | `t/<k>/turn` | the paused SAIA turn of a step's `k`-th Loop call |
+| `items`, `done` | a running map's items and its completed items with their results |
 | `p/<pass>/…`, `i/<index>/…` | positions inside an iterate pass, a map item |
 
 The paused turn is the turn exactly at the pause: task, the model's tool call, and the tool
@@ -227,10 +229,11 @@ a warning is logged: the history is still complete, but carries no final state. 
 
 **A step either completes or is interrupted.** Under the halt, a step that returns has completed;
 a step that stops before finishing its work raises `Interrupted` (a Loop call that leaves a paused
-turn counts as interrupted without raising). The innermost chain that sees the run's halt writes
-the halt commit: its cursor stays on an interrupted step and moves past a completed one. Chains,
-iterates and maps that stop early raise `Interrupted` to the step running them, and a halted
-`run()` returns `None`.
+turn counts as interrupted without raising). A chain that sees the halt after a step stops: its
+cursor stays on an interrupted step and moves past a completed one. Chains, iterates and maps that
+stop early raise `Interrupted` to the step running them, each staying registered where it stopped.
+Once everything has stopped — every map item, at any depth — `run()` writes the one halt commit
+from those positions and returns `None`.
 
 **Only the interrupted step runs again.** Resume continues every structure at its cursor, so
 completed steps and passes do not run again. The step that was interrupted runs again with the
@@ -240,16 +243,17 @@ input it had, and a Loop call in it resumes its paused turn.
 
 | Save point | Fires here? | Why |
 |---|---|---|
-| Halt observation (after each step, before each pass) | Yes — run 1 | The halt arrived during `summarize`. |
+| Halt checkpoint (once everything stopped) | Yes — run 1 | The halt arrived during `summarize`. |
 | Iterate boundary, `outcome="ok"` | No | `on_iterate` is off by default; enable with `flow.with_checkpoint_policy(on_iterate=True)`. |
 | Map item, `outcome="ok"` | No | No map here; `on_map_item` is off by default. |
 | Explicit `ctx.checkpoint()` / `ctx.checkpoint(name)` | No | The verb does not call it. |
 | Final-state commit (`$end`, tagged `complete`) | Yes — run 2 | Clean exit, `retain` retention. |
 | Failure commit (`$failed`) | No | Written when a run raises; `latest` skips it. |
 
-**Maps.** A map does not record its own progress yet: resuming into a running map runs its items
-again, and under `max_concurrency > 1` the halt commit is written when the first item stops, while
-the others may still be running.
+**Maps.** A running map's cursor (`n/<map>/items`, `n/<map>/done`) holds its item list and its
+completed items with their results; each running item keeps its own positions under
+`n/<map>/i/<index>/`. On resume a completed item does not run again, a running one continues where
+it was, and the rest run.
 
 ## Named checkpoints
 

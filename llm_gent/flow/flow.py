@@ -63,11 +63,13 @@ from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext
+from ._halt_observer import HaltPoint
 from ._node_id import flow_root_hash, iter_flows
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
     commit_failure,
+    commit_halt,
 )
 from ._validation import (
     _check_node_name,
@@ -173,7 +175,7 @@ class Flow:
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
-        self._halt_saved: bool = False
+        self._halt_at: HaltPoint | None = None
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._scopes: ScopeRegistry = ScopeRegistry()
 
@@ -971,7 +973,7 @@ class Flow:
         self._begin_checkpoint_run()
         active_state, saved = await self._start_state(self._wrap_top_state(state), resume)
         self._scopes.begin(active_state, saved)
-        self._halt_saved = False
+        self._halt_at = None
         try:
             result = await self._run_as_subflow(
                 *args,
@@ -981,7 +983,9 @@ class Flow:
                 **kwargs,
             )
         except Interrupted:
-            return None  # halted: the run's state is in the halt checkpoint
+            # Everything has stopped, each part registered where it stopped.
+            await commit_halt(self)
+            return None
         except Exception:
             await commit_failure(self, active_state)
             raise
@@ -1079,16 +1083,31 @@ class Flow:
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
-        try:
-            result = await Chain(self, env).walk(args, kwargs)
-        except Interrupted:
-            if not is_subflow or self._halt_event is None or self._halt_event is parent_halt:
-                raise
-            # This subflow's own halt stopped it: the subtree ends here and the
-            # run carries on, with no result from it.
-            result = None
+        own_halt = is_subflow and self._owns_halt(parent_halt)
+        result = await self._walk(env, args, kwargs, own_halt=own_halt)
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
+
+    def _owns_halt(self, parent_halt: asyncio.Event | None) -> bool:
+        """True when this Flow has a halt event of its own, not the one it inherits."""
+        return self._halt_event is not None and self._halt_event is not parent_halt
+
+    async def _walk(
+        self, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any], *, own_halt: bool
+    ) -> Any:
+        """Walk this Flow's chain; a subflow stopped by its own halt returns ``None``.
+
+        That subtree ends there and the run carries on, with no result
+        from it: what the halt stopped inside it is no position of the
+        run's, so it leaves the snapshots.
+        """
+        try:
+            return await Chain(self, env).walk(args, kwargs)
+        except Interrupted:
+            if not own_halt:
+                raise
+            env.scopes.close_under(env.path)
+            return None
 
     def _make_run_env(
         self,

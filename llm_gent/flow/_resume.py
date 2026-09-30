@@ -16,8 +16,9 @@ reaches their paths.
 
 Write side — :func:`apply_clean_exit_retention` and
 :func:`commit_completion` commit the final state on clean exit and move
-the ``complete`` tag to it; :func:`commit_failure` commits the state at
-the moment a run raised.
+the ``complete`` tag to it; :func:`commit_halt` commits a halted run's
+position once everything has stopped; :func:`commit_failure` commits the
+state at the moment a run raised.
 """
 
 from __future__ import annotations
@@ -136,19 +137,19 @@ class Resume:
 async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:
     """Apply the store's retention policy on the clean-exit path.
 
-    A run that wrote a halt checkpoint stopped before its end: the history
-    is kept regardless of policy, with the halt commit as its head. A run
-    that finished every step is clean even when the halt was set during its
-    last step — the step completed, so there is nothing left to resume. On
-    a clean exit: ``gc_on_success`` prunes; ``retain`` keeps the record and
-    commits ``final_state`` tagged ``complete``, so a later
-    ``run(resume="latest")`` continues from the finished run's final state.
+    Only a run that finished every step gets here: a halted run ends in its
+    halt commit (:func:`commit_halt`), kept regardless of policy. A run is
+    clean even when the halt was set during its last step — the step
+    completed, so there is nothing left to resume. On a clean exit:
+    ``gc_on_success`` prunes; ``retain`` keeps the record and commits
+    ``final_state`` tagged ``complete``, so a later ``run(resume="latest")``
+    continues from the finished run's final state.
 
     A resumed run that finished without reaching some of its saved scopes
     or cursors drops them first (:func:`_drop_unreached_scopes`), so the
     final commit holds the root scope alone.
     """
-    if flow._checkpoint_ctx is None or flow._halt_saved:
+    if flow._checkpoint_ctx is None:
         return
     ctx = flow._checkpoint_ctx
     _drop_unreached_scopes(flow, ctx.client_flow_id)
@@ -194,6 +195,25 @@ async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
     commit = await ctx.save_completion_commit(tree)
     await ctx.put_tag(COMPLETE_TAG, commit.content_hash)
     return commit
+
+
+async def commit_halt(flow: Flow) -> None:
+    """Commit the run's halt checkpoint, once everything the halt stopped has stopped.
+
+    Every structure the halt stopped — at any depth, in every map item —
+    left its scope and cursor registered where it stopped, so the snapshot
+    holds the whole run's position: resume continues each part there. The
+    commit's metadata records where the halt was first observed. A no-op
+    without a checkpointer.
+    """
+    ctx = flow._checkpoint_ctx
+    if ctx is None:
+        return
+    at = flow._halt_at
+    assert at is not None, "a halted run reached its end without observing the halt"
+    await ctx.save_scope_commit(
+        at.ancestor_chain, at.iteration, at.node_id, flow._scopes, at.state, "halted"
+    )
 
 
 async def commit_failure(flow: Flow, failed_state: State[Any]) -> None:
