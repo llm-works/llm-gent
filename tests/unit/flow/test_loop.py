@@ -32,6 +32,7 @@ from llm_gent.flow import (
     Role,
     verb,
 )
+from llm_gent.flow.state.snapshot import TURN
 
 from .conftest import ROLE_A, make_ff, make_test_logger
 
@@ -471,14 +472,13 @@ class TestPausedCapture:
         assert loop._paused_bytes is None
 
     @pytest.mark.asyncio
-    async def test_dispatch_start_clears_stale_pending_turn(self) -> None:
-        """An uncapturable pause must not leave the previous pass's turn pending.
+    async def test_turn_paused_without_the_run_halt_is_dropped_past_its_step(self) -> None:
+        """A pause the run's halt did not cause leaves no turn once the chain moves on.
 
-        Pass 1 pauses and captures; halt is never set, so nothing drains
-        the runtime's pending entry. Pass 2 pauses with a conversation
-        that has no ``to_dict`` (capture no-op). Only the dispatch-start
-        clear removes pass 1's entry — without it a later halt commit
-        would stamp pass 1's stale conversation.
+        Both passes pause (the stub always does) while the run's halt is
+        never set, so each step completes as far as the run is concerned;
+        a paused turn left behind would ride along in every later
+        snapshot.
         """
 
         class _NoDictConversation:
@@ -496,7 +496,7 @@ class TestPausedCapture:
         flow.iterate(lambda body: body.call(body_verb), max_iters=2)
         await flow.run()
         assert not convs, "both passes should have dispatched"
-        assert flow._pending_paused_turns.snapshot() == []
+        assert not flow._scopes.holds_under((), TURN)
 
     @pytest.mark.asyncio
     async def test_paused_bytes_reset_per_dispatch(self) -> None:

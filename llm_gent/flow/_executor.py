@@ -547,44 +547,21 @@ async def _save_halt_checkpoint(
         return
     env.runtime._halt_saved = True
     try:
-        stashed_ids = await _persist_halt(env, iteration, node_id, current_state)
-    except BaseException:
-        # Both Exception and asyncio.CancelledError un-latch so a later
-        # halt-observation site can retry.
-        env.runtime._halt_saved = False
-        raise
-    # Drop only the entries we stashed. Late arrivals from concurrent .map
-    # items that landed after the snapshot stay on the runtime dict.
-    for stashed_id in stashed_ids:
-        env.pending_paused_turns.remove(stashed_id)
-
-
-async def _persist_halt(
-    env: _RunEnv,
-    iteration: int,
-    node_id: str,
-    current_state: State[Any],
-) -> tuple[str, ...]:
-    """Stash pending paused turns + save the halted commit; return stashed node_ids."""
-    assert env.checkpoint_ctx is not None
-    try:
-        trace_ref, stashed_ids = await env.pending_paused_turns.stash_to_ctx(env.checkpoint_ctx)
         await env.checkpoint_ctx.save_scope_commit(
-            env.ancestor_chain,
-            iteration,
-            node_id,
-            env.scopes,
-            current_state,
-            "halted",
-            trace_ref,
+            env.ancestor_chain, iteration, node_id, env.scopes, current_state, "halted"
         )
     except Exception as e:
         env.lg.warning(
             "halt-save failed; un-latching for retry at next observation",
             extra={"exception": e},
         )
+        env.runtime._halt_saved = False
         raise
-    return stashed_ids
+    except BaseException:
+        # asyncio.CancelledError also un-latches so a later halt-observation
+        # site can retry.
+        env.runtime._halt_saved = False
+        raise
 
 
 async def _save_scope_commit(

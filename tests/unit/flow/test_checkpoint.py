@@ -629,17 +629,17 @@ class TestCtxCheckpoint:
         assert called == 1
 
 
-class TestPausedTurnTraceRef:
-    """Loop's paused conversation lands as a Blob referenced by trace_ref."""
+class TestPausedTurnInSnapshot:
+    """A Loop's paused turn lands in the halt commit's snapshot at the call's path."""
 
-    async def test_halt_save_stamps_paused_turn_and_writes_blob(
+    async def test_halt_commit_holds_paused_turn_at_the_call_path(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """Loop paused mid-turn → halt commit's trace_ref points at a blob equal to canonical to_dict."""
+        """Loop paused mid-turn → the snapshot holds its task + conversation at ``<step>/t/0``."""
         from dataclasses import dataclass, field
 
-        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
-        from llm_gent.flow.state.cas import Commit, canonical_json
+        from llm_gent.flow import Context, FlowFactory, History, Loop, Role, verb
+        from llm_gent.flow.state.cas import Commit
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -706,26 +706,25 @@ class TestPausedTurnTraceRef:
             store.get_object(flow_id_for(store, "paused-turn-1"), "commit", halted_hash) or b""
         )
         assert commit.meta.outcome == "halted"
-        # trace_ref carries exactly one paused_turn entry whose id encodes the
-        # Loop's node_id and the blob hash; the blob bytes match canonical_json
-        # of the conversation's to_dict.
-        assert len(commit.meta.trace_ref) == 1
-        ref = commit.meta.trace_ref[0]
-        assert ref.kind == "paused_turn"
-        node_id, _, blob_hash = ref.id.partition(":")
-        assert node_id and blob_hash
-        expected = canonical_json({"task": "t", "conversation": conv.to_dict()})
-        stored = store.get_object(flow_id_for(store, "paused-turn-1"), "blob", blob_hash)
-        assert stored == expected
+        assert commit.meta.trace_ref == ()
+        snapshot = await History(store, "paused-turn-1").snapshot(commit)
+        turns = {p: c["turn"] for p, c in snapshot.cursors.items() if "turn" in c}
+        [(path, turn)] = turns.items()
+        assert path.endswith("/t/0")
+        assert turn == {"task": "t", "conversation": conv.to_dict()}
 
-    async def test_sibling_non_paused_clear_does_not_erase_other_loops_bytes(
+    async def test_turn_paused_before_the_run_halt_is_not_saved(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """Loop A pauses; sibling Loop B completes non-paused; A's bytes still land."""
+        """Loop A pauses with the run's halt unset: its step completed, its turn is dropped.
+
+        Loop B then sets the halt and completes, so the halt commit's
+        cursor is at the step after B and holds no paused turn.
+        """
         from dataclasses import dataclass, field
 
-        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
-        from llm_gent.flow.state.cas import Commit, canonical_json
+        from llm_gent.flow import Context, FlowFactory, History, Loop, Role, verb
+        from llm_gent.flow.state.cas import Commit
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -797,16 +796,8 @@ class TestPausedTurnTraceRef:
             store.get_object(flow_id_for(store, "paused-turn-multi"), "commit", halted_hash) or b""
         )
         assert commit.meta.outcome == "halted"
-        # Under the old single-slot design Loop B's non-paused clear would have
-        # erased Loop A's bytes. With per-node_id keying A's entry survives and
-        # halt-save stamps it.
-        saia_refs = [r for r in commit.meta.trace_ref if r.kind == "paused_turn"]
-        assert len(saia_refs) == 1
-        _, _, blob_hash = saia_refs[0].id.partition(":")
-        expected = canonical_json({"task": "t", "conversation": conv_a.to_dict()})
-        assert (
-            store.get_object(flow_id_for(store, "paused-turn-multi"), "blob", blob_hash) == expected
-        )
+        snapshot = await History(store, "paused-turn-multi").snapshot(commit)
+        assert not any("turn" in c for c in snapshot.cursors.values())
 
     async def test_resume_round_trip_hands_reconstructed_conv_and_resume_true(
         self, store: JsonFileCheckpointStore
@@ -1048,13 +1039,14 @@ class TestPausedTurnTraceRef:
         assert result == "ran-after"
 
     async def test_resume_restores_saved_task_from_paused_turn_envelope(self) -> None:
-        """Loop._consume_resume_entry decodes both task and conversation from the envelope."""
+        """The Loop call rebuilds task and conversation from the turn saved at its path."""
         from dataclasses import dataclass, field
         from types import SimpleNamespace
 
         from llm_gent.flow import Loop, Role
-        from llm_gent.flow.state.cas import canonical_json
-        from llm_gent.flow.state.paused_turn import ResumePausedTurns
+        from llm_gent.flow.loop import _LoopTurn
+        from llm_gent.flow.state import State
+        from llm_gent.flow.state.snapshot import TURN, ScopeRegistry, Snapshot
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -1077,31 +1069,27 @@ class TestPausedTurnTraceRef:
         node_id = "node-abc"
         loop = Loop(role, conversation_factory=_ConvFactory())
 
-        # Seed a runtime resume-map with a paused_turn envelope carrying BOTH the
-        # task and the conversation state. This is exactly the shape
-        # _hydrate_resume_state populates from a halt commit's paused_turn blob.
-        resume_turns = ResumePausedTurns()
-        resume_turns.add(
-            node_id,
-            canonical_json(
-                {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
-            ),
+        # A checked-out snapshot whose turn at the step's first Loop call
+        # carries BOTH the task and the conversation state.
+        saved = {"task": "saved-task-string", "conversation": {"messages": ["mid-turn"]}}
+        scopes = ScopeRegistry()
+        scopes.begin(
+            State(data={}),
+            Snapshot(has_state=True, root={}, cursors={f"n/{node_id}/t/0": {TURN: saved}}),
         )
-        env = SimpleNamespace(resume_paused_turns=resume_turns)
+        env = SimpleNamespace(scopes=scopes, owner_path=lambda nid: ("n", nid))
         ctx = SimpleNamespace(_env=env, _node_id=node_id)
 
-        task, conversation, is_resume = loop._consume_resume_entry(ctx)  # type: ignore[arg-type]
+        turn = _LoopTurn(ctx)  # type: ignore[arg-type]
+        task, conversation, is_resume = loop._consume_saved_turn(ctx, turn)  # type: ignore[arg-type]
         assert is_resume is True
-        # Without this test the direct-Loop chain-step at index > 0 case CR
-        # flagged would silently lose the task on resume; _walk_chain calls
-        # Loop.__call__(ctx) and _prepare_dispatch has no task to hand SAIA.
+        # A direct Loop chain step resumes with no task of its own: the saved
+        # task is what reaches SAIA.
         assert task == "saved-task-string"
         assert isinstance(conversation, _Conv)
         assert conversation.messages == ["mid-turn"]
-        # Entry is NOT popped by _consume_resume_entry — release happens only
-        # after saia.complete succeeds, so a rescue-then-iterate-retry can
-        # re-consume the same envelope.
-        assert resume_turns.load(node_id) is not None
+        # The resuming turn stays in the run's snapshots until SAIA finishes it.
+        assert scopes.capture()[("n", node_id, "t", "0", TURN)] == saved
 
 
 class TestSaveOnHaltChain:

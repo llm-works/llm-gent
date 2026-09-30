@@ -3,9 +3,9 @@
 
 """Integration test: real :class:`llm_saia.SAIA` + gent Loop mid-turn pause/resume.
 
-Exercises the full save-side (halt-observation stamps a paused_turn Blob +
-TraceRef on the halt commit) and resume-side (framework loads the blob and
-Loop dispatches SAIA with the reconstructed Conversation + ``resume=True``)
+Exercises the full save-side (the halt commit's snapshot holds the paused
+turn at the Loop call's path) and resume-side (the rerun Loop call takes it
+back and dispatches SAIA with the reconstructed Conversation + ``resume=True``)
 against an actual ``llm_saia.SAIA`` driven by a Backend that halts mid-turn
 via ``PauseRequested`` and completes on the resumed dispatch.
 """
@@ -25,11 +25,11 @@ from llm_saia.core.errors import PauseRequested
 from llm_saia.core.logger import NullLogger
 from llm_saia.core.types import ChatResponse, Message, ToolCall, ToolDef
 
-from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
-from llm_gent.flow.checkpoint import HEAD_REF
+from llm_gent.flow import Context, FlowFactory, History, Loop, Role, verb
+from llm_gent.flow.state.snapshot import TURN
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
-from ...unit.flow.conftest import flow_id_for, make_test_logger
+from ...unit.flow.conftest import make_test_logger
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -188,6 +188,15 @@ def store(tmp_path: Path) -> JsonFileCheckpointStore:
     return JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
 
 
+async def _saved_turns(store: JsonFileCheckpointStore, name: str) -> dict[str, Any]:
+    """Paused turns in the halt commit at the history's head, by path."""
+    history = History(store, name)
+    head = await history.head()
+    assert head is not None and head.meta.outcome == "halted"
+    snapshot = await history.snapshot(head)
+    return {p: c[TURN] for p, c in snapshot.cursors.items() if TURN in c}
+
+
 async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore) -> None:
     """Real SAIA halts mid-turn on run 1; run 2 with resume="latest" completes the turn."""
     role = Role(name="r", backend="openai", model="gpt-4o-mini")
@@ -219,18 +228,9 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     # returned paused before the second turn could start.
     assert len(backend1.calls) == 1
 
-    # The halt commit was written with a paused_turn TraceRef pointing at a blob
-    # that encodes the paused task + conversation-state envelope.
-    from llm_gent.flow.state.cas import Commit
-
-    halted_hash = store.get_ref(flow_id_for(store, "real-saia-resume"), HEAD_REF)
-    assert halted_hash is not None
-    commit = Commit.from_bytes(
-        store.get_object(flow_id_for(store, "real-saia-resume"), "commit", halted_hash) or b""
-    )
-    assert commit.meta.outcome == "halted"
-    saia_refs = [r for r in commit.meta.trace_ref if r.kind == "paused_turn"]
-    assert len(saia_refs) == 1
+    # The halt commit's snapshot holds the paused task + conversation state.
+    [(_path, turn)] = (await _saved_turns(store, "real-saia-resume")).items()
+    assert turn["task"] == "please answer"
 
     # ---- Run 2: framework loads the envelope, Loop dispatches SAIA with
     # resume=True and the reconstructed Conversation. Backend2's halt is never
@@ -287,16 +287,13 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
 async def test_loop_without_caller_conversation_persists_paused_turn(
     store: JsonFileCheckpointStore,
 ) -> None:
-    """``loop(ctx, task)`` with no conversation still lands the paused turn on the halt commit.
+    """``loop(ctx, task)`` with no conversation still lands the paused turn in the halt commit.
 
     The Loop hands SAIA a factory-created conversation, SAIA appends
     the user task + tool call + tool result to it, and the halt pauses
-    the follow-up chat. The halt commit's paused_turn blob must carry
-    that whole prefix — otherwise resume re-runs the turn from scratch.
+    the follow-up chat. The halt commit's saved turn must carry that
+    whole prefix — otherwise resume re-runs the turn from scratch.
     """
-    from llm_gent.flow.state.cas import Commit
-    from llm_gent.flow.state.paused_turn import PausedTurnEnvelope
-
     role = Role(name="r", backend="openai", model="gpt-4o-mini")
     halt = asyncio.Event()
     loop = Loop(role, conversation_factory=_ConvFactory())
@@ -316,20 +313,9 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
     )
     await flow.run()
 
-    head = store.get_ref(flow_id_for(store, "no-caller-conv"), HEAD_REF)
-    assert head is not None
-    commit = Commit.from_bytes(
-        store.get_object(flow_id_for(store, "no-caller-conv"), "commit", head) or b""
-    )
-    assert commit.meta.outcome == "halted"
-    saia_refs = [r for r in commit.meta.trace_ref if r.kind == "paused_turn"]
-    assert len(saia_refs) == 1
-    _node_id, _, blob_hash = saia_refs[0].id.partition(":")
-    envelope = PausedTurnEnvelope.from_bytes(
-        store.get_object(flow_id_for(store, "no-caller-conv"), "blob", blob_hash) or b""
-    )
-    assert envelope.task == "look up cas"
-    msgs = [Message.from_dict(m) for m in envelope.conversation["messages"]]
+    [(_path, turn)] = (await _saved_turns(store, "no-caller-conv")).items()
+    assert turn["task"] == "look up cas"
+    msgs = [Message.from_dict(m) for m in turn["conversation"]["messages"]]
     assert [m.role for m in msgs] == ["user", "assistant", "tool"], msgs
     assert msgs[1].tool_calls and msgs[1].tool_calls[0].name == "lookup"
     assert msgs[2].content == "LOOKUP_RESULT"

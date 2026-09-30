@@ -9,8 +9,8 @@
 
 Verifies Flow's checkpoint + mid-SAIA-turn pause + resume story
 end-to-end. Structurally exercises every save site: iterate
-boundary, halt-observation mid-turn, ``paused_turn`` trace_ref on
-the CAS commit, :class:`JsonFileCheckpointStore` persistence, and
+boundary, halt-observation mid-turn, the paused turn in the CAS
+commit's snapshot, :class:`JsonFileCheckpointStore` persistence, and
 :meth:`Flow.run(resume="latest")` checkout on a subsequent process.
 
 Backend modes:
@@ -182,10 +182,10 @@ def _make_tool_executor(
     ``lookup_reference`` returns its blurb AND flips
     ``halt_event``. SAIA's next iteration's ``Backend.chat`` sees
     the event via ``abort_signal`` and raises :class:`PauseRequested`
-    — SAIA returns ``TaskResult(paused=True)``, Loop stashes the
-    conversation onto ``env.pending_paused_turns``, and the halt-
-    observation site writes a CAS commit whose ``trace_ref`` slot
-    holds the paused-turn payload.
+    — SAIA returns ``TaskResult(paused=True)``, Loop keeps the
+    task and conversation in the run's snapshots at its call's
+    path, and the halt-observation site writes a CAS commit whose
+    snapshot holds that paused turn.
 
     ``arm_halt=False`` (resume invocation): the tool call is
     already in the persisted conversation, so this executor is
@@ -456,9 +456,12 @@ async def _resume_pending(history: History) -> bool:
 
 
 async def _paused_turn_saved(history: History) -> bool:
-    """True when the head carries a ``paused_turn`` trace ref (the paused conversation)."""
+    """True when the head's snapshot holds a Loop's paused turn (the paused conversation)."""
     head = await history.head()
-    return head is not None and any(r.kind == "paused_turn" for r in head.meta.trace_ref)
+    if head is None:
+        return False
+    snapshot = await history.snapshot(head)
+    return any("turn" in cursor for cursor in snapshot.cursors.values())
 
 
 async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> tuple[Digest, bool]:
@@ -507,9 +510,9 @@ async def _report(history: History, store_dir: Path, final: Digest, halted: bool
     print(f"  ref files: {refs}")
     if halted:
         saved = (
-            "paused_turn saved"
+            "paused turn saved"
             if await _paused_turn_saved(history)
-            else "NO paused_turn on halt commit"
+            else "NO paused turn in the halt commit"
         )
         print(f"  halted mid-turn ({saved}) — invoke again to resume")
     else:
@@ -538,7 +541,7 @@ async def _run_smoke(lg: Logger) -> int:
     # its tool call instead of restarting from the task.
     checks = {
         "halted with state untouched": halted and first.pending == list(TOPICS),
-        "halt commit carries paused_turn": turn_saved,
+        "halt commit holds the paused turn": turn_saved,
         "resume continued the paused turn": resumed_backend.lookups == len(TOPICS) - 1,
         "full drain": not still_halted
         and not final.pending

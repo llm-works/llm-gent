@@ -38,7 +38,6 @@ from .state.snapshot import ScopePath, ScopeRegistry
 if TYPE_CHECKING:
     from ._checkpoint_ctx import CheckpointContext
     from .flow import Flow
-    from .state.paused_turn import PendingPausedTurns, ResumePausedTurns
 
 from .checkpoint import CheckpointPolicy
 
@@ -254,26 +253,6 @@ class _RunEnv:
     def owner_path(self, node_id: str) -> ScopePath:
         """Snapshot path of the step ``node_id`` of this Flow."""
         return (*self.path, "n", node_id)
-
-    @property
-    def pending_paused_turns(self) -> PendingPausedTurns:
-        """Typed accessor for the runtime's pending paused-turn container.
-
-        Callers use this instead of reaching through
-        ``env.runtime._pending_paused_turns``. The container itself lives
-        on the top-level Flow (which is what ``runtime`` points at);
-        this property is the typed public interface across the module
-        boundary.
-        """
-        return self.runtime._pending_paused_turns
-
-    @property
-    def resume_paused_turns(self) -> ResumePausedTurns:
-        """Typed accessor for the runtime's resume paused-turn container.
-
-        Companion to :attr:`pending_paused_turns` on the read side.
-        """
-        return self.runtime._resume_paused_turns
 
 
 @dataclass

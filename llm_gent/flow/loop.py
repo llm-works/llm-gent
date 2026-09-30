@@ -19,10 +19,10 @@ is effective becomes SAIA's ``abort_signal``.
 Loop is CAS-native for durable pause capture — when a
 :class:`~llm_saia.core.conversation.ConversationFactory` is wired,
 every dispatch runs against a conversation (the caller's, or a
-factory-created one), and a paused result's conversation is serialized
-and published for the halt-observation site to stamp as a Blob
-referenced by ``TraceRef(kind="paused_turn", ...)`` on the Flow's halt
-commit.
+factory-created one), and a paused result's task and conversation are
+held in the run's snapshots at the call's path (``<step>/t/<k>/turn``).
+A paused call leaves its step interrupted: resume runs the step again,
+and the same call continues the saved turn.
 
 :class:`LoopFactory` bundles the cross-cutting config (logger, SAIAFactory,
 halt) so consumers wire once at the app boundary and ``.create(role,
@@ -44,7 +44,8 @@ from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .role import Role
-from .state.paused_turn import PausedTurnEnvelope
+from .state.paused_turn import PausedTurn, PausedTurnEnvelope
+from .state.snapshot import TURN, ScopePath, ScopeRegistry
 
 
 # ----------------------------------------------------------------------------
@@ -192,14 +193,11 @@ class Loop:
                 :meth:`ConversationFactory.create` one — the
                 conversation the model runs on, so the factory's
                 configuration applies to the live turn, not only to the
-                saved snapshot — and a paused
-                result triggers the framework to capture the
-                conversation's :meth:`to_dict` payload as canonical
-                bytes on :attr:`_paused_bytes` for the halt-observation
-                site to stamp into the Flow's CAS commit. The factory
-                also rebuilds the conversation on resume. Consumers that
-                don't need durable pause capture can leave it ``None``;
-                capture becomes a no-op.
+                saved snapshot — and a paused result's conversation
+                :meth:`to_dict` payload is kept in the run's snapshots.
+                The factory also rebuilds the conversation on resume.
+                Without one a paused turn is not captured: resume
+                starts it over.
             on_iteration: Bridges to SAIA's per-turn hook.
             on_complete: Fires after a non-paused ``saia.complete``.
                 Non-``None`` return replaces the raw SAIA result as
@@ -278,7 +276,7 @@ class Loop:
                 construction.
             task: The task/prompt handed to ``saia.complete``.
                 ``None`` is only valid when resuming from a
-                ``paused_turn`` checkpoint that carries the saved task —
+                checkpoint that holds this call's paused turn —
                 :meth:`_prepare_dispatch` restores it before
                 :meth:`saia.complete` runs. Any other dispatch with
                 ``task=None`` raises ``TypeError``.
@@ -305,28 +303,28 @@ class Loop:
             TypeError: ``task`` is ``None`` and no resume entry
                 supplies one.
         """
+        turn = _LoopTurn(ctx)
         try:
             # Inside the outer try so a raise from _prepare_dispatch (JSON
             # decode fail, ConversationFactory.create_from_state raise, etc.)
             # still fires on_finally per its "runs last on every dispatch"
             # contract. on_failed's scope stays around saia.complete only.
             saia, complete_kwargs, conversation, task = self._prepare_dispatch(
-                ctx, task, conversation
+                ctx, task, conversation, turn
             )
             if task is None:
                 raise TypeError(
                     f"Loop at node {ctx._node_id!r} dispatched without a task and "
-                    "no paused_turn resume entry supplied one."
+                    "no saved paused turn supplied one."
                 )
             if self._on_executor_ready is not None:
                 await maybe_await(self._on_executor_ready(saia, ctx))
             result = await self._run_saia_complete(saia, task, complete_kwargs, ctx)
-            # saia.complete returned successfully — drop the resume entry now.
-            # A raise inside _run_saia_complete leaves it in place so a
-            # rescue-then-iterate-retry re-consumes it with resume=True.
-            self._release_resume_entry(ctx)
-            override = await self._after_run(result, ctx, task, conversation)
+            override = await self._after_run(result, ctx, task, conversation, turn)
             return override if override is not None else result
+        except BaseException:
+            turn.release()
+            raise
         finally:
             if self._on_finally is not None:
                 await maybe_await(self._on_finally(ctx))
@@ -384,20 +382,19 @@ class Loop:
                 await maybe_await(self._on_failed(exc, ctx))
             raise
 
-    async def _after_run(self, result: Any, ctx: Context[Any], task: str, conversation: Any) -> Any:
+    async def _after_run(
+        self, result: Any, ctx: Context[Any], task: str, conversation: Any, turn: _LoopTurn
+    ) -> Any:
         """Cost hook, then paused-vs-complete branching + return override.
 
-        On the paused path, capture ``task`` alongside the
-        conversation's serialized :meth:`to_dict` payload as
-        canonical bytes on :attr:`_paused_bytes` when a
-        :class:`ConversationFactory` is wired — the halt-observation
-        site reads it to stamp a ``TraceRef(kind="paused_turn", ...)``
-        on the Flow's CAS halt commit. Persisting the task lets
-        :meth:`_consume_resume_entry` restore both when a direct
-        :class:`Loop` chain step resumes at index > 0 with empty
-        ``node_args``. Capture is a no-op when no factory is wired
-        (with one wired, :meth:`_prepare_dispatch` always supplies a
-        conversation) or when the conversation has no ``to_dict``.
+        On the paused path, the turn is held in the run's snapshots at
+        this call's path: ``task`` alongside the conversation's
+        :meth:`to_dict` payload when a :class:`ConversationFactory` is
+        wired (canonical bytes also land on :attr:`_paused_bytes`), else
+        an empty turn — the step still counts as interrupted and its
+        rerun starts the turn over. Keeping the task lets a resumed call
+        that receives no task (a direct :class:`Loop` chain step) run
+        the saved one. On the complete path the turn is released.
 
         Returns the value from ``on_paused`` / ``on_complete`` when
         the hook returned non-``None`` — :meth:`__call__` uses it to
@@ -407,39 +404,27 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
-            self._capture_paused(ctx, task, conversation)
+            turn.hold(self._capture_paused(task, conversation))
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
-        # Clear this Loop's stale paused bytes on non-paused completion so a
-        # later halt-save doesn't stamp conversation state from an earlier
-        # pause of this Loop. Sibling Loops' entries stay put.
-        env = ctx._env
-        if env is not None and ctx._node_id is not None:
-            env.pending_paused_turns.remove(ctx._node_id)
+        turn.release()
         if self._on_complete is not None:
             return await maybe_await(self._on_complete(result, ctx))
         return None
 
     def _prepare_dispatch(
-        self, ctx: Context[Any], task: str | None, conversation: Any
+        self, ctx: Context[Any], task: str | None, conversation: Any, turn: _LoopTurn
     ) -> tuple[Any, dict[str, Any], Any, str | None]:
         """Resolve saia, build ``saia.complete`` kwargs, return the effective task + conversation.
 
-        On dispatch entry: pop this Loop's stale pending-turn entry
-        from the runtime, reset :attr:`_paused_bytes`, and consume
-        any resume entry left by :meth:`Flow._hydrate_resume_state`.
-        When a resume entry is present, its saved task AND
-        reconstructed :class:`Conversation` replace the caller's
-        AND ``resume=True`` is added to the ``saia.complete`` kwargs.
-        Otherwise, when the caller passed no conversation and a
-        :class:`ConversationFactory` is wired, a fresh
-        :meth:`ConversationFactory.create` conversation is handed to
-        SAIA so a pause has turn history to capture.
-        The task-restore lets a direct :class:`Loop` chain step at
-        index > 0 resume — Chain's resume contract calls
-        the target with empty ``node_args``, so without the saved
-        task ``Loop.__call__`` would have none.
+        When the checked-out snapshot holds a paused turn at this call's
+        path, its saved task AND reconstructed :class:`Conversation`
+        replace the caller's AND ``resume=True`` is added to the
+        ``saia.complete`` kwargs. Otherwise, when the caller passed no
+        conversation and a :class:`ConversationFactory` is wired, a
+        fresh :meth:`ConversationFactory.create` conversation is handed
+        to SAIA so a pause has turn history to capture.
 
         Returns ``(saia, complete_kwargs, effective_conversation,
         effective_task)``. :meth:`__call__` hands the effective
@@ -447,10 +432,7 @@ class Loop:
         """
         saia = self._require_saia(ctx)
         self._paused_bytes = None
-        env = ctx._env
-        if env is not None and ctx._node_id is not None:
-            env.pending_paused_turns.remove(ctx._node_id)
-        resumed_task, resumed_conversation, is_resume = self._consume_resume_entry(ctx)
+        resumed_task, resumed_conversation, is_resume = self._consume_saved_turn(ctx, turn)
         if is_resume:
             task = resumed_task
             conversation = resumed_conversation
@@ -467,102 +449,100 @@ class Loop:
             complete_kwargs["resume"] = True
         return saia, complete_kwargs, conversation, task
 
-    def _consume_resume_entry(self, ctx: Context[Any]) -> tuple[str | None, Any, bool]:
-        """Rebuild task + Conversation from this Loop's resume entry, leaving the entry in place.
-
-        Reads ``env.resume_paused_turns`` at
-        ``ctx._node_id``. When an entry is present, decodes the
-        canonical-json envelope ``{"task": ..., "conversation":
-        ...}`` and hands the conversation-state payload to
-        :attr:`_conversation_factory`'s ``create_from_state`` to
-        reconstruct the paused ``Conversation``.
+    def _consume_saved_turn(
+        self, ctx: Context[Any], turn: _LoopTurn
+    ) -> tuple[str | None, Any, bool]:
+        """Rebuild task + Conversation from the paused turn saved at this call's path.
 
         Returns ``(saved_task, reconstructed_conversation, True)``
-        when a resume entry was found, ``(None, None, False)``
-        otherwise. Raises :class:`RuntimeError` when an entry exists
-        but no :class:`ConversationFactory` is wired — a fresh
-        dispatch would silently drop the SAIA turn the halted commit
-        captured.
+        when the snapshot held a captured turn there, ``(None, None,
+        False)`` otherwise (including an empty turn, which reruns
+        fresh). The turn stays in the run's snapshots until
+        ``saia.complete`` finishes it, so a checkpoint taken while it
+        resumes keeps it.
 
-        The entry is intentionally NOT popped here.
-        :meth:`_release_resume_entry` drops it only after
-        ``saia.complete`` returns successfully — a raise from
-        ``on_executor_ready`` or ``saia.complete`` leaves the entry
-        in place so a rescue-then-iterate-retry re-reconstructs the
-        same task/conversation instead of falling through to a fresh
-        dispatch without ``resume=True``.
+        Raises:
+            RuntimeError: A turn was saved but no
+                :class:`ConversationFactory` is wired — a fresh dispatch
+                would silently drop the SAIA turn the checkpoint
+                captured.
         """
-        env = ctx._env
-        node_id = ctx._node_id
-        if env is None or node_id is None:
-            return None, None, False
-        payload = env.resume_paused_turns.load(node_id)
-        if payload is None:
+        envelope = turn.take_saved()
+        if envelope is None:
             return None, None, False
         if self._conversation_factory is None:
             raise RuntimeError(
-                f"Loop at node {node_id!r} scheduled to resume a paused "
+                f"Loop at node {ctx._node_id!r} scheduled to resume a paused "
                 "SAIA turn but no ConversationFactory is wired; the "
                 "reconstructed conversation would be lost. Wire a "
                 "ConversationFactory matching the format SAIA used at "
                 "save time."
             )
-        envelope = PausedTurnEnvelope.from_bytes(payload)
         conversation = self._conversation_factory.create_from_state(envelope.conversation)
         return envelope.task, conversation, True
 
-    def _release_resume_entry(self, ctx: Context[Any]) -> None:
-        """Drop this Loop's resume entry — safe to call unconditionally after ``saia.complete``.
+    def _capture_paused(self, task: str, conversation: Any) -> PausedTurnEnvelope | None:
+        """The paused turn as an envelope; ``None`` when it cannot be captured.
 
-        Popped here (not in :meth:`_consume_resume_entry`) so a raise
-        from ``on_executor_ready`` or ``saia.complete`` leaves the
-        entry available for a rescue-then-iterate-retry to consume
-        again with ``resume=True``.
-        """
-        env = ctx._env
-        node_id = ctx._node_id
-        if env is None or node_id is None:
-            return
-        env.resume_paused_turns.release(node_id)
+        The envelope is ``{"task": <str>, "conversation": <to_dict()>}``;
+        its canonical bytes also land on :attr:`_paused_bytes`, an
+        introspection surface for callers holding this Loop.
 
-    def _capture_paused(self, ctx: Context[Any], task: str, conversation: Any) -> None:
-        """Serialize the paused task + conversation to canonical bytes.
-
-        Publishes to two seams:
-
-        - :attr:`_paused_bytes` on this Loop instance — introspection
-          surface for tests and consumers that already hold a Loop
-          reference.
-        - ``env.pending_paused_turns`` on the top-level Flow runtime
-          — keyed by ``ctx._node_id`` so each Loop's
-          bytes stay distinct (concurrent ``.map`` bodies, sibling
-          Loops in a chain, and nested Loops in an iterate body all
-          share one runtime). The halt-observation site drains it
-          to stamp one ``TraceRef(kind="paused_turn", ...)`` per
-          entry on the halt commit.
-
-        The blob envelope is ``{"task": <str>, "conversation":
-        <to_dict()>}`` — persisting ``task`` alongside the
-        conversation state so :meth:`_consume_resume_entry` restores
-        both when a direct :class:`Loop` chain step resumes at
-        index > 0 with empty ``node_args``.
-
-        No-op when this Loop was constructed without a
+        ``None`` when this Loop was constructed without a
         :class:`ConversationFactory` (a wired factory guarantees a
         conversation flowed through the dispatch — see
-        :meth:`_prepare_dispatch`), when the conversation has no
-        ``to_dict``, or when ``ctx._node_id`` is unset.
+        :meth:`_prepare_dispatch`) or when the conversation has no
+        ``to_dict``.
         """
         if self._conversation_factory is None or conversation is None:
-            return
+            return None
         to_dict = getattr(conversation, "to_dict", None)
         if to_dict is None:
-            return
-        payload = PausedTurnEnvelope(task=task, conversation=to_dict()).to_bytes()
-        self._paused_bytes = payload
-        env = ctx._env
-        if env is not None and ctx._node_id is not None:
-            env.pending_paused_turns.add(ctx._node_id, payload, env.ancestor_chain)
+            return None
+        envelope = PausedTurnEnvelope(task=task, conversation=to_dict())
+        self._paused_bytes = envelope.to_bytes()
+        return envelope
+
+
+class _LoopTurn:
+    """One Loop call's paused turn in the run's snapshots, at the call's path.
+
+    The path is ``<step>/t/<k>`` for the step's ``k``-th Loop call
+    (:meth:`~llm_gent.flow.state.snapshot.ScopeRegistry.next_turn`). A
+    Loop dispatched outside a run (no executor env) has no path; every
+    method is then a no-op.
+    """
+
+    def __init__(self, ctx: Context[Any]) -> None:
+        env, node_id = ctx._env, ctx._node_id
+        self._runner = PausedTurn(None)
+        self._scopes: ScopeRegistry | None = None
+        self._path: ScopePath = ()
+        if env is not None and node_id is not None:
+            self._scopes = env.scopes
+            self._path = env.scopes.next_turn(env.owner_path(node_id))
+
+    def take_saved(self) -> PausedTurnEnvelope | None:
+        """The captured turn the checked-out snapshot saved at this path, held again; else ``None``."""
+        if self._scopes is None:
+            return None
+        found, raw = self._scopes.take_cursor(self._path, TURN)
+        if not found or raw is None:
+            return None
+        envelope = PausedTurnEnvelope.from_dict(raw)
+        self.hold(envelope)
+        return envelope
+
+    def hold(self, envelope: PausedTurnEnvelope | None) -> None:
+        """Keep ``envelope`` (``None``: an uncaptured turn) in the run's snapshots."""
+        self._runner.envelope = envelope
+        if self._scopes is not None:
+            self._scopes.open_cursor(self._path, self._runner)
+
+    def release(self) -> None:
+        """Drop the turn from the run's snapshots."""
+        if self._scopes is not None:
+            self._scopes.close_cursor(self._path, self._runner)
 
 
 # ----------------------------------------------------------------------------
