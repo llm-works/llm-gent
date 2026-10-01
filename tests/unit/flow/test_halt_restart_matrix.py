@@ -179,35 +179,47 @@ class Pan:
     members: tuple[Leaf, ...]
 
 
-Node = Leaf | Seq | Iter | Fan | Branch | Scope | Pan
+@dataclass(frozen=True)
+class Ckpt:
+    """A subflow declaring ``with_checkpointer()``.
+
+    In a shape with one, the top-level flow has the store alone: only the
+    leaves inside a ``Ckpt`` (named ``c<n>``) save, into the run's repo.
+    """
+
+    body: Node
+
+
+Node = Leaf | Seq | Iter | Fan | Branch | Scope | Pan | Ckpt
 
 _L = Leaf("", 0)
 _T = Turn("", 0)
 _B = BareTurn("", 0)
 
 
-def _label(node: Node, counter: list[int]) -> Node:
-    """Return ``node`` with its leaves named ``l1, l2, ...`` in depth-first order."""
+def _label(node: Node, counter: list[int], prefix: str = "l") -> Node:
+    """Return ``node`` with its leaves named ``l1, l2, ...`` in depth-first order (``c<n>`` in a ``Ckpt``)."""
     if isinstance(node, Leaf):
-        counter[0] += 1
-        return type(node)(f"l{counter[0]}", counter[0])
+        return type(node)(*_leaf_label(counter, prefix))
     if isinstance(node, Seq):
-        return Seq(tuple(_label(child, counter) for child in node.children))
+        return Seq(tuple(_label(child, counter, prefix) for child in node.children))
     if isinstance(node, Iter):
-        return Iter(_label(node.body, counter), node.n, node.until)
+        return Iter(_label(node.body, counter, prefix), node.n, node.until)
     if isinstance(node, Fan):
-        return Fan(_label(node.body, counter), node.width, node.mode)
+        return Fan(_label(node.body, counter, prefix), node.width, node.mode)
     if isinstance(node, Branch):
-        return Branch(_label(node.then, counter), _label(node.else_, counter))
+        return Branch(_label(node.then, counter, prefix), _label(node.else_, counter, prefix))
     if isinstance(node, Pan):
-        return Pan(tuple(type(m)(*_leaf_label(counter)) for m in node.members))
-    return Scope(_label(node.body, counter))
+        return Pan(tuple(type(m)(*_leaf_label(counter, prefix)) for m in node.members))
+    if isinstance(node, Ckpt):
+        return Ckpt(_label(node.body, counter, "c"))
+    return Scope(_label(node.body, counter, prefix))
 
 
-def _leaf_label(counter: list[int]) -> tuple[str, int]:
+def _leaf_label(counter: list[int], prefix: str) -> tuple[str, int]:
     """The next leaf's ``(name, c)``."""
     counter[0] += 1
-    return f"l{counter[0]}", counter[0]
+    return f"{prefix}{counter[0]}", counter[0]
 
 
 _INNER: dict[str, Node] = {
@@ -255,6 +267,12 @@ _INNER: dict[str, Node] = {
     "iter(panel)": Iter(Pan((_L, _L)), 2),
     "fan(panel)": Fan(Pan((_L, _T)), 2),
     "sub(panel,panel)": Seq((Pan((_L, _L)), Pan((_T, _L)))),
+    "ckpt": Ckpt(Seq((_L, _L))),
+    "ckpt(iter)": Ckpt(Iter(_L, 2)),
+    "fan(ckpt)": Fan(Ckpt(_L), 2),
+    "iter(ckpt(fan))": Iter(Ckpt(Fan(_L, 2)), 2),
+    "ckpt(turn)": Ckpt(Seq((_T, _L))),
+    "sub(ckpt,leaf)": Seq((Ckpt(_L), _L)),
 }
 
 SHAPES: dict[str, Seq] = {}
@@ -271,11 +289,17 @@ def _has(node: Node, kind: type, mode: FanMode | None = None) -> bool:
         return any(_has(child, kind, mode) for child in node.children)
     if isinstance(node, Branch):
         return _has(node.then, kind, mode) or _has(node.else_, kind, mode)
-    if isinstance(node, Iter | Fan | Scope):
+    if isinstance(node, Iter | Fan | Scope | Ckpt):
         return _has(node.body, kind, mode)
     if isinstance(node, Pan):
         return any(_has(m, kind, mode) for m in node.members)
     return False
+
+
+def _saving_keys(shape: Seq) -> list[str]:
+    """The model's leaf executions that save: inside a ``Ckpt`` when the shape has one, else all."""
+    keys = list(model(shape)[1])
+    return [k for k in keys if k.startswith("c")] if _has(shape, Ckpt) else keys
 
 
 def _ordered(shape: Node, parallel: bool) -> bool:
@@ -451,12 +475,16 @@ def _leaf_verb(leaf: Leaf, probe: Probe) -> Any:
 
 
 async def _save(ctx: Context[Any], probe: Probe, key: str) -> None:
-    """A leaf's own save after its work: ``leaf`` saves, ``named`` saves as a checkpoint ``key``."""
-    if probe.policy == "leaf":
-        await ctx.checkpoint()
+    """A leaf's own save after its work: ``leaf`` saves, ``named`` saves as a checkpoint ``key``.
+
+    Recorded in ``checkpointed`` only when a commit was written: outside
+    every checkpointer the save writes nothing.
+    """
+    if probe.policy not in ("leaf", "named"):
+        return
+    written = await ctx.checkpoint(key if probe.policy == "named" else None)
+    if written is not None:
         probe.checkpointed.append(key)
-    elif probe.policy == "named":
-        await ctx.checkpoint(key)
 
 
 ROLE = Role(name="matrix", backend="openai", model="none")
@@ -576,6 +604,10 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     """Append ``node`` to ``flow`` as one chain step."""
     if isinstance(node, Pan):
         return flow.call(_panel_verb(node, probe))
+    if isinstance(node, Ckpt):
+        sub = FlowFactory(LG).create().with_checkpointer()
+        _add(node.body, sub, probe, parallel)
+        return flow.call(sub)
     if isinstance(node, Turn):
         return flow.call(_turn_verb(node, probe))
     if isinstance(node, Leaf):
@@ -635,8 +667,14 @@ def _add_fan(node: Fan, flow: Flow, probe: Probe, parallel: bool) -> Flow:
 def _flow(
     shape: Seq, probe: Probe, store: Any, *, parallel: bool, halt: asyncio.Event | None = None
 ) -> Flow:
-    """Build the top-level flow for ``shape`` under ``probe.policy``."""
-    flow = FlowFactory(LG).create(state={}).with_checkpointer(store, FLOW_NAME)
+    """Build the top-level flow for ``shape`` under ``probe.policy``.
+
+    It carries the run's store; it declares the checkpointer itself unless
+    the shape declares its own in a ``Ckpt``.
+    """
+    flow = FlowFactory(LG).create(state={}).with_checkpoint_store(store, FLOW_NAME)
+    if not _has(shape, Ckpt):
+        flow = flow.with_checkpointer()
     if probe.policy in ("on_iterate", "on_map_item"):
         flow = flow.with_checkpoint_policy(**{probe.policy: True})
     if halt is not None:
@@ -933,9 +971,9 @@ async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path:
 
 
 def _named_params() -> Iterator[Any]:
-    """Every shape × every leaf, sequential: the leaf whose named checkpoint resume checks out."""
+    """Every shape × every leaf that saves, sequential: the one whose checkpoint resume checks out."""
     for name, shape in SHAPES.items():
-        for leaf in range(len(model(shape)[1])):
+        for leaf in range(len(_saving_keys(shape))):
             yield pytest.param(name, leaf, id=f"{name}-leaf{leaf + 1}")
 
 
@@ -957,7 +995,8 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
     first = Probe(policy="named")
     assert await _flow(shape, first, store, parallel=False).run(RUN_INPUT) == expected_result
 
-    name = first.executed[leaf]
+    assert sorted(first.checkpointed) == sorted(_saving_keys(shape))
+    name = first.checkpointed[leaf]
     history = History(store, FLOW_NAME)
     commit = await history.checkpoint(name)
     assert commit is not None

@@ -205,6 +205,17 @@ class Interrupted(BaseException):  # noqa: N818 — a signal, like asyncio.Cance
 
 
 @dataclass(frozen=True)
+class Checkpointer:
+    """A flow's :meth:`~llm_gent.flow.Flow.with_checkpointer`: saves inside it write commits.
+
+    A save belongs to the innermost checkpointer enclosing the step that
+    saves; with a ``name`` it also moves the run's tag ``tags/<name>``.
+    """
+
+    name: str | None = None
+
+
+@dataclass(frozen=True)
 class _RunEnv:
     """Per-run environment threaded through the execution helpers.
 
@@ -217,7 +228,10 @@ class _RunEnv:
     (or inherited from the outer runtime); ``None`` when no halt is in
     scope. ``budget`` is the ambient session tracker attached via
     :meth:`Flow.with_budget` (or inherited); ``None`` when no budget is in
-    scope.
+    scope. ``checkpoint_ctx`` is the run's repo (the top-level flow's
+    checkpoint store); ``checkpointer`` the innermost
+    :meth:`Flow.with_checkpointer` on this flow or above it — saves write
+    commits only under one.
 
     Composition-graph position is threaded via a pair of content-addressed
     hashes: ``chain_context`` is the hash used to compute this Flow's own
@@ -239,6 +253,7 @@ class _RunEnv:
     halt: asyncio.Event | None = None
     budget: Tracker | None = None
     checkpoint_ctx: CheckpointContext | None = None
+    checkpointer: Checkpointer | None = None
     chain_context: str = ""
     ancestor_chain: tuple[str, ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)

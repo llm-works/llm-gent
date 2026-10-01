@@ -156,7 +156,7 @@ class TestCreateHaltAndCheckpointer:
         assert flow._halt_event is factory_halt
 
     def test_create_checkpointer_pair_binds_flow(self, tmp_path: Any) -> None:
-        """``checkpointer=(store, id)`` wires the pair via .with_checkpointer."""
+        """``checkpointer=(store, id)`` binds the run's repo via .with_checkpoint_store, nothing more."""
         from llm_gent.flow import FlowFactory
         from llm_gent.flow.stores import JsonFileCheckpointStore
 
@@ -166,6 +166,7 @@ class TestCreateHaltAndCheckpointer:
         assert flow._checkpoint_ctx is not None
         assert flow._checkpoint_ctx.store is store
         assert flow._checkpoint_ctx.client_flow_id == "flow-1"
+        assert flow._checkpointer is None  # saves need an explicit with_checkpointer()
 
     def test_create_checkpointer_supersedes_factory_pair(self, tmp_path: Any) -> None:
         """``checkpointer=`` wins over the factory-level store + client_flow_id."""
@@ -174,7 +175,9 @@ class TestCreateHaltAndCheckpointer:
 
         factory_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "a")
         create_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "b")
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), checkpointer=factory_store)
+        ff = FlowFactory(
+            make_test_logger(), saia_factory=StubFactory(), checkpoint_store=factory_store
+        )
         flow = ff.create(client_flow_id="ignored", checkpointer=(create_store, "flow-override"))
         assert flow._checkpoint_ctx is not None
         assert flow._checkpoint_ctx.store is create_store

@@ -172,7 +172,7 @@ def build_canonical_flow(
         halt_after_iteration: Iteration count at which to fire ``halt``.
             Requires ``halt``.
         store: Optional :class:`CheckpointStore`. Wires
-            ``.with_checkpointer(store, client_flow_id)`` when present.
+            ``.with_checkpoint_store(store, client_flow_id).with_checkpointer()`` when present.
         client_flow_id: Checkpoint history identifier.
 
     Raises:
@@ -185,7 +185,7 @@ def build_canonical_flow(
     ff = FlowFactory(lg, state_factory=TypeStateFactory(CanonicalCounter))
     flow = ff.create(state=state if state is not None else CanonicalCounter())
     if store is not None:
-        flow.with_checkpointer(store, client_flow_id)
+        flow.with_checkpoint_store(store, client_flow_id).with_checkpointer()
         # Canonical fixture opts into per-iteration saves: the determinism
         # assertions and resume tests need each boundary as a resumable anchor.
         flow.with_checkpoint_policy(on_iterate=True)

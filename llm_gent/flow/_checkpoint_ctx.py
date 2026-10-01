@@ -11,10 +11,12 @@ plumbed the client_flow_id argument. :class:`CheckpointContext`
 holds the pair as one unambiguously-bound object and exposes the
 save operations the framework needs.
 
-Presence is the persistence gate. When a Flow was constructed with
-``.with_checkpointer(store, client_flow_id)`` there is a context;
-otherwise ``env.checkpoint_ctx is None`` and every save site skips.
-No more Optional-pair guards.
+A run has one context: its repo, set on the top-level flow with
+``.with_checkpoint_store(store, client_flow_id)``. Without one,
+``env.checkpoint_ctx is None`` and every save site skips; with one, saves
+inside the run also need a ``with_checkpointer()`` on the saving flow or
+above it (``env.checkpointer``). :func:`check_one_repo` rejects a store on
+a nested flow and a checkpointer in a run without a store.
 
 The context is also the translation layer between the agent's name
 (``client_flow_id``) and gent's internal history identity
@@ -46,17 +48,49 @@ from .state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
 
 
 if TYPE_CHECKING:
+    from .flow import Flow
     from .state import State
     from .state.cas import CommitOutcome, TraceRef
+
+
+def check_one_repo(root: Flow) -> None:
+    """Raise unless ``root``'s run has at most one repo, on ``root``, and checkpointers need one.
+
+    Raises:
+        RuntimeError: A flow inside the run sets a checkpoint store (a run
+            has one repo, on its top-level flow), or a flow declares
+            ``with_checkpointer()`` while the run has no store.
+    """
+    from ._node_id import iter_flows
+
+    flows = iter_flows(root)
+    for flow in flows[1:]:
+        if flow._checkpoint_ctx is not None:
+            raise RuntimeError(
+                f"Flow {_label(flow)} sets a checkpoint store but runs inside "
+                f"{_label(root)}: a run has one repo, set on its top-level flow — "
+                f"use with_checkpointer() on the inner flow instead"
+            )
+    if root._checkpoint_ctx is None:
+        declaring = next((f for f in flows if f._checkpointer is not None), None)
+        if declaring is not None:
+            raise RuntimeError(
+                f"Flow {_label(declaring)} declares with_checkpointer() but the run has no "
+                f"checkpoint store: checkpointers require a checkpoint store — call "
+                f"with_checkpoint_store(store, client_flow_id) on {_label(root)}"
+            )
+
+
+def _label(flow: Flow) -> str:
+    return repr(flow._name or "<anonymous>")
 
 
 class CheckpointContext:
     """CAS-store wiring bundled with the save operations that consume it.
 
-    Constructed when a Flow is attached to a checkpointer via
-    ``.with_checkpointer(store, client_flow_id)``. Absent when the
-    flow runs without persistence — save sites check
-    ``env.checkpoint_ctx is None`` and skip.
+    Constructed by ``.with_checkpoint_store(store, client_flow_id)`` on a
+    run's top-level flow. Absent when the run has no store — save sites
+    check ``env.checkpoint_ctx is None`` and skip.
 
     Owns the ``(store, client_flow_id)`` pair unambiguously (both
     fields are always populated once the context exists — the

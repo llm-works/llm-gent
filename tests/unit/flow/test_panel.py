@@ -276,7 +276,8 @@ class TestPanel:
             primed = (
                 make_ff()
                 .create(state={"nested_n": 0})
-                .with_checkpointer(store, "nested-history")
+                .with_checkpoint_store(store, "nested-history")
+                .with_checkpointer()
                 .iterate(bump_then_halt, max_iters=5)
                 .with_halt(halt)
             )
@@ -288,7 +289,8 @@ class TestPanel:
             resumed = (
                 make_ff()
                 .create(state={"nested_n": 0})
-                .with_checkpointer(store, "nested-history")
+                .with_checkpoint_store(store, "nested-history")
+                .with_checkpointer()
                 .iterate(bump_then_halt, max_iters=5)
             )
             result = await resumed.run(resume="latest")
@@ -461,7 +463,12 @@ class TestPanelInsideIterateResumeBoundary:
             # Voters must live on the top-level runtime flow — Panel dispatches
             # by name via ctx.flow, which resolves to the outer runtime, not
             # the iterate body's subflow.
-            flow = make_ff().create(state={"i": 0}).with_checkpointer(store, "panel-iter-1")
+            flow = (
+                make_ff()
+                .create(state={"i": 0})
+                .with_checkpoint_store(store, "panel-iter-1")
+                .with_checkpointer()
+            )
             if with_halt:
                 flow.with_halt(halt)
             for v in (voter_a, voter_b, voter_c):

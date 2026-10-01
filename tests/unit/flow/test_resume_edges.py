@@ -85,7 +85,8 @@ class TestRescue:
             return (
                 FlowFactory(make_test_logger())
                 .create(state={})
-                .with_checkpointer(store, "rescue")
+                .with_checkpoint_store(store, "rescue")
+                .with_checkpointer()
                 .with_halt(halt)
                 .iterate(lambda b: b.call(step), max_iters=3, name="loop")
                 .rescue(lambda _e, _p, _c: -1)
@@ -124,7 +125,8 @@ class TestSubflowOwnHalt:
             return (
                 FlowFactory(make_test_logger())
                 .create(state={})
-                .with_checkpointer(store, "sub-halt")
+                .with_checkpoint_store(store, "sub-halt")
+                .with_checkpointer()
                 .with_halt(run_halt)
                 .call(sub)
                 .then(_stop_then_halt(run_halt, ran, arm))
@@ -222,7 +224,8 @@ def _typed_flow(store: Any, halt: asyncio.Event, ran: list[str], stop_at: int | 
     return (
         FlowFactory(make_test_logger(), state_factory=TypeStateFactory(Totals))
         .create(state=Totals())
-        .with_checkpointer(store, "typed")
+        .with_checkpoint_store(store, "typed")
+        .with_checkpointer()
         .with_halt(halt)
         .call(seed)
         .iterate(lambda b: b.call(bump), max_iters=2)

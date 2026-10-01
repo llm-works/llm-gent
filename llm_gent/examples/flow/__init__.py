@@ -4,7 +4,7 @@
 """Flow-substrate example agents.
 
 Demonstrates the Flow substrate directly: typed state, ``.iterate``,
-``.with_checkpointer`` pause/resume, and multi-role composition. See the
+checkpointed pause/resume, and multi-role composition. See the
 sibling ``llm_gent.examples`` modules (``quickstart``, ``external_agent``)
 for the older ``AgentFactory`` + ``LLMTrait`` surface.
 

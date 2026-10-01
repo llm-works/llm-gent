@@ -247,9 +247,9 @@ input it had, and a Loop call in it resumes its paused turn.
 | Save point | Fires here? | Why |
 |---|---|---|
 | Halt checkpoint (once everything stopped) | Yes — run 1 | The halt arrived during `summarize`. |
-| Iterate boundary, `outcome="ok"` | No | `on_iterate` is off by default; enable with `flow.with_checkpoint_policy(on_iterate=True)`. |
+| Iterate boundary, `outcome="ok"` | No | No `with_checkpointer()`, and `on_iterate` is off by default; enable with `flow.with_checkpointer().with_checkpoint_policy(on_iterate=True)`. |
 | Map item, `outcome="ok"` | No | No map here; `on_map_item` is off by default. |
-| Explicit `ctx.checkpoint()` / `ctx.checkpoint(name)` | No | The verb does not call it. |
+| Explicit `ctx.checkpoint()` / `ctx.checkpoint(name)` | No | The verb does not call it, and it would need a `with_checkpointer()`. |
 | Final-state commit (`$end`, tagged `complete`) | Yes — run 2 | Clean exit, `retain` retention. |
 | A run that raises | — | Writes nothing: the head stays at the last save, where `latest` continues. |
 

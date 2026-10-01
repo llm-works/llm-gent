@@ -52,7 +52,8 @@ def _flow(store: Any, tag: str | None) -> Any:
     return (
         FlowFactory(make_test_logger())
         .create(state={})
-        .with_checkpointer(store, NAME)
+        .with_checkpoint_store(store, NAME)
+        .with_checkpointer()
         .call(a)
         .then(b)
         .then(c)

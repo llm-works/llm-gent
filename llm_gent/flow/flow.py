@@ -63,9 +63,9 @@ from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
 from ._budget import Budget, RunBudget, check_budget, check_caps_have_a_tracker, run_budget
 from ._chain import Chain
-from ._checkpoint_ctx import CheckpointContext
+from ._checkpoint_ctx import CheckpointContext, check_one_repo
 from ._halt_observer import HaltPoint
-from ._node_id import flow_root_hash, iter_flows
+from ._node_id import flow_root_hash
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
@@ -90,6 +90,7 @@ from .nodes import (
     UNSET,
     AfterHook,
     AggregateFn,
+    Checkpointer,
     GuardFn,
     Interrupted,
     ItemsFn,
@@ -178,6 +179,7 @@ class Flow:
         self._halt_event: asyncio.Event | None = None
         self._budget: Budget | None = None
         self._checkpoint_ctx: CheckpointContext | None = None
+        self._checkpointer: Checkpointer | None = None
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
@@ -780,26 +782,28 @@ class Flow:
         self._budget = check_budget(budget)
         return self
 
-    def with_checkpointer(self, store: CheckpointStore, client_flow_id: str) -> Flow:
-        """Attach a :class:`CheckpointStore` + agent-owned ``client_flow_id``.
+    def with_checkpoint_store(self, store: CheckpointStore, client_flow_id: str) -> Flow:
+        """Set the run's repo: a :class:`CheckpointStore` and the agent-owned ``client_flow_id``.
 
-        Wires checkpoints (``ctx.checkpoint()``, the checkpoint policy and
-        the halt checkpoint) and, on :meth:`run` ``resume="latest"``, a
-        checkout at start that restores the run's scopes and cursors. On fully
-        successful :meth:`run` completion the framework calls
-        :meth:`CheckpointStore.gc_history` when the store's
-        ``retention`` is ``"gc_on_success"``; the default ``"retain"``
-        keeps the history for audit. Cancellation, halt exits, and
-        unhandled exceptions preserve the checkpoint regardless of
-        retention so a subsequent resume can pick up.
+        A run has one repo, set on its top-level flow: every commit the run
+        writes — wherever in the flow tree it is taken — holds the whole
+        run and goes here. A flow inside another run cannot set one
+        (:meth:`run` raises). With a store, the run writes its halt
+        checkpoint and, on a clean exit, its final state; saves inside the
+        run (``ctx.checkpoint()``, the checkpoint policy) need a
+        :meth:`with_checkpointer` on the saving flow or above it. On
+        :meth:`run` ``resume=...`` the repo is checked out at start,
+        restoring the run's scopes and cursors. On fully successful
+        :meth:`run` completion the framework calls
+        :meth:`CheckpointStore.gc_history` when the store's ``retention``
+        is ``"gc_on_success"``; the default ``"retain"`` keeps the history
+        for audit. Cancellation, halt exits, and unhandled exceptions
+        preserve the history regardless of retention so a subsequent
+        resume can pick up.
 
         Both arguments bind together — the ``client_flow_id`` scopes every
         save/load/delete call and identifies the resumable history. It
         is agent-owned: the framework never assigns one automatically.
-
-        A subflow inherits the outer runtime's checkpointer + id
-        automatically; calling ``.with_checkpointer`` on a subflow
-        overrides both for that subtree.
 
         Resume semantics:
 
@@ -824,15 +828,39 @@ class Flow:
         self._checkpoint_ctx = CheckpointContext(store, client_flow_id, self.root_hash)
         return self
 
-    def _begin_checkpoint_run(self) -> None:
-        """Reset run-scoped caches on every checkpoint context in the tree.
+    def with_checkpointer(self, name: str | None = None) -> Flow:
+        """Declare that saves inside this flow write commits.
 
-        Covers subflows wired with their own ``.with_checkpointer``, which
-        are entered per run through :meth:`_run_as_subflow`, not :meth:`run`.
+        ``ctx.checkpoint()`` and the checkpoint policy write commits in the
+        flow and its subtree; in a part of the run with no checkpointer on
+        it or above it they write nothing. Declared on any flow — the top
+        level or a subflow, a map body, an iterate body — the commits go to
+        the run's repo (:meth:`with_checkpoint_store` on the top-level
+        flow) and hold the whole run; a checkpointer in a run without a
+        store makes :meth:`run` raise.
+
+        A save belongs to the innermost checkpointer enclosing the step
+        that saves. With ``name``, each such save also moves the tag
+        ``tags/<name>``: ``run(resume=name)`` goes back to the latest
+        checkpoint that part took. Tag names are repo-global, one namespace
+        with ``ctx.checkpoint(name)``; two flows with the same name share
+        one tag.
+
+        Returns ``self`` for chaining.
+
+        Raises:
+            ValueError: ``name`` cannot name a checkpoint (see
+                :func:`~llm_gent.flow.checkpoint.checkpoint_tag`).
         """
-        for flow in iter_flows(self):
-            if flow._checkpoint_ctx is not None:
-                flow._checkpoint_ctx.begin_run()
+        if name is not None:
+            checkpoint_tag(name)
+        self._checkpointer = Checkpointer(name)
+        return self
+
+    def _begin_checkpoint_run(self) -> None:
+        """Reset the run's repo's run-scoped caches."""
+        if self._checkpoint_ctx is not None:
+            self._checkpoint_ctx.begin_run()
 
     def root_hash(self) -> str:
         """Structure hash of this flow's composition tree.
@@ -1012,7 +1040,7 @@ class Flow:
         return result
 
     def _check_run_args(self, resume: ResumeMode | str) -> None:
-        """Reject an empty flow, a bad ``resume``, resuming without a checkpointer, or a lone cap.
+        """Reject an empty flow, a bad ``resume``, a misplaced store or checkpointer, or a lone cap.
 
         Runs before anything is read or written, so a misconfigured run
         leaves no new history behind.
@@ -1030,9 +1058,10 @@ class Flow:
         if resume != "off" and self._checkpoint_ctx is None:
             label = self._name or "<anonymous>"
             raise RuntimeError(
-                f"Flow {label!r} was run with resume={resume!r} but has no "
-                f"checkpointer — call .with_checkpointer(store, client_flow_id) first"
+                f"Flow {label!r} was run with resume={resume!r} but has no checkpoint "
+                f"store — call .with_checkpoint_store(store, client_flow_id) first"
             )
+        check_one_repo(self)
         check_caps_have_a_tracker(self)
 
     async def _start_state(
@@ -1053,6 +1082,7 @@ class Flow:
         parent_halt: asyncio.Event | None = None,
         parent_budget: Tracker | None = None,
         parent_checkpoint_ctx: CheckpointContext | None = None,
+        parent_checkpointer: Checkpointer | None = None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
         parent_extra: dict[str, Any] | None = None,
@@ -1068,12 +1098,13 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_halt`` / ``parent_budget`` / ``parent_checkpoint_ctx`` are
-        the effective ambients from the calling scope — nested subflows
-        fall back to them when they have no local
-        ``.with_halt()`` / ``.with_budget()`` / ``.with_checkpointer()``
-        override, preserving an intermediate layer's ambient through
-        arbitrarily deep nesting. The run's budget context (its tracker,
+        ``parent_halt`` / ``parent_budget`` / ``parent_checkpointer`` /
+        ``parent_policy`` are the effective ambients from the calling scope
+        — nested subflows fall back to them when they have no local
+        ``.with_halt()`` / ``.with_budget()`` / ``.with_checkpointer()`` /
+        ``.with_checkpoint_policy()``, preserving an intermediate layer's
+        ambient through arbitrarily deep nesting. ``parent_checkpoint_ctx``
+        is the run's repo, set on the top-level flow only. The run's budget context (its tracker,
         and the halt it observes when capped) comes from
         :func:`~llm_gent.flow._budget.run_budget`.
 
@@ -1095,6 +1126,7 @@ class Flow:
                 state=state,
                 context=context,
                 parent_checkpoint_ctx=parent_checkpoint_ctx,
+                parent_checkpointer=parent_checkpointer,
                 parent_chain_context=parent_chain_context,
                 parent_ancestor_chain=parent_ancestor_chain,
                 parent_extra=parent_extra,
@@ -1168,36 +1200,31 @@ class Flow:
         parent_extra: dict[str, Any] | None = None,
         parent_policy: CheckpointPolicy | None = None,
         parent_path: ScopePath = (),
+        parent_checkpointer: Checkpointer | None = None,
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
         Local ``.with_checkpointer`` / ``.with_checkpoint_policy`` wins over
         the caller's parent ambients; unset locals fall back to the parent
         so an intermediate layer's ambient survives arbitrarily deep
-        nesting. Halt and budget come resolved in ``context``.
+        nesting. Halt and budget come resolved in ``context``. The repo is
+        the top-level flow's (:func:`check_one_repo` keeps nested flows
+        from setting one).
 
         ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
         verbatim: the descent sites in :mod:`._executor` are the ones
         that extend them when recursing into a subflow / arm / body.
         """
-        halt = context.halt
-        budget = context.tracker
-        if self._checkpoint_policy is not None:
-            policy = self._checkpoint_policy
-        elif parent_policy is not None:
-            policy = parent_policy
-        else:
-            policy = CheckpointPolicy()
-        checkpoint_ctx = (
-            self._checkpoint_ctx if self._checkpoint_ctx is not None else parent_checkpoint_ctx
-        )
+        policy = self._checkpoint_policy or parent_policy or CheckpointPolicy()
+        checkpoint_ctx = self._checkpoint_ctx or parent_checkpoint_ctx
         return _RunEnv(
             runtime=runtime,
             state=state,
             lg=runtime._lg,
-            halt=halt,
-            budget=budget,
+            halt=context.halt,
+            budget=context.tracker,
             checkpoint_ctx=checkpoint_ctx,
+            checkpointer=self._checkpointer or parent_checkpointer,
             chain_context=parent_chain_context,
             ancestor_chain=parent_ancestor_chain,
             extra=parent_extra if parent_extra is not None else {},

@@ -116,7 +116,12 @@ class TestMemoryStore:
             return int(ctx.state.data["n"])
 
         def build() -> Any:
-            return FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, "c")
+            return (
+                FlowFactory(make_test_logger())
+                .create(state={})
+                .with_checkpoint_store(store, "c")
+                .with_checkpointer()
+            )
 
         assert await build().call(bump).run() == 1
         assert await build().call(bump).run(resume="latest") == 2

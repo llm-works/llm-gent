@@ -73,7 +73,8 @@ class TestRootTrackerAcrossResume:
         return (
             _ff()
             .create(state={})
-            .with_checkpointer(store, NAME)
+            .with_checkpoint_store(store, NAME)
+            .with_checkpointer()
             .with_halt(halt)
             .with_budget(tracker)
             .call(a)
@@ -130,7 +131,12 @@ class TestRootTrackerAcrossResume:
 
         def flow(tracker: Tracker) -> Any:
             return (
-                _ff().create(state={}).with_checkpointer(store, NAME).with_budget(tracker).call(a)
+                _ff()
+                .create(state={})
+                .with_checkpoint_store(store, NAME)
+                .with_checkpointer()
+                .with_budget(tracker)
+                .call(a)
             )
 
         await flow(_tracker()).run(1)
@@ -240,14 +246,16 @@ class TestItemBudgetsAcrossHalt:
 
         root1 = _tracker()
         flow1 = _item_flow(root1, asyncio.Event(), costs, {}, arm=True)
-        assert await flow1.with_checkpointer(store, NAME).run() is None
+        assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is None
         assert root1.spent == pytest.approx(0.7)
 
         root2 = _tracker()
         seen2: dict[int, Any] = {}
         before: dict[int, float] = {}
         flow2 = _item_flow(root2, asyncio.Event(), costs, seen2, before_second=before)
-        assert await flow2.with_checkpointer(store, NAME).run(resume="latest") == [0, 10]
+        assert await flow2.with_checkpoint_store(store, NAME).with_checkpointer().run(
+            resume="latest"
+        ) == [0, 10]
         assert seen2 == {}  # no first step ran again
         assert before == {0: pytest.approx(0.3), 1: pytest.approx(0.4)}
         assert root2.spent == pytest.approx(1.0)
@@ -261,14 +269,16 @@ class TestItemBudgetsAcrossHalt:
         store = InMemoryCheckpointStore()
         costs = {0: [0.9, 0.1], 1: [0.1, 0.1]}
         flow1 = _item_flow(_tracker(), asyncio.Event(), costs, {}, arm=True)
-        assert await flow1.with_checkpointer(store, NAME).run() is None
+        assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is None
 
         root2 = _tracker()
         before: dict[int, float] = {}
         flow2 = _item_flow(
             root2, asyncio.Event(), costs, {}, before_second=before, cap=0.5, cooperative=False
         )
-        assert await flow2.with_checkpointer(store, NAME).run(resume="latest") == [None, 10]
+        assert await flow2.with_checkpoint_store(store, NAME).with_checkpointer().run(
+            resume="latest"
+        ) == [None, 10]
         assert before == {1: pytest.approx(0.1)}  # item 0 ran no step
         assert root2.spent == pytest.approx(1.1)
 

@@ -275,22 +275,50 @@ at once, so a run that ran out stays out until its cap is raised. A
 finished run keeps no tracker in its final commit: the next session
 starts from the tracker as given.
 
+### One repo per run
+
+A run has one repo: the checkpoint store and history name set once, on
+its top-level flow, with `with_checkpoint_store(store, client_flow_id)`
+(or `FlowFactory(checkpoint_store=store)` with `create(client_flow_id=...)`).
+Every commit the run writes holds the whole run and goes there, wherever
+in the flow tree it was taken — committing in a subdirectory commits the
+repo. A flow inside a run cannot set a store of its own; `run()` raises.
+
+Saves are declared with `with_checkpointer()`, on any flow: the top
+level, a subflow, a map or iterate body. Inside a flow with a
+checkpointer on it or above it, `ctx.checkpoint()` and the checkpoint
+policy write commits; elsewhere they write nothing. A save belongs to the
+innermost checkpointer enclosing the step; `with_checkpointer("research")`
+also moves the tag `tags/research` to each of its saves, so
+`run(resume="research")` goes back to that part's latest checkpoint. Tag
+names are repo-global, shared with `ctx.checkpoint(name)`. A checkpointer
+in a run without a store makes `run()` raise.
+
+```python
+flow = (
+    ff.create(state=...)
+    .with_checkpoint_store(store, "campaign-42")  # the run's repo
+    .call(plan)
+    .map(lambda b: b.with_checkpointer("research").call(item), items=...)
+)
+```
+
 ### Checkpoint cadence
 
 Three save triggers govern when the framework writes commits:
 
-- **Halt observation** — always on. Setting the ambient halt event
-  causes the executor to save a `halted` commit before returning.
+- **Halt observation** — always on with a store. Setting the ambient
+  halt event causes the run to save a `halted` commit before returning.
   This is the durability guarantee for pause/resume across process
   restart. A run whose halt is set is never marked complete and never
   deleted under `gc_on_success`.
-- **Explicit `ctx.checkpoint()`** — always available. Verbs invoke
-  the async method to force a save; the chain running the verb is at
-  its step, so resuming from that save runs the step again.
+- **Explicit `ctx.checkpoint()`** — under a `with_checkpointer()`. Verbs
+  invoke the async method to force a save; the chain running the verb is
+  at its step, so resuming from that save runs the step again.
   `ctx.checkpoint(name)` also tags the save as a named checkpoint (see
   below).
-- **Implicit multi-execution boundary saves** — off by default.
-  Governed by `CheckpointPolicy`:
+- **Implicit multi-execution boundary saves** — off by default, and
+  under a `with_checkpointer()`. Governed by `CheckpointPolicy`:
     - `on_iterate: bool` — save after every iterate body iteration.
     - `on_map_item: bool` — save after every successful map item
       (body-plus-merge). Failed / skipped / cancelled items never
@@ -308,7 +336,8 @@ wanted.
 ```python
 flow = (
     ff.create(state=...)
-    .with_checkpointer(store, "history-42")
+    .with_checkpoint_store(store, "history-42")
+    .with_checkpointer()
     .with_checkpoint_policy(on_iterate=True, on_map_item=True)
     .iterate(body, max_iters=10)
 )

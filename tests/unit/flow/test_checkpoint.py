@@ -216,7 +216,8 @@ class TestCheckpointPolicyIterate:
         outer = (
             FlowFactory(make_test_logger())
             .create(state={"n": 0})
-            .with_checkpointer(store, "policy-halt-only")
+            .with_checkpoint_store(store, "policy-halt-only")
+            .with_checkpointer()
             .iterate(body, max_iters=5)
         )
         await outer.run()
@@ -259,7 +260,8 @@ class TestCheckpointPolicyIterate:
         outer = (
             FlowFactory(make_test_logger())
             .create(state={"n": 0})
-            .with_checkpointer(store, "policy-on-iter")
+            .with_checkpoint_store(store, "policy-on-iter")
+            .with_checkpointer()
             .with_checkpoint_policy(on_iterate=True)
             .iterate(body, max_iters=3)
         )
@@ -303,7 +305,8 @@ class TestCheckpointPolicyMap:
         outer = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "map-default")
+            .with_checkpoint_store(store, "map-default")
+            .with_checkpointer()
             .map(body, items=lambda _p, _c: [1, 2, 3])
         )
         await outer.run()
@@ -339,7 +342,8 @@ class TestCheckpointPolicyMap:
         outer = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "map-on-item")
+            .with_checkpoint_store(store, "map-on-item")
+            .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(body, items=lambda _p, _c: [1, 2, 3])
         )
@@ -378,7 +382,8 @@ class TestCheckpointPolicyMap:
         outer = (
             FlowFactory(make_test_logger())
             .create(state={"total": 1})
-            .with_checkpointer(store, "map-rollback")
+            .with_checkpoint_store(store, "map-rollback")
+            .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(
                 lambda b: b.call(add),
@@ -417,7 +422,8 @@ class TestCheckpointPolicyMap:
         outer = (
             FlowFactory(make_test_logger())
             .create(state=state)
-            .with_checkpointer(store, "map-siblings")  # type: ignore[arg-type]
+            .with_checkpoint_store(store, "map-siblings")
+            .with_checkpointer()  # type: ignore[arg-type]
             .with_checkpoint_policy(on_map_item=True)
             .map(lambda b: b.call(mark), items=lambda _p, _c: [0, 1], strict=False)
         )
@@ -454,7 +460,8 @@ class TestCommitConsistency:
         await (
             FlowFactory(make_test_logger())
             .create(state={"n": 0})
-            .with_checkpointer(store, "one-moment")  # type: ignore[arg-type]
+            .with_checkpoint_store(store, "one-moment")
+            .with_checkpointer()  # type: ignore[arg-type]
             .call(sub, state=lambda p: {"n": p["n"]})
             .run()
         )
@@ -487,7 +494,8 @@ class TestCheckpointedRunValues:
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "app-object")
+            .with_checkpoint_store(store, "app-object")
+            .with_checkpointer()
             .call(make)
             .call(read)
         )
@@ -512,7 +520,8 @@ class TestCheckpointedRunValues:
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "wave")
+            .with_checkpoint_store(store, "wave")
+            .with_checkpointer()
             .map(
                 lambda b: b.call(dispatch),
                 items=lambda _p, _c: [WaveTarget(1), WaveTarget(2), WaveTarget(3)],
@@ -539,7 +548,8 @@ class TestCheckpointedRunValues:
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "failed-item")
+            .with_checkpoint_store(store, "failed-item")
+            .with_checkpointer()
             .map(lambda b: b.call(double), items=lambda _p, _c: [1, 2, 3], strict=False)
             .call(summarize)
         )
@@ -568,7 +578,8 @@ class TestCtxCheckpoint:
         outer = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "ctx-ckpt")
+            .with_checkpoint_store(store, "ctx-ckpt")
+            .with_checkpointer()
             .call(saver)
         )
         await outer.run()
@@ -606,7 +617,8 @@ class TestCtxCheckpoint:
         await (
             FlowFactory(make_test_logger())
             .create(state={"n": 1})
-            .with_checkpointer(store, "no-reput")
+            .with_checkpoint_store(store, "no-reput")
+            .with_checkpointer()
             .call(save_twice)
             .run()
         )
@@ -693,7 +705,8 @@ class TestPausedTurnInSnapshot:
         ff = FlowFactory(make_test_logger(), saia_factory=_PausingSAIAFactory())
         flow = (
             ff.create(state={})
-            .with_checkpointer(store, "paused-turn-1")
+            .with_checkpoint_store(store, "paused-turn-1")
+            .with_checkpointer()
             .with_halt(halt)
             .call(run_loop)
             .then(after)
@@ -782,7 +795,8 @@ class TestPausedTurnInSnapshot:
         ff = FlowFactory(make_test_logger())
         flow = (
             ff.create(state={})
-            .with_checkpointer(store, "paused-turn-multi")
+            .with_checkpoint_store(store, "paused-turn-multi")
+            .with_checkpointer()
             .with_halt(halt)
             .call(run_a)
             .then(run_b)
@@ -889,7 +903,8 @@ class TestPausedTurnInSnapshot:
         ff1 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
         flow1 = (
             ff1.create(state={})
-            .with_checkpointer(store, "resume-round-trip")
+            .with_checkpoint_store(store, "resume-round-trip")
+            .with_checkpointer()
             .with_halt(halt1)
             .iterate(body, max_iters=2)
         )
@@ -905,7 +920,8 @@ class TestPausedTurnInSnapshot:
         ff2 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
         flow2 = (
             ff2.create(state={})
-            .with_checkpointer(store, "resume-round-trip")
+            .with_checkpoint_store(store, "resume-round-trip")
+            .with_checkpointer()
             .with_halt(halt2)
             .iterate(body, max_iters=2)
         )
@@ -997,7 +1013,8 @@ class TestPausedTurnInSnapshot:
         ff1 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
         flow1 = (
             ff1.create(state={})
-            .with_checkpointer(store, "chain-resume")
+            .with_checkpoint_store(store, "chain-resume")
+            .with_checkpointer()
             .with_halt(halt1)
             .call(run_loop)
             .then(after_step)
@@ -1011,7 +1028,8 @@ class TestPausedTurnInSnapshot:
         ff2 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
         flow2 = (
             ff2.create(state={})
-            .with_checkpointer(store, "chain-resume")
+            .with_checkpoint_store(store, "chain-resume")
+            .with_checkpointer()
             .with_halt(halt2)
             .call(run_loop)
             .then(after_step)
@@ -1125,7 +1143,8 @@ class TestSaveOnHaltChain:
         ff = FlowFactory(make_test_logger())
         pre = (
             ff.create(state={})
-            .with_checkpointer(store, "chain-halt")
+            .with_checkpoint_store(store, "chain-halt")
+            .with_checkpointer()
             .with_halt(halt)
             .call(step_a)
             .then(step_b)
@@ -1147,7 +1166,8 @@ class TestSaveOnHaltChain:
         halt.clear()
         resume = (
             ff.create(state={})
-            .with_checkpointer(store, "chain-halt")
+            .with_checkpoint_store(store, "chain-halt")
+            .with_checkpointer()
             .call(step_a)
             .then(step_b)
             .then(step_c)
@@ -1207,7 +1227,8 @@ class TestSaveOnHaltChain:
         ff = FlowFactory(make_test_logger())
         pre = (
             ff.create(state={})
-            .with_checkpointer(store, "branch-halt")
+            .with_checkpoint_store(store, "branch-halt")
+            .with_checkpointer()
             .with_halt(halt)
             .call(step_a)
             .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
@@ -1227,7 +1248,8 @@ class TestSaveOnHaltChain:
         halt.clear()
         resume = (
             ff.create(state={})
-            .with_checkpointer(store, "branch-halt")
+            .with_checkpoint_store(store, "branch-halt")
+            .with_checkpointer()
             .call(step_a)
             .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
             .then(step_c)
@@ -1259,7 +1281,8 @@ class TestSaveOnHaltChain:
         ff = FlowFactory(make_test_logger())
         pre = (
             ff.create(state={})
-            .with_checkpointer(store, "pre-set-halt")
+            .with_checkpoint_store(store, "pre-set-halt")
+            .with_checkpointer()
             .with_halt(halt)
             .call(step_a)
             .then(step_b)
@@ -1277,7 +1300,11 @@ class TestSaveOnHaltChain:
         # Resume with halt cleared — step_b runs, reads items from state
         halt.clear()
         resume = (
-            ff.create(state={}).with_checkpointer(store, "pre-set-halt").call(step_a).then(step_b)
+            ff.create(state={})
+            .with_checkpoint_store(store, "pre-set-halt")
+            .with_checkpointer()
+            .call(step_a)
+            .then(step_b)
         )
         result = await resume.run(resume="latest")
         assert result == 6  # sum([1, 2, 3])
@@ -1317,7 +1344,8 @@ class TestSaveOnHaltChain:
 
         pre = (
             ff.create(state={})
-            .with_checkpointer(store, "nested-halt")
+            .with_checkpoint_store(store, "nested-halt")
+            .with_checkpointer()
             .with_halt(halt)
             .call(outer_a)
             .call(inner)
@@ -1339,7 +1367,8 @@ class TestSaveOnHaltChain:
         inner_resume = ff.create().call(inner_a).then(inner_b)
         resume = (
             ff.create(state={})
-            .with_checkpointer(store, "nested-halt")
+            .with_checkpoint_store(store, "nested-halt")
+            .with_checkpointer()
             .call(outer_a)
             .call(inner_resume)
             .then(outer_b)
@@ -1474,7 +1503,8 @@ class TestHistoryLineage:
         outer = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "lineage-map")
+            .with_checkpoint_store(store, "lineage-map")
+            .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(body, items=lambda _p, _c: [1, 2, 3, 4])
         )
@@ -1612,7 +1642,8 @@ class TestCompletionTag:
         result = await (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "opaque-state")
+            .with_checkpoint_store(store, "opaque-state")
+            .with_checkpointer()
             .call(attach)
             .run()
         )
@@ -1637,7 +1668,8 @@ class TestCompletionTag:
         await (
             FlowFactory(make_test_logger())
             .create(state={"n": 0})
-            .with_checkpointer(store, "final-state")
+            .with_checkpoint_store(store, "final-state")
+            .with_checkpointer()
             .iterate(lambda body: body.call(bump), max_iters=3)
             .run()
         )
@@ -1792,7 +1824,8 @@ class TestResumeDeterminism:
             return (
                 FlowFactory(make_test_logger())
                 .create(state={"counter": 0})
-                .with_checkpointer(store, "complete-1")
+                .with_checkpoint_store(store, "complete-1")
+                .with_checkpointer()
                 .iterate(lambda body: body.call(bump), max_iters=3)
                 .call(tail)
             )
@@ -1846,7 +1879,8 @@ class TestResumeDeterminism:
             return (
                 FlowFactory(make_test_logger())
                 .create(state={"iter": 0})
-                .with_checkpointer(store, "scopeless-carry")
+                .with_checkpoint_store(store, "scopeless-carry")
+                .with_checkpointer()
                 .with_halt(halt)
                 .iterate(lambda b: b.call(step), max_iters=4)
             )
@@ -1990,7 +2024,8 @@ class TestScopedStateRoundTrip:
 
         outer_pre = (
             ff.create(state={"outer": True})
-            .with_checkpointer(store, "scoped-1")
+            .with_checkpoint_store(store, "scoped-1")
+            .with_checkpointer()
             .with_halt(halt)
             .call(inner, state=lambda _p: {"counter": 0})
         )
@@ -2007,7 +2042,8 @@ class TestScopedStateRoundTrip:
         # re-projecting to counter=0; run reaches max_iters=5 cleanly.
         outer_resume = (
             ff.create(state={"outer": True})
-            .with_checkpointer(store, "scoped-1")
+            .with_checkpoint_store(store, "scoped-1")
+            .with_checkpointer()
             .call(inner, state=lambda _p: {"counter": 0})
         )
         await outer_resume.run(resume="latest")
@@ -2068,7 +2104,8 @@ class TestScopedStateRoundTrip:
         ff = FlowFactory(make_test_logger())
         outer_pre = (
             ff.create(state={"outer": True})
-            .with_checkpointer(store, "3-level-1")
+            .with_checkpoint_store(store, "3-level-1")
+            .with_checkpointer()
             .with_checkpoint_policy(on_iterate=True)
             .with_halt(halt)
             .call(mid_flow, state=lambda _p: {})
@@ -2098,7 +2135,8 @@ class TestScopedStateRoundTrip:
         # pre-fix behavior), WITNESS_KEY starts at 0 and only reaches 3.
         outer_resume = (
             ff.create(state={"outer": True})
-            .with_checkpointer(store, "3-level-1")
+            .with_checkpoint_store(store, "3-level-1")
+            .with_checkpointer()
             .with_checkpoint_policy(on_iterate=True)
             .call(mid_flow, state=lambda _p: {})
         )
@@ -2148,7 +2186,8 @@ class TestScopedStateRoundTrip:
         # Leaf iterate with its own state= projection (not inherited from .call)
         flow_pre = (
             ff.create(state={"root": True})
-            .with_checkpointer(store, "leaf-iterate-state")
+            .with_checkpoint_store(store, "leaf-iterate-state")
+            .with_checkpointer()
             .with_halt(halt)
             .iterate(
                 lambda body: body.call(bump).then(maybe_halt),
@@ -2170,7 +2209,8 @@ class TestScopedStateRoundTrip:
         halt.clear()
         flow_resume = (
             ff.create(state={"root": True})
-            .with_checkpointer(store, "leaf-iterate-state")
+            .with_checkpoint_store(store, "leaf-iterate-state")
+            .with_checkpointer()
             .iterate(
                 lambda body: body.call(bump).then(maybe_halt),
                 max_iters=5,
