@@ -172,7 +172,7 @@ def _restore(scopes: ScopeRegistry, path: ScopePath, tracker: Tracker) -> None:
         tracker.restore(
             float(saved["spent"]), {k: float(v) for k, v in saved["costs_by_op"].items()}
         )
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
         where = path_str((*path, BUDGET))
         raise TypeError(f"cursor at {where!r} cannot be restored: {e}") from e
 
