@@ -908,5 +908,8 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
     assert await flow.run(RUN_INPUT, resume=name) == expected_result
     await _check_finished(history, baseline, merges)
     _check_rerun(resumed, _Point(captured, {name}, set()))
+    assert set(resumed.executed) & set(captured) <= {name}, (
+        "a completed leaf before the named checkpoint ran again"
+    )
     missing = [k for k in baseline if k not in captured]
     assert [k for k in resumed.executed if k not in captured] == missing
