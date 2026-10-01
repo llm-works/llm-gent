@@ -13,12 +13,13 @@ process" here is a new Flow and a new Tracker over the same store.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from llm_gent.core.budget import PricingConfig, Tracker
-from llm_gent.flow import Context, FlowFactory, History, Interrupted, verb
+from llm_gent.flow import Context, FlowFactory, History, Interrupted, Loop, Role, verb
 from llm_gent.flow.state.snapshot import BUDGET
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
@@ -28,6 +29,7 @@ from .conftest import make_test_logger
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 NAME = "budget"
+ROLE = Role(name="r", backend="openai", model="none")
 
 
 def _tracker(cap: float | None = None, halt: asyncio.Event | None = None) -> Tracker:
@@ -151,13 +153,15 @@ def _item_flow(
     *,
     arm: bool = False,
     before_second: dict[int, float] | None = None,
+    cap: float = 1.0,
+    cooperative: bool = True,
 ) -> Any:
-    """Map over ``costs``' keys; each item runs on its own child (cap 1.0), two steps.
+    """Map over ``costs``' keys; each item runs on its own child (``cap``), two steps.
 
     Step 1 spends ``costs[item][0]`` and records the item's tracker; with
     ``arm`` the last item to finish it sets the run's ``halt``. Step 2
-    stops on the item's halt, else records the item's spend so far in
-    ``before_second`` and spends ``costs[item][1]``.
+    stops on the item's halt (unless not ``cooperative``), else records
+    the item's spend so far in ``before_second`` and spends ``costs[item][1]``.
     """
 
     @verb
@@ -171,7 +175,7 @@ def _item_flow(
     @verb
     async def second(ctx: Context[Any], item: int) -> int:
         await asyncio.sleep(0)  # lets a set run halt reach the item's own halt
-        if ctx.halt is not None and ctx.halt.is_set():
+        if cooperative and ctx.halt is not None and ctx.halt.is_set():
             raise Interrupted()
         assert ctx.budget is not None
         if before_second is not None:
@@ -185,7 +189,7 @@ def _item_flow(
         .with_halt(halt)
         .with_budget(root)
         .map(
-            lambda b: b.with_budget(1.0).call(first).then(second),
+            lambda b: b.with_budget(cap).call(first).then(second),
             items=lambda _p, _c: sorted(costs),
         )
     )
@@ -247,6 +251,105 @@ class TestItemBudgetsAcrossHalt:
         assert seen2 == {}  # no first step ran again
         assert before == {0: pytest.approx(0.3), 1: pytest.approx(0.4)}
         assert root2.spent == pytest.approx(1.0)
+
+    async def test_item_resumed_at_or_over_its_cap_runs_no_step(self) -> None:
+        """Item 0 halted at 0.9; resumed under a cap of 0.5 it ends with None, item 1 finishes.
+
+        The resumed steps ignore the halt: only the run's check before its
+        first step keeps item 0 from working.
+        """
+        store = InMemoryCheckpointStore()
+        costs = {0: [0.9, 0.1], 1: [0.1, 0.1]}
+        flow1 = _item_flow(_tracker(), asyncio.Event(), costs, {}, arm=True)
+        assert await flow1.with_checkpointer(store, NAME).run() is None
+
+        root2 = _tracker()
+        before: dict[int, float] = {}
+        flow2 = _item_flow(
+            root2, asyncio.Event(), costs, {}, before_second=before, cap=0.5, cooperative=False
+        )
+        assert await flow2.with_checkpointer(store, NAME).run(resume="latest") == [None, 10]
+        assert before == {1: pytest.approx(0.1)}  # item 0 ran no step
+        assert root2.spent == pytest.approx(1.1)
+
+
+@dataclass
+class _Conv:
+    messages: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"messages": list(self.messages)}
+
+
+class _ConvFactory:
+    def create(self) -> _Conv:
+        return _Conv()
+
+    def create_from_state(self, state: dict[str, Any]) -> _Conv:
+        return _Conv(list(state["messages"]))
+
+
+@dataclass
+class _TurnResult:
+    paused: bool
+    output: str = ""
+
+
+class _SpendingSAIA:
+    """A SAIA turn in two halves, each an LLM call costing ``costs[task]``.
+
+    ``on_executor_ready`` hands it the call's tracker, as an app wires its
+    tool executor. After the first half the turn pauses when its
+    ``abort_signal`` is set, as a real backend does.
+    """
+
+    def __init__(self, costs: dict[str, float]) -> None:
+        self.role = ROLE
+        self._costs = costs
+        self.trackers: dict[str, Tracker] = {}
+        self.paused: list[str] = []
+
+    async def complete(self, task: str, **kwargs: Any) -> _TurnResult:
+        self.trackers[task].track("llm", override_cost=self._costs[task])
+        await asyncio.sleep(0)
+        abort = kwargs.get("abort_signal")
+        if abort is not None and abort.is_set():
+            self.paused.append(task)
+            return _TurnResult(paused=True)
+        self.trackers[task].track("llm", override_cost=self._costs[task])
+        return _TurnResult(paused=False, output=f"done:{task}")
+
+
+class TestLoopInACappedItem:
+    async def test_crossing_the_cap_mid_turn_pauses_the_turn_and_ends_the_item(self) -> None:
+        """The item's own stop is the Loop's abort_signal: crossing it pauses the turn."""
+        root = _tracker()
+        saia = _SpendingSAIA({"a": 0.3, "b": 1.5})
+
+        @verb
+        async def research(ctx: Context[Any], task: str) -> str:
+            def hand_over(s: Any, c: Context[Any]) -> None:
+                s.trackers[task] = c.budget
+
+            loop = Loop(
+                ROLE, saia=saia, conversation_factory=_ConvFactory(), on_executor_ready=hand_over
+            )
+            result = await loop(ctx, task)
+            return str(result.output)
+
+        flow = (
+            _ff()
+            .create(state={})
+            .with_budget(root)
+            .map(
+                lambda b: b.with_budget(1.0).call(research),
+                items=lambda _p, _c: ["a", "b"],
+                max_concurrency=1,
+            )
+        )
+        assert await flow.run() == ["done:a", None]
+        assert saia.paused == ["b"]
+        assert root.spent == pytest.approx(0.3 + 0.3 + 1.5)
 
 
 class TestPassAndCallBudgets:
