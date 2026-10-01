@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from .flow import Flow
     from .nodes import _RunEnv
     from .panel import AggregateFn
+    from .state.snapshot import ScopePath
 
 
 async def run_panel(
@@ -45,6 +46,7 @@ async def run_panel(
 
     path = env.scopes.next_panel(env.owner_path(node_id))
     bodies = [Flow(env.runtime._lg).call(v) for v in verbs]
+    # body is a placeholder—_PanelItemRunner._dispatch_body selects the correct body per item.
     mp = _Map(body=bodies[0], items=None, aggregate=aggregate, strict=True)
     runner = _PanelRunner(mp, env, node_id, path, bodies, args, kwargs)
     return await runner.run((list(range(len(verbs))),))
@@ -58,7 +60,7 @@ class _PanelRunner(MapRunner):
         mp: _Map,
         env: _RunEnv,
         node_id: str,
-        path: tuple[str, ...],
+        path: ScopePath,
         bodies: list[Flow],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
