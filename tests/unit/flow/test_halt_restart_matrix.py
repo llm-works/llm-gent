@@ -23,35 +23,34 @@ Leaves are not state-driven: a leaf does its work every time it runs,
 so a leaf that runs again shows up in the executed list. They honour the
 halt contract: a leaf halted before its work raises ``Interrupted``, one
 halted after its work returns. The resume point is the newest commit
-with state that is not a failure record — the commit
-``resume="latest"`` checks out.
+with state — the commit ``resume="latest"`` checks out. A run that
+raises writes none: its resume point is its last save.
+
+Some cases stop twice: the resume stops again (a halt or a crash at the
+first or second leaf it runs) and a final resume finishes. Each resume
+is checked against its own resume point.
 
 Properties checked per case:
 
 - The stopped run ends as its stop dictates: a halt returns, a crash or
   an exception raises. Nothing is written after it returns or raises.
-- The resume point holds only work the stopped run did, with the
+- The resume point holds only work the runs so far did, with the
   baseline's values.
 - A halt writes a halt checkpoint — unless it was set after the last
   leaf's work, when the run completes — and the resume point holds every
   leaf the stopped run completed; with a checkpoint in every leaf, so
   does a crash's or an exception's resume point.
-- Resume ends with the baseline's result and ``done`` map, marks the
-  history complete, and executes every leaf the resume point lacks, in
-  the baseline's order, once. Of the leaves the resume point holds, at
-  most one runs again: the one that was running when the checkpoint was
-  taken.
-
-Cases that fail because of a known defect are listed by id in
-``halt_restart_known_defects.json`` and run as ``xfail(strict=True)``
-with the defect as the reason: a fix turns them into failures until
-their ids are removed.
+- Resume ends with the baseline's result, ``done`` map and scoped-map
+  merges, marks the history complete, and executes every leaf the resume
+  point lacks, in the baseline's order, once. Of the leaves the resume
+  point holds, at most one runs again: the one that was running when the
+  checkpoint was taken — and the leaf that crashed or raised. A Loop turn
+  the halt paused continues from its saved half; it never starts over.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,7 +59,7 @@ from typing import Any, Literal
 import pytest
 
 from llm_gent.flow import Context, Flow, FlowFactory, History, Interrupted, Loop, Role, verb
-from llm_gent.flow.checkpoint import FAILED_NODE_PATH, CheckpointStore
+from llm_gent.flow.checkpoint import CheckpointStore
 from llm_gent.flow.stores import InMemoryCheckpointStore, JsonFileCheckpointStore
 
 from .conftest import make_test_logger
@@ -77,7 +76,7 @@ Policy = Literal["none", "on_iterate", "on_map_item", "leaf"]
 
 
 class SimulatedCrash(BaseException):
-    """The process died: not an ``Exception``, so no failure commit is written."""
+    """The process died: not an ``Exception``, so nothing handles it on the way out."""
 
 
 class LeafError(Exception):
@@ -109,18 +108,34 @@ class Seq:
 
 @dataclass(frozen=True)
 class Iter:
-    """``.iterate(body, max_iters=n)``."""
+    """``.iterate(body, max_iters=n)``; with ``until``, also stops on :func:`_until`."""
 
     body: Node
     n: int
+    until: bool = False
+
+
+def _until(result: int) -> bool:
+    """The state-driven stop of an ``Iter(until=True)``: a pass result divisible by 4."""
+    return result % 4 == 0
+
+
+FanMode = Literal["strict", "lenient", "scoped"]
 
 
 @dataclass(frozen=True)
 class Fan:
-    """``.map(body)`` over ``[10 * x + i for i in range(width)]``, summed."""
+    """``.map(body)`` over ``[10 * x + i for i in range(width)]``, summed.
+
+    ``lenient``: ``strict=False`` with a guard that skips the last item.
+    ``scoped``: each item runs under its own ``state=`` (an empty ``done``)
+    and merges back, appending the keys it merged to ``merges``, so a
+    merge applied twice shows.
+    """
 
     body: Node
     width: int
+    mode: FanMode = "strict"
 
 
 @dataclass(frozen=True)
@@ -152,9 +167,9 @@ def _label(node: Node, counter: list[int]) -> Node:
     if isinstance(node, Seq):
         return Seq(tuple(_label(child, counter) for child in node.children))
     if isinstance(node, Iter):
-        return Iter(_label(node.body, counter), node.n)
+        return Iter(_label(node.body, counter), node.n, node.until)
     if isinstance(node, Fan):
-        return Fan(_label(node.body, counter), node.width)
+        return Fan(_label(node.body, counter), node.width, node.mode)
     if isinstance(node, Branch):
         return Branch(_label(node.then, counter), _label(node.else_, counter))
     return Scope(_label(node.body, counter))
@@ -184,6 +199,18 @@ _INNER: dict[str, Node] = {
     "branch(turn)": Branch(_T, _T),
     "scope(turn)": Scope(Seq((_T, _L))),
     "iter(fan(turn))": Iter(Fan(_T, 2), 2),
+    "until": Iter(_L, 4, until=True),
+    "until(fan)": Iter(Fan(_L, 2), 4, until=True),
+    "until(sub)": Iter(Seq((_L, _L)), 4, until=True),
+    "lenient": Fan(_L, 3, "lenient"),
+    "lenient(iter)": Fan(Iter(_L, 2), 3, "lenient"),
+    "lenient(turn)": Fan(_T, 3, "lenient"),
+    "scoped": Fan(_L, 2, "scoped"),
+    "scoped(sub)": Fan(Seq((_L, _L)), 2, "scoped"),
+    "scoped(scoped)": Fan(Fan(_L, 2, "scoped"), 2, "scoped"),
+    "iter(scoped)": Iter(Fan(_L, 2, "scoped"), 2),
+    "scope(scoped)": Scope(Fan(_L, 2, "scoped")),
+    "scoped(turn)": Fan(_T, 2, "scoped"),
 }
 
 SHAPES: dict[str, Seq] = {}
@@ -192,24 +219,32 @@ for _key, _inner in _INNER.items():
     SHAPES[f"{_key}>leaf"] = Seq((_label(_inner, [0]), Leaf("l99", 99)))
 
 
-def _has(node: Node, kind: type) -> bool:
-    """True when ``node`` contains a node of ``kind``."""
-    if isinstance(node, kind):
+def _has(node: Node, kind: type, mode: FanMode | None = None) -> bool:
+    """True when ``node`` contains a node of ``kind`` (a ``Fan`` in ``mode``, when given)."""
+    if isinstance(node, kind) and (mode is None or getattr(node, "mode", None) == mode):
         return True
     if isinstance(node, Seq):
-        return any(_has(child, kind) for child in node.children)
+        return any(_has(child, kind, mode) for child in node.children)
     if isinstance(node, Branch):
-        return _has(node.then, kind) or _has(node.else_, kind)
+        return _has(node.then, kind, mode) or _has(node.else_, kind, mode)
     if isinstance(node, Iter | Fan | Scope):
-        return _has(node.body, kind)
+        return _has(node.body, kind, mode)
     return False
+
+
+def _has_scope(node: Node) -> bool:
+    """True when ``node`` runs anything under a ``state=`` scope: a ``Scope`` or a scoped map."""
+    return _has(node, Scope) or _has(node, Fan, "scoped")
 
 
 # --- Reference model --------------------------------------------------------
 
 
-def _model_node(node: Node, x: int, out: dict[str, int]) -> int:
-    """Evaluate ``node`` on ``x``, recording each leaf execution in ``out`` in order."""
+def _model_node(node: Node, x: int, out: dict[str, int], merges: list[str]) -> int:
+    """Evaluate ``node`` on ``x``, recording each leaf execution in ``out`` in order.
+
+    ``merges`` collects the keys each scoped map item merges back.
+    """
     if isinstance(node, Leaf):
         key = f"{node.name}:{x}"
         assert key not in out, f"model keys collide: {key}"
@@ -217,23 +252,38 @@ def _model_node(node: Node, x: int, out: dict[str, int]) -> int:
         return out[key]
     if isinstance(node, Seq):
         for child in node.children:
-            x = _model_node(child, x, out)
+            x = _model_node(child, x, out, merges)
         return x
     if isinstance(node, Iter):
         for _ in range(node.n):
-            x = _model_node(node.body, x, out)
+            x = _model_node(node.body, x, out, merges)
+            if node.until and _until(x):
+                break
         return x
     if isinstance(node, Fan):
-        return sum(_model_node(node.body, 10 * x + i, out) for i in range(node.width))
+        return _model_fan(node, x, out, merges)
     if isinstance(node, Branch):
-        return _model_node(node.then if x % 2 == 0 else node.else_, x, out)
-    return _model_node(node.body, x, out)
+        return _model_node(node.then if x % 2 == 0 else node.else_, x, out, merges)
+    return _model_node(node.body, x, out, merges)
 
 
-def model(shape: Seq) -> tuple[int, dict[str, int]]:
-    """Return the uninterrupted run's result and its ``done`` map, in execution order."""
+def _model_fan(node: Fan, x: int, out: dict[str, int], merges: list[str]) -> int:
+    """A map: the lenient guard skips the last item; a scoped item merges its keys."""
+    width = node.width - 1 if node.mode == "lenient" else node.width
+    total = 0
+    for i in range(width):
+        before = set(out)
+        total += _model_node(node.body, 10 * x + i, out, merges)
+        if node.mode == "scoped":
+            merges.extend(sorted(set(out) - before))
+    return total
+
+
+def model(shape: Seq) -> tuple[int, dict[str, int], list[str]]:
+    """Return the uninterrupted run's result, its ``done`` map in execution order, and merges."""
     out: dict[str, int] = {}
-    return _model_node(shape, RUN_INPUT, out), out
+    merges: list[str] = []
+    return _model_node(shape, RUN_INPUT, out, merges), out, sorted(merges)
 
 
 # --- Store and probe --------------------------------------------------------
@@ -454,26 +504,50 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
             _add(child, sub, probe, parallel)
         if isinstance(node, Seq):
             return flow.call(sub)
-        return flow.call(
-            sub,
-            state=lambda p: {"done": dict(p.get("done", {}))},
-            merge=lambda p, c: p.setdefault("done", {}).update(c["done"]),
-        )
+        return flow.call(sub, state=lambda p: {"done": dict(p.get("done", {}))}, merge=_merge_scope)
     if isinstance(node, Iter):
-        return flow.iterate(lambda b: _add(node.body, b, probe, parallel), max_iters=node.n)
+        until = (lambda r, _ctx: _until(r)) if node.until else None
+        return flow.iterate(
+            lambda b: _add(node.body, b, probe, parallel), max_iters=node.n, until=until
+        )
     if isinstance(node, Branch):
         return flow.branch(
             when=lambda prev, _ctx: prev % 2 == 0,
             then=lambda b: _add(node.then, b, probe, parallel),
             else_=lambda b: _add(node.else_, b, probe, parallel),
         )
+    return _add_fan(node, flow, probe, parallel)
+
+
+def _merge_scope(parent: dict[str, Any], child: dict[str, Any]) -> None:
+    """Merge a ``Scope`` back: its ``done``, and the merges scoped maps inside it recorded."""
+    parent.setdefault("done", {}).update(child["done"])
+    parent.setdefault("merges", []).extend(child.get("merges", []))
+
+
+def _merge_item(parent: dict[str, Any], child: dict[str, Any]) -> None:
+    """Merge a scoped map item back, recording the keys it merged."""
+    _merge_scope(parent, child)
+    parent["merges"].extend(sorted(child["done"]))
+
+
+def _add_fan(node: Fan, flow: Flow, probe: Probe, parallel: bool) -> Flow:
+    """Append a ``.map`` step for ``node`` in its mode."""
     width = node.width
-    return flow.map(
+    scoped: dict[str, Any] = (
+        {"state": lambda _p: {"done": {}}, "merge": _merge_item} if node.mode == "scoped" else {}
+    )
+    flow = flow.map(
         lambda b: _add(node.body, b, probe, parallel),
         items=lambda prev, _ctx: [10 * prev + i for i in range(width)],
-        aggregate=sum,
+        aggregate=lambda results: sum(r for r in results if isinstance(r, int)),
+        strict=node.mode != "lenient",
         max_concurrency=None if parallel else 1,
+        **scoped,
     )
+    if node.mode == "lenient":
+        flow = flow.guard(lambda item, _ctx: item % 10 != width - 1)
+    return flow
 
 
 def _flow(
@@ -508,10 +582,8 @@ async def _snapshot_done(history: History, commit: Any) -> dict[str, int] | None
 
 
 async def _resume_point_done(history: History) -> dict[str, int]:
-    """The ``done`` map resume continues from: newest commit with state, not a failure."""
+    """The ``done`` map resume continues from: the newest commit with state."""
     async for commit in history.commits():
-        if commit.meta.node_path == FAILED_NODE_PATH:
-            continue
         done = await _snapshot_done(history, commit)
         if done is not None:
             return done
@@ -538,37 +610,29 @@ class Case:
     policy: Policy
     parallel: bool
     store: str
+    # A second stop, while the first resume runs: (stop, leaf), after its work.
+    second: tuple[Stop, int] | None = None
 
     @property
     def id(self) -> str:
         run = "par" if self.parallel else "seq"
+        then = "" if self.second is None else f"-then-{self.second[0]}{self.second[1]}"
         return (
             f"{self.shape}-{self.stop}-at{self.stop_at}-{self.mode}"
-            f"-{self.policy}-{run}-{self.store}"
+            f"-{self.policy}-{run}-{self.store}{then}"
         )
 
+    def stops(self) -> list[tuple[Stop, int, str]]:
+        """Each stopped run's (stop, leaf, mode), in order."""
+        first = [(self.stop, self.stop_at, self.mode)]
+        return first if self.second is None else [*first, (*self.second, "after")]
 
-KNOWN_DEFECTS_FILE = Path(__file__).with_name("halt_restart_known_defects.json")
 
-
-_RAISES: dict[str, type[BaseException]] = {"TypeError": TypeError, "AssertionError": AssertionError}
-
-
-def _known_defects() -> dict[str, tuple[str, type[BaseException]]]:
-    """Case id → (reason, exception the defect raises), for every case failing on a known defect.
-
-    The file lists exact case ids per defect: whether a halted map hands
-    ``aggregate`` a partial result depends on which item was running, so
-    no rule over the dimensions matches the failing cases exactly. The
-    exception type keeps a listed case from passing as xfail when it
-    fails for another reason.
-    """
-    defects = json.loads(KNOWN_DEFECTS_FILE.read_text(encoding="utf-8"))
-    return {
-        case_id: (d["reason"], _RAISES[d["raises"]])
-        for d in defects.values()
-        for case_id in d["cases"]
-    }
+def _stop_kinds(shape: Seq) -> tuple[Stop, ...]:
+    """Halt, crash, exception — without exception where a ``strict=False`` map absorbs it."""
+    if _has(shape, Fan, "lenient"):
+        return ("halt", "crash")
+    return ("halt", "crash", "exception")
 
 
 def _memory_cases() -> Iterator[Case]:
@@ -577,10 +641,28 @@ def _memory_cases() -> Iterator[Case]:
         leaves = len(model(shape)[1])
         for parallel in (False, True) if _has(shape, Fan) else (False,):
             for policy in ("none", "on_iterate", "on_map_item", "leaf"):
-                for stop in ("halt", "crash", "exception"):
+                for stop in _stop_kinds(shape):
                     for stop_at in range(1, leaves + 1):
                         for mode in ("before", "after"):
                             yield Case(name, stop, stop_at, mode, policy, parallel, "mem")
+
+
+SECOND_STOPS: tuple[tuple[Stop, int], ...] = (("halt", 1), ("halt", 2), ("crash", 1))
+"""Where a resumed run stops again: the first or second leaf it runs."""
+
+
+def _cycle_cases() -> Iterator[Case]:
+    """Two stops: a halt or crash at every leaf, then another while the resume runs."""
+    for name, shape in SHAPES.items():
+        leaves = len(model(shape)[1])
+        for parallel in (False, True) if _has(shape, Fan) else (False,):
+            for policy in ("none", "leaf"):
+                for stop in ("halt", "crash"):
+                    for stop_at in range(1, leaves + 1):
+                        for second in SECOND_STOPS:
+                            yield Case(
+                                name, stop, stop_at, "after", policy, parallel, "mem", second
+                            )
 
 
 def _file_cases() -> Iterator[Case]:
@@ -594,17 +676,12 @@ def _file_cases() -> Iterator[Case]:
 
 
 def _cases() -> list[Case]:
-    return [*_memory_cases(), *_file_cases()]
+    return [*_memory_cases(), *_cycle_cases(), *_file_cases()]
 
 
 def _params() -> Iterator[Any]:
-    known = _known_defects()
     for case in _cases():
-        defect = known.get(case.id)
-        marks = (
-            [pytest.mark.xfail(reason=defect[0], raises=defect[1], strict=True)] if defect else []
-        )
-        yield pytest.param(case, id=case.id, marks=marks)
+        yield pytest.param(case, id=case.id)
 
 
 # --- Tests ------------------------------------------------------------------
@@ -616,17 +693,11 @@ def _store(kind: str, tmp_path: Path) -> CheckpointStore:
     return JsonFileCheckpointStore(LG, tmp_path / "cp")
 
 
-def test_known_defects_name_existing_cases() -> None:
-    """Every listed case id exists in the matrix, so the list cannot go stale unnoticed."""
-    stale = set(_known_defects()) - {case.id for case in _cases()}
-    assert not stale, f"{KNOWN_DEFECTS_FILE.name} lists cases the matrix no longer has: {stale}"
-
-
 @pytest.mark.parametrize("parallel", [False, True], ids=["seq", "par"])
 @pytest.mark.parametrize("shape_name", list(SHAPES))
 async def test_uninterrupted_run_matches_model(shape_name: str, parallel: bool) -> None:
     shape = SHAPES[shape_name]
-    expected_result, baseline = model(shape)
+    expected_result, baseline, merges = model(shape)
     store = InMemoryCheckpointStore()
     probe = Probe()
 
@@ -634,87 +705,145 @@ async def test_uninterrupted_run_matches_model(shape_name: str, parallel: bool) 
     assert sorted(probe.executed) == sorted(baseline)
     if not parallel:
         assert probe.executed == list(baseline)
-    history = History(store, FLOW_NAME)
-    head = await history.head()
-    assert head is not None
-    assert await _root_done(history, head) == baseline
+    await _check_finished(History(store, FLOW_NAME), baseline, merges)
 
 
-async def _run_stopped(case: Case, shape: Seq, store: CrashableStore) -> Probe:
-    """Run ``shape`` until it stops as ``case`` dictates; check how it ended."""
+_RAISED_BY: dict[Stop, type[BaseException]] = {"crash": SimulatedCrash, "exception": LeafError}
+
+
+async def _run_stopping(
+    shape: Seq,
+    case: Case,
+    stop: Stop,
+    stop_at: int,
+    mode: str,
+    store: CrashableStore,
+    *,
+    resume: bool,
+) -> Probe:
+    """Run ``shape`` — resuming when ``resume`` — until it stops at leaf ``stop_at``.
+
+    A stop point past the leaves the run reaches never fires: the run
+    finishes. Checks the run ended as its stop dictates and wrote nothing
+    after it ended.
+    """
     halt = asyncio.Event()
-    probe = Probe(
-        policy=case.policy,
-        stop=case.stop,
-        stop_at=case.stop_at,
-        mode=case.mode,
-        halt=halt,
-        store=store,
-    )
+    probe = Probe(policy=case.policy, stop=stop, stop_at=stop_at, mode=mode, halt=halt, store=store)
     flow = _flow(shape, probe, store, parallel=case.parallel, halt=halt)
-    expected: type[BaseException] | None = {
-        "halt": None,
-        "crash": SimulatedCrash,
-        "exception": LeafError,
-    }[case.stop]
+    raised: BaseException | None = None
+    try:
+        await flow.run(RUN_INPUT, resume="latest" if resume else "off")
+    except (SimulatedCrash, LeafError) as e:
+        raised = e
+    expected = _RAISED_BY.get(stop) if probe.stopped is not None else None
     if expected is None:
-        await flow.run(RUN_INPUT)
+        assert raised is None, f"the run raised {raised!r}"
     else:
-        with pytest.raises(expected):
-            await flow.run(RUN_INPUT)
+        assert isinstance(raised, expected), f"expected {expected.__name__}, got {raised!r}"
     writes = store.writes
     await _settle()
     assert store.writes == writes, "the stopped run wrote after run() ended"
     return probe
 
 
-@pytest.mark.parametrize("case", list(_params()))
-async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path: Path) -> None:
-    shape = SHAPES[case.shape]
-    expected_result, baseline = model(shape)
-    inner = _store(case.store, tmp_path)
-    history = History(inner, FLOW_NAME)
+@dataclass
+class _Point:
+    """Where a stopped run left the history: what the next resume continues from."""
 
-    first = await _run_stopped(case, shape, CrashableStore(inner))
+    done: dict[str, int]
+    raised: set[str]
+    paused: set[str]
+
+
+async def _check_stopped(
+    shape: Seq, stop: Stop, probe: Probe, history: History, prior: set[str]
+) -> _Point | None:
+    """Check the resume point a stopped run left; ``None`` when the run finished instead.
+
+    ``prior`` is every leaf the runs so far executed.
+    """
+    _, baseline, merges = model(shape)
     captured = await _resume_point_done(history)
     assert captured.items() <= baseline.items(), "resume point holds work never done"
-    assert set(captured) <= set(first.executed), "resume point holds work this run never did"
-    if case.stop == "halt":
-        lost = [k for k in first.executed if k not in captured]
+    assert set(captured) <= prior, "resume point holds work no run did"
+    if await history.is_complete():
+        # The stop never fired, or a halt came after the last leaf's work: every
+        # step completed, so the run finished and there is nothing to resume.
+        assert probe.stopped is None or stop == "halt"
+        await _check_finished(history, baseline, merges)
+        return None
+    if stop == "halt":
+        lost = [k for k in probe.executed if k not in captured]
         assert not lost, f"completed work missing from the halt checkpoint: {lost}"
-        if await history.is_complete():
-            # The halt was set after the last leaf's work: every step completed,
-            # so the run finished and there is nothing to resume.
-            assert captured == baseline
-            return
         # A save point written after the halt checkpoint (a sibling map item
         # finishing its iteration) is kept: it carries more progress.
         outcomes = [commit.meta.outcome async for commit in history.commits()]
         assert "halted" in outcomes, f"no halt checkpoint; outcomes {outcomes}"
-    if case.policy == "leaf":
+    # The leaf that crashed or raised did not complete its step: it runs again.
+    raised = {probe.stopped} if stop != "halt" and probe.stopped else set()
+    if probe.policy == "leaf":
         # A leaf that raised inside a state= scope takes its work down with the
         # scope: the block never merges it, and a later save point (a sibling
         # map item carrying on) no longer holds it. Resume runs that leaf again.
-        discarded = {first.stopped} if case.stop == "exception" and _has(shape, Scope) else set()
-        lost = [k for k in first.checkpointed if k not in captured and k not in discarded]
+        discarded = raised if stop == "exception" and _has_scope(shape) else set()
+        lost = [k for k in probe.checkpointed if k not in captured and k not in discarded]
         assert not lost, f"checkpointed work missing from the resume point: {lost}"
+    return _Point(captured, raised, set(probe.turns_paused))
 
+
+def _check_rerun(probe: Probe, point: _Point) -> None:
+    """A resumed run reruns at most the step running at its resume point.
+
+    A leaf that crashed or raised runs again too: its step did not
+    complete. Other map items keep running after it, so a later save can
+    hold its work with another step running. A Loop turn the halt paused
+    resumes; it never starts over.
+    """
+    assert len(probe.executed) == len(set(probe.executed)), "a leaf ran twice in one run"
+    again = [k for k in probe.executed if k in point.done]
+    rerun = [k for k in again if k not in point.raised]
+    assert len(rerun) <= 1, f"more than the interrupted step ran again: {again}"
+    restarted = point.paused & set(probe.turns_started)
+    assert not restarted, f"paused Loop turns started over instead of resuming: {restarted}"
+
+
+async def _check_finished(history: History, baseline: dict[str, int], merges: list[str]) -> None:
+    """The history is complete with the uninterrupted run's state: its leaves and merges."""
+    assert await history.is_complete()
+    head = await history.head()
+    assert head is not None
+    root = (await history.snapshot(head)).root
+    assert root.get("done", {}) == baseline
+    assert sorted(root.get("merges", [])) == merges, "a scoped map merged an item twice or never"
+
+
+@pytest.mark.parametrize("case", list(_params()))
+async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path: Path) -> None:
+    shape = SHAPES[case.shape]
+    expected_result, baseline, merges = model(shape)
+    inner = _store(case.store, tmp_path)
+    history = History(inner, FLOW_NAME)
+
+    prior: set[str] = set()
+    point: _Point | None = None
+    for stop, stop_at, mode in case.stops():
+        store = CrashableStore(inner)
+        probe = await _run_stopping(
+            shape, case, stop, stop_at, mode, store, resume=point is not None
+        )
+        if point is not None:
+            _check_rerun(probe, point)
+        prior |= set(probe.executed)
+        point = await _check_stopped(shape, stop, probe, history, prior)
+        if point is None:
+            return
+
+    assert point is not None
     resumed = Probe(policy=case.policy)
     flow = _flow(shape, resumed, inner, parallel=case.parallel)
     assert await flow.run(RUN_INPUT, resume="latest") == expected_result
-    head = await history.head()
-    assert head is not None and await _root_done(history, head) == baseline
-    assert await history.is_complete()
-    assert len(resumed.executed) == len(set(resumed.executed)), "a leaf ran twice on resume"
-    missing = [k for k in baseline if k not in captured]
-    assert [k for k in resumed.executed if k not in captured] == missing or case.parallel
-    assert set(resumed.executed) - set(captured) == set(missing)
-    again = [k for k in resumed.executed if k in captured]
-    # A leaf that raised runs again: its step did not complete. A strict map's
-    # other items keep running after it, so a later save can hold it done with
-    # another step running. Besides it, only the step running at the save runs again.
-    raised = {first.stopped} if case.stop == "exception" else set()
-    rerun = [k for k in again if k not in raised]
-    assert len(rerun) <= 1, f"more than the interrupted step ran again: {again}"
-    restarted = set(first.turns_paused) & set(resumed.turns_started)
-    assert not restarted, f"paused Loop turns started over instead of resuming: {restarted}"
+    await _check_finished(history, baseline, merges)
+    _check_rerun(resumed, point)
+    missing = [k for k in baseline if k not in point.done]
+    assert [k for k in resumed.executed if k not in point.done] == missing or case.parallel
+    assert set(resumed.executed) - set(point.done) == set(missing)

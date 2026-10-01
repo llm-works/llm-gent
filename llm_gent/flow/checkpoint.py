@@ -151,24 +151,10 @@ head is at this path is complete.
 """
 
 
-FAILED_NODE_PATH = "$failed"
-"""Reserved ``node_path`` of the commit written when a top-level run raises.
-
-Records the root state at the moment of failure (``outcome="failed"``)
-for inspection. It is never a starting point: that state may be
-half-updated, so ``resume="latest"`` skips such commits and continues
-from the last commit before them.
-"""
-
-
 COMPLETION_PRODUCER = "$framework/completion"
-"""``produced_by.node_id`` of the :data:`END_NODE_PATH` final-state commit."""
+"""``produced_by.node_id`` of the :data:`END_NODE_PATH` final-state commit.
 
-
-FAILURE_PRODUCER = "$framework/failure"
-"""``produced_by.node_id`` of the :data:`FAILED_NODE_PATH` commit.
-
-The framework writes both itself — no node produced them — following the
+The framework writes it — no node produced it — following the
 ``$external/*`` convention for producers that are not flow nodes.
 """
 
@@ -178,9 +164,9 @@ ResumeMode = Literal["off", "latest"]
 
 - ``"off"`` — run from ``state=`` as given; new commits still append to
   the history.
-- ``"latest"`` — check out the newest commit that has usable state
-  (halted, ok or final; ``$failed`` and stateless commits are skipped) and
-  continue from it: every scope comes back, and every chain, iterate and
+- ``"latest"`` — check out the newest commit that has state (commits
+  without state are skipped) and continue from it — a run that raised
+  wrote no commit, so this is the last save before it: every scope comes back, and every chain, iterate and
   branch that was running continues where its cursor was — at the same
   step with the same input, in the same pass with the same carried value,
   on the same arm. Only the step that was running when the checkpoint was

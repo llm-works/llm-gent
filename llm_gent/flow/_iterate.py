@@ -32,7 +32,7 @@ from ._halt_observer import is_halt_signaled, note_halt
 from ._node_id import _descend_context
 from .nodes import Interrupted
 from .state import State
-from .state.snapshot import CARRY, PASS, ScopePath
+from .state.snapshot import CARRY, PASS, UNTIL, ScopePath
 
 
 if TYPE_CHECKING:
@@ -53,14 +53,17 @@ class IterateRunner:
         self.it = it
         self.env = env
         self.node_id = node_id
-        # The cursor: the pass the loop is in, and the value it carries into
-        # that pass. Kept here, not in _loop's locals, so a checkpoint reads them.
+        # The cursor: the pass the loop is in, the value it carries into that
+        # pass, and until's verdict on that value (None: not checked yet). Kept
+        # here, not in _loop's locals, so a checkpoint reads them. The run's
+        # input is never checked: the body runs at least once.
         self.iteration = 0
         self.carry: Any = None
+        self.done: bool | None = False
 
     def cursor(self) -> dict[str, Any]:
-        """The pass this iterate is in (0-based) and the value carried into it."""
-        return {PASS: self.iteration, CARRY: self.carry}
+        """The pass this iterate is in (0-based), the value carried into it, until's verdict."""
+        return {PASS: self.iteration, CARRY: self.carry, UNTIL: self.done}
 
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Drive the loop; return the last body result.
@@ -85,29 +88,42 @@ class IterateRunner:
         return result
 
     def _take_saved_position(self, path: ScopePath) -> None:
-        """Continue at the pass and carried value a checkout saved at ``path``, when there is one."""
-        found, saved_pass = self.env.scopes.take_cursor(path, PASS)
+        """Continue at the pass, carried value and verdict a checkout saved at ``path``, if any."""
+        scopes = self.env.scopes
+        found, saved_pass = scopes.take_cursor(path, PASS)
         if found:
             self.iteration = saved_pass
-        found, saved_carry = self.env.scopes.take_cursor(path, CARRY)
+        found, saved_carry = scopes.take_cursor(path, CARRY)
         if found:
             self.carry = saved_carry
+        found, saved_done = scopes.take_cursor(path, UNTIL)
+        if found:
+            self.done = saved_done
 
     async def _loop(self, path: ScopePath, child_state: State[Any]) -> Any:
         """Run passes until a bound, the halt or ``until`` stops them; return the last result.
 
         ``self.iteration`` and ``self.carry`` advance together after each
         pass, with no await in between, so a checkpoint always sees a pass
-        number and the value carried into that pass. A halt that stops the
-        loop before its bounds do interrupts it: a body interrupted inside
-        a pass raises :class:`Interrupted` through the loop, which neither
-        advances nor writes a policy commit after it, and leaves the
-        iterate registered in that pass.
+        number and the value carried into that pass; ``until``'s verdict on
+        that value is recorded next, before the ``on_iterate`` commit. A
+        checkpoint taken before the verdict was recorded (a sibling map
+        item saving meanwhile) has it unchecked, and resume checks it first:
+        a loop ``until`` stopped does not run another pass.
+
+        A halt that stops the loop before its bounds do interrupts it: a
+        body interrupted inside a pass raises :class:`Interrupted` through
+        the loop, which neither advances nor writes a policy commit after
+        it, and leaves the iterate registered in that pass.
 
         Raises:
             Interrupted: The halt stopped the loop before its bounds or
                 ``until`` did.
         """
+        if self.done is None:
+            self.done = await self._until_holds(child_state)
+        if self.done:
+            return self.carry
         started = time.monotonic()
         while True:
             if self.it.max_iters is not None and self.iteration >= self.it.max_iters:
@@ -123,12 +139,17 @@ class IterateRunner:
                 raise Interrupted()
             pass_path = (*path, "p", str(self.iteration))
             result = await self._dispatch_body(child_state, self.carry, pass_path)
-            self.carry, self.iteration = result, self.iteration + 1
+            self.carry, self.iteration, self.done = result, self.iteration + 1, None
+            self.done = await self._until_holds(child_state)
             if self.env.policy.on_iterate:
                 await _save_scope_commit(self.env, self.iteration, self.node_id, child_state, "ok")
-            if await _check_until(self.it.until, result, child_state, self.env, self.node_id):
+            if self.done:
                 break
         return self.carry
+
+    async def _until_holds(self, child_state: State[Any]) -> bool:
+        """``until``'s verdict on the carried value; ``False`` without ``until``."""
+        return await _check_until(self.it.until, self.carry, child_state, self.env, self.node_id)
 
     async def _dispatch_body(
         self, child_state: State[Any], prev_result: Any, pass_path: ScopePath

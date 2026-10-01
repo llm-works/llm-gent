@@ -17,8 +17,8 @@ reaches their paths.
 Write side — :func:`apply_clean_exit_retention` and
 :func:`commit_completion` commit the final state on clean exit and move
 the ``complete`` tag to it; :func:`commit_halt` commits a halted run's
-position once everything has stopped; :func:`commit_failure` commits the
-state at the moment a run raised.
+position once everything has stopped. A run that raises writes nothing:
+its history's head is its last save, where resume continues.
 """
 
 from __future__ import annotations
@@ -54,27 +54,26 @@ class Resume:
         self._history = History(ctx.store, ctx.client_flow_id)
 
     async def checkout(self, fallback: State[Any]) -> tuple[State[Any], Snapshot | None]:
-        """Check out the snapshot of the newest commit that has usable state.
+        """Check out the snapshot of the newest commit that has state.
 
-        Walks back from the head past ``$failed`` commits (the state at a
-        failure may be half-updated) and commits with an empty tree (state
-        that could not be serialized). Returns the snapshot's root as the
-        top-level :class:`State` together with the snapshot itself, whose
-        scopes and cursors the run takes as it reaches their paths.
+        Starts at the head — after a run that raised, its last save — and
+        walks back past commits with an empty tree (state that could not be
+        serialized). Returns the snapshot's root as the top-level
+        :class:`State` together with the snapshot itself, whose scopes and
+        cursors the run takes as it reaches their paths.
 
         Skipping is logged: the restored state may predate the head by
         whole runs (a stateless ``$end`` sends the walk into the previous
         run). Returns ``(fallback, None)`` when the history is empty or
-        holds no commit with usable state (warning in the latter case).
+        holds no commit with state (warning in the latter case).
         """
         skipped: list[str] = []
         async for commit in self._history.commits():
-            if not History.is_failed(commit):
-                snapshot = await self._history.snapshot(commit)
-                if snapshot.has_state:
-                    if skipped:
-                        self._warn_skipped(skipped, commit)
-                    return self._root_state(snapshot.root), snapshot
+            snapshot = await self._history.snapshot(commit)
+            if snapshot.has_state:
+                if skipped:
+                    self._warn_skipped(skipped, commit)
+                return self._root_state(snapshot.root), snapshot
             skipped.append(commit.meta.node_path)
         if skipped:
             self.flow._lg.warning(
@@ -112,9 +111,9 @@ class Resume:
         return root, snapshot
 
     def _warn_skipped(self, skipped: list[str], restored: Commit) -> None:
-        """Log the ``$failed`` / stateless commits the checkout walked past, and where it landed."""
+        """Log the stateless commits the checkout walked past, and where it landed."""
         self.flow._lg.warning(
-            "resume skipped commits without usable state",
+            "resume skipped commits without state",
             extra={
                 "client_flow_id": self._history.client_flow_id,
                 "skipped": skipped,
@@ -222,24 +221,6 @@ async def commit_halt(flow: Flow) -> None:
         # Store/IO errors propagate: the caller expects the halt checkpoint to exist.
         flow._lg.warning("halt commit could not be written", extra={"exception": e})
         raise
-
-
-async def commit_failure(flow: Flow, failed_state: State[Any]) -> None:
-    """Commit the root state at ``$failed`` after the run raised.
-
-    Called from :meth:`Flow.run`'s exception path before the original
-    exception is re-raised. Any error while writing is logged at warning
-    level and swallowed, so it never replaces the exception that ended the
-    run. A no-op without a checkpointer.
-    """
-    ctx = flow._checkpoint_ctx
-    if ctx is None:
-        return
-    try:
-        tree = await _put_root_tree(flow, failed_state)
-        await ctx.save_failure_commit(tree)
-    except Exception as e:
-        flow._lg.warning("failure commit could not be written", extra={"exception": e})
 
 
 async def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:

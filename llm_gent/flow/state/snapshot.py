@@ -14,7 +14,7 @@ that tell repeated executions apart::
     chain                             cursor of the top-level chain
     n/<node>/state                    scope opened by a .call / .iterate step
     n/<node>/chain                    cursor of the chain a .call / .branch runs
-    n/<node>/pass, n/<node>/carry     cursor of a running .iterate
+    n/<node>/pass, carry, until       cursor of a running .iterate
     n/<node>/arm                      arm a running .branch took
     n/<node>/t/<k>/turn               paused turn of the step's <k>-th Loop call
     n/<node>/p/<pass>/n/<node>/...    positions inside iterate pass <pass>
@@ -55,6 +55,9 @@ PASS = "pass"
 CARRY = "carry"
 """Cursor entry: the value a running iterate carries into its current pass."""
 
+UNTIL = "until"
+"""Cursor entry: a running iterate's ``until`` verdict on its carried value (``null``: unchecked)."""
+
 CHAIN = "chain"
 """Cursor entry: the step a running chain is at, and that step's input."""
 
@@ -70,7 +73,7 @@ ITEMS = "items"
 DONE = "done"
 """Cursor entry: a running map's completed items — index to result and whether it merged."""
 
-CURSOR_ENTRIES = frozenset({PASS, CARRY, CHAIN, ARM, TURN, ITEMS, DONE})
+CURSOR_ENTRIES = frozenset({PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE})
 """Tree entries that hold cursor values rather than a scope."""
 
 

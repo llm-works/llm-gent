@@ -177,8 +177,7 @@ class ProducedBy:
     node whose body produced the commit, a ``$external/*`` prefix for
     consumer-driven direct saves (e.g. an initial-plan write) that
     happen outside an iterate boundary, or ``$framework/*`` for commits
-    the framework writes itself (the final-state commit on clean exit,
-    the failure commit when a run raises).
+    the framework writes itself (the final-state commit on clean exit).
 
     :attr:`verb_name` is the ``@verb`` callable's ``__name__`` when the
     commit came from an in-flow verb; ``None`` for direct saves.
@@ -216,14 +215,13 @@ class TraceRef:
     id: str
 
 
-CommitOutcome = Literal["ok", "failed", "halted"]
-"""The three iteration outcomes that MAY be committed:
+CommitOutcome = Literal["ok", "halted"]
+"""Why a commit was written:
 
-- ``"ok"`` — iteration body ran to completion.
-- ``"failed"`` — the run raised; carried by the ``$failed`` commit.
-- ``"halted"`` — iteration was interrupted by an ambient halt.
+- ``"ok"`` — a save point (policy, ``ctx.checkpoint()``) or the final state.
+- ``"halted"`` — the run's halt checkpoint.
 
-Closed enum; the accountability model needs exactly these three states.
+A run that raises writes no commit: resume continues from the last save.
 """
 
 
@@ -264,8 +262,8 @@ class Commit:
     written immediately before this one, in time order — or is empty for
     a history's first commit. It records sequence, not derivation: a run
     started with ``resume="off"`` still parents on the previous head.
-    A run ends in a ``halted``, ``$end`` or ``$failed`` commit, so run
-    boundaries are read from those. A multi-parent tuple is reserved for a future
+    A run that finishes or halts ends in an ``$end`` or ``halted`` commit;
+    one that raises ends at its last save. A multi-parent tuple is reserved for a future
     fork/merge surface and unused today.
 
     Build only via :meth:`build` so :attr:`content_hash` stays consistent
