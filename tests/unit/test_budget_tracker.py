@@ -407,3 +407,46 @@ class TestRestoreSpent:
         child.restore_spent(0.5)
         assert child.spent == pytest.approx(0.5)
         assert root.spent == pytest.approx(0.001)
+
+
+class TestSnapshotRestore:
+    """snapshot / restore round-trip this level's accounting; restore re-applies the cap."""
+
+    def test_round_trip(self) -> None:
+        t = Tracker(_lg(), _pricing(), budget=10.0)
+        t.track("web_search", count=3)
+        t.track("op", override_cost=0.5)
+        fresh = Tracker(_lg(), _pricing(), budget=10.0)
+        fresh.restore(**t.snapshot())
+        assert fresh.snapshot() == t.snapshot()
+        assert fresh.costs_by_op == {"web_search": pytest.approx(0.003), "op": 0.5}
+
+    def test_snapshot_is_detached(self) -> None:
+        t = Tracker(_lg(), _pricing())
+        t.track("op", override_cost=1.0)
+        snap = t.snapshot()
+        t.track("op", override_cost=1.0)
+        assert snap == {"spent": 1.0, "costs_by_op": {"op": 1.0}}
+
+    def test_restore_over_the_cap_latches_wrapup_and_fires_halt(self) -> None:
+        halt = asyncio.Event()
+        t = Tracker(_lg(), _pricing(), budget=1.0, halt=halt)
+        t.restore(1.5, {"op": 1.5})
+        assert t.exceeded and t.urgent_wrapup and halt.is_set()
+
+    def test_restore_under_the_cap_does_not_fire(self) -> None:
+        halt = asyncio.Event()
+        t = Tracker(_lg(), _pricing(), budget=1.0, halt=halt)
+        t.restore(0.5, {"op": 0.5})
+        assert not t.urgent_wrapup and not halt.is_set()
+
+    def test_does_not_walk_up(self) -> None:
+        root = Tracker(_lg(), _pricing(), budget=10.0)
+        child = root.child(budget=1.0)
+        child.restore(0.5, {"op": 0.5})
+        assert root.spent == 0.0
+
+    @pytest.mark.parametrize("bad", [(float("nan"), {}), (1.0, {"op": float("inf")})])
+    def test_non_finite_raises(self, bad: tuple[float, dict[str, float]]) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            Tracker(_lg(), _pricing()).restore(*bad)

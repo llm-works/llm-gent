@@ -388,7 +388,9 @@ def _record(data: Digest, term: str, result: Any) -> None:
     Paused: the halt commit snapshots state after the verb returns,
     and resume re-dispatches with ``pending[0]`` still the halted
     term — matching the task the saved conversation carries.
-    Mutating here would checkpoint a half-applied state.
+    Applying the step's work here (popping the term, appending a
+    summary) would checkpoint a half-applied step; recording the
+    turn's own bookkeeping would not.
     """
     if getattr(result, "paused", False):
         print(f"  paused mid-turn on {term!r}")

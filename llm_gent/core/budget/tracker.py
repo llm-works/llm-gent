@@ -280,6 +280,35 @@ class Tracker:
         self._spent = amount
         self._lg.debug("restored spend", extra={"spent": amount})
 
+    def snapshot(self) -> dict[str, Any]:
+        """This level's accounting as plain data: ``{"spent", "costs_by_op"}``.
+
+        Cap, halt event and callbacks are wiring, not accounting: they are
+        not included. :meth:`restore` is the inverse.
+        """
+        return {"spent": self._spent, "costs_by_op": dict(self._costs_by_op)}
+
+    def restore(self, spent: float, costs_by_op: dict[str, float]) -> None:
+        """Set this level's accounting to a :meth:`snapshot` taken earlier (for resume).
+
+        This level only, like :meth:`restore_spent`: ancestors keep their
+        own accounting. Restored spend at or over the cap latches
+        ``urgent_wrapup`` and fires ``halt``: a tracker that ran out stays
+        out until its cap is raised (:meth:`update_budget`).
+
+        Raises:
+            ValueError: ``spent`` or a ``costs_by_op`` value is not finite.
+        """
+        if not math.isfinite(spent) or not all(math.isfinite(c) for c in costs_by_op.values()):
+            raise ValueError(f"restored spend must be finite, got {spent} / {costs_by_op}")
+        self._spent = spent
+        self._costs_by_op = dict(costs_by_op)
+        if self.exceeded:
+            self._urgent_wrapup = True
+            if self._halt is not None:
+                self._halt.set()
+        self._lg.debug("restored accounting", extra={"spent": spent})
+
     def _record_cost(
         self,
         cost: float,

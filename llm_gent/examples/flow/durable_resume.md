@@ -294,16 +294,27 @@ characters, the form of a commit hash. `run(resume=...)` with a hash or a name t
 not have raises `ValueError`; for a name, the error lists the checkpoint names the history has
 (`History.checkpoint_names()`).
 
+## Budgets across resume
+
+The example wires no budget. With one — `with_budget(tracker)` on the flow, or a cap per item with
+`with_budget(cap)` on a map body — each run's tracker is in the halt commit at that run's path
+(`budget`: spend so far, and spend by op), and run 2 restores it before the run continues: run 2
+spends what is left of the cap, not the whole cap again. A finished run's `$end` commit holds no
+tracker, so a fresh cycle starts from the tracker as given. See `docs/index.md`, "Budgets".
+
 ## Two contracts the example depends on
 
 **Wire a `ConversationFactory` on the Loop.** It supplies the conversation SAIA appends the turn
 to, and rebuilds it on resume. Without one, a paused turn is not captured: the step still counts
 as interrupted and runs again, and the turn starts over from the task.
 
-**Do not mutate state on a paused result.** The halt commit snapshots state after the verb
-returns. A verb that pops its input or appends a placeholder on a paused `TaskResult` checkpoints a
-half-applied step; on resume the Loop restores the saved task while the verb reads the next item,
-and the halted item is skipped. `summarize` checks `result.paused` before touching `ctx.data`.
+**Do not apply the step's work on a paused result.** The halt commit snapshots state after the
+verb returns. A verb that pops its input or appends a placeholder on a paused `TaskResult`
+checkpoints a half-applied step; on resume the Loop restores the saved task while the verb reads
+the next item, and the halted item is skipped. `summarize` checks `result.paused` before touching
+`ctx.data`. Recording the turn's own bookkeeping is fine and is how it survives the halt: a field
+of state such as an iteration count, written on the paused result, is in the halt commit and in
+`ctx.data` when the step runs again.
 
 ## What `--smoke` verifies
 
