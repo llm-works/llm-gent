@@ -113,6 +113,23 @@ class InMemoryCheckpointStore:
         """Return ``True`` when the object exists."""
         return self.get_object(flow_id, kind, content_hash) is not None
 
+    def list_objects(self, flow_id: str) -> list[tuple[Kind, str]]:
+        """Return the ``(kind, content_hash)`` of every object under ``flow_id``."""
+        _require_non_empty(flow_id=flow_id)
+        with self._lock:
+            history = self._histories.get(flow_id)
+            return [] if history is None else list(history.objects)
+
+    def delete_objects(self, flow_id: str, keys: list[tuple[Kind, str]]) -> None:
+        """Delete the objects ``keys``; keys that do not exist are skipped."""
+        _require_non_empty(flow_id=flow_id)
+        with self._lock:
+            history = self._histories.get(flow_id)
+            if history is None:
+                return
+            for key in keys:
+                history.objects.pop(key, None)
+
     # --- refs ---
 
     def get_ref(self, flow_id: str, name: str) -> str | None:
@@ -131,6 +148,13 @@ class InMemoryCheckpointStore:
                 return False
             refs[name] = commit_hash
             return True
+
+    def list_refs(self, flow_id: str) -> dict[str, str]:
+        """Return every ref under ``flow_id``: name → commit hash."""
+        _require_non_empty(flow_id=flow_id)
+        with self._lock:
+            history = self._histories.get(flow_id)
+            return {} if history is None else dict(history.refs)
 
     # --- history cleanup ---
 

@@ -47,15 +47,21 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import get_args
 from urllib.parse import quote, unquote
 
 from appinfra.log import Logger
 
 from ..checkpoint import Kind, Retention
+
+
+_MKSTEMP_TMP = re.compile(r"\.[a-zA-Z0-9_]{6,}\.tmp$")
+"""Matches temp files from :func:`tempfile.mkstemp` with ``suffix='.tmp'``."""
 
 
 def _atomic_write_text(target: Path, text: str) -> None:
@@ -248,6 +254,22 @@ class JsonFileCheckpointStore:
         """Return ``True`` when the object file exists on disk."""
         return (self._objects_dir(flow_id, kind) / content_hash).is_file()
 
+    def list_objects(self, flow_id: str) -> list[tuple[Kind, str]]:
+        """Return the ``(kind, content_hash)`` of every object file; ``.tmp`` files are skipped."""
+        keys: list[tuple[Kind, str]] = []
+        for kind in get_args(Kind):
+            obj_dir = self._objects_dir(flow_id, kind)
+            if obj_dir.is_dir():
+                names = (p.name for p in obj_dir.iterdir())
+                keys.extend((kind, name) for name in names if not name.endswith(".tmp"))
+        return keys
+
+    def delete_objects(self, flow_id: str, keys: list[tuple[Kind, str]]) -> None:
+        """Delete the object files ``keys``; missing files are skipped."""
+        for kind, content_hash in keys:
+            with contextlib.suppress(FileNotFoundError):
+                (self._objects_dir(flow_id, kind) / content_hash).unlink()
+
     # ------------------------------------------------------------------
     # Refs
     # ------------------------------------------------------------------
@@ -275,6 +297,20 @@ class JsonFileCheckpointStore:
                 return False
             _atomic_write_text(ref_file, commit_hash)
             return True
+
+    def list_refs(self, flow_id: str) -> dict[str, str]:
+        """Return every ref under ``flow_id``: name → commit hash."""
+        refs_dir = self._history_dir(flow_id) / "refs"
+        if not refs_dir.is_dir():
+            return {}
+        refs: dict[str, str] = {}
+        for path in refs_dir.iterdir():
+            if path.name == ".lock" or _MKSTEMP_TMP.search(path.name):
+                continue
+            commit_hash = path.read_text(encoding="utf-8").strip()
+            if commit_hash:
+                refs[unquote(path.name)] = commit_hash
+        return refs
 
     # ------------------------------------------------------------------
     # History cleanup

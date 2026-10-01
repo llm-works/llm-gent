@@ -344,6 +344,26 @@ history written by one flow can be resumed by the other.
 resumed run and the store it leaves on disk: refs, commits, and the
 snapshot tree with its cursors.
 
+### Cleaning up a history
+
+Objects stay in the store when nothing reaches them any more: the commits
+written after a named checkpoint once `resume=<name>` moves `HEAD` back to
+it, and the objects of a commit whose process died before moving `HEAD`
+to it. The framework never deletes them on its own;
+`collect_unreachable` does, keeping every ref and everything a ref
+reaches:
+
+```python
+from llm_gent.flow import collect_unreachable
+
+removed = await collect_unreachable(store, "history-42")  # objects deleted
+```
+
+Call it while no run writes the history: a run puts a commit's objects
+before `HEAD` moves to it, so they would count as unreachable. A history
+with a missing object raises `HistoryCorrupt` and nothing is deleted.
+`retention="gc_on_success"` still removes a whole history on success.
+
 ## Related Projects
 
 - [llm-infer](https://github.com/llm-works/llm-infer) - LLM inference server and client
