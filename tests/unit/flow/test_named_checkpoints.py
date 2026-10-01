@@ -56,7 +56,8 @@ def _flow(store: Any, calls: list[str], tag: str | None = "mid") -> Any:
     return (
         FlowFactory(make_test_logger())
         .create(state={})
-        .with_checkpointer(store, NAME)
+        .with_checkpoint_store(store, NAME)
+        .with_checkpointer()
         .call(a)
         .then(b)
         .then(c)
@@ -138,13 +139,13 @@ class TestNamedCheckpointErrors:
         with pytest.raises(ValueError, match="reserved"):
             await _flow(InMemoryCheckpointStore(), []).run(resume="complete")
 
-    async def test_resume_by_name_requires_a_checkpointer(self) -> None:
+    async def test_resume_by_name_requires_a_checkpoint_store(self) -> None:
         @verb
         async def a(ctx: Context[Any], x: int) -> int:
             return x
 
         flow = FlowFactory(make_test_logger()).create().call(a)
-        with pytest.raises(RuntimeError, match="no checkpointer"):
+        with pytest.raises(RuntimeError, match="no checkpoint store"):
             await flow.run(1, resume="mid")
 
 
@@ -165,7 +166,8 @@ class TestNamedCheckpointInIterate:
             return (
                 FlowFactory(make_test_logger())
                 .create(state={})
-                .with_checkpointer(store, NAME)
+                .with_checkpoint_store(store, NAME)
+                .with_checkpointer()
                 .iterate(lambda body: body.call(step), max_iters=4)
             )
 
@@ -219,7 +221,12 @@ def _hash_flow(
         ctx.state.data["d"] = x
         return x - 1
 
-    flow = FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, NAME)
+    flow = (
+        FlowFactory(make_test_logger())
+        .create(state={})
+        .with_checkpoint_store(store, NAME)
+        .with_checkpointer()
+    )
     if halt is not None:
         flow = flow.with_halt(halt)
     return flow.call(a).then(b).then(c).then(d)
@@ -237,7 +244,12 @@ class TestResumeByHash:
             seen.append((written, None if head is None else head.content_hash))
             return x
 
-        flow = FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, NAME)
+        flow = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpoint_store(store, NAME)
+            .with_checkpointer()
+        )
         await flow.call(a).run(1)
         assert len(seen) == 1 and seen[0][0] is not None and seen[0][0] == seen[0][1]
 
@@ -305,7 +317,12 @@ class TestResumeByHash:
             ctx.state.data["handle"] = object()
             return x
 
-        flow = FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, NAME)
+        flow = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpoint_store(store, NAME)
+            .with_checkpointer()
+        )
         await flow.call(a).run(1)
         head = await History(store, NAME).head()
         assert head is not None

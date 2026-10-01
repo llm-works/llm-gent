@@ -337,7 +337,7 @@ class TestCtxExtraResume:
                 state={"counter": 0},
             )
             outer.iterate(body, max_iters=5)
-            outer = outer.with_checkpointer(store, "extra-resume-1")
+            outer = outer.with_checkpoint_store(store, "extra-resume-1").with_checkpointer()
             return outer.with_halt(halt_event) if halt_event is not None else outer
 
         pre_lock = threading.Lock()

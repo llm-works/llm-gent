@@ -72,7 +72,8 @@ def _map_flow(
     return (
         FlowFactory(make_test_logger())
         .create(state={})
-        .with_checkpointer(store, "map")
+        .with_checkpoint_store(store, "map")
+        .with_checkpointer()
         .with_halt(halt)
         .map(
             lambda b: b.call(work),
@@ -174,7 +175,8 @@ class TestUnmergedItem:
             return (
                 FlowFactory(make_test_logger())
                 .create(state={})
-                .with_checkpointer(store, "unmerged")
+                .with_checkpoint_store(store, "unmerged")
+                .with_checkpointer()
                 .map(
                     lambda b: b.call(work),
                     items=lambda _p, _c: [1, 2],
@@ -218,7 +220,8 @@ class TestWaveShape:
             return (
                 FlowFactory(make_test_logger())
                 .create(state={})
-                .with_checkpointer(store, "wave")
+                .with_checkpoint_store(store, "wave")
+                .with_checkpointer()
                 .with_halt(halt)
                 .map(
                     lambda b: b.call(work),
@@ -255,7 +258,8 @@ class TestSerialization:
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "opaque")
+            .with_checkpoint_store(store, "opaque")
+            .with_checkpointer()
             .map(lambda b: b.call(work), items=lambda _p, _c: [_Opaque()])
         )
         with pytest.raises(TypeError, match=r"/items'.*_Opaque"):

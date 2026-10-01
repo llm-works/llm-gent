@@ -91,7 +91,12 @@ def _flow(store: Any, halt: asyncio.Event | None, saia: _SAIA, ran: list[str]) -
     async def judge(ctx: Context[Any], topic: str) -> str:
         return str(await panel.run(ctx, topic))
 
-    flow = FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, NAME)
+    flow = (
+        FlowFactory(make_test_logger())
+        .create(state={})
+        .with_checkpoint_store(store, NAME)
+        .with_checkpointer()
+    )
     if halt is not None:
         flow = flow.with_halt(halt)
     return flow.call(judge)
@@ -149,7 +154,12 @@ class TestPanelResume:
                 second = await panel.run(ctx, "second")
                 return [*first, *second]
 
-            f = FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, NAME)
+            f = (
+                FlowFactory(make_test_logger())
+                .create(state={})
+                .with_checkpoint_store(store, NAME)
+                .with_checkpointer()
+            )
             return (f.with_halt(run_halt) if run_halt is not None else f).call(step)
 
         assert await flow(halt).run() is None
@@ -178,7 +188,12 @@ class TestPanelResume:
         async def step(ctx: Context[Any], x: int) -> int:
             return int(await panel.run(ctx, x))
 
-        flow = FlowFactory(make_test_logger()).create(state={}).with_checkpointer(store, NAME)
+        flow = (
+            FlowFactory(make_test_logger())
+            .create(state={})
+            .with_checkpoint_store(store, NAME)
+            .with_checkpointer()
+        )
         assert await flow.call(step).run(3) == 9
         commit = await History(store, NAME).checkpoint("in-panel")
         assert commit is not None
@@ -211,7 +226,8 @@ class TestPanelResume:
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, NAME)
+            .with_checkpoint_store(store, NAME)
+            .with_checkpointer()
             .with_halt(halt)
             .call(step)
         )

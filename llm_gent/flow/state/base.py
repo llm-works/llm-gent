@@ -24,8 +24,9 @@ because it doesn't know the payload's concrete type. Consumers call
 ``state.data.to_dict()`` in their save hook and
 ``PayloadClass.from_dict(checkpoint["data"])`` in their resume hook.
 
-The contract only surfaces when ``.with_checkpointer(...)`` is wired on
-the enclosing flow. Consumers who never checkpoint don't need to conform.
+The contract only surfaces when the run has a checkpoint store
+(``.with_checkpoint_store(...)`` on its top-level flow). Consumers who
+never checkpoint don't need to conform.
 """
 
 from __future__ import annotations
@@ -207,8 +208,9 @@ class State(Generic[T]):
 class StateFactory(Protocol[T_co]):
     """Framework-facing state construction on the checkpoint restore path.
 
-    The framework calls :meth:`restore` at ``.with_checkpointer(...)``
-    resume time to rebuild state from the serialized dict. Runtime
+    The framework calls :meth:`restore` at resume time (``run(resume=...)``
+    on a flow with a checkpoint store) to rebuild state from the serialized
+    dict. Runtime
     handles that cannot be serialized (Logger, storage backends,
     connections) are captured at factory construction and threaded
     through :meth:`restore`; the framework passes no runtime context of

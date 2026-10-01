@@ -194,7 +194,8 @@ class TestFlowSnapshots:
         await (
             FlowFactory(LG)
             .create(state={})
-            .with_checkpointer(store, "siblings")
+            .with_checkpoint_store(store, "siblings")
+            .with_checkpointer()
             .map(
                 lambda b: b.call(work),
                 items=lambda _p, _c: [0, 1, 2],
@@ -223,7 +224,8 @@ class TestFlowSnapshots:
         await (
             FlowFactory(LG)
             .create(state={})
-            .with_checkpointer(store, "passes")
+            .with_checkpoint_store(store, "passes")
+            .with_checkpointer()
             .iterate(lambda b: b.call(step), max_iters=5)
             .run(0)
         )
@@ -251,7 +253,8 @@ class TestFlowSnapshots:
         flow = (
             FlowFactory(LG)
             .create(state={})
-            .with_checkpointer(store, "chain")
+            .with_checkpoint_store(store, "chain")
+            .with_checkpointer()
             .call(first)
             .call(second, project=lambda r: r * 10)
         )
@@ -274,7 +277,8 @@ class TestFlowSnapshots:
         await (
             FlowFactory(LG)
             .create(state={})
-            .with_checkpointer(store, "arm")
+            .with_checkpoint_store(store, "arm")
+            .with_checkpointer()
             .branch(
                 when=lambda prev, _c: prev > 0,
                 then=lambda b: b.call(save),
@@ -296,7 +300,8 @@ class TestFlowSnapshots:
         flow = (
             FlowFactory(LG)
             .create(state={})
-            .with_checkpointer(InMemoryCheckpointStore(), "tuple")
+            .with_checkpoint_store(InMemoryCheckpointStore(), "tuple")
+            .with_checkpointer()
             .call(save)
         )
         with pytest.raises(TypeError, match=r"cursor at 'chain': a value of type tuple cannot be"):
@@ -314,7 +319,8 @@ class TestFlowSnapshots:
         await (
             FlowFactory(LG)
             .create(state={"items": []})
-            .with_checkpointer(store, "same-bytes")
+            .with_checkpoint_store(store, "same-bytes")
+            .with_checkpointer()
             .call(sub, state=lambda _p: {}, merge=lambda _p, _c: None)
             .run()
         )
@@ -333,7 +339,8 @@ class TestFlowSnapshots:
         await (
             FlowFactory(LG)
             .create(state={})
-            .with_checkpointer(store, "end")
+            .with_checkpoint_store(store, "end")
+            .with_checkpointer()
             .call(
                 FlowFactory(LG).create().iterate(lambda b: b.call(step), max_iters=2),
                 state=lambda _p: {},

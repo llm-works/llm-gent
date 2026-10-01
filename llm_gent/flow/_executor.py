@@ -25,6 +25,7 @@ import inspect
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from .checkpoint import checkpoint_tag
 from .context import Context
 from .nodes import (
     UNSET,
@@ -296,6 +297,7 @@ async def _run_subflow(
             parent_halt=env.halt,
             parent_budget=env.budget,
             parent_checkpoint_ctx=env.checkpoint_ctx,
+            parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(node_id, "call"),
             parent_ancestor_chain=env.ancestor_chain + (node_id,),
             parent_extra=env.extra,
@@ -507,6 +509,7 @@ async def _run_arm(
             parent_halt=env.halt,
             parent_budget=env.budget,
             parent_checkpoint_ctx=env.checkpoint_ctx,
+            parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(node_id, arm.arm),
             parent_ancestor_chain=env.ancestor_chain + (node_id,),
             parent_extra=env.extra,
@@ -534,19 +537,24 @@ async def _save_scope_commit(
     outcome: CommitOutcome,
     trace_ref: tuple[TraceRef, ...] = (),
 ) -> Commit | None:
-    """Persist a scope commit via ``env.checkpoint_ctx`` and return it; ``None`` when unbound.
+    """Save the whole run as a commit in its repo and return it; ``None`` when nothing saves here.
 
-    Thin wrapper that resolves the ``env → checkpoint context`` reach
-    for callers that already have an ``env`` in scope
-    (:class:`IterateRunner`, :class:`MapItemRunner`,
-    :meth:`Context.checkpoint`). Delegates the actual persistence
-    machinery to :meth:`CheckpointContext.save_scope_commit`.
+    The save point of :class:`IterateRunner`, :class:`MapItemRunner` and
+    :meth:`Context.checkpoint`. It writes only with a repo
+    (``env.checkpoint_ctx``) and a checkpointer on the saving flow or
+    above it (``env.checkpointer``); the save belongs to that innermost
+    checkpointer, and a named one's tag moves to the commit. Delegates the
+    persistence to :meth:`CheckpointContext.save_scope_commit`.
     """
-    if env.checkpoint_ctx is None:
+    ctx, checkpointer = env.checkpoint_ctx, env.checkpointer
+    if ctx is None or checkpointer is None:
         return None
-    return await env.checkpoint_ctx.save_scope_commit(
+    commit = await ctx.save_scope_commit(
         env.ancestor_chain, iteration, node_id, env.scopes, current_state, outcome, trace_ref
     )
+    if checkpointer.name is not None:
+        await ctx.put_tag(checkpoint_tag(checkpointer.name), commit.content_hash)
+    return commit
 
 
 def _target_label(target: Any) -> str:

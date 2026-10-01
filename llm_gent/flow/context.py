@@ -262,14 +262,19 @@ class Context(Generic[T]):
         commit's metadata records the current node, iteration ``0`` and
         ``outcome="ok"``.
 
-        Returns the commit's hash: ``run(resume=<hash>)`` checks it out
-        later, also after a reset took it off the history's line. With
-        ``name``, the checkpoint is also tagged ``tags/<name>``:
-        ``run(resume=name)`` checks it out. Taking it again (at this step
-        or elsewhere) moves the tag to the new commit.
+        The commit goes to the run's repo (the top-level flow's
+        :meth:`~llm_gent.flow.Flow.with_checkpoint_store`), wherever in the
+        flow tree this step runs. Returns the commit's hash:
+        ``run(resume=<hash>)`` checks it out later, also after a reset took
+        it off the history's line. With ``name``, the checkpoint is also
+        tagged ``tags/<name>``: ``run(resume=name)`` checks it out. Taking
+        it again (at this step or elsewhere) moves the tag to the new
+        commit. A named :meth:`~llm_gent.flow.Flow.with_checkpointer` this
+        save belongs to moves its tag too.
 
         No-op returning ``None`` when:
-        - No checkpointer is wired on the enclosing flow.
+        - No ``with_checkpointer()`` is on this step's flow or above it, or
+          the run has no checkpoint store.
         - The ctx has no live executor env (e.g. built by
           :meth:`Flow.dispatch` used standalone).
 
@@ -281,7 +286,7 @@ class Context(Generic[T]):
         tag = None if name is None else checkpoint_tag(name)
         env = self._env
         node_id = self._node_id
-        if env is None or node_id is None or env.checkpoint_ctx is None:
+        if env is None or node_id is None:
             return None
         from ._executor import _save_scope_commit
 
@@ -289,5 +294,6 @@ class Context(Generic[T]):
         if commit is None:
             return None
         if tag is not None:
+            assert env.checkpoint_ctx is not None  # a commit was written to it
             await env.checkpoint_ctx.put_tag(tag, commit.content_hash)
         return commit.content_hash

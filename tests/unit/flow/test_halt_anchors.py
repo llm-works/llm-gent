@@ -62,7 +62,8 @@ def _two_steps(
     flow = (
         FlowFactory(make_test_logger())
         .create(state={})
-        .with_checkpointer(store, name)
+        .with_checkpoint_store(store, name)
+        .with_checkpointer()
         .call(s1)
         .call(s2)
     )
@@ -117,7 +118,8 @@ class TestHaltInLastStep:
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "gc-late-halt")
+            .with_checkpoint_store(store, "gc-late-halt")
+            .with_checkpointer()
             .with_halt(halt)
             .call(s1)
         )
@@ -144,7 +146,8 @@ class TestHaltInLastStep:
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "map-last")
+            .with_checkpoint_store(store, "map-last")
+            .with_checkpointer()
             .with_halt(halt)
             .map(lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1)
         )
@@ -178,7 +181,8 @@ class TestSubflowLocalHalt:
         flow = (
             FlowFactory(make_test_logger())
             .create(state={})
-            .with_checkpointer(store, "local-map")
+            .with_checkpoint_store(store, "local-map")
+            .with_checkpointer()
             .call(sub)
         )
         await flow.run()

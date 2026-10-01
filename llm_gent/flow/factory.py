@@ -132,10 +132,12 @@ class FlowFactory:
                 directly for state that binds runtime handles. ``None``
                 (default) treats the payload as a plain dict.
             checkpointer: Optional :class:`CheckpointStore` captured for
-                subsequent :meth:`create` calls. Only wired onto a built
-                :class:`Flow` when :meth:`create` is passed a
-                ``client_flow_id=`` — the id scopes the history and is
-                agent-owned per Flow instance.
+                subsequent :meth:`create` calls. Only bound to a built
+                :class:`Flow` (:meth:`Flow.with_checkpoint_store`) when
+                :meth:`create` is passed a ``client_flow_id=`` — the id
+                scopes the history and is agent-owned per Flow instance.
+                Saves inside the run also need
+                :meth:`Flow.with_checkpointer`.
         """
         self._lg = lg
         self._saia_factory = saia_factory
@@ -168,9 +170,9 @@ class FlowFactory:
             client_flow_id: Per-Flow history identifier for the
                 captured :class:`CheckpointStore`. Required to bind the
                 store — the built Flow gets
-                :meth:`Flow.with_checkpointer` called with
+                :meth:`Flow.with_checkpoint_store` called with
                 ``(store, client_flow_id)`` only when both this argument
-                is supplied AND the factory carries a checkpointer.
+                is supplied AND the factory carries a store.
                 ``None`` (default) leaves the built Flow unwired even
                 when the factory carries a store. Ignored when
                 ``checkpointer=`` is passed (that argument carries its
@@ -182,7 +184,7 @@ class FlowFactory:
                 give each concurrent flow instance its own halt handle
                 while keeping one shared factory.
             checkpointer: Per-Flow ``(store, client_flow_id)`` pair —
-                atomically binds both via :meth:`Flow.with_checkpointer`.
+                atomically binds both via :meth:`Flow.with_checkpoint_store`.
                 Supersedes the factory's captured ``checkpointer`` and
                 the ``client_flow_id`` argument above; use when the
                 store differs from the factory's default or when a
@@ -208,9 +210,9 @@ class FlowFactory:
             flow.with_budget(self._budget)
         if checkpointer is not None:
             store, flow_id = checkpointer
-            flow.with_checkpointer(store, flow_id)
+            flow.with_checkpoint_store(store, flow_id)
         elif self._checkpointer is not None and client_flow_id is not None:
-            flow.with_checkpointer(self._checkpointer, client_flow_id)
+            flow.with_checkpoint_store(self._checkpointer, client_flow_id)
         return flow
 
     def with_saia_factory(self, saia_factory: SAIAFactory) -> FlowFactory:
@@ -285,8 +287,8 @@ class FlowFactory:
             checkpointer=self._checkpointer,
         )
 
-    def with_checkpointer(self, store: CheckpointStore) -> FlowFactory:
-        """Return a new :class:`FlowFactory` whose checkpointer is swapped.
+    def with_checkpoint_store(self, store: CheckpointStore) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose checkpoint store is swapped.
 
         Every other captured slot carries over. The store binds to each
         built :class:`Flow` only when :meth:`create` is called with a

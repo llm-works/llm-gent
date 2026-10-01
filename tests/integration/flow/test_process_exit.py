@@ -48,7 +48,8 @@ def _iterate_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
     return (
         FlowFactory(make_test_logger())
         .create(state={})
-        .with_checkpointer(store, NAME)
+        .with_checkpoint_store(store, NAME)
+        .with_checkpointer()
         .iterate(lambda b: b.call(step), max_iters=4)
     )
 
@@ -67,7 +68,8 @@ def _map_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
     return (
         FlowFactory(make_test_logger())
         .create(state={})
-        .with_checkpointer(store, NAME)
+        .with_checkpoint_store(store, NAME)
+        .with_checkpointer()
         .with_checkpoint_policy(on_map_item=True)
         .map(lambda b: b.call(item), items=lambda _p, _c: [0, 1, 2, 3], aggregate=sum)
     )

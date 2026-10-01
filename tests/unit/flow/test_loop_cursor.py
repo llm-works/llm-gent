@@ -96,7 +96,8 @@ def _map_flow(store: Any, halt: asyncio.Event, saia: _PausingSAIA) -> Any:
     return (
         FlowFactory(make_test_logger())
         .create(state={})
-        .with_checkpointer(store, "loop-in-map")
+        .with_checkpoint_store(store, "loop-in-map")
+        .with_checkpointer()
         .with_halt(halt)
         .map(lambda b: b.call(item), items=lambda _p, _c: ["a", "b"], max_concurrency=2)
     )
@@ -160,7 +161,8 @@ def _two_calls_flow(store: Any, halt: asyncio.Event, saia: _ScriptedSAIA, factor
     return (
         FlowFactory(make_test_logger())
         .create(state={})
-        .with_checkpointer(store, "two-calls")
+        .with_checkpoint_store(store, "two-calls")
+        .with_checkpointer()
         .with_halt(halt)
         .call(both)
         .then(then)
