@@ -403,28 +403,17 @@ class TestPanel:
 
 
 class TestPanelInsideIterateResumeBoundary:
-    """The iterate iteration is the checkpoint boundary around a Panel.
+    """A Panel inside an iterate pass resumes at its verbs, not at the pass.
 
-    Panel has no checkpoint boundary of its own. When a halt fires
-    during a Panel's ``asyncio.gather``, siblings are not cancelled —
-    each dispatched verb observes ``ctx.halt`` on its own if it
-    chooses (saia-backed verbs observe halt at call entry and mid-stream,
-    so they abort fast; verbs that don't poll halt run to completion).
-    The gather returns whatever the verbs returned; control goes back
-    to the enclosing iterate, which honors halt at its next
-    between-iterations check.
-
-    The preserved checkpoint reflects the *completion* of the
-    iteration containing the Panel. On resume, iterate proceeds at
-    the next iteration and dispatches a fresh Panel — the halted
-    iteration's Panel is never partially re-dispatched.
+    The Panel runs as a map over its verbs: a halt set by one verb stops
+    the verbs that had not started, the Panel is interrupted, and so is the
+    pass. Resume continues the pass, and its Panel: the finished verb does
+    not run again, the others run with the input the pass had.
     """
 
     @pytest.mark.asyncio
-    async def test_halted_iteration_does_not_partially_redispatch_on_resume(
-        self, tmp_path: Path
-    ) -> None:
-        """Halt set from inside one Panel verb: iteration completes; resume proceeds at K+1 with a fresh Panel."""
+    async def test_halted_panel_resumes_its_unfinished_verbs(self, tmp_path: Path) -> None:
+        """Halt set from inside a Panel verb in pass 2: resume runs only pass 2's other verbs, then 3-5."""
         lg = make_test_logger()
         store = JsonFileCheckpointStore(lg, tmp_path / "cp")
         halt = asyncio.Event()
@@ -458,9 +447,15 @@ class TestPanelInsideIterateResumeBoundary:
 
         @verb(role=ROLE_A)
         async def body(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
-            """Increment the iteration counter, run the Panel with it, return the aggregate."""
-            ctx.state.data["i"] += 1
-            return await panel.run(ctx, ctx.state.data["i"])
+            """Run the Panel with the next iteration number; record it once the Panel finished.
+
+            Writing the counter after the Panel keeps a rerun of the step from
+            counting the interrupted pass twice.
+            """
+            iteration = ctx.state.data["i"] + 1
+            result = await panel.run(ctx, iteration)
+            ctx.state.data["i"] = iteration
+            return int(result)
 
         def build(with_halt: bool) -> Flow:
             # Voters must live on the top-level runtime flow — Panel dispatches
@@ -474,24 +469,16 @@ class TestPanelInsideIterateResumeBoundary:
             flow.iterate(body, max_iters=5)
             return flow
 
-        # First run: halt fires during iteration 2's Panel; iterate exits
-        # at the next between-iterations check.
-        await build(with_halt=True).run()
-
-        iter1 = [r for r in runs if r[0] == 1]
-        iter2 = [r for r in runs if r[0] == 2]
-        past_2 = [r for r in runs if r[0] >= 3]
-        assert sorted(iter1) == [(1, "a"), (1, "b"), (1, "c")]
-        # Iteration 2 completes fully despite halt-set from inside voter_a.
-        assert sorted(iter2) == [(2, "a"), (2, "b"), (2, "c")]
-        assert not past_2, f"iterations past 2 must not run: {past_2}"
+        # First run: voter_a sets the halt in pass 2; voters b and c had not
+        # started, so they stop before running and the run halts.
+        assert await build(with_halt=True).run() is None
+        assert sorted(r for r in runs if r[0] == 1) == [(1, "a"), (1, "b"), (1, "c")]
+        assert [r for r in runs if r[0] >= 2] == [(2, "a")]
 
         runs.clear()
 
-        # Resume: iterate continues at iteration 3 with a fresh Panel each pass.
-        await build(with_halt=False).run(resume="latest")
-
-        seen_iters = sorted({r[0] for r in runs})
-        assert seen_iters == [3, 4, 5], "iteration 2's Panel must not re-dispatch"
+        # Resume: pass 2's Panel runs only b and c; passes 3-5 run in full.
+        assert await build(with_halt=False).run(resume="latest") == 3
+        assert sorted(r for r in runs if r[0] == 2) == [(2, "b"), (2, "c")]
         for i in (3, 4, 5):
             assert sorted(r for r in runs if r[0] == i) == [(i, "a"), (i, "b"), (i, "c")]

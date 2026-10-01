@@ -130,25 +130,48 @@ class Panel:
         ``ctx.data`` would silently observe the flow's construction
         state instead.
 
-        Halt semantics — cooperative per verb. Setting ``ctx.halt`` does
-        not raise, so ``asyncio.gather`` awaits all siblings to completion;
-        each dispatched verb receives ``ctx.halt`` and decides on its own
-        whether to poll it. Verbs backed by saia observe halt at call entry
-        (fast abort before hitting the LLM) and mid-stream, so a halted
-        Panel of saia verbs exits in about the longest single in-flight
-        LLM call — not the sum across N. Verbs that don't poll halt run
-        to completion; that's an authoring responsibility, not framework
-        behavior.
+        Halt semantics — cooperative per verb, as for map items. Each verb
+        receives ``ctx.halt`` and decides on its own whether to poll it;
+        verbs backed by saia observe it at call entry and mid-stream (a
+        Loop's turn pauses), so a halted Panel of saia verbs stops in
+        about the longest single in-flight LLM call — not the sum across
+        N. Verbs that don't poll halt run to completion.
 
-        Resume semantics — the Panel's verbs are not in the run's
-        snapshots: the checkpoint boundary is the step whose verb runs
-        the Panel. A verb that returns the aggregate has completed, and
-        resume moves past it; a verb that stops because of the halt
-        should raise :class:`~llm_gent.flow.Interrupted`, and resume
-        runs it again with a fresh Panel — every inner verb runs again,
-        the ones that finished included. A Loop inside an inner verb
-        does not save its paused turn.
+        Inside a run (``ctx`` from a step of a running flow), the Panel is
+        in the run's snapshots: it runs as a map over its verbs at
+        ``<step>/panel/<k>``, the ``k``-th Panel the step starts, verb
+        ``i`` as map item ``i``. A verb's result is recorded when it
+        finishes — and must then be checkpointable, like a map item's: plain
+        JSON, a pydantic model, or an object with ``to_dict()`` and a
+        classmethod ``from_dict()``. A Loop in a verb keeps its paused turn,
+        and ``ctx.checkpoint()`` in a verb writes a commit. When the halt
+        stops a verb before it finishes, the Panel raises
+        :class:`~llm_gent.flow.Interrupted` once every verb has stopped, so
+        the calling step is interrupted; resume runs the step again, and
+        its Panel continues: finished verbs don't run again, a running one
+        continues where it was (a paused turn resumes mid-turn), and the
+        aggregate equals the uninterrupted run's. The first verb exception
+        propagates; siblings run on and their results are discarded.
+
+        Outside a run (``Flow.dispatch`` used standalone, or a hook
+        context) there is nothing to checkpoint: the verbs are dispatched
+        through ``ctx.flow`` and gathered.
+
+        Raises:
+            Interrupted: Inside a run, the halt stopped a verb before it
+                finished.
         """
+        env, node_id = ctx._env, ctx._node_id
+        if env is not None and node_id is not None:
+            from ._panel_map import run_panel
+
+            return await run_panel(env, node_id, self.verbs, self.aggregate, args, kwargs)
+        return await self._gather(ctx, args, kwargs)
+
+    async def _gather(
+        self, ctx: Context[Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        """Dispatch every verb through ``ctx.flow`` concurrently and aggregate (outside a run)."""
         results = await asyncio.gather(
             *[
                 ctx.flow.dispatch(

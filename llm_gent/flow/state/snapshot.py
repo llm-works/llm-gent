@@ -17,6 +17,8 @@ that tell repeated executions apart::
     n/<node>/pass, carry, until       cursor of a running .iterate
     n/<node>/arm                      arm a running .branch took
     n/<node>/t/<k>/turn               paused turn of the step's <k>-th Loop call
+    n/<node>/panel/<k>/items, done    cursor of the step's <k>-th Panel run (a map over
+                                      its verbs; verb <i> at .../panel/<k>/i/<i>)
     n/<node>/p/<pass>/n/<node>/...    positions inside iterate pass <pass>
     n/<node>/items, n/<node>/done     cursor of a running .map
     n/<node>/i/<index>/state          scope of map item <index>
@@ -122,6 +124,7 @@ class ScopeRegistry:
         self._saved: dict[ScopePath, Any] = {}
         self._saved_cursors: dict[tuple[ScopePath, str], Any] = {}
         self._turns: dict[ScopePath, int] = {}
+        self._panels: dict[ScopePath, int] = {}
 
     def begin(self, root: State[Any], saved: Snapshot | None = None) -> None:
         """Start a run whose root scope is ``root``; forget the previous run.
@@ -134,6 +137,7 @@ class ScopeRegistry:
         self._scopes.clear()
         self._cursors.clear()
         self._turns.clear()
+        self._panels.clear()
         self._saved = (
             {} if saved is None else {path_from_str(p): v for p, v in saved.scopes.items()}
         )
@@ -230,6 +234,17 @@ class ScopeRegistry:
         k = self._turns.get(step, 0)
         self._turns[step] = k + 1
         return (*step, "t", str(k))
+
+    def next_panel(self, step: ScopePath) -> ScopePath:
+        """Path of the next :class:`~llm_gent.flow.Panel` run inside the step at ``step``.
+
+        ``<step>/panel/<k>``, numbered in the order the Panels start, as
+        :meth:`next_turn` numbers Loop calls: a rerun of the step gives the
+        same Panel run the same path.
+        """
+        k = self._panels.get(step, 0)
+        self._panels[step] = k + 1
+        return (*step, "panel", str(k))
 
     def path_of(self, scope: State[Any]) -> ScopePath:
         """Path of the live scope ``scope`` (identity); ``()`` for the root or an unknown scope."""
