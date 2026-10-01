@@ -175,7 +175,9 @@ class TestCreateHaltAndCheckpointer:
 
         factory_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "a")
         create_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "b")
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), checkpointer=factory_store)
+        ff = FlowFactory(
+            make_test_logger(), saia_factory=StubFactory(), checkpoint_store=factory_store
+        )
         flow = ff.create(client_flow_id="ignored", checkpointer=(create_store, "flow-override"))
         assert flow._checkpoint_ctx is not None
         assert flow._checkpoint_ctx.store is create_store

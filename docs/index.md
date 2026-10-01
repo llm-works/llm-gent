@@ -279,7 +279,7 @@ starts from the tracker as given.
 
 A run has one repo: the checkpoint store and history name set once, on
 its top-level flow, with `with_checkpoint_store(store, client_flow_id)`
-(or `FlowFactory(checkpointer=store)` with `create(client_flow_id=...)`).
+(or `FlowFactory(checkpoint_store=store)` with `create(client_flow_id=...)`).
 Every commit the run writes holds the whole run and goes there, wherever
 in the flow tree it was taken — committing in a subdirectory commits the
 repo. A flow inside a run cannot set a store of its own; `run()` raises.
