@@ -39,6 +39,8 @@ Public surface:
 - :class:`History` — read API over one checkpointed history: head, last
   completed run, commit chain, per-commit state; :class:`HistoryCorrupt`
   when a referenced object is missing from the store
+- :func:`collect_unreachable` — delete the objects of a history no ref
+  reaches (left by ``resume=<name>`` or a process that died mid-commit)
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
 - :class:`Skipped` — sentinel returned for an item gated out by
   ``Flow.guard`` on a ``Flow.map`` node
@@ -64,6 +66,7 @@ from .checkpoint import CheckpointPolicy, CheckpointStore, ConcurrentWriteError,
 from .context import Context
 from .factory import FlowFactory, SAIAFactory
 from .flow import Flow
+from .gc import collect_unreachable
 from .history import History, HistoryCorrupt
 from .loop import Loop, LoopFactory
 from .nodes import UNSET, Failure, Interrupted, Skipped, Unset
@@ -98,6 +101,7 @@ __all__ = [
     "StateFactory",
     "TypeStateFactory",
     "Unset",
+    "collect_unreachable",
     "extractor",
     "grader",
     "planner",

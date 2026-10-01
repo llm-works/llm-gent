@@ -41,7 +41,11 @@ The store is a Protocol with four surfaces:
   (``ctx.checkpoint(name)``) is the tag ``tags/<name>``.
 
 - **History cleanup** — :meth:`gc_history` removes every object, ref
-  and the name mapping of one ``flow_id``. The framework calls it on a
+  and the name mapping of one ``flow_id``. :meth:`list_refs`,
+  :meth:`list_objects` and :meth:`delete_objects` let
+  :func:`~llm_gent.flow.collect_unreachable` remove only the objects no
+  ref reaches — commits left behind when ``resume=<name>`` moved
+  ``HEAD`` back, or written by a process that died before moving it. The framework calls it on a
   fully successful :meth:`Flow.run` when the store's retention policy is
   ``"gc_on_success"``; the default ``"retain"`` keeps successful
   histories on disk for audit, cross-run diff, and downstream
@@ -367,6 +371,18 @@ class CheckpointStore(Protocol):
         """
         ...
 
+    def list_objects(
+        self, flow_id: str
+    ) -> list[tuple[Kind, str]] | Awaitable[list[tuple[Kind, str]]]:
+        """Return the ``(kind, content_hash)`` of every object under ``flow_id``.
+
+        Empty for an unknown ``flow_id``. Used by
+        :func:`~llm_gent.flow.collect_unreachable`.
+
+        May be declared ``async def``.
+        """
+        ...
+
     # Refs
 
     def get_ref(self, flow_id: str, name: str) -> str | None | Awaitable[str | None]:
@@ -397,6 +413,13 @@ class CheckpointStore(Protocol):
         """
         ...
 
+    def list_refs(self, flow_id: str) -> dict[str, str] | Awaitable[dict[str, str]]:
+        """Return every ref under ``flow_id``: name → commit hash. Empty when there are none.
+
+        May be declared ``async def``.
+        """
+        ...
+
     # History cleanup
 
     def gc_history(self, flow_id: str) -> None | Awaitable[None]:
@@ -406,6 +429,17 @@ class CheckpointStore(Protocol):
         clean-exit path when :attr:`retention` is ``"gc_on_success"``;
         also callable directly by consumers who want to prune a
         history.
+
+        May be declared ``async def``.
+        """
+        ...
+
+    def delete_objects(self, flow_id: str, keys: list[tuple[Kind, str]]) -> None | Awaitable[None]:
+        """Delete the objects ``keys`` (``(kind, content_hash)``) under ``flow_id``.
+
+        Keys that do not exist are skipped. Used by
+        :func:`~llm_gent.flow.collect_unreachable` to remove objects no
+        ref reaches; refs and the name binding are untouched.
 
         May be declared ``async def``.
         """

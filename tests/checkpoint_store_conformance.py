@@ -180,6 +180,36 @@ class CheckpointStoreConformance:
         assert store.get_ref("history-b", "HEAD") == "hash-b"
         assert store.get_flow_id("campaign-b") == "history-b"
 
+    # --- listing and deleting objects ---
+
+    def test_list_objects_returns_every_key_of_the_history(self, store: Any) -> None:
+        store.put_object("history-1", "blob", "b", b"x")
+        store.put_object("history-1", "tree", "t", b"y")
+        store.put_object("history-1", "commit", "c", b"z")
+        store.put_object("history-2", "blob", "other", b"w")
+        assert sorted(store.list_objects("history-1")) == [
+            ("blob", "b"),
+            ("commit", "c"),
+            ("tree", "t"),
+        ]
+        assert store.list_objects("never-existed") == []
+
+    def test_delete_objects_removes_only_the_given_keys(self, store: Any) -> None:
+        store.put_object("history-1", "blob", "keep", b"x")
+        store.put_object("history-1", "blob", "drop", b"y")
+        store.put_object("history-1", "tree", "drop", b"z")
+        store.put_object("history-2", "blob", "drop", b"w")
+        store.delete_objects("history-1", [("blob", "drop"), ("tree", "drop"), ("commit", "gone")])
+        assert store.list_objects("history-1") == [("blob", "keep")]
+        assert store.get_object("history-2", "blob", "drop") == b"w"
+
+    def test_list_refs_returns_every_ref_of_the_history(self, store: Any) -> None:
+        store.set_ref("history-1", "HEAD", "commit-2", None)
+        store.set_ref("history-1", "tags/complete", "commit-1", None)
+        store.set_ref("history-2", "HEAD", "commit-x", None)
+        assert store.list_refs("history-1") == {"HEAD": "commit-2", "tags/complete": "commit-1"}
+        assert store.list_refs("never-existed") == {}
+
     # --- retention ---
 
     def test_default_retention_is_retain(self, store: Any) -> None:

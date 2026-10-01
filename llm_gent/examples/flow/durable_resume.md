@@ -125,7 +125,8 @@ shown here will not match a local run.
 
 Only `refs/` is mutable. Everything under `objects/` is immutable and named by the hash of its
 bytes; identical content is stored once, so a value that did not change between commits is not
-written again. If resume finds an object missing, it raises `HistoryCorrupt`.
+written again. If resume finds an object missing, it raises `HistoryCorrupt`. Objects no ref
+reaches any more are deleted only by an explicit `collect_unreachable(store, client_flow_id)`.
 
 ### Refs
 

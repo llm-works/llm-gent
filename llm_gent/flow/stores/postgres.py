@@ -33,7 +33,7 @@ from typing import Any, cast
 
 from appinfra.db.pg import PG
 from appinfra.log import Logger
-from sqlalchemy import DateTime, LargeBinary, String, delete, select, update
+from sqlalchemy import DateTime, LargeBinary, String, delete, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
@@ -46,6 +46,9 @@ from ..checkpoint import Kind, Retention
 
 _FLOW_ID_LEN = 36
 """Length of a ``flow_id`` column — a canonical UUID string."""
+
+_DELETE_BATCH = 500
+"""Object keys per DELETE statement in :meth:`PgCheckpointStore.delete_objects`."""
 
 
 class FlowName(Base):
@@ -205,6 +208,25 @@ class PgCheckpointStore:
         with self._pg.session() as session:
             return session.execute(stmt).first() is not None
 
+    def list_objects(self, flow_id: str) -> list[tuple[Kind, str]]:
+        """Return the ``(kind, content_hash)`` of every object row under ``flow_id``."""
+        stmt = select(FlowObject.kind, FlowObject.content_hash).where(FlowObject.flow_id == flow_id)
+        with self._pg.session() as session:
+            rows = session.execute(stmt).all()
+        return [(cast(Kind, kind), str(content_hash)) for kind, content_hash in rows]
+
+    def delete_objects(self, flow_id: str, keys: list[tuple[Kind, str]]) -> None:
+        """Delete the object rows ``keys``, in batches; missing rows are skipped."""
+        with self._pg.session() as session:
+            for start in range(0, len(keys), _DELETE_BATCH):
+                batch = keys[start : start + _DELETE_BATCH]
+                session.execute(
+                    delete(FlowObject).where(
+                        FlowObject.flow_id == flow_id,
+                        tuple_(FlowObject.kind, FlowObject.content_hash).in_(batch),
+                    )
+                )
+
     # ------------------------------------------------------------------
     # Refs
     # ------------------------------------------------------------------
@@ -243,6 +265,13 @@ class PgCheckpointStore:
         with self._pg.session() as session:
             result = cast(CursorResult[Any], session.execute(stmt))
         return bool(result.rowcount == 1)
+
+    def list_refs(self, flow_id: str) -> dict[str, str]:
+        """Return every ref under ``flow_id``: name → commit hash."""
+        stmt = select(FlowRef.name, FlowRef.commit_hash).where(FlowRef.flow_id == flow_id)
+        with self._pg.session() as session:
+            rows = session.execute(stmt).all()
+        return {str(name): str(commit_hash) for name, commit_hash in rows}
 
     # ------------------------------------------------------------------
     # History cleanup
