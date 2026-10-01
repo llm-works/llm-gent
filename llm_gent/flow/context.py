@@ -250,8 +250,8 @@ class Context(Generic[T]):
         lg: Logger = self.flow._lg
         return lg
 
-    async def checkpoint(self, name: str | None = None) -> None:
-        """Explicit save trigger — writes a snapshot of the whole run as a commit.
+    async def checkpoint(self, name: str | None = None) -> str | None:
+        """Explicit save trigger — writes a snapshot of the whole run as a commit; returns its hash.
 
         Fires regardless of the flow's :class:`CheckpointPolicy`; the
         policy governs implicit framework-driven saves only. The commit
@@ -262,27 +262,32 @@ class Context(Generic[T]):
         commit's metadata records the current node, iteration ``0`` and
         ``outcome="ok"``.
 
-        With ``name``, the checkpoint is also tagged ``tags/<name>``:
-        ``run(resume=name)`` later checks it out. Taking it again (at
-        this step or elsewhere) moves the tag to the new commit.
+        Returns the commit's hash: ``run(resume=<hash>)`` checks it out
+        later, also after a reset took it off the history's line. With
+        ``name``, the checkpoint is also tagged ``tags/<name>``:
+        ``run(resume=name)`` checks it out. Taking it again (at this step
+        or elsewhere) moves the tag to the new commit.
 
-        No-op when:
+        No-op returning ``None`` when:
         - No checkpointer is wired on the enclosing flow.
         - The ctx has no live executor env (e.g. built by
           :meth:`Flow.dispatch` used standalone).
 
         Raises:
-            ValueError: ``name`` cannot name a checkpoint (empty, or one of
-                ``"off"``, ``"latest"``, ``"complete"``) — also without a
-                checkpointer.
+            ValueError: ``name`` cannot name a checkpoint (empty, one of
+                ``"off"``, ``"latest"``, ``"complete"``, or a commit hash's
+                form) — also without a checkpointer.
         """
         tag = None if name is None else checkpoint_tag(name)
         env = self._env
         node_id = self._node_id
         if env is None or node_id is None or env.checkpoint_ctx is None:
-            return
+            return None
         from ._executor import _save_scope_commit
 
         commit = await _save_scope_commit(env, 0, node_id, self.state, "ok")
-        if tag is not None and commit is not None:
+        if commit is None:
+            return None
+        if tag is not None:
             await env.checkpoint_ctx.put_tag(tag, commit.content_hash)
+        return commit.content_hash

@@ -7,8 +7,9 @@ Read side — :class:`Resume` is constructed per resuming ``run()`` with the
 flow being resumed, and reads the history through the public
 :class:`~llm_gent.flow.history.History` API. :meth:`Resume.checkout`
 (``resume="latest"``) checks out the snapshot of the newest commit with
-usable state, :meth:`Resume.checkout_named` (``resume=<name>``) the
-snapshot of a named checkpoint: its root scope hydrates the top-level
+usable state, :meth:`Resume.checkout_at` (``resume=<hash>`` or
+``resume=<name>``) the snapshot of one commit or named checkpoint: its
+root scope hydrates the top-level
 :class:`State`; each
 child scope goes back to the block that owns it, and each cursor to the
 chain, iterate, branch or Loop call that registered it, when the run
@@ -25,7 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import COMPLETE_TAG, HEAD_REF
+from .checkpoint import COMPLETE_TAG, HEAD_REF, is_commit_hash
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
@@ -82,26 +83,31 @@ class Resume:
             )
         return fallback, None
 
-    async def checkout_named(self, name: str) -> tuple[State[Any], Snapshot]:
-        """Check out the checkpoint ``name`` and reset ``HEAD`` to it.
+    async def checkout_at(self, target: str) -> tuple[State[Any], Snapshot]:
+        """Check out the commit ``target`` names and reset ``HEAD`` to it.
 
+        ``target`` is a commit hash of the history or a checkpoint name.
         The run continues from that commit's snapshot as ``latest`` does
         from the newest one. ``HEAD`` moves back to the commit
         (compare-and-set), so the run's commits are parented on it: the
-        commits written after the checkpoint leave the history's line,
-        and ``latest`` no longer sees them.
+        commits written after it leave the history's line, and ``latest``
+        no longer sees them. They stay resumable by hash until
+        :func:`~llm_gent.flow.collect_unreachable` deletes them.
 
         Raises:
-            ValueError: The history has no checkpoint named ``name``, or
-                ``name`` cannot name one.
+            ValueError: The history holds no commit ``target`` (a hash) or
+                no checkpoint named ``target`` (the error lists the names it
+                has), ``target`` cannot name a checkpoint, or the commit
+                holds no state.
             ConcurrentWriteError: ``HEAD`` moved under the reset.
         """
-        commit = await self._history.checkpoint(name)
-        if commit is None:
-            raise ValueError(
-                f"history {self._history.client_flow_id!r} has no checkpoint named {name!r}"
-            )
+        commit = await self._resolve(target)
         snapshot = await self._history.snapshot(commit)
+        if not snapshot.has_state:
+            raise ValueError(
+                f"history {self._history.client_flow_id!r}: commit {commit.content_hash} "
+                "holds no state to resume from"
+            )
         root = self._root_state(snapshot.root)
         ctx = self.flow._checkpoint_ctx
         assert ctx is not None
@@ -109,6 +115,23 @@ class Resume:
         if head != commit.content_hash:
             await ctx.move_ref(HEAD_REF, commit.content_hash, head)
         return root, snapshot
+
+    async def _resolve(self, target: str) -> Commit:
+        """The commit ``target`` names: a commit hash of this history, else a checkpoint name."""
+        history = self._history
+        if is_commit_hash(target):
+            commit = await history.commit(target)
+            if commit is None:
+                raise ValueError(f"history {history.client_flow_id!r} has no commit {target}")
+            return commit
+        commit = await history.checkpoint(target)
+        if commit is None:
+            names = await history.checkpoint_names()
+            raise ValueError(
+                f"history {history.client_flow_id!r} has no checkpoint named {target!r}; "
+                f"checkpoints: {names}"
+            )
+        return commit
 
     def _warn_skipped(self, skipped: list[str], restored: Commit) -> None:
         """Log the stateless commits the checkout walked past, and where it landed."""

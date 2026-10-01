@@ -44,8 +44,9 @@ The store is a Protocol with four surfaces:
   and the name mapping of one ``flow_id``. :meth:`list_refs`,
   :meth:`list_objects` and :meth:`delete_objects` let
   :func:`~llm_gent.flow.collect_unreachable` remove only the objects no
-  ref reaches — commits left behind when ``resume=<name>`` moved
-  ``HEAD`` back, or written by a process that died before moving it. The framework calls it on a
+  ref reaches — commits off the history's line after ``resume=<name>`` or
+  ``resume=<hash>`` moved ``HEAD`` back, or written by a process that died
+  before moving it. The framework calls :meth:`gc_history` on a
   fully successful :meth:`Flow.run` when the store's retention policy is
   ``"gc_on_success"``; the default ``"retain"`` keeps successful
   histories on disk for audit, cross-run diff, and downstream
@@ -78,6 +79,7 @@ regardless of retention so a later resuming run can pick up.
 from __future__ import annotations
 
 import inspect
+import re
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -117,7 +119,11 @@ class ConcurrentWriteError(RuntimeError):
         self.expected = expected
 
 
-COMPLETE_TAG = "tags/complete"
+TAG_PREFIX = "tags/"
+"""Prefix of every tag ref: :data:`COMPLETE_TAG` and the named checkpoints."""
+
+
+COMPLETE_TAG = f"{TAG_PREFIX}complete"
 """Ref the framework moves to a history's final-state commit on clean exit.
 
 It always points at the final state of the most recent run that finished,
@@ -130,12 +136,22 @@ RESERVED_CHECKPOINT_NAMES = frozenset({"off", "latest", "complete"})
 framework's own ``complete`` tag."""
 
 
+_COMMIT_HASH = re.compile(r"[0-9a-f]{64}")
+"""Form of a commit hash: the hex of a 32-byte blake2b digest (:mod:`~llm_gent.flow.state.cas`)."""
+
+
+def is_commit_hash(value: object) -> bool:
+    """True when ``value`` has the form of a commit hash: 64 lowercase hex characters."""
+    return isinstance(value, str) and _COMMIT_HASH.fullmatch(value) is not None
+
+
 def checkpoint_tag(name: str) -> str:
     """Ref of the named checkpoint ``name``: ``tags/<name>``.
 
     Raises:
-        ValueError: ``name`` is not a non-empty ``str``, or is one of
-            :data:`RESERVED_CHECKPOINT_NAMES`.
+        ValueError: ``name`` is not a non-empty ``str``, is one of
+            :data:`RESERVED_CHECKPOINT_NAMES`, or has the form of a commit
+            hash (``run(resume=<hash>)`` takes those as commits).
     """
     if not isinstance(name, str) or not name:
         raise ValueError(f"a checkpoint name must be a non-empty str; got {name!r}")
@@ -143,7 +159,9 @@ def checkpoint_tag(name: str) -> str:
         raise ValueError(
             f"{name!r} cannot name a checkpoint; reserved: {sorted(RESERVED_CHECKPOINT_NAMES)}"
         )
-    return f"tags/{name}"
+    if is_commit_hash(name):
+        raise ValueError(f"{name!r} cannot name a checkpoint; it has the form of a commit hash")
+    return f"{TAG_PREFIX}{name}"
 
 
 END_NODE_PATH = "$end"
@@ -178,9 +196,13 @@ ResumeMode = Literal["off", "latest"]
   Starts from ``state=`` when the history is empty; raises
   :class:`~llm_gent.flow.history.HistoryCorrupt` on a corrupt history.
 
-Any other string names a checkpoint taken with ``ctx.checkpoint(name)``
-(see :func:`checkpoint_tag`): the run checks it out the same way and
-moves ``HEAD`` back to it, so its commits continue from there.
+A commit hash (:func:`is_commit_hash`; ``ctx.checkpoint()`` returns the
+one it wrote) checks out that commit of the history, and any other string
+names a checkpoint taken with ``ctx.checkpoint(name)`` (see
+:func:`checkpoint_tag`). Either way the run checks the commit out the same
+way and moves ``HEAD`` back to it, so its commits continue from there. The
+commits written after it leave the history's line but stay resumable by
+hash until :func:`~llm_gent.flow.collect_unreachable` deletes them.
 """
 
 

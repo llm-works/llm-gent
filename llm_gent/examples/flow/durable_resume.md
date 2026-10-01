@@ -139,7 +139,8 @@ the ref still points where the writer expects, so a second writer on the same hi
 - `tags/complete` — the final state of the last run that finished. It stays put while later runs
   append past it (`History.last_complete()`).
 - `tags/<name>` — a named checkpoint: `ctx.checkpoint("name")` tags the commit it writes, and
-  `run(resume="name")` checks it out (see [Named checkpoints](#named-checkpoints)).
+  `run(resume="name")` checks it out; `run(resume=<commit hash>)` checks out any commit (see
+  [Named checkpoints](#named-checkpoints)).
 
 The script reads the history through `History(store, CLIENT_FLOW_ID)` rather than the store:
 `head()` to decide whether the next run resumes, `snapshot(head)` for the halted state.
@@ -276,8 +277,22 @@ again with the input it had. It also moves `HEAD` back to that commit: the run's
 from there, and the commits written after the checkpoint leave the history's line — `latest` no
 longer sees them.
 
-`"off"`, `"latest"` and `"complete"` cannot name a checkpoint. `run(resume=name)` for a name the
-history does not have raises `ValueError`.
+Every commit can be checked out the same way by its hash. `ctx.checkpoint()` returns the hash of
+the commit it wrote, named or not, and `History.head()` gives the newest one:
+
+```python
+halted = (await History(store, "history-42").head()).content_hash
+await flow.run(resume="before-review")  # HEAD moves back; the halted commit leaves the line
+await flow.run(resume=halted)  # HEAD moves to the halted commit; the run continues there
+```
+
+Moving `HEAD` deletes nothing: a commit off the line stays resumable by hash, and a named one by
+its name, until `collect_unreachable` deletes what no ref reaches.
+
+`"off"`, `"latest"` and `"complete"` cannot name a checkpoint, nor can a string of 64 lowercase hex
+characters, the form of a commit hash. `run(resume=...)` with a hash or a name the history does
+not have raises `ValueError`; for a name, the error lists the checkpoint names the history has
+(`History.checkpoint_names()`).
 
 ## Two contracts the example depends on
 

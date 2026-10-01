@@ -5,10 +5,11 @@
 
 A history's objects are reachable from its refs — ``HEAD`` and every tag —
 through commits, their parents, each commit's snapshot tree, its subtrees
-and blobs. Two things leave objects behind that nothing reaches:
-``run(resume=<name>)`` moving ``HEAD`` back to a named checkpoint (the
-commits written after it, and what only they hold), and a process that
-died after writing a commit's objects but before moving ``HEAD`` to it.
+and blobs. Two things leave objects that nothing reaches:
+``run(resume=<name>)`` or ``run(resume=<hash>)`` moving ``HEAD`` back to an
+earlier commit (the commits written after it, and what only they hold —
+resumable by hash until collected), and a process that died after writing
+a commit's objects but before moving ``HEAD`` to it.
 :func:`collect_unreachable` deletes them; the framework never does on its
 own.
 """

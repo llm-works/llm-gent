@@ -76,7 +76,13 @@ from ._validation import (
     _require_state_for_merge,
     _validate_target,
 )
-from .checkpoint import CheckpointPolicy, CheckpointStore, ResumeMode, checkpoint_tag
+from .checkpoint import (
+    CheckpointPolicy,
+    CheckpointStore,
+    ResumeMode,
+    checkpoint_tag,
+    is_commit_hash,
+)
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
@@ -932,11 +938,14 @@ class Flow:
                 via ``state_factory`` when bound, else used as plain dicts.
                 On an empty history the run proceeds with ``state`` as
                 given, appending to the same history; a corrupt history
-                raises :class:`HistoryCorrupt`. Any other string names a
-                checkpoint taken with ``ctx.checkpoint(name)``: the run
+                raises :class:`HistoryCorrupt`. A commit hash (as
+                ``ctx.checkpoint()`` returns) or a checkpoint name (as
+                ``ctx.checkpoint(name)`` took) selects one commit: the run
                 checks it out the same way and moves ``HEAD`` back to it,
-                so its commits continue from there (the commits after the
-                checkpoint leave the history's line). Resuming requires
+                so its commits continue from there. The commits after it
+                leave the history's line and stay resumable by hash until
+                :func:`~llm_gent.flow.collect_unreachable` deletes them.
+                Resuming requires
                 :meth:`with_checkpointer`. Bound parameter: not forwarded
                 to the first node.
             **kwargs: Keyword inputs to the first node.
@@ -961,9 +970,10 @@ class Flow:
                 start — the error surfaces at the first ``ctx.saia``
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
-            ValueError: ``resume`` is neither a :data:`ResumeMode` value
-                nor a valid checkpoint name, or names a checkpoint the
-                history does not have.
+            ValueError: ``resume`` is not a :data:`ResumeMode` value, a
+                commit hash or a valid checkpoint name; names a commit or
+                checkpoint the history does not have; or names a commit
+                without state.
         """
         self._check_run_args(resume)
         self._begin_checkpoint_run()
@@ -993,13 +1003,13 @@ class Flow:
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        if resume not in get_args(ResumeMode):
+        if resume not in get_args(ResumeMode) and not is_commit_hash(resume):
             try:
                 checkpoint_tag(resume)
             except ValueError as e:
                 raise ValueError(
-                    f"resume must be one of {get_args(ResumeMode)} or a checkpoint name; "
-                    f"got {resume!r} ({e})"
+                    f"resume must be one of {get_args(ResumeMode)}, a commit hash or a "
+                    f"checkpoint name; got {resume!r} ({e})"
                 ) from None
         if resume != "off" and self._checkpoint_ctx is None:
             label = self._name or "<anonymous>"
@@ -1016,7 +1026,7 @@ class Flow:
             return fallback, None
         if resume == "latest":
             return await Resume(self).checkout(fallback)
-        return await Resume(self).checkout_named(resume)
+        return await Resume(self).checkout_at(resume)
 
     async def _run_as_subflow(
         self,

@@ -303,8 +303,13 @@ running then run again.
   took, the same way, and move `HEAD` back to it: the run's commits
   continue from there, and the commits written after the checkpoint leave
   the history's line (`"latest"` no longer sees them). `"off"`,
-  `"latest"` and `"complete"` cannot name a checkpoint; an unknown name
-  raises `ValueError`.
+  `"latest"` and `"complete"` cannot name a checkpoint, nor can a string
+  of a commit hash's form; an unknown name raises `ValueError` listing
+  the names the history has.
+- `"<commit hash>"` — the same for any commit of the history.
+  `ctx.checkpoint()` returns the hash of the commit it wrote, named or
+  not. A commit off the history's line after a reset stays resumable by
+  hash until `collect_unreachable` deletes it.
 
 A corrupt history (a commit, tree or blob missing from the store) raises
 `HistoryCorrupt` rather than starting over.
@@ -329,6 +334,8 @@ if await history.is_complete():  # last run finished
     state = await history.root_state(head, TypeStateFactory(MyState))
 done = await history.last_complete()  # final state of the last finished run
 mark = await history.checkpoint("before-review")  # a named checkpoint, or None
+names = await history.checkpoint_names()  # every checkpoint name, sorted
+commit = await history.commit(head.content_hash)  # any commit by hash, or None
 snapshot = await history.snapshot(head)  # root scope, child scopes, cursors
 async for commit in history.commits():  # newest first, via parent links
     print(commit.meta.node_path, commit.meta.outcome, commit.meta.timestamp_iso)
@@ -347,9 +354,9 @@ snapshot tree with its cursors.
 ### Cleaning up a history
 
 Objects stay in the store when nothing reaches them any more: the commits
-written after a named checkpoint once `resume=<name>` moves `HEAD` back to
-it, and the objects of a commit whose process died before moving `HEAD`
-to it. The framework never deletes them on its own;
+written after a checkpoint once `resume=<name>` or `resume=<hash>` moves
+`HEAD` back to it (resumable by hash until collected), and the objects of
+a commit whose process died before moving `HEAD` to it. The framework never deletes them on its own;
 `collect_unreachable` does, keeping every ref and everything a ref
 reaches:
 
