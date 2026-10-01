@@ -27,6 +27,7 @@ from .checkpoint import (
     COMPLETE_TAG,
     END_NODE_PATH,
     HEAD_REF,
+    TAG_PREFIX,
     CheckpointStore,
     Kind,
     checkpoint_tag,
@@ -113,6 +114,33 @@ class History:
             return None
         commit_hash = await maybe_await(self.store.get_ref(flow_id, tag))
         return None if commit_hash is None else await self._commit(flow_id, commit_hash)
+
+    async def checkpoint_names(self) -> list[str]:
+        """Names of the history's named checkpoints, sorted; empty when there is no history."""
+        flow_id = await self.flow_id()
+        if flow_id is None:
+            return []
+        refs: dict[str, str] = await maybe_await(self.store.list_refs(flow_id))
+        return sorted(
+            ref.removeprefix(TAG_PREFIX)
+            for ref in refs
+            if ref.startswith(TAG_PREFIX) and ref != COMPLETE_TAG
+        )
+
+    async def commit(self, commit_hash: str) -> Commit | None:
+        """The history's commit ``commit_hash``, or ``None`` when the history holds no such commit.
+
+        Any commit the history holds, on its line or off it — e.g. one
+        written after a checkpoint that ``resume=<name>`` moved ``HEAD``
+        back to, until :func:`~llm_gent.flow.collect_unreachable` deletes it.
+        """
+        flow_id = await self.flow_id()
+        if flow_id is None:
+            return None
+        payload: bytes | None = await maybe_await(
+            self.store.get_object(flow_id, "commit", commit_hash)
+        )
+        return None if payload is None else Commit.from_bytes(payload)
 
     async def commits(self) -> AsyncIterator[Commit]:
         """Walk the chain from the head through parent links, newest first.
