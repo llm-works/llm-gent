@@ -481,7 +481,7 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
         lg,
         saia_factory=_SAIAFactory(lg, backend, halt, arm_halt=not resuming),
         state_factory=TypeStateFactory(Digest),
-        checkpointer=store,
+        checkpoint_store=store,
     )
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")

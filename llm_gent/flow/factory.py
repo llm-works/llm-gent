@@ -99,7 +99,7 @@ class FlowFactory:
         halt: asyncio.Event | None = None,
         budget: Tracker | None = None,
         state_factory: StateFactory[Any] | None = None,
-        checkpointer: CheckpointStore | None = None,
+        checkpoint_store: CheckpointStore | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -131,7 +131,7 @@ class FlowFactory:
                 :class:`TypeStateFactory`; implement :class:`StateFactory`
                 directly for state that binds runtime handles. ``None``
                 (default) treats the payload as a plain dict.
-            checkpointer: Optional :class:`CheckpointStore` captured for
+            checkpoint_store: Optional :class:`CheckpointStore` captured for
                 subsequent :meth:`create` calls. Only bound to a built
                 :class:`Flow` (:meth:`Flow.with_checkpoint_store`) when
                 :meth:`create` is passed a ``client_flow_id=`` — the id
@@ -146,7 +146,7 @@ class FlowFactory:
         self._halt = halt
         self._budget = budget
         self._state_factory = state_factory
-        self._checkpointer = checkpointer
+        self._checkpoint_store = checkpoint_store
 
     def create(
         self,
@@ -185,7 +185,7 @@ class FlowFactory:
                 while keeping one shared factory.
             checkpointer: Per-Flow ``(store, client_flow_id)`` pair —
                 atomically binds both via :meth:`Flow.with_checkpoint_store`.
-                Supersedes the factory's captured ``checkpointer`` and
+                Supersedes the factory's captured ``checkpoint_store`` and
                 the ``client_flow_id`` argument above; use when the
                 store differs from the factory's default or when a
                 shared factory hands each flow its own history id.
@@ -211,15 +211,15 @@ class FlowFactory:
         if checkpointer is not None:
             store, flow_id = checkpointer
             flow.with_checkpoint_store(store, flow_id)
-        elif self._checkpointer is not None and client_flow_id is not None:
-            flow.with_checkpoint_store(self._checkpointer, client_flow_id)
+        elif self._checkpoint_store is not None and client_flow_id is not None:
+            flow.with_checkpoint_store(self._checkpoint_store, client_flow_id)
         return flow
 
     def with_saia_factory(self, saia_factory: SAIAFactory) -> FlowFactory:
         """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
 
         Every other captured slot (``lg``, ``state``, ``traits``, ``halt``,
-        ``budget``, ``state_factory``, ``checkpointer``) carries over.
+        ``budget``, ``state_factory``, ``checkpoint_store``) carries over.
         Useful for subsystems that share the app's logger but need a
         different saia builder (e.g. a plugin with its own model wiring).
         """
@@ -231,7 +231,7 @@ class FlowFactory:
             halt=self._halt,
             budget=self._budget,
             state_factory=self._state_factory,
-            checkpointer=self._checkpointer,
+            checkpoint_store=self._checkpoint_store,
         )
 
     def with_traits(self, traits: TraitRegistry | None) -> FlowFactory:
@@ -248,7 +248,7 @@ class FlowFactory:
             halt=self._halt,
             budget=self._budget,
             state_factory=self._state_factory,
-            checkpointer=self._checkpointer,
+            checkpoint_store=self._checkpoint_store,
         )
 
     def with_halt(self, event: asyncio.Event) -> FlowFactory:
@@ -266,7 +266,7 @@ class FlowFactory:
             halt=event,
             budget=self._budget,
             state_factory=self._state_factory,
-            checkpointer=self._checkpointer,
+            checkpoint_store=self._checkpoint_store,
         )
 
     def with_budget(self, tracker: Tracker) -> FlowFactory:
@@ -284,7 +284,7 @@ class FlowFactory:
             halt=self._halt,
             budget=tracker,
             state_factory=self._state_factory,
-            checkpointer=self._checkpointer,
+            checkpoint_store=self._checkpoint_store,
         )
 
     def with_checkpoint_store(self, store: CheckpointStore) -> FlowFactory:
@@ -304,7 +304,7 @@ class FlowFactory:
             halt=self._halt,
             budget=self._budget,
             state_factory=self._state_factory,
-            checkpointer=store,
+            checkpoint_store=store,
         )
 
     def with_state_factory(self, state_factory: StateFactory[Any] | None) -> FlowFactory:
@@ -322,5 +322,5 @@ class FlowFactory:
             halt=self._halt,
             budget=self._budget,
             state_factory=state_factory,
-            checkpointer=self._checkpointer,
+            checkpoint_store=self._checkpoint_store,
         )
