@@ -58,7 +58,17 @@ from typing import Any, Literal
 
 import pytest
 
-from llm_gent.flow import Context, Flow, FlowFactory, History, Interrupted, Loop, Role, verb
+from llm_gent.flow import (
+    Context,
+    Flow,
+    FlowFactory,
+    History,
+    Interrupted,
+    Loop,
+    Panel,
+    Role,
+    verb,
+)
 from llm_gent.flow.checkpoint import CheckpointStore
 from llm_gent.flow.stores import InMemoryCheckpointStore, JsonFileCheckpointStore
 
@@ -158,7 +168,18 @@ class Scope:
     body: Node
 
 
-Node = Leaf | Seq | Iter | Fan | Branch | Scope
+@dataclass(frozen=True)
+class Pan:
+    """A step whose verb runs a :class:`Panel` of its member leaves, each on the step's input, summed.
+
+    The members run concurrently, in the run's snapshots as a map at
+    ``<step>/panel/0``.
+    """
+
+    members: tuple[Leaf, ...]
+
+
+Node = Leaf | Seq | Iter | Fan | Branch | Scope | Pan
 
 _L = Leaf("", 0)
 _T = Turn("", 0)
@@ -178,7 +199,15 @@ def _label(node: Node, counter: list[int]) -> Node:
         return Fan(_label(node.body, counter), node.width, node.mode)
     if isinstance(node, Branch):
         return Branch(_label(node.then, counter), _label(node.else_, counter))
+    if isinstance(node, Pan):
+        return Pan(tuple(type(m)(*_leaf_label(counter)) for m in node.members))
     return Scope(_label(node.body, counter))
+
+
+def _leaf_label(counter: list[int]) -> tuple[str, int]:
+    """The next leaf's ``(name, c)``."""
+    counter[0] += 1
+    return f"l{counter[0]}", counter[0]
 
 
 _INNER: dict[str, Node] = {
@@ -220,6 +249,12 @@ _INNER: dict[str, Node] = {
     "bare": _B,
     "iter(bare)": Iter(_B, 2),
     "fan(bare)": Fan(_B, 2),
+    "panel": Pan((_L, _L)),
+    "panel(turn)": Pan((_T, _L)),
+    "panel(bare)": Pan((_B, _L)),
+    "iter(panel)": Iter(Pan((_L, _L)), 2),
+    "fan(panel)": Fan(Pan((_L, _T)), 2),
+    "sub(panel,panel)": Seq((Pan((_L, _L)), Pan((_T, _L)))),
 }
 
 SHAPES: dict[str, Seq] = {}
@@ -238,7 +273,14 @@ def _has(node: Node, kind: type, mode: FanMode | None = None) -> bool:
         return _has(node.then, kind, mode) or _has(node.else_, kind, mode)
     if isinstance(node, Iter | Fan | Scope):
         return _has(node.body, kind, mode)
+    if isinstance(node, Pan):
+        return any(_has(m, kind, mode) for m in node.members)
     return False
+
+
+def _ordered(shape: Node, parallel: bool) -> bool:
+    """True when leaves run in the model's order: no parallel map and no Panel (members run at once)."""
+    return not parallel and not _has(shape, Pan)
 
 
 def _has_scope(node: Node) -> bool:
@@ -273,6 +315,8 @@ def _model_node(node: Node, x: int, out: dict[str, int], merges: list[str]) -> i
         return _model_fan(node, x, out, merges)
     if isinstance(node, Branch):
         return _model_node(node.then if x % 2 == 0 else node.else_, x, out, merges)
+    if isinstance(node, Pan):
+        return sum(_model_node(m, x, out, merges) for m in node.members)
     return _model_node(node.body, x, out, merges)
 
 
@@ -514,8 +558,24 @@ def _turn_verb(leaf: Turn, probe: Probe) -> Any:
     return verb(body)
 
 
+def _panel_verb(node: Pan, probe: Probe) -> Any:
+    """Return the verb for a :class:`Pan` step: a Panel of its members' verbs, summed."""
+    members = [
+        _turn_verb(m, probe) if isinstance(m, Turn) else _leaf_verb(m, probe) for m in node.members
+    ]
+    panel = Panel(members, aggregate=sum)
+
+    async def body(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+        return await panel.run(ctx, x)
+
+    body.__name__ = body.__qualname__ = "panel_" + "_".join(m.name for m in node.members)
+    return verb(body)
+
+
 def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     """Append ``node`` to ``flow`` as one chain step."""
+    if isinstance(node, Pan):
+        return flow.call(_panel_verb(node, probe))
     if isinstance(node, Turn):
         return flow.call(_turn_verb(node, probe))
     if isinstance(node, Leaf):
@@ -725,7 +785,7 @@ async def test_uninterrupted_run_matches_model(shape_name: str, parallel: bool) 
 
     assert await _flow(shape, probe, store, parallel=parallel).run(RUN_INPUT) == expected_result
     assert sorted(probe.executed) == sorted(baseline)
-    if not parallel:
+    if _ordered(shape, parallel):
         assert probe.executed == list(baseline)
     await _check_finished(History(store, FLOW_NAME), baseline, merges)
 
@@ -867,7 +927,8 @@ async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path:
     await _check_finished(history, baseline, merges)
     _check_rerun(resumed, point)
     missing = [k for k in baseline if k not in point.done]
-    assert [k for k in resumed.executed if k not in point.done] == missing or case.parallel
+    in_order = [k for k in resumed.executed if k not in point.done] == missing
+    assert in_order or not _ordered(shape, case.parallel)
     assert set(resumed.executed) - set(point.done) == set(missing)
 
 
@@ -912,4 +973,6 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
         "a completed leaf before the named checkpoint ran again"
     )
     missing = [k for k in baseline if k not in captured]
-    assert [k for k in resumed.executed if k not in captured] == missing
+    in_order = [k for k in resumed.executed if k not in captured] == missing
+    assert in_order or not _ordered(shape, False)
+    assert set(resumed.executed) - set(captured) == set(missing)

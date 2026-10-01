@@ -75,11 +75,16 @@ class MapRunner:
     where it was, and the rest run.
     """
 
-    def __init__(self, mp: _Map, env: _RunEnv, node_id: str) -> None:
+    def __init__(self, mp: _Map, env: _RunEnv, node_id: str, path: ScopePath | None = None) -> None:
+        """Run ``mp`` as the step ``node_id`` of ``env``'s flow, at ``path`` (default: the step's).
+
+        A map that is not a step of its own (a :class:`~llm_gent.flow.Panel`
+        inside a verb) passes the path it runs at.
+        """
         self.mp = mp
         self.env = env
         self.node_id = node_id
-        self.path: ScopePath = env.owner_path(node_id)
+        self.path: ScopePath = env.owner_path(node_id) if path is None else path
         # The cursor. Kept here, not in run's locals, so a checkpoint reads it.
         self.items: list[Any] = []
         self.done: dict[int, _Done] = {}
@@ -172,7 +177,7 @@ class MapRunner:
         )
 
         async def _gated(index: int, item: Any) -> Any:
-            runner = MapItemRunner(self, item, index, merge_lock)
+            runner = self._item_runner(item, index, merge_lock)
             done = self.done.get(index)
             if done is not None:
                 return done.result if done.merged else await runner.merge_saved(done.result)
@@ -189,6 +194,10 @@ class MapRunner:
             if isinstance(r, BaseException):
                 raise r
         return gathered
+
+    def _item_runner(self, item: Any, index: int, merge_lock: asyncio.Lock) -> MapItemRunner:
+        """The runner for item ``index``; a subclass runs a different body per item."""
+        return MapItemRunner(self, item, index, merge_lock)
 
     async def _aggregate(self, results: list[Any]) -> Any:
         """Apply ``mp.aggregate`` (if attached); await when it returns a coroutine."""

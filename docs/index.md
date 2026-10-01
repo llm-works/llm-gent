@@ -225,10 +225,15 @@ guarded by the verb itself (idempotency keys, "did I already do this"
 checks against state or an external record), or split into their own
 step so a rerun of a later step does not repeat them.
 
+A `Panel` run from a step is a map over its verbs, at
+`<step>/panel/<k>` (the step's `k`-th Panel): a halted Panel keeps its
+finished verbs and their results, and resume continues the rest — a
+paused Loop turn in a verb resumes mid-turn. Its verbs' results follow
+the map items' rule above. Like everything in an interrupted step, a
+Panel that finished before the step stopped runs again with it.
+
 Current limits:
 
-- A `Panel`'s verbs are not in the snapshot: a halted Panel runs again
-  in full, and a Loop inside a Panel verb does not save its paused turn.
 - Positions are recorded by node id. A deploy that inserts steps keeps
   them valid; resuming into a flow that no longer has the saved step
   raises, naming its path. Reordering steps can make a step run again.
