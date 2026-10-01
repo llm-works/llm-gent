@@ -21,6 +21,7 @@ that tell repeated executions apart::
     n/<node>/items, n/<node>/done     cursor of a running .map
     n/<node>/i/<index>/state          scope of map item <index>
     n/<node>/i/<index>/chain          cursor of map item <index>'s body
+    budget, <run path>/budget         a run's own budget tracker: spend so far
 
 A dict payload is stored as a tree with one blob per top-level key, so
 keys that did not change keep their hash from one commit to the next.
@@ -73,7 +74,10 @@ ITEMS = "items"
 DONE = "done"
 """Cursor entry: a running map's completed items — index to result and whether it merged."""
 
-CURSOR_ENTRIES = frozenset({PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE})
+BUDGET = "budget"
+"""Cursor entry: a running flow's own budget tracker — its spend and spend by op."""
+
+CURSOR_ENTRIES = frozenset({PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, BUDGET})
 """Tree entries that hold cursor values rather than a scope."""
 
 

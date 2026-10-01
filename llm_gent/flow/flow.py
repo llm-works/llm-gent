@@ -61,6 +61,7 @@ from appinfra.log import Logger
 
 from ..core.budget import Tracker
 from ..core.traits import Registry as TraitRegistry
+from ._budget import Budget, RunBudget, check_budget, check_caps_have_a_tracker, run_budget
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext
 from ._halt_observer import HaltPoint
@@ -175,7 +176,7 @@ class Flow:
         self._traits = traits
         self._state_factory = state_factory
         self._halt_event: asyncio.Event | None = None
-        self._budget_tracker: Tracker | None = None
+        self._budget: Budget | None = None
         self._checkpoint_ctx: CheckpointContext | None = None
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
@@ -269,7 +270,8 @@ class Flow:
         Pass ``halt=ctx.halt`` and ``budget=ctx.budget`` from an in-flight
         verb to propagate its effective ambients to the dispatched sibling;
         omitting either (or passing ``UNSET``) defaults to this flow's
-        ``.with_halt()`` / ``.with_budget()`` binding if any.
+        ``.with_halt()`` / ``.with_budget(tracker)`` binding if any (a
+        ``.with_budget(cap)`` has no enclosing tracker here: none).
 
         Pass ``extra=ctx.extra`` from an in-flight verb to propagate the
         caller-supplied opaque dict to the dispatched sibling. Omitting
@@ -287,7 +289,8 @@ class Flow:
             else scope_state
         )
         effective_halt = self._halt_event if halt is UNSET else halt
-        effective_budget = self._budget_tracker if budget is UNSET else budget
+        own_tracker = self._budget if isinstance(self._budget, Tracker) else None
+        effective_budget = own_tracker if budget is UNSET else budget
         effective_extra: dict[str, Any] = {} if extra is UNSET else extra
         wrapped_state = (
             payload
@@ -744,25 +747,37 @@ class Flow:
         self._halt_event = event
         return self
 
-    def with_budget(self, tracker: Tracker) -> Flow:
-        """Attach a :class:`Tracker` reachable as ``ctx.budget``.
+    def with_budget(self, budget: Budget) -> Flow:
+        """Set this flow's budget context, reachable as ``ctx.budget``.
 
-        Threads ``tracker`` through the execution environment so verbs
-        can record LLM and operation costs against its cap. Auto-halt
-        integration is opt-in on the tracker side: pass a shared
-        ``asyncio.Event`` to both :meth:`Tracker.__init__` (``halt=``)
-        and :meth:`with_halt`, and the tracker sets the event on the
-        first cross into ``exceeded``.
+        - A :class:`Tracker`: every run of this flow runs on it. Verbs
+          record LLM and operation costs against it. Auto-halt is opt-in
+          on the tracker side: pass a shared ``asyncio.Event`` to both
+          :meth:`Tracker.__init__` (``halt=``) and :meth:`with_halt`, and
+          the tracker sets the event on the first cross into ``exceeded``.
+        - A cap (``float``): each run of this flow runs on a child of the
+          enclosing flow's tracker with that cap — spend rolls up and every
+          cap on the chain applies. A map body runs once per item, an
+          iterate body once per pass, a subflow once per ``.call``. Crossing
+          the cap stops that run with halt semantics (in-flight LLM calls
+          finish, everything under it stops) and it ends with no result
+          (``None``); the enclosing flow carries on. The run also stops on
+          the halt it would observe uncapped. A cap needs a tracker on an
+          enclosing flow: :meth:`run` raises otherwise.
 
-        Consumers with hierarchical accounting attach the root tracker
-        here; verbs reach descendants via ``ctx.budget.child(...)``.
+        Without ``with_budget`` a flow shares the enclosing tracker.
 
-        A subflow inherits the outer runtime's tracker automatically;
-        calling ``.with_budget`` on a subflow overrides it for that subtree.
+        A run's own tracker (its tracker, or its capped child) is in every
+        checkpoint taken while the run is in progress, and restored when it
+        resumes; see :mod:`llm_gent.flow._budget`.
 
         Returns ``self`` for chaining.
+
+        Raises:
+            TypeError: ``budget`` is neither a Tracker nor a number.
+            ValueError: A cap that is not finite and > 0.
         """
-        self._budget_tracker = tracker
+        self._budget = check_budget(budget)
         return self
 
     def with_checkpointer(self, store: CheckpointStore, client_flow_id: str) -> Flow:
@@ -965,8 +980,9 @@ class Flow:
 
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode
-                was requested without :meth:`with_checkpointer` wired.
-                Missing :class:`SAIAFactory` no longer raises at run
+                was requested without :meth:`with_checkpointer` wired, OR
+                a flow in the tree has ``with_budget(cap)`` with no tracker
+                on any flow enclosing it. Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
@@ -996,7 +1012,7 @@ class Flow:
         return result
 
     def _check_run_args(self, resume: ResumeMode | str) -> None:
-        """Reject an empty flow, a bad ``resume``, or resuming without a checkpointer.
+        """Reject an empty flow, a bad ``resume``, resuming without a checkpointer, or a lone cap.
 
         Runs before anything is read or written, so a misconfigured run
         leaves no new history behind.
@@ -1017,6 +1033,7 @@ class Flow:
                 f"Flow {label!r} was run with resume={resume!r} but has no "
                 f"checkpointer — call .with_checkpointer(store, client_flow_id) first"
             )
+        check_caps_have_a_tracker(self)
 
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode | str
@@ -1056,7 +1073,9 @@ class Flow:
         fall back to them when they have no local
         ``.with_halt()`` / ``.with_budget()`` / ``.with_checkpointer()``
         override, preserving an intermediate layer's ambient through
-        arbitrarily deep nesting.
+        arbitrarily deep nesting. The run's budget context (its tracker,
+        and the halt it observes when capped) comes from
+        :func:`~llm_gent.flow._budget.run_budget`.
 
         ``parent_chain_context`` is the hash the executor uses to compute
         this Flow's chain-step node IDs (empty at run root; extended by
@@ -1068,26 +1087,43 @@ class Flow:
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        env = self._make_run_env(
-            runtime=runtime,
-            state=state,
-            parent_halt=parent_halt,
-            parent_budget=parent_budget,
-            parent_checkpoint_ctx=parent_checkpoint_ctx,
-            parent_chain_context=parent_chain_context,
-            parent_ancestor_chain=parent_ancestor_chain,
-            parent_extra=parent_extra,
-            parent_policy=parent_policy,
-            parent_path=parent_path,
-        )
+        async with run_budget(
+            self, parent_path, runtime._scopes, parent_budget, parent_halt
+        ) as context:
+            env = self._make_run_env(
+                runtime=runtime,
+                state=state,
+                context=context,
+                parent_checkpoint_ctx=parent_checkpoint_ctx,
+                parent_chain_context=parent_chain_context,
+                parent_ancestor_chain=parent_ancestor_chain,
+                parent_extra=parent_extra,
+                parent_policy=parent_policy,
+                parent_path=parent_path,
+            )
+            own_halt = runtime is not self and self._owns_halt(parent_halt)
+            return await self._run_in(env, context, args, kwargs, own_halt=own_halt)
+
+    async def _run_in(
+        self,
+        env: _RunEnv,
+        context: RunBudget,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        own_halt: bool,
+    ) -> Any:
+        """Walk this Flow under ``env``; a capped run already out of budget does nothing."""
         label = self._name or "<anonymous>"
-        is_subflow = runtime is not self
+        is_subflow = env.runtime is not self
+        if context.stopped_by_budget():
+            env.lg.debug("flow run out of budget before its first step", extra={"flow": label})
+            return None
         env.lg.debug(
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
-        own_halt = is_subflow and self._owns_halt(parent_halt)
-        result = await self._walk(env, args, kwargs, own_halt=own_halt)
+        result = await self._walk(env, args, kwargs, own_halt=own_halt, context=context)
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
@@ -1096,18 +1132,26 @@ class Flow:
         return self._halt_event is not None and self._halt_event is not parent_halt
 
     async def _walk(
-        self, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any], *, own_halt: bool
+        self,
+        env: _RunEnv,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        own_halt: bool,
+        context: RunBudget,
     ) -> Any:
-        """Walk this Flow's chain; a subflow stopped by its own halt returns ``None``.
+        """Walk this Flow's chain; a run stopped by its own halt or budget returns ``None``.
 
         That subtree ends there and the run carries on, with no result
         from it: what the halt stopped inside it is no position of the
-        run's, so it leaves the snapshots.
+        run's, so it leaves the snapshots. A capped run stopped because the
+        halt it would observe uncapped was set is not stopped by its budget:
+        the interruption carries on up.
         """
         try:
             return await Chain(self, env).walk(args, kwargs)
         except Interrupted:
-            if not own_halt:
+            if not (own_halt or context.stopped_by_budget()):
                 raise
             env.scopes.close_under(env.path)
             return None
@@ -1117,8 +1161,7 @@ class Flow:
         *,
         runtime: Flow,
         state: State[Any],
-        parent_halt: asyncio.Event | None,
-        parent_budget: Tracker | None,
+        context: RunBudget,
         parent_checkpoint_ctx: CheckpointContext | None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
@@ -1128,17 +1171,17 @@ class Flow:
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
-        Local ``.with_halt`` / ``.with_budget`` / ``.with_checkpointer``
-        wins over the caller's parent ambients; unset locals fall back to
-        the parent so an intermediate layer's ambient survives arbitrarily
-        deep nesting.
+        Local ``.with_checkpointer`` / ``.with_checkpoint_policy`` wins over
+        the caller's parent ambients; unset locals fall back to the parent
+        so an intermediate layer's ambient survives arbitrarily deep
+        nesting. Halt and budget come resolved in ``context``.
 
         ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
         verbatim: the descent sites in :mod:`._executor` are the ones
         that extend them when recursing into a subflow / arm / body.
         """
-        halt = self._halt_event if self._halt_event is not None else parent_halt
-        budget = self._budget_tracker if self._budget_tracker is not None else parent_budget
+        halt = context.halt
+        budget = context.tracker
         if self._checkpoint_policy is not None:
             policy = self._checkpoint_policy
         elif parent_policy is not None:
