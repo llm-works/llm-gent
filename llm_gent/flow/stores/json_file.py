@@ -47,6 +47,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator
@@ -57,6 +58,10 @@ from urllib.parse import quote, unquote
 from appinfra.log import Logger
 
 from ..checkpoint import Kind, Retention
+
+
+_MKSTEMP_TMP = re.compile(r"\.[a-zA-Z0-9_]{6,}\.tmp$")
+"""Matches temp files from :func:`tempfile.mkstemp` with ``suffix='.tmp'``."""
 
 
 def _atomic_write_text(target: Path, text: str) -> None:
@@ -300,7 +305,7 @@ class JsonFileCheckpointStore:
             return {}
         refs: dict[str, str] = {}
         for path in refs_dir.iterdir():
-            if path.name == ".lock" or path.name.endswith(".tmp"):
+            if path.name == ".lock" or _MKSTEMP_TMP.search(path.name):
                 continue
             commit_hash = path.read_text(encoding="utf-8").strip()
             if commit_hash:

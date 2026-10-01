@@ -210,6 +210,14 @@ class CheckpointStoreConformance:
         assert store.list_refs("history-1") == {"HEAD": "commit-2", "tags/complete": "commit-1"}
         assert store.list_refs("never-existed") == {}
 
+    def test_list_refs_includes_refs_ending_in_tmp(self, store: Any) -> None:
+        store.set_ref("history-1", "tags/archive.tmp", "commit-1", None)
+        store.set_ref("history-1", "HEAD", "commit-2", None)
+        assert store.list_refs("history-1") == {
+            "tags/archive.tmp": "commit-1",
+            "HEAD": "commit-2",
+        }
+
     # --- retention ---
 
     def test_default_retention_is_retain(self, store: Any) -> None:
