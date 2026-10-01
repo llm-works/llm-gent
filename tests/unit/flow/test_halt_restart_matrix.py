@@ -72,7 +72,7 @@ FLOW_NAME = "matrix"
 RUN_INPUT = 1
 
 Stop = Literal["halt", "crash", "exception"]
-Policy = Literal["none", "on_iterate", "on_map_item", "leaf"]
+Policy = Literal["none", "on_iterate", "on_map_item", "leaf", "named"]
 
 
 class SimulatedCrash(BaseException):
@@ -97,6 +97,11 @@ class Leaf:
 @dataclass(frozen=True)
 class Turn(Leaf):
     """A leaf whose work is a Loop turn: half of it, then (unless paused there) the rest."""
+
+
+@dataclass(frozen=True)
+class BareTurn(Turn):
+    """A :class:`Turn` whose Loop has no ConversationFactory: a paused turn starts over."""
 
 
 @dataclass(frozen=True)
@@ -157,6 +162,7 @@ Node = Leaf | Seq | Iter | Fan | Branch | Scope
 
 _L = Leaf("", 0)
 _T = Turn("", 0)
+_B = BareTurn("", 0)
 
 
 def _label(node: Node, counter: list[int]) -> Node:
@@ -211,6 +217,9 @@ _INNER: dict[str, Node] = {
     "iter(scoped)": Iter(Fan(_L, 2, "scoped"), 2),
     "scope(scoped)": Scope(Fan(_L, 2, "scoped")),
     "scoped(turn)": Fan(_T, 2, "scoped"),
+    "bare": _B,
+    "iter(bare)": Iter(_B, 2),
+    "fan(bare)": Fan(_B, 2),
 }
 
 SHAPES: dict[str, Seq] = {}
@@ -388,15 +397,22 @@ def _leaf_verb(leaf: Leaf, probe: Probe) -> Any:
             raise Interrupted()  # a halt: stops before its work
         done[key] = 3 * x + leaf.c
         probe.executed.append(key)
-        if probe.policy == "leaf":
-            await ctx.checkpoint()
-            probe.checkpointed.append(key)
+        await _save(ctx, probe, key)
         if fire:
             probe.stop_here()  # sets the halt, or raises for a crash / an exception
         return done[key]
 
     body.__name__ = body.__qualname__ = leaf.name
     return verb(body)
+
+
+async def _save(ctx: Context[Any], probe: Probe, key: str) -> None:
+    """A leaf's own save after its work: ``leaf`` saves, ``named`` saves as a checkpoint ``key``."""
+    if probe.policy == "leaf":
+        await ctx.checkpoint()
+        probe.checkpointed.append(key)
+    elif probe.policy == "named":
+        await ctx.checkpoint(key)
 
 
 ROLE = Role(name="matrix", backend="openai", model="none")
@@ -429,29 +445,34 @@ class _TurnSAIA:
     A fresh turn does the first half, then pauses if it is where the run
     stops mid-turn or if the halt is already set (as a real backend does
     through ``abort_signal``). A resumed turn must arrive with the saved
-    first half and does only the second.
+    first half and does only the second. A turn without a conversation (a
+    :class:`BareTurn`) cannot be captured: its pause is not recorded as
+    one that must resume.
     """
 
     def __init__(self, probe: Probe) -> None:
         self._probe = probe
 
     async def complete(self, task: str, **kwargs: Any) -> _TurnResult:
-        conv: _Conv = kwargs["conversation"]
+        conv: _Conv | None = kwargs["conversation"]
         probe = self._probe
         if kwargs.get("resume", False):
-            assert conv.messages == [f"half:{task}"], f"resumed {task} with {conv.messages}"
+            assert conv is not None and conv.messages == [f"half:{task}"], f"resumed {task}"
             probe.turns_resumed.append(task)
         else:
             probe.turns_started.append(task)
-            conv.messages.append(f"half:{task}")
+            if conv is not None:
+                conv.messages.append(f"half:{task}")
             if probe.mid_turn == task:
                 probe.stop_here()  # sets the halt, or raises for a crash / an exception
             await asyncio.sleep(0)  # lets parallel map items interleave
             halt = kwargs.get("abort_signal")
             if halt is not None and halt.is_set():
-                probe.turns_paused.append(task)
+                if conv is not None:
+                    probe.turns_paused.append(task)
                 return _TurnResult(paused=True)
-        conv.messages.append(f"rest:{task}")
+        if conv is not None:
+            conv.messages.append(f"rest:{task}")
         return _TurnResult(paused=False)
 
 
@@ -459,9 +480,12 @@ def _turn_verb(leaf: Turn, probe: Probe) -> Any:
     """Return the verb for a :class:`Turn` leaf: its work is one Loop call.
 
     A stop "before" its work lands mid-turn, between the turn's halves; a
-    paused turn leaves the step interrupted with nothing recorded.
+    paused turn leaves the step interrupted with nothing recorded. A
+    :class:`BareTurn`'s Loop has no ConversationFactory: its paused turn is
+    not captured, and its step's rerun starts the turn over.
     """
-    loop = Loop(ROLE, saia=_TurnSAIA(probe), conversation_factory=_ConvFactory())
+    factory = None if isinstance(leaf, BareTurn) else _ConvFactory()
+    loop = Loop(ROLE, saia=_TurnSAIA(probe), conversation_factory=factory)
 
     async def body(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
         await asyncio.sleep(0)
@@ -481,9 +505,7 @@ def _turn_verb(leaf: Turn, probe: Probe) -> Any:
         done = ctx.state.data.setdefault("done", {})
         done[key] = 3 * x + leaf.c
         probe.executed.append(key)
-        if probe.policy == "leaf":
-            await ctx.checkpoint()
-            probe.checkpointed.append(key)
+        await _save(ctx, probe, key)
         if fire and probe.mode == "after":
             probe.stop_here()
         return done[key]
@@ -847,3 +869,44 @@ async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path:
     missing = [k for k in baseline if k not in point.done]
     assert [k for k in resumed.executed if k not in point.done] == missing or case.parallel
     assert set(resumed.executed) - set(point.done) == set(missing)
+
+
+def _named_params() -> Iterator[Any]:
+    """Every shape × every leaf, sequential: the leaf whose named checkpoint resume checks out."""
+    for name, shape in SHAPES.items():
+        for leaf in range(len(model(shape)[1])):
+            yield pytest.param(name, leaf, id=f"{name}-leaf{leaf + 1}")
+
+
+@pytest.mark.parametrize(("shape_name", "leaf"), list(_named_params()))
+async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
+    shape_name: str, leaf: int
+) -> None:
+    """A finished run's history, checked out at any leaf's named checkpoint, finishes again.
+
+    Every leaf takes a checkpoint named after itself, after its work.
+    ``run(resume=<name>)`` moves ``HEAD`` back there and continues: the
+    result and state are the uninterrupted ones, the leaves the
+    checkpoint lacks run once, and of the ones it holds only the leaf
+    that took it runs again (its step had not completed).
+    """
+    shape = SHAPES[shape_name]
+    expected_result, baseline, merges = model(shape)
+    store = InMemoryCheckpointStore()
+    first = Probe(policy="named")
+    assert await _flow(shape, first, store, parallel=False).run(RUN_INPUT) == expected_result
+
+    name = first.executed[leaf]
+    history = History(store, FLOW_NAME)
+    commit = await history.checkpoint(name)
+    assert commit is not None
+    captured = await _snapshot_done(history, commit)
+    assert captured is not None and name in captured
+
+    resumed = Probe()
+    flow = _flow(shape, resumed, store, parallel=False)
+    assert await flow.run(RUN_INPUT, resume=name) == expected_result
+    await _check_finished(history, baseline, merges)
+    _check_rerun(resumed, _Point(captured, {name}, set()))
+    missing = [k for k in baseline if k not in captured]
+    assert [k for k in resumed.executed if k not in captured] == missing
