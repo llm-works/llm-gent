@@ -37,8 +37,10 @@ Public surface:
   snapshots of a run — every scope and running structure's position,
   paused SAIA turns included — at save points and when the halt stops it
 - :class:`History` — read API over one checkpointed history: head, last
-  completed run, commit chain, per-commit state; :class:`HistoryCorrupt`
-  when a referenced object is missing from the store
+  completed run, commit chain, per-commit state and flow structure;
+  :class:`HistoryCorrupt` when a referenced object is missing from the store
+- :class:`FlowStructure` — a flow's composition tree by step identity;
+  :class:`StructureDiff` — how two structures differ (``FlowStructure.diff``)
 - :func:`collect_unreachable` — delete the objects of a history no ref
   reaches (left by ``resume=<name>`` or a process that died mid-commit)
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``;
@@ -74,6 +76,7 @@ from .nodes import UNSET, Failure, Interrupted, RestoredError, Skipped, Unset
 from .panel import Panel
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
+from .structure import FlowStructure, StepPath, StructureDiff, path_label
 from .verb import verb
 
 
@@ -86,6 +89,7 @@ __all__ = [
     "Failure",
     "Flow",
     "FlowFactory",
+    "FlowStructure",
     "History",
     "HistoryCorrupt",
     "Interrupted",
@@ -101,11 +105,14 @@ __all__ = [
     "StateData",
     "StateDataclass",
     "StateFactory",
+    "StepPath",
+    "StructureDiff",
     "TypeStateFactory",
     "Unset",
     "collect_unreachable",
     "extractor",
     "grader",
+    "path_label",
     "planner",
     "synthesizer",
     "verb",

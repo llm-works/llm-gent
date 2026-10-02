@@ -26,6 +26,7 @@ that tell repeated executions apart::
     cost, <run path>/cost             a budgeted run's child tracker: spend so far
     tracker, <run path>/tracker       a cost tracker a flow declares: spend so far
     signals                           the run's signals that are set
+    flow                              the structure of the flow that wrote it
 
 A dict payload is stored as a tree with one blob per top-level key, so
 keys that did not change keep their hash from one commit to the next.
@@ -86,6 +87,15 @@ TRACKER = "tracker"
 
 SIGNALS = "signals"
 """Cursor entry at the root: the run's signals (``Flow.with_signal``) that are set."""
+
+FLOW = "flow"
+"""Root tree entry: the structure of the flow that wrote the snapshot, as a blob.
+
+Its hash is the commit's ``flow_root_hash``
+(:class:`~llm_gent.flow.structure.FlowStructure`). Reachable from the
+commit like every entry, so :func:`~llm_gent.flow.collect_unreachable`
+keeps it; :func:`read_snapshot` does not read it.
+"""
 
 CURSOR_ENTRIES = frozenset(
     {PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, COST, TRACKER, SIGNALS}
@@ -357,10 +367,15 @@ def _to_json(scope: State[Any], path: ScopePath) -> Any:
         raise TypeError(f"scope at {where!r} cannot be checkpointed: {e}") from e
 
 
-def build_snapshot_tree(flat: dict[ScopePath, Any]) -> tuple[Tree, list[Blob | Tree]]:
+def build_snapshot_tree(
+    flat: dict[ScopePath, Any], structure: Blob
+) -> tuple[Tree, list[Blob | Tree]]:
     """Build the snapshot tree for captured values; return it and every object to store.
 
-    Pure and synchronous: hashing only, no store access.
+    ``structure`` is the structure of the flow writing the snapshot
+    (:meth:`~llm_gent.flow.structure.FlowStructure.blob`), held at the
+    root as :data:`FLOW`. Pure and synchronous: hashing only, no store
+    access.
     """
     nested: dict[str, Any] = {}
     for path, value in flat.items():
@@ -368,6 +383,8 @@ def build_snapshot_tree(flat: dict[ScopePath, Any]) -> tuple[Tree, list[Blob | T
         for segment in path[:-1]:
             node = node.setdefault(segment, {})
         node[path[-1]] = _Leaf(value)
+    assert FLOW not in nested, "no scope or cursor is registered at the root as 'flow'"
+    nested[FLOW] = structure
     objects: list[Blob | Tree] = []
     return _build_tree(nested, objects), objects
 
@@ -385,6 +402,9 @@ def _build_tree(node: dict[str, Any], objects: list[Blob | Tree]) -> Tree:
     for name, child in node.items():
         if isinstance(child, _Leaf):
             obj: Blob | Tree = _leaf_object(child.value, objects)
+        elif isinstance(child, Blob):
+            objects.append(child)
+            obj = child
         else:
             obj = _build_tree(child, objects)
         kind: TreeEntryKind = "blob" if isinstance(obj, Blob) else "tree"

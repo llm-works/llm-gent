@@ -45,6 +45,7 @@ from .checkpoint import (
 )
 from .state.cas import Blob, Commit, CommitMeta, ProducedBy, Tree
 from .state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
+from .structure import FlowStructure
 
 
 if TYPE_CHECKING:
@@ -106,18 +107,19 @@ class CheckpointContext:
         self,
         store: CheckpointStore,
         client_flow_id: str,
-        root_hash: Callable[[], str],
+        structure: Callable[[], FlowStructure],
     ) -> None:
-        """Bind the store and name; ``root_hash`` yields the owning flow's structure hash.
+        """Bind the store and name; ``structure`` yields the owning flow's structure.
 
-        ``root_hash`` is evaluated once per run, at the run's first commit,
-        so nodes added to the flow after ``with_checkpointer`` are reflected
-        and every commit of a run records the same structure hash.
+        ``structure`` is evaluated once per run, at the run's first commit,
+        so nodes added to the flow after ``with_checkpoint_store`` are
+        reflected and every commit of a run holds the same structure and
+        records its hash.
         """
         self.store = store
         self.client_flow_id = client_flow_id
-        self._root_hash = root_hash
-        self._run_root_hash: str | None = None
+        self._structure = structure
+        self._run_structure: Blob | None = None
         self._flow_id: str | None = None
         self._flow_id_lock = asyncio.Lock()
         # Head of the history: the newest commit, parent of the next one.
@@ -134,14 +136,14 @@ class CheckpointContext:
         self._written: set[tuple[Kind, str]] = set()
 
     def begin_run(self) -> None:
-        """Drop the cached ``flow_id``, head and root hash, and create fresh locks.
+        """Drop the cached ``flow_id``, head and structure, and create fresh locks.
 
         Called at the start of every top-level run so each run re-reads
         the store: a history collected (or advanced) by someone else between
         runs is observed instead of written into under a stale id or head.
         Fresh locks keep a Flow reusable across event loops.
         """
-        self._run_root_hash = None
+        self._run_structure = None
         self._flow_id = None
         self._flow_id_lock = asyncio.Lock()
         self._head = None
@@ -332,8 +334,12 @@ class CheckpointContext:
         the store, and other tasks (concurrent map items) change the
         scopes meanwhile, so serializing between writes could commit
         scopes from different moments.
+
+        The root tree also holds the run's flow structure
+        (:data:`~llm_gent.flow.state.snapshot.FLOW`), whose
+        hash every commit of the run records as ``flow_root_hash``.
         """
-        tree, objects = build_snapshot_tree(scopes.capture())
+        tree, objects = build_snapshot_tree(scopes.capture(), self._run_structure_blob())
         for obj in objects:
             if isinstance(obj, Blob):
                 await self.put_blob(obj.content_hash, obj.payload)
@@ -358,6 +364,12 @@ class CheckpointContext:
 
     # --- private helpers used by save_scope_commit ---
 
+    def _run_structure_blob(self) -> Blob:
+        """The owning flow's structure as a blob, taken at the run's first use."""
+        if self._run_structure is None:
+            self._run_structure = self._structure().blob()
+        return self._run_structure
+
     def _build_commit_meta(
         self,
         flow_id: str,
@@ -372,12 +384,10 @@ class CheckpointContext:
         ``produced_by`` records the node's ``node_id`` — verb-level
         attribution (``verb_name`` / ``role`` / ``result_hash``)
         lands with the SAIA-verb-wrapper wiring. ``flow_root_hash`` is
-        the owning flow's structure hash, computed once per run.
+        the hash of the owning flow's structure, taken once per run.
         """
         from llm_gent import __version__
 
-        if self._run_root_hash is None:
-            self._run_root_hash = self._root_hash()
         return CommitMeta(
             flow_id=flow_id,
             node_path=node_path,
@@ -385,7 +395,7 @@ class CheckpointContext:
             produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
             trace_ref=trace_ref,
             outcome=outcome,
-            flow_root_hash=self._run_root_hash,
+            flow_root_hash=self._run_structure_blob().content_hash,
             timestamp_iso=datetime.now(UTC).isoformat(),
             framework_version=__version__,
         )
