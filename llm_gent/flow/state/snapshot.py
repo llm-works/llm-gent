@@ -23,7 +23,8 @@ that tell repeated executions apart::
     n/<node>/items, n/<node>/done     cursor of a running .map
     n/<node>/i/<index>/state          scope of map item <index>
     n/<node>/i/<index>/chain          cursor of map item <index>'s body
-    cost, <run path>/cost             a run's own cost tracker: spend so far
+    cost, <run path>/cost             a budgeted run's child tracker: spend so far
+    tracker, <run path>/tracker       a cost tracker a flow declares: spend so far
     signals                           the run's signals that are set
 
 A dict payload is stored as a tree with one blob per top-level key, so
@@ -80,10 +81,15 @@ DONE = "done"
 COST = "cost"
 """Cursor entry: a running flow's own cost tracker — its spend and spend by op."""
 
+TRACKER = "tracker"
+"""Cursor entry: the cost tracker a flow declares (``with_cost_tracker``) — spend and spend by op."""
+
 SIGNALS = "signals"
 """Cursor entry at the root: the run's signals (``Flow.with_signal``) that are set."""
 
-CURSOR_ENTRIES = frozenset({PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, COST, SIGNALS})
+CURSOR_ENTRIES = frozenset(
+    {PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, COST, TRACKER, SIGNALS}
+)
 """Tree entries that hold cursor values rather than a scope."""
 
 

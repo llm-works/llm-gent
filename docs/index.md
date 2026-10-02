@@ -330,21 +330,27 @@ agent reads through `ctx.cost` (to wrap up, say); gent stops nothing. A
 hard stop is the app's choice: a tracker built with `halt=` the run's
 halt event pauses the run when its budget is crossed.
 
-Across pause, resume and shortcut:
+The running cost is reconstructed across pause, resume and shortcut.
+Every tracker's spend (and spend by op) is in the checkpoints, and resume
+restores it before the run's first step:
 
-- A budgeted run's child tracker is in each checkpoint taken while the
-  run is in progress — its spend and spend by op — and is restored when
-  it resumes, before its first step: a run halted at 9.0 of a 10.0 budget
-  resumes with 1.0 left. A shortcut's continuation carries it over the
-  same way, so nothing is counted twice. A finished run keeps no child in
-  its final commit.
-- A tracker the app passes (`with_cost_tracker`) is the app's: gent never
-  saves or restores it. The app seeds it for each session — fresh, or
-  with what it has spent so far.
+- The run's tracker (`with_cost_tracker` on the top-level flow) is in
+  every commit, the completion commit included, so its spend is the total
+  over the whole history: a later session continues it. A tracker every
+  flow inherits (a `FlowFactory(cost_tracker=...)`) is kept once, at the
+  top. A tracker a nested flow declares of its own is kept while that
+  flow runs.
+- A budgeted run's child is kept while the run is in progress: a run
+  halted at 9.0 of a 10.0 budget resumes with 1.0 left. A shortcut's
+  continuation carries it over the same way, so nothing is counted twice.
 - After a crash the run resumes from its last save: spend recorded after
   that save is in no checkpoint, so the step that runs again records it
-  again. The run's accounting counts from the save; the app's `on_cost`
-  callbacks saw every cost when it was recorded.
+  again. Cost tracking is best effort.
+
+Spend is cumulative; a per-session budget is a limit set on it. The app
+reads the spend so far from the history's head
+(`History.snapshot(head).cursors[""]["tracker"]["spent"]`) and builds the
+session's tracker with `budget=` that plus the session's allowance.
 
 ### One repo per run
 

@@ -829,8 +829,10 @@ class Flow:
         """Run every run of this flow on ``tracker``, reachable as ``ctx.cost``.
 
         Verbs record LLM and operation costs against it through
-        ``ctx.cost``. The tracker is the app's: gent never saves or
-        restores it — the app seeds it (per session, or cumulative). A hard
+        ``ctx.cost``. Its spend is in the run's checkpoints — on the
+        top-level flow, in every commit including the completion commit —
+        and restored on resume, so it is the total over the whole history
+        (see :mod:`llm_gent.flow._cost`). A hard
         stop is opt-in on the tracker side: pass the run's halt event to
         both :meth:`CostTracker.__init__` (``halt=``) and :meth:`with_halt`,
         and the tracker sets it on the first cross into ``exceeded``,

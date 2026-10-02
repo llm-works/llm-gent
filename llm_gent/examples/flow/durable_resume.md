@@ -222,7 +222,8 @@ The history is the chain final-state commit → halt commit, written by two diff
 run 2 read `HEAD` before its first commit and parented on it.
 
 Written on clean exit when the store's retention is `retain` (the default). A finished run has no
-running structure, so the snapshot holds the root scope alone. `HEAD` always holds the state the
+running structure, so the snapshot holds the root scope (and the run's cost tracker, when it has
+one). `HEAD` always holds the state the
 last run ended with, and `resume="latest"` on a finished history starts from its first step with
 that state. If the final state cannot be serialized, the commit is written with an empty tree and
 a warning is logged: the history is still complete, but carries no final state. With
@@ -299,9 +300,10 @@ not have raises `ValueError`; for a name, the error lists the checkpoint names t
 The example tracks no cost. With a budget per item — `with_budget(limit)` on a map body, under a
 `with_cost_tracker(tracker)` — each item's child tracker is in the halt commit at that item's path
 (`cost`: spend so far, and spend by op), and run 2 restores it before the item continues: the item
-has what is left of its budget, not the whole budget again. The app's own tracker is not in any
-commit: the app seeds it for each session. A finished run's `$end` commit holds no tracker. See
-`docs/index.md`, "Cost and budgets".
+has what is left of its budget, not the whole budget again. The run's own tracker is in every
+commit, `$end` included, and restored on every resume: its spend is the total over the whole
+history.
+See `docs/index.md`, "Cost and budgets".
 
 ## Two contracts the example depends on
 

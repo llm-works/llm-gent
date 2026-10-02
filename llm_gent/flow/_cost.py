@@ -21,11 +21,23 @@ for the agent to read through ``ctx.cost``; it does not stop the run. A
 hard stop is the app's choice: a tracker built with ``halt=`` the run's
 halt event pauses the run when that tracker's budget is crossed.
 
-A budgeted run's child tracker is a position like a cursor: its spend is
-in every checkpoint taken while the run is in progress, at the run's path
-(:data:`~llm_gent.flow.state.snapshot.COST`), and restored when the run
-resumes, before its first step. A tracker the app passes is the app's: it
-is never saved or restored.
+The running cost is reconstructed across pause, resume and shortcut: a
+tracker's spend (and spend by op) is a position like a cursor, in every
+checkpoint taken while it is in use and restored before the run's first
+step on resume.
+
+- A budgeted run's child is saved at the run's path
+  (:data:`~llm_gent.flow.state.snapshot.COST`) while the run is in
+  progress.
+- A tracker a flow declares is saved at that flow's path
+  (:data:`~llm_gent.flow.state.snapshot.TRACKER`) while its run is in
+  progress; the top-level flow's stays through the run's end, so the
+  completion commit holds it too and a later session continues the
+  total. A tracker a flow inherits — the same object as its parent's —
+  is saved once, where it is first declared.
+
+Spend is therefore cumulative over the whole history. A per-session
+budget is the app's limit, set on the restored spend (``update_budget``).
 """
 
 from __future__ import annotations
@@ -33,13 +45,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..core.cost import CostTracker
 from ._node_id import _child_flows
-from .state.snapshot import COST, ScopePath, ScopeRegistry, path_str
+from .state.snapshot import COST, TRACKER, ScopePath, ScopeRegistry, path_str
 
 
 if TYPE_CHECKING:
@@ -129,11 +141,12 @@ async def run_cost(
 ) -> AsyncIterator[RunCost]:
     """The cost context of one run of ``flow`` at ``path``, for the duration of the run.
 
-    A budgeted run gets a child of its tracker, kept registered at
-    ``path`` — after restoring the spend a checked-out snapshot saved there
-    — and dropped once the run completes; a run that stops keeps it, for
-    the run's halt checkpoint. A tracker the app passes is neither saved
-    nor restored.
+    The tracker ``flow`` declares (one its parent does not already run on)
+    and a budgeted run's child are kept registered at ``path`` — after
+    restoring the spend a checked-out snapshot saved there — while the run
+    is in progress; a run that stops keeps them, for the run's halt
+    checkpoint. The top-level flow's tracker stays registered after the
+    run completes, for the completion commit.
 
     Raises:
         RuntimeError: ``flow`` has a budget and no tracker to make its
@@ -143,23 +156,49 @@ async def run_cost(
     # The run's halt is on the top-level flow (check_one_halt); a nested run
     # observes what its parent does.
     halt = flow._halt_event if parent_halt is None else parent_halt
-    tracker = flow._cost_tracker if flow._cost_tracker is not None else parent_cost
-    if flow._budget is None:
-        yield RunCost(tracker, halt)
-        return
+    own = flow._cost_tracker
+    tracker = own if own is not None else parent_cost
+    declared = own if own is not None and own is not parent_cost else None
+    with _kept(scopes, path, TRACKER, declared, past_the_run=path == ()):
+        if flow._budget is None:
+            yield RunCost(tracker, halt)
+            return
+        if tracker is None:
+            raise RuntimeError(_no_tracker_message(flow, flow._budget))
+        child = tracker.child(flow._budget)
+        with _kept(scopes, path, COST, child, past_the_run=False):
+            yield RunCost(child, halt)
+
+
+@contextlib.contextmanager
+def _kept(
+    scopes: ScopeRegistry,
+    path: ScopePath,
+    entry: str,
+    tracker: CostTracker | None,
+    *,
+    past_the_run: bool,
+) -> Iterator[None]:
+    """Keep ``tracker``'s accounting at ``path`` as ``entry`` while the block runs.
+
+    Restores it first from a checked-out snapshot. Dropped when the block
+    completes, unless ``past_the_run``; kept when it stops early (the halt
+    checkpoint needs it). Nothing when ``tracker`` is ``None``.
+    """
     if tracker is None:
-        raise RuntimeError(_no_tracker_message(flow, flow._budget))
-    child = tracker.child(flow._budget)
-    _restore(scopes, path, child)
-    cursor = _CostCursor(child)
+        yield
+        return
+    _restore(scopes, path, entry, tracker)
+    cursor = _TrackerCursor(tracker, entry)
     scopes.open_cursor(path, cursor)
-    yield RunCost(child, halt)
-    scopes.close_cursor(path, cursor)
+    yield
+    if not past_the_run:
+        scopes.close_cursor(path, cursor)
 
 
-def _restore(scopes: ScopeRegistry, path: ScopePath, tracker: CostTracker) -> None:
+def _restore(scopes: ScopeRegistry, path: ScopePath, entry: str, tracker: CostTracker) -> None:
     """Restore ``tracker`` from the spend a checked-out snapshot saved at ``path``, if any."""
-    found, saved = scopes.take_cursor(path, COST)
+    found, saved = scopes.take_cursor(path, entry)
     if not found:
         return
     try:
@@ -167,16 +206,17 @@ def _restore(scopes: ScopeRegistry, path: ScopePath, tracker: CostTracker) -> No
             float(saved["spent"]), {k: float(v) for k, v in saved["costs_by_op"].items()}
         )
     except (KeyError, TypeError, ValueError, AttributeError) as e:
-        where = path_str((*path, COST))
+        where = path_str((*path, entry))
         raise TypeError(f"cursor at {where!r} cannot be restored: {e}") from e
 
 
-class _CostCursor:
-    """Cursor of a budgeted run's tracker: its accounting, restored when the run resumes."""
+class _TrackerCursor:
+    """Cursor of a tracker kept in the run's snapshots: its accounting, as ``entry``."""
 
-    def __init__(self, tracker: CostTracker) -> None:
+    def __init__(self, tracker: CostTracker, entry: str) -> None:
         self.tracker = tracker
+        self.entry = entry
 
     def cursor(self) -> dict[str, Any]:
-        """``{"cost": {"spent", "costs_by_op"}}``."""
-        return {COST: self.tracker.snapshot()}
+        """``{entry: {"spent", "costs_by_op"}}``."""
+        return {self.entry: self.tracker.snapshot()}

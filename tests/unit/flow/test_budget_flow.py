@@ -22,7 +22,7 @@ import pytest
 
 from llm_gent.core.cost import CostTracker, PricingConfig
 from llm_gent.flow import Context, FlowFactory, History, Interrupted, Loop, Role, verb
-from llm_gent.flow.state.snapshot import COST
+from llm_gent.flow.state.snapshot import TRACKER
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
 from .conftest import make_test_logger
@@ -84,21 +84,30 @@ class TestAppTrackerAcrossResume:
             .then(c)
         )
 
-    async def test_resume_leaves_the_tracker_as_the_app_seeded_it(self) -> None:
-        """Not restored: a fresh tracker resumes at 0, one the app seeded at what it seeded."""
+    async def test_the_running_cost_comes_back_after_a_halt(self) -> None:
         store = InMemoryCheckpointStore()
         assert await self._flow(store, _tracker(), asyncio.Event(), []).run(1) is None
-        head = await History(store, NAME).head()
-        assert head is not None
-        assert all(
-            COST not in c for c in (await History(store, NAME).snapshot(head)).cursors.values()
-        )
 
         fresh = _tracker(10.0)
         seen: list[float] = []
         assert await self._flow(store, fresh, asyncio.Event(), seen).run(resume="latest") == 1
-        assert seen == [0.0]
-        assert fresh.spent == 1.0
+        assert seen == [5.0]
+        assert fresh.spent == 6.0
+        assert fresh.costs_by_op == {"llm": 3.0, "op": 3.0}
+
+    async def test_a_per_session_budget_is_set_on_the_restored_spend(self) -> None:
+        """Spend is cumulative; the app reads it from the history and sets this session's limit."""
+        store = InMemoryCheckpointStore()
+        await self._flow(store, _tracker(), asyncio.Event(), []).run(1)
+        history = History(store, NAME)
+        head = await history.head()
+        assert head is not None
+        so_far = (await history.snapshot(head)).cursors[""][TRACKER]["spent"]
+        assert so_far == 5.0
+
+        session = _tracker(so_far + 1.5)
+        await self._flow(store, session, asyncio.Event(), []).run(resume="latest")
+        assert session.spent == 6.0 and not session.exceeded
 
     async def test_a_hard_stop_is_the_app_s_choice(self) -> None:
         """A tracker built with the run's halt pauses the run when its budget is crossed."""
@@ -130,8 +139,8 @@ class TestAppTrackerAcrossResume:
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "halted"
 
-    async def test_finished_history_restores_no_spend(self) -> None:
-        """A finished run's final commit holds no tracker: the next session starts as given."""
+    async def test_a_finished_run_s_spend_carries_into_the_next_session(self) -> None:
+        """The completion commit holds the tracker: the next session continues the total."""
         store = InMemoryCheckpointStore()
 
         @verb
@@ -150,15 +159,57 @@ class TestAppTrackerAcrossResume:
             )
 
         await flow(_tracker()).run(1)
-        head = await History(store, NAME).head()
+        history = History(store, NAME)
+        assert await history.is_complete()
+        head = await history.head()
         assert head is not None
-        assert all(
-            COST not in c for c in (await History(store, NAME).snapshot(head)).cursors.values()
-        )
+        assert (await history.snapshot(head)).cursors[""][TRACKER]["spent"] == 2.0
 
         fresh = _tracker()
         await flow(fresh).run(1, resume="latest")
-        assert fresh.spent == 2.0
+        assert fresh.spent == 4.0
+
+    async def test_a_tracker_every_flow_inherits_is_restored_once(self) -> None:
+        """A FlowFactory(cost_tracker=) puts the same tracker on every flow: one position, at the top.
+
+        Restoring it again where a nested flow starts would overwrite the
+        spend recorded since the run's start.
+        """
+        store = InMemoryCheckpointStore()
+        halt = asyncio.Event()
+
+        def build(tracker: CostTracker, arm: bool) -> Any:
+            ff = FlowFactory(make_test_logger(), cost_tracker=tracker)
+
+            @verb
+            async def a(ctx: Context[Any], x: int) -> int:
+                _spend(ctx, 1.0)
+                return x
+
+            @verb
+            async def b(ctx: Context[Any], x: int) -> int:
+                _spend(ctx, 2.0)
+                if arm:
+                    halt.set()
+                    raise Interrupted()
+                return x
+
+            inner = ff.create().call(b)
+            return (
+                ff.create(state={})
+                .with_checkpoint_store(store, NAME)
+                .with_halt(halt)
+                .call(a)
+                .then(inner)
+            )
+
+        assert await build(_tracker(), arm=True).run(1) is None
+        snapshot = await History(store, NAME).snapshot(await History(store, NAME).head())
+        assert [p for p, c in snapshot.cursors.items() if TRACKER in c] == [""]
+
+        fresh = _tracker()
+        assert await build(fresh, arm=False).run(1, resume="latest") == 1
+        assert fresh.spent == pytest.approx(3.0 + 2.0)  # 3.0 restored, b again: 2.0
 
 
 def _item_flow(
@@ -253,7 +304,7 @@ class TestItemBudgets:
 
 class TestItemBudgetsAcrossHalt:
     async def test_budgeted_item_stops_on_the_run_halt_and_resumes_with_its_spend(self) -> None:
-        """Each item resumes on a child with its spend; the app's tracker records this session."""
+        """Each item resumes on a child with its spend; the run's tracker continues its total."""
         store = InMemoryCheckpointStore()
         costs = {0: [0.3, 0.2], 1: [0.4, 0.1]}
 
@@ -271,7 +322,8 @@ class TestItemBudgetsAcrossHalt:
         ) == [0, 10]
         assert seen2 == {}  # no first step ran again
         assert before == {0: pytest.approx(0.3), 1: pytest.approx(0.4)}
-        assert root2.spent == pytest.approx(0.3)  # only the resumed session's spend
+        # 0.7 restored; the items' restored spend does not roll up a second time.
+        assert root2.spent == pytest.approx(0.7 + 0.3)
 
     async def test_an_item_resumed_over_its_budget_runs_with_exceeded_latched(self) -> None:
         """Item 0 halted at 0.9; resumed under a budget of 0.5 it carries on, exceeded."""
@@ -287,7 +339,7 @@ class TestItemBudgetsAcrossHalt:
             resume="latest"
         ) == [0, 10]
         assert before == {0: pytest.approx(0.9), 1: pytest.approx(0.1)}
-        assert root2.spent == pytest.approx(0.2)
+        assert root2.spent == pytest.approx(1.0 + 0.2)
 
 
 @dataclass
@@ -598,7 +650,7 @@ class TestCostAcrossCrash:
         root2 = _tracker()
         assert await build(root2, fail=False).run(1, resume="latest") == 1
         assert seen == [pytest.approx(1.0), pytest.approx(1.0)]  # b's first spend was lost
-        assert root2.spent == pytest.approx(2.0)
+        assert root2.spent == pytest.approx(1.0 + 2.0)  # the total at the save, then b again
 
 
 class TestValidation:
