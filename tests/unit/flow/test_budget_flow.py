@@ -7,9 +7,10 @@ A ``with_budget(limit)`` flow runs each of its runs (a map item, an
 iterate pass, a ``.call``) on a child of its cost tracker with that budget;
 crossing the budget latches the child's ``exceeded`` / ``urgent_wrapup``
 and the run carries on — the agent decides. A budgeted run's child is in
-the checkpoints taken while it runs and restored when it resumes; a
-tracker the app passes is never saved or restored. "A fresh process" here
-is a new Flow and a new CostTracker over the same store.
+the checkpoints taken while it runs and restored when it resumes; the
+tracker a flow declares is saved at that flow's path (the top-level one
+through the completion commit) and restored on resume. "A fresh process"
+here is a new Flow and a new CostTracker over the same store.
 """
 
 from __future__ import annotations
