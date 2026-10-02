@@ -240,6 +240,8 @@ Current limits:
 - Positions are recorded by node id. A deploy that inserts steps keeps
   them valid; resuming into a flow that no longer has the saved step
   raises, naming its path. Reordering steps can make a step run again.
+- Adding `name=` to a step changes its node id (and its descendants').
+  A checkpoint at that step fails to resume until the run completes.
 
 ### Shortcuts
 
