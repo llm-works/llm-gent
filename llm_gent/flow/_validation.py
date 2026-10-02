@@ -101,6 +101,17 @@ def _require_state_for_merge(
         )
 
 
+def check_concurrency(value: object, where: str) -> int:
+    """``value`` when it is a map concurrency cap: an ``int >= 1`` (not a bool).
+
+    Raises:
+        ValueError: Anything else; the message names ``where`` it came from.
+    """
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{where} must be an int >= 1; got {value!r}")
+    return value
+
+
 def _check_node_name(name: str | None, method: str) -> None:
     """Enforce that a node label, when given, is a non-empty string."""
     if name is not None and (not isinstance(name, str) or not name):

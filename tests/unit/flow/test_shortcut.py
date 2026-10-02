@@ -22,10 +22,12 @@ import pytest
 
 from llm_gent.flow import (
     Context,
+    Failure,
     FlowFactory,
     History,
     Interrupted,
     Loop,
+    RestoredError,
     Role,
     Skipped,
     verb,
@@ -329,6 +331,44 @@ class TestMap:
         assert results[:2] == ["x0", "x1"]
         assert isinstance(results[2], Skipped)
         assert sorted(ran) == ["extract:0", "extract:1", "query:0", "query:1"]
+
+    async def test_failed_and_skipped_items_do_not_run_again(self) -> None:
+        """The continuation takes them from the restaged cursor, as a resume would."""
+        cut = asyncio.Event()
+        ran: list[int] = []
+        guarded: list[int] = []
+
+        @verb
+        async def item(ctx: Context[Any], n: int) -> int:
+            ran.append(n)
+            if n == 0:
+                raise ValueError("bad item 0")
+            if n == 2:
+                cut.set()  # completes; item 3 does not start
+                await asyncio.sleep(0)  # the stop follows the signal
+            return n * 10
+
+        def guard(n: int, _ctx: Any) -> bool:
+            guarded.append(n)
+            return n != 1
+
+        flow = (
+            _top(cut)
+            .with_shortcut("cut")
+            .map(
+                lambda b: b.call(item),
+                items=lambda _p, _c: [0, 1, 2, 3],
+                strict=False,
+                max_concurrency=1,
+            )
+            .guard(guard)
+        )
+        failure, skipped, done, unstarted = await flow.run()
+        assert (ran, guarded) == ([0, 2], [0, 1, 2])
+        assert isinstance(failure, Failure)
+        assert isinstance(failure.exception, RestoredError)
+        assert failure.exception.message == "bad item 0"
+        assert (skipped, done, unstarted) == (Skipped(item=1), 20, Skipped(item=3))
 
 
 ROLE = Role(name="r", backend="openai", model="none")

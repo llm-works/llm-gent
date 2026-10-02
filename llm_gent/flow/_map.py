@@ -37,8 +37,9 @@ from ._executor import (
 )
 from ._halt_observer import is_halt_signaled
 from ._node_id import _descend_context
+from ._validation import check_concurrency
 from .context import Context
-from .nodes import Failure, Interrupted, ItemsFn, Skipped
+from .nodes import Failure, Interrupted, ItemsFn, RestoredError, Skipped
 from .state import serialize_state_data
 from .state.snapshot import DONE, ITEMS, ScopePath
 
@@ -54,10 +55,40 @@ _INTERRUPTED = object()
 
 @dataclass
 class _Done:
-    """A completed item: its result, and whether its scope merged into the parent yet."""
+    """A completed item: its result, and whether its scope merged into the parent yet.
+
+    A failed (``strict=False``) or skipped item is done too: its result is
+    its :class:`Failure` or :class:`Skipped`, with nothing to merge.
+    """
 
     result: Any
     merged: bool
+
+    def stored(self) -> dict[str, Any]:
+        """The record as the map's cursor stores it.
+
+        A failure keeps its exception's type and message (an exception is
+        not storable); a resumed map gets them back as a :class:`RestoredError`.
+        """
+        if isinstance(self.result, Failure):
+            exc = self.result.exception
+            if isinstance(exc, RestoredError):
+                return {"failure": {"type": exc.type_name, "message": exc.message}}
+            return {"failure": {"type": type(exc).__name__, "message": str(exc)}}
+        if isinstance(self.result, Skipped):
+            return {"skipped": True}
+        return {"result": self.result, "merged": self.merged}
+
+    @classmethod
+    def from_stored(cls, raw: dict[str, Any], item: Any) -> _Done:
+        """The record :meth:`stored` wrote for ``item``."""
+        if "failure" in raw:
+            failure = raw["failure"]
+            error = RestoredError(failure["type"], failure["message"])
+            return cls(Failure(exception=error, item=item), merged=True)
+        if raw.get("skipped"):
+            return cls(Skipped(item=item), merged=True)
+        return cls(raw["result"], raw["merged"])
 
 
 class MapRunner:
@@ -71,8 +102,9 @@ class MapRunner:
     results — is state on the runner, in every snapshot taken while it
     runs. Items that are running keep their own positions under
     ``<map>/i/<index>``. On ``resume="latest"`` the map runs over the saved
-    items: a completed item does not run again, a running one continues
-    where it was, and the rest run.
+    items: a completed item does not run again — nor does one that failed
+    (``strict=False``) or was skipped — a running one continues where it
+    was, and the rest run.
     """
 
     def __init__(self, mp: _Map, env: _RunEnv, node_id: str, path: ScopePath | None = None) -> None:
@@ -91,9 +123,8 @@ class MapRunner:
         self.done: dict[int, _Done] = {}
 
     def cursor(self) -> dict[str, Any]:
-        """The items and the completed ones: index to ``{"result", "merged"}``."""
-        done = {str(i): {"result": d.result, "merged": d.merged} for i, d in self.done.items()}
-        return {ITEMS: self.items, DONE: done}
+        """The items and the done ones: index to its record (:meth:`_Done.stored`)."""
+        return {ITEMS: self.items, DONE: {str(i): d.stored() for i, d in self.done.items()}}
 
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Resolve items, spawn per-item runners, aggregate.
@@ -138,16 +169,18 @@ class MapRunner:
         if found:
             self.items = items
             _, done = scopes.take_cursor(self.path, DONE)
-            self.done = {int(i): _Done(d["result"], d["merged"]) for i, d in (done or {}).items()}
+            self.done = {
+                int(i): _Done.from_stored(d, items[int(i)]) for i, d in (done or {}).items()
+            }
             return
         prev_result = node_args[0] if node_args else None
         self.items = await _resolve_items(self.mp.items, prev_result, self._build_ctx())
 
     def _build_ctx(self) -> Context[Any]:
-        """Build the :class:`Context` passed to ``items_fn``.
+        """Build the :class:`Context` passed to ``items_fn`` and a computed ``max_concurrency``.
 
-        Uses the parent state at map entry. Role is ``None`` since
-        ``items_fn`` is a data-producing callback, not a role action.
+        Uses the parent state at map entry. Role is ``None`` since both
+        are data-producing callbacks, not role actions.
         """
         env = self.env
         return Context(
@@ -171,11 +204,8 @@ class MapRunner:
         item's result (or :class:`Failure` sentinel).
         """
         merge_lock = asyncio.Lock()
-        sem = (
-            asyncio.Semaphore(self.mp.max_concurrency)
-            if self.mp.max_concurrency is not None
-            else None
-        )
+        cap = await self._concurrency(items)
+        sem = asyncio.Semaphore(cap) if cap is not None else None
 
         async def _gated(index: int, item: Any) -> Any:
             runner = self._item_runner(item, index, merge_lock)
@@ -196,6 +226,25 @@ class MapRunner:
                 raise r
         return gathered
 
+    async def _concurrency(self, items: list[Any]) -> int | None:
+        """The cap on in-flight items: ``max_concurrency``, computed now when it is a callable.
+
+        A computed cap is not saved: a resumed map computes it again. It is
+        not computed when no item is left to run.
+
+        Raises:
+            ValueError: The callable returned anything but an ``int >= 1``.
+        """
+        cap = self.mp.max_concurrency
+        if cap is None or isinstance(cap, int):
+            return cap
+        if all(i in self.done for i in range(len(items))):
+            return None
+        value = cap(items, self._build_ctx())
+        if inspect.isawaitable(value):
+            value = await value
+        return check_concurrency(value, f"map {self.mp.name or self.node_id!r}: max_concurrency")
+
     def _item_runner(self, item: Any, index: int, merge_lock: asyncio.Lock) -> MapItemRunner:
         """The runner for item ``index``; a subclass runs a different body per item."""
         return MapItemRunner(self, item, index, merge_lock)
@@ -215,10 +264,12 @@ class MapItemRunner:
 
     Terminal states:
 
-    - :class:`Skipped` — the guard predicate returned falsy.
+    - :class:`Skipped` — the guard predicate returned falsy; recorded as
+      done in the map's cursor, so a resumed map does not ask again.
     - :class:`Failure` — the body (or projection / guard) raised;
-      non-strict returns the sentinel, strict re-raises after
-      firing hooks.
+      non-strict returns the sentinel and records it as done (a resumed
+      map does not run the item again), strict re-raises after firing
+      hooks and records nothing: the item runs again from the last save.
     - Body's return value — the successful path; recorded as completed
       in the map's cursor, merges the child state into the parent (under
       the shared lock) and saves a per-item boundary commit when policy
@@ -261,14 +312,20 @@ class MapItemRunner:
             return _INTERRUPTED
         if self._shortcut_skips():
             skipped = Skipped(item=self.item)
+            self.owner.done[self.item_index] = _Done(skipped, merged=True)
             await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
             return skipped
         try:
             outcome = await self._run_item()
         except Interrupted:
             return _INTERRUPTED
-        # Merged back, skipped or failed: the item leaves the snapshot.
+        # Merged back, skipped or failed: the item leaves the snapshot. A
+        # skipped or failed one is recorded as done in the same step — no
+        # await between — so a checkpoint holds its positions or its record,
+        # never both. (A completed one was recorded when its body returned.)
         self.env.scopes.close_under(self.path)
+        if isinstance(outcome, Failure | Skipped):
+            self.owner.done[self.item_index] = _Done(outcome, merged=True)
         return outcome
 
     def _shortcut_skips(self) -> bool:

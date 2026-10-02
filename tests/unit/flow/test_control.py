@@ -1118,6 +1118,82 @@ class TestMapMaxConcurrency:
         assert order == [1, -1, 2, -2, 3, -3]
 
 
+def _peak_tracker() -> tuple[Any, list[int]]:
+    """A map body that records the peak number of items running at once, in ``peak[0]``."""
+    peak = [0]
+    in_flight = 0
+
+    @verb(role=ROLE_A)
+    async def slow(_ctx: Context, x: int) -> int:
+        nonlocal in_flight
+        in_flight += 1
+        peak[0] = max(peak[0], in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return x
+
+    return slow, peak
+
+
+class TestMapComputedConcurrency:
+    """.map(max_concurrency=(items, ctx) -> int): the cap is computed once when the map starts."""
+
+    @pytest.mark.asyncio
+    async def test_computed_cap_limits_items_in_flight(self) -> None:
+        slow, peak = _peak_tracker()
+        flow = make_ff().create().call(_identity).map(slow, max_concurrency=lambda _i, _c: 2)
+        assert await flow.run([1, 2, 3, 4, 5]) == [1, 2, 3, 4, 5]
+        assert peak[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_called_once_with_the_resolved_items_and_the_map_s_ctx(self) -> None:
+        calls: list[tuple[list[int], Any]] = []
+
+        async def cap(items: list[int], ctx: Context) -> int:
+            calls.append((items, ctx.state.data))
+            return 1
+
+        flow = (
+            make_ff()
+            .create(state={"remaining": 3})
+            .map(_double, items=lambda _p, _c: [1, 2, 3], max_concurrency=cap)
+        )
+        assert await flow.run() == [2, 4, 6]
+        assert calls == [([1, 2, 3], {"remaining": 3})]
+
+    @pytest.mark.asyncio
+    async def test_not_called_for_a_map_without_items(self) -> None:
+        def cap(_items: list[int], _ctx: Context) -> int:
+            raise AssertionError("no item to run")
+
+        flow = make_ff().create().call(_identity).map(_double, max_concurrency=cap)
+        assert await flow.run([]) == []
+
+    @pytest.mark.parametrize("bad", [0, -1, True, 1.5, "2", None])
+    @pytest.mark.asyncio
+    async def test_a_bad_computed_cap_raises_at_map_start(self, bad: Any) -> None:
+        ran: list[int] = []
+
+        @verb(role=ROLE_A)
+        async def body(_ctx: Context, x: int) -> int:
+            ran.append(x)
+            return x
+
+        flow = (
+            make_ff()
+            .create()
+            .call(_identity)
+            .map(body, max_concurrency=lambda _i, _c: bad, name="wave")
+        )
+        with pytest.raises(ValueError, match=r"map 'wave': max_concurrency must be an int >= 1"):
+            await flow.run([1, 2])
+        assert ran == []
+
+    def test_a_non_callable_non_int_is_rejected_at_build_time(self) -> None:
+        with pytest.raises(ValueError, match=r"\.map\(max_concurrency=\) must be an int >= 1"):
+            make_ff().create().call(_identity).map(_double, max_concurrency="3")
+
+
 # -----------------------------------------------------------------------------
 # Flow.with_halt — ambient halt reaches map and iterate boundaries
 # -----------------------------------------------------------------------------
