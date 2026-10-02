@@ -4,28 +4,40 @@
 """Cost tracking as flow context: the cost tracker each run of a flow runs on.
 
 Cost is what calls and operations cost; a budget is the limit cost is
-checked against. A flow's cost context:
+checked against. Gent tracks cost; the agent decides how to keep to a
+budget. A flow's cost context:
 
 - :meth:`Flow.with_cost_tracker` — every run of the flow runs on that
   :class:`~llm_gent.core.cost.CostTracker`;
 - :meth:`Flow.with_budget` — each run of the flow runs on a child of its
   tracker (its own, else the enclosing one) with that budget, so spend
-  rolls up and every budget on the chain applies. A map body runs once per
-  item, an iterate body once per pass, a subflow once per ``.call``:
+  rolls up and every budget on the chain is tracked. A map body runs once
+  per item, an iterate body once per pass, a subflow once per ``.call``:
   per-item, per-pass, per-call budgets;
 - neither — the run shares the enclosing tracker.
 
-A run with a budget stops when its budget is crossed, with halt
-semantics, on a halt event of its own (:class:`RunCost`); that event is
-also set when the enclosing halt is, so the run stops on either. A run
-whose own budget stopped it ends with no result and the enclosing flow
-carries on (:meth:`Flow._walk`).
+Crossing a budget latches the child's ``exceeded`` / ``urgent_wrapup``
+for the agent to read through ``ctx.cost``; it does not stop the run. A
+hard stop is the app's choice: a tracker built with ``halt=`` the run's
+halt event pauses the run when that tracker's budget is crossed.
 
-A run's own tracker (its explicit one, or its budgeted child) is a
-position like a cursor: its spend is in every checkpoint taken while the
-run is in progress, at the run's path
-(:data:`~llm_gent.flow.state.snapshot.COST`), and restored when the run
-resumes, before its first step.
+The running cost is reconstructed across pause, resume and shortcut: a
+tracker's spend (and spend by op) is a position like a cursor, in every
+checkpoint taken while it is in use and restored before the run's first
+step on resume.
+
+- A budgeted run's child is saved at the run's path
+  (:data:`~llm_gent.flow.state.snapshot.COST`) while the run is in
+  progress.
+- A tracker a flow declares is saved at that flow's path
+  (:data:`~llm_gent.flow.state.snapshot.TRACKER`) while its run is in
+  progress; the top-level flow's stays through the run's end, so the
+  completion commit holds it too and a later session continues the
+  total. A tracker a flow inherits — the same object as its parent's —
+  is saved once, where it is first declared.
+
+Spend is therefore cumulative over the whole history. A per-session
+budget is the app's limit, set on the restored spend (``update_budget``).
 """
 
 from __future__ import annotations
@@ -33,13 +45,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..core.cost import CostTracker
 from ._node_id import _child_flows
-from .state.snapshot import COST, ScopePath, ScopeRegistry, path_str
+from .state.snapshot import COST, TRACKER, ScopePath, ScopeRegistry, path_str
 
 
 if TYPE_CHECKING:
@@ -111,22 +123,12 @@ def _no_tracker_message(flow: Flow, budget: float) -> str:
 class RunCost:
     """The cost context one run of a flow runs under.
 
-    ``tracker`` is ``ctx.cost`` for the run. ``halt`` is the event the
-    run observes. ``stop`` is the run's own halt event when it has a
-    budget (``halt`` is then ``stop``), set on crossing the budget or when
-    ``enclosing`` — the halt the run would observe without one — is set.
+    ``tracker`` is ``ctx.cost`` for the run; ``halt`` is the halt it
+    observes (the run's, from the top-level flow).
     """
 
     tracker: CostTracker | None
     halt: asyncio.Event | None
-    stop: asyncio.Event | None = None
-    enclosing: asyncio.Event | None = None
-
-    def stopped_by_budget(self) -> bool:
-        """True when the run's own stop is set and the enclosing halt is not."""
-        if self.stop is None or not self.stop.is_set():
-            return False
-        return self.enclosing is None or not self.enclosing.is_set()
 
 
 @contextlib.asynccontextmanager
@@ -139,11 +141,12 @@ async def run_cost(
 ) -> AsyncIterator[RunCost]:
     """The cost context of one run of ``flow`` at ``path``, for the duration of the run.
 
-    A run with a tracker of its own keeps it registered at ``path`` — after
-    restoring the spend a checked-out snapshot saved there — and drops it
-    once the run completes; a run that stops keeps it, for the run's halt
-    checkpoint. A budgeted run's link to the enclosing halt ends with the
-    run.
+    The tracker ``flow`` declares (one its parent does not already run on)
+    and a budgeted run's child are kept registered at ``path`` — after
+    restoring the spend a checked-out snapshot saved there — while the run
+    is in progress; a run that stops keeps them, for the run's halt
+    checkpoint. The top-level flow's tracker stays registered after the
+    run completes, for the completion commit.
 
     Raises:
         RuntimeError: ``flow`` has a budget and no tracker to make its
@@ -151,35 +154,51 @@ async def run_cost(
             tree, e.g. through ``ctx.flow.dispatch``).
     """
     # The run's halt is on the top-level flow (check_one_halt); a nested run
-    # observes what its parent does, which under a budget is the budget's stop.
-    enclosing = flow._halt_event if parent_halt is None else parent_halt
-    tracker = flow._cost_tracker if flow._cost_tracker is not None else parent_cost
-    if flow._budget is None:
-        if flow._cost_tracker is None:
-            yield RunCost(parent_cost, enclosing)
+    # observes what its parent does.
+    halt = flow._halt_event if parent_halt is None else parent_halt
+    own = flow._cost_tracker
+    tracker = own if own is not None else parent_cost
+    declared = own if own is not None and own is not parent_cost else None
+    with _kept(scopes, path, TRACKER, declared, past_the_run=path == ()):
+        if flow._budget is None:
+            yield RunCost(tracker, halt)
             return
-        context = RunCost(flow._cost_tracker, enclosing)
-    else:
         if tracker is None:
             raise RuntimeError(_no_tracker_message(flow, flow._budget))
-        stop = asyncio.Event()
-        context = RunCost(tracker.child(flow._budget, halt=stop), stop, stop, enclosing)
-    assert context.tracker is not None
-    _restore(scopes, path, context.tracker)
-    cursor = _CostCursor(context.tracker)
+        child = tracker.child(flow._budget)
+        with _kept(scopes, path, COST, child, past_the_run=False):
+            yield RunCost(child, halt)
+
+
+@contextlib.contextmanager
+def _kept(
+    scopes: ScopeRegistry,
+    path: ScopePath,
+    entry: str,
+    tracker: CostTracker | None,
+    *,
+    past_the_run: bool,
+) -> Iterator[None]:
+    """Keep ``tracker``'s accounting at ``path`` as ``entry`` while the block runs.
+
+    Restores it first from a checked-out snapshot. Dropped when the block
+    completes, unless ``past_the_run``; kept when it stops early (the halt
+    checkpoint needs it). Nothing when ``tracker`` is ``None``.
+    """
+    if tracker is None:
+        yield
+        return
+    _restore(scopes, path, entry, tracker)
+    cursor = _TrackerCursor(tracker, entry)
     scopes.open_cursor(path, cursor)
-    link = follow(enclosing, context.stop)
-    try:
-        yield context
+    yield
+    if not past_the_run:
         scopes.close_cursor(path, cursor)
-    finally:
-        if link is not None:
-            link.cancel()
 
 
-def _restore(scopes: ScopeRegistry, path: ScopePath, tracker: CostTracker) -> None:
+def _restore(scopes: ScopeRegistry, path: ScopePath, entry: str, tracker: CostTracker) -> None:
     """Restore ``tracker`` from the spend a checked-out snapshot saved at ``path``, if any."""
-    found, saved = scopes.take_cursor(path, COST)
+    found, saved = scopes.take_cursor(path, entry)
     if not found:
         return
     try:
@@ -187,33 +206,17 @@ def _restore(scopes: ScopeRegistry, path: ScopePath, tracker: CostTracker) -> No
             float(saved["spent"]), {k: float(v) for k, v in saved["costs_by_op"].items()}
         )
     except (KeyError, TypeError, ValueError, AttributeError) as e:
-        where = path_str((*path, COST))
+        where = path_str((*path, entry))
         raise TypeError(f"cursor at {where!r} cannot be restored: {e}") from e
 
 
-def follow(
-    enclosing: asyncio.Event | None, stop: asyncio.Event | None
-) -> asyncio.Task[None] | None:
-    """Set ``stop`` once ``enclosing`` is set; the task doing it, ``None`` when nothing to do."""
-    if enclosing is None or stop is None:
-        return None
-    if enclosing.is_set():
-        stop.set()
-        return None
+class _TrackerCursor:
+    """Cursor of a tracker kept in the run's snapshots: its accounting, as ``entry``."""
 
-    async def follow() -> None:
-        await enclosing.wait()
-        stop.set()
-
-    return asyncio.create_task(follow())
-
-
-class _CostCursor:
-    """Cursor of a run's own tracker: its accounting, restored when the run resumes."""
-
-    def __init__(self, tracker: CostTracker) -> None:
+    def __init__(self, tracker: CostTracker, entry: str) -> None:
         self.tracker = tracker
+        self.entry = entry
 
     def cursor(self) -> dict[str, Any]:
-        """``{"cost": {"spent", "costs_by_op"}}``."""
-        return {COST: self.tracker.snapshot()}
+        """``{entry: {"spent", "costs_by_op"}}``."""
+        return {self.entry: self.tracker.snapshot()}

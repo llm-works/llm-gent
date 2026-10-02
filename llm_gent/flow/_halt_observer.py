@@ -74,9 +74,9 @@ def _label(flow: Flow) -> str:
 def is_halt_signaled(env: _RunEnv) -> bool:
     """True when the halt event in effect under ``env`` is set, or the run's halt is.
 
-    Under a capped run or a shortcut, ``env.halt`` is a stop event that
-    follows the run's halt one loop tick later; the run's halt is checked
-    directly so it is never missed in between.
+    Under a shortcut, ``env.halt`` is a stop event that follows the run's
+    halt one loop tick later; the run's halt is checked directly so it is
+    never missed in between.
     """
     return (env.halt is not None and env.halt.is_set()) or is_run_halted(env)
 
@@ -90,9 +90,8 @@ def is_run_halted(env: _RunEnv) -> bool:
 def note_halt(env: _RunEnv, iteration: int, node_id: str) -> None:
     """Record where the run's halt was observed, unless an earlier observation was recorded.
 
-    Only the run's halt is recorded: a capped run stopped by its own
-    budget, with the run's halt not set, ends that run without a halt
-    checkpoint.
+    Only the run's halt is recorded: a flow its shortcut stopped, with the
+    run's halt not set, continues without a halt checkpoint.
     """
     runtime = env.runtime
     halt = runtime._halt_event

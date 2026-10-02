@@ -828,11 +828,16 @@ class Flow:
     def with_cost_tracker(self, tracker: CostTracker) -> Flow:
         """Run every run of this flow on ``tracker``, reachable as ``ctx.cost``.
 
-        Verbs record LLM and operation costs against it. Auto-halt is
-        opt-in on the tracker side: pass a shared ``asyncio.Event`` to both
-        :meth:`CostTracker.__init__` (``halt=``) and :meth:`with_halt`, and
-        the tracker sets the event on the first cross into ``exceeded``.
-        Without a tracker of its own a flow shares the enclosing one.
+        Verbs record LLM and operation costs against it through
+        ``ctx.cost``. Its spend is in the run's checkpoints — on the
+        top-level flow, in every commit including the completion commit —
+        and restored on resume, so it is the total over the whole history
+        (see :mod:`llm_gent.flow._cost`). A hard
+        stop is opt-in on the tracker side: pass the run's halt event to
+        both :meth:`CostTracker.__init__` (``halt=``) and :meth:`with_halt`,
+        and the tracker sets it on the first cross into ``exceeded``,
+        pausing the run. Without a tracker of its own a flow shares the
+        enclosing one.
 
         Returns ``self`` for chaining.
 
@@ -847,18 +852,17 @@ class Flow:
 
         Each run runs on a child of the flow's tracker (its own, else the
         enclosing flow's) with ``budget`` as its limit — cost rolls up and
-        every budget on the chain applies. A map body runs once per item,
-        an iterate body once per pass, a subflow once per ``.call``.
-        Crossing the budget stops that run with halt semantics (in-flight
-        LLM calls finish, everything under it stops) and it ends with no
-        result (``None``); the enclosing flow carries on. The run also
-        stops on the halt it would observe without a budget. A budget
-        needs a tracker on this flow or an enclosing one: :meth:`run`
-        raises otherwise.
+        every budget on the chain is tracked. A map body runs once per
+        item, an iterate body once per pass, a subflow once per ``.call``.
+        Crossing the budget latches the child's ``exceeded`` and
+        ``urgent_wrapup`` for the agent to read through ``ctx.cost``; gent
+        does not stop the run — the agent decides how to keep to its
+        budget. A budget needs a tracker on this flow or an enclosing one:
+        :meth:`run` raises otherwise.
 
-        A run's own tracker (its tracker, or its budgeted child) is in every
-        checkpoint taken while the run is in progress, and restored when it
-        resumes; see :mod:`llm_gent.flow._cost`.
+        The child's spend is in every checkpoint taken while the run is in
+        progress, and restored when it resumes; see
+        :mod:`llm_gent.flow._cost`.
 
         Returns ``self`` for chaining.
 
@@ -1199,7 +1203,7 @@ class Flow:
         ``.with_checkpointer()`` / ``.with_checkpoint_policy()``,
         preserving an intermediate layer's ambient through arbitrarily
         deep nesting. ``parent_halt`` is the halt the calling scope
-        observes: the run's halt, or a budgeted run's stop event.
+        observes: the run's halt, or a shortcut's stop event.
         ``parent_checkpoint_ctx`` is the run's repo; repo and halt are set
         on the top-level flow only. The run's cost context (its tracker,
         and the halt it observes) comes from
@@ -1236,44 +1240,22 @@ class Flow:
                 shortcut=shortcut,
                 parent_shortcuts=parent_shortcuts,
             )
-            return await self._run_in(env, context, args, kwargs)
+            return await self._run_in(env, args, kwargs)
 
-    async def _run_in(
-        self,
-        env: _RunEnv,
-        context: RunCost,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> Any:
-        """Walk this Flow under ``env``; a run already over its budget does nothing."""
+    async def _run_in(self, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """Walk this Flow under ``env``."""
         label = self._name or "<anonymous>"
         is_subflow = env.runtime is not self
-        if context.stopped_by_budget():
-            env.lg.debug("flow run out of budget before its first step", extra={"flow": label})
-            return None
         env.lg.debug(
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
-        result = await self._walk(env, args, kwargs, context=context)
+        result = await self._walk(env, args, kwargs)
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
 
-    async def _walk(
-        self,
-        env: _RunEnv,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        *,
-        context: RunCost,
-    ) -> Any:
-        """Walk this Flow's chain; a run stopped by its own budget returns ``None``.
-
-        That subtree ends there and the run carries on, with no result
-        from it: what the stop interrupted inside it is no position of the
-        run's, so it leaves the snapshots. A budgeted run stopped because the
-        run's halt was set is not stopped by its budget: the interruption
-        carries on up.
+    async def _walk(self, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """Walk this Flow's chain.
 
         A run its shortcut stopped walks again at once, in shortcut mode,
         from the positions it stopped at (restaged as a checkout's).
@@ -1281,13 +1263,10 @@ class Flow:
         try:
             return await Chain(self, env).walk(args, kwargs)
         except Interrupted:
-            if context.stopped_by_budget():
-                env.scopes.close_under(env.path)
-                return None
             if env.shortcut is None or not env.shortcut.take_over(is_run_halted(env)):
                 raise
         env.scopes.restage_under(env.path)
-        return await self._walk(env, args, kwargs, context=context)
+        return await self._walk(env, args, kwargs)
 
     def _make_run_env(
         self,

@@ -17,10 +17,11 @@ nesting a consumer needs. Every level has the same capabilities.
 Halt-observation contract:
 
 - Halt at tracker level N fires when N's own cap crosses.
-- Cascading halt observation across scopes is a Flow-layer concern —
-  a run has one halt (:meth:`Flow.with_halt` on its top-level flow), and
-  a capped flow (``with_budget(cap)``) runs on a stop event that both its
-  cap and the run's halt set.
+- Halt observation is a Flow-layer concern — a run has one halt
+  (:meth:`Flow.with_halt` on its top-level flow). A flow's budget
+  (``with_budget``) only tracks: its child tracker has no halt event, and
+  the agent reads ``exceeded`` / ``urgent_wrapup`` to decide. A tracker
+  given the run's halt event pauses the run when its budget is crossed.
 
 This separation of concerns is deliberate: the tracker records and
 fires; the Flow decides what to observe.

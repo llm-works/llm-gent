@@ -202,9 +202,8 @@ chain. Chains, iterates and maps that stop before their end raise
 `Interrupted` to the step running them, and each part stays registered
 where it stopped. Once everything has stopped, `run()` writes one
 `halted` commit holding every position and returns `None`: the halted
-run's state is in that commit. A run stopped by its own budget ends
-the interruption at its boundary, without a commit (see Cost and budgets). A
-halted history is never marked complete.
+run's state is in that commit. A halted history is never marked
+complete.
 
 A run has one halt, set with `.with_halt(event)` on its top-level flow;
 every subflow observes it. `run()` raises when a nested flow sets a
@@ -308,7 +307,7 @@ it is checked against. Verbs reach the run's tracker as `ctx.cost`:
   tracker.
 - `with_budget(limit)` — each run of the flow runs on a child of its
   tracker (its own, else the enclosing flow's) with that budget; spend
-  rolls up, and every budget on the chain applies. A map body runs once
+  rolls up, and every budget on the chain is tracked. A map body runs once
   per item, an iterate body once per pass, a subflow once per `.call`, so
   a budget on the body is a per-item, per-pass or per-call budget. A
   budget needs a tracker on the flow or an enclosing one; `run()` raises
@@ -325,18 +324,33 @@ flow = (
 )
 ```
 
-Crossing a budget stops that run with halt semantics — LLM calls in
-flight finish, everything under it stops — and it ends with no result
-(`None`); the enclosing flow carries on. A budgeted run also stops when
-the run's halt is set; then the interruption carries on up as usual.
+Gent tracks cost; the agent decides how to keep to its budget. Crossing
+a budget latches the tracker's `exceeded` and `urgent_wrapup`, which the
+agent reads through `ctx.cost` (to wrap up, say); gent stops nothing. A
+hard stop is the app's choice: a tracker built with `halt=` the run's
+halt event pauses the run when its budget is crossed.
 
-Every run's own tracker is in each checkpoint taken while the run is in
-progress — its spend and spend by op — and is restored when it resumes,
-before its first step: a run halted at 9.0 of a 10.0 budget resumes with
-1.0 left. A tracker whose restored spend is at or over its budget fires
-its halt at once, so a run that ran out stays out until its budget is
-raised. A finished run keeps no tracker in its final commit: the next
-session starts from the tracker as given.
+The running cost is reconstructed across pause, resume and shortcut.
+Every tracker's spend (and spend by op) is in the checkpoints, and resume
+restores it before the run's first step:
+
+- The run's tracker (`with_cost_tracker` on the top-level flow) is in
+  every commit, the completion commit included, so its spend is the total
+  over the whole history: a later session continues it. A tracker every
+  flow inherits (a `FlowFactory(cost_tracker=...)`) is kept once, at the
+  top. A tracker a nested flow declares of its own is kept while that
+  flow runs.
+- A budgeted run's child is kept while the run is in progress: a run
+  halted at 9.0 of a 10.0 budget resumes with 1.0 left. A shortcut's
+  continuation carries it over the same way, so nothing is counted twice.
+- After a crash the run resumes from its last save: spend recorded after
+  that save is in no checkpoint, so the step that runs again records it
+  again. Cost tracking is best effort.
+
+Spend is cumulative; a per-session budget is a limit set on it. The app
+reads the spend so far from the history's head
+(`History.snapshot(head).cursors[""]["tracker"]["spent"]`) and builds the
+session's tracker with `budget=` that plus the session's allowance.
 
 ### One repo per run
 
