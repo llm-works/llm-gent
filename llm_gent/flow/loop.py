@@ -291,7 +291,11 @@ class Loop:
             SAIA's vocab), UNLESS ``on_complete`` (non-paused path) or
             ``on_paused`` (paused path) returned a non-``None`` value —
             that value replaces the raw result. ``on_finally`` fires
-            after either path.
+            after either path. A call that holds a paused turn while a
+            :meth:`~llm_gent.flow.Flow.with_shortcut` above it is in
+            shortcut mode does not continue the turn: it releases it and
+            returns the result SAIA paused it with (``None`` when that
+            could not be kept), without calling SAIA or the other hooks.
 
         Raises:
             asyncio.CancelledError: Re-raised after ``on_cancelled`` and
@@ -305,6 +309,10 @@ class Loop:
         """
         turn = _LoopTurn(ctx)
         try:
+            if _in_shortcut(ctx):
+                finished, paused_result = turn.finish()
+                if finished:
+                    return paused_result
             # Inside the outer try so a raise from _prepare_dispatch (JSON
             # decode fail, ConversationFactory.create_from_state raise, etc.)
             # still fires on_finally per its "runs last on every dispatch"
@@ -403,7 +411,7 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
-            turn.hold(self._capture_paused(task, conversation))
+            turn.hold(self._capture_paused(task, conversation, result))
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
@@ -480,11 +488,14 @@ class Loop:
         conversation = self._conversation_factory.create_from_state(envelope.conversation)
         return envelope.task, conversation, True
 
-    def _capture_paused(self, task: str, conversation: Any) -> PausedTurnEnvelope | None:
+    def _capture_paused(
+        self, task: str, conversation: Any, result: Any
+    ) -> PausedTurnEnvelope | None:
         """The paused turn as an envelope; ``None`` when it cannot be captured.
 
-        The envelope is ``{"task": <str>, "conversation": <to_dict()>}``;
-        its canonical bytes also land on :attr:`_paused_bytes`, an
+        The envelope is ``{"task": <str>, "conversation": <to_dict()>}``
+        plus the ``result`` SAIA paused the turn with; the canonical bytes
+        of task and conversation also land on :attr:`_paused_bytes`, an
         introspection surface for callers holding this Loop.
 
         ``None`` when this Loop was constructed without a
@@ -498,7 +509,7 @@ class Loop:
         to_dict = getattr(conversation, "to_dict", None)
         if to_dict is None:
             return None
-        envelope = PausedTurnEnvelope(task=task, conversation=to_dict())
+        envelope = PausedTurnEnvelope(task=task, conversation=to_dict(), result=result)
         self._paused_bytes = envelope.to_bytes()
         return envelope
 
@@ -542,6 +553,25 @@ class _LoopTurn:
         """Drop the turn from the run's snapshots."""
         if self._scopes is not None:
             self._scopes.close_cursor(self._path, self._runner)
+
+    def finish(self) -> tuple[bool, Any]:
+        """Take the turn held at this path without continuing it: ``(True, its paused result)``.
+
+        ``(False, None)`` when no turn is held here. The turn leaves the
+        run's snapshots.
+        """
+        if self._scopes is None:
+            return False, None
+        found, raw = self._scopes.take_cursor(self._path, TURN)
+        if not found:
+            return False, None
+        return True, None if raw is None else PausedTurnEnvelope.from_dict(raw).result
+
+
+def _in_shortcut(ctx: Context[Any]) -> bool:
+    """True when a flow this call runs under is in shortcut mode."""
+    env = ctx._env
+    return env is not None and any(shortcut.active for shortcut in env.shortcuts)
 
 
 # ----------------------------------------------------------------------------

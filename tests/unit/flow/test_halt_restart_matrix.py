@@ -190,7 +190,21 @@ class Ckpt:
     body: Node
 
 
-Node = Leaf | Seq | Iter | Fan | Branch | Scope | Pan | Ckpt
+@dataclass(frozen=True)
+class Cut:
+    """A subflow declaring ``with_shortcut("cut")`` (the run's signal is ``probe.cut``).
+
+    With ``to``, it lands on its last step.
+
+    The last child is then a :class:`Leaf`, appended with ``name="to"``.
+    Only the shortcut section uses it: the model runs it as a :class:`Seq`.
+    """
+
+    children: tuple[Node, ...]
+    to: bool = False
+
+
+Node = Leaf | Seq | Iter | Fan | Branch | Scope | Pan | Ckpt | Cut
 
 _L = Leaf("", 0)
 _T = Turn("", 0)
@@ -213,6 +227,8 @@ def _label(node: Node, counter: list[int], prefix: str = "l") -> Node:
         return Pan(tuple(type(m)(*_leaf_label(counter, prefix)) for m in node.members))
     if isinstance(node, Ckpt):
         return Ckpt(_label(node.body, counter, "c"))
+    if isinstance(node, Cut):
+        return Cut(tuple(_label(child, counter, prefix) for child in node.children), node.to)
     return Scope(_label(node.body, counter, prefix))
 
 
@@ -285,7 +301,7 @@ def _has(node: Node, kind: type, mode: FanMode | None = None) -> bool:
     """True when ``node`` contains a node of ``kind`` (a ``Fan`` in ``mode``, when given)."""
     if isinstance(node, kind) and (mode is None or getattr(node, "mode", None) == mode):
         return True
-    if isinstance(node, Seq):
+    if isinstance(node, Seq | Cut):
         return any(_has(child, kind, mode) for child in node.children)
     if isinstance(node, Branch):
         return _has(node.then, kind, mode) or _has(node.else_, kind, mode)
@@ -325,7 +341,7 @@ def _model_node(node: Node, x: int, out: dict[str, int], merges: list[str]) -> i
         assert key not in out, f"model keys collide: {key}"
         out[key] = 3 * x + node.c
         return out[key]
-    if isinstance(node, Seq):
+    if isinstance(node, Seq | Cut):
         for child in node.children:
             x = _model_node(child, x, out, merges)
         return x
@@ -418,6 +434,15 @@ class Probe:
     turns_started: list[str] = field(default_factory=list)
     turns_paused: list[str] = field(default_factory=list)
     turns_resumed: list[str] = field(default_factory=list)
+    cut: asyncio.Event = field(default_factory=asyncio.Event)
+    cut_key: str | None = None
+    cut_before_halt: bool = False
+
+    async def cut_here(self, key: str) -> None:
+        """Set the shortcut's event when leaf execution ``key`` is the one that cuts."""
+        if key == self.cut_key:
+            self.cut.set()
+            await asyncio.sleep(0)  # the stop follows the event
 
     def stop_here(self) -> None:
         """Stop the run at the current leaf.
@@ -428,6 +453,7 @@ class Probe:
         """
         if self.stop == "halt":
             assert self.halt is not None
+            self.cut_before_halt = self.cut.is_set()
             self.halt.set()
             return
         if self.stop == "crash":
@@ -466,6 +492,7 @@ def _leaf_verb(leaf: Leaf, probe: Probe) -> Any:
         done[key] = 3 * x + leaf.c
         probe.executed.append(key)
         await _save(ctx, probe, key)
+        await probe.cut_here(key)
         if fire:
             probe.stop_here()  # sets the halt, or raises for a crash / an exception
         return done[key]
@@ -509,6 +536,13 @@ class _ConvFactory:
 @dataclass
 class _TurnResult:
     paused: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"paused": self.paused}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> _TurnResult:
+        return cls(**data)
 
 
 class _TurnSAIA:
@@ -572,8 +606,9 @@ def _turn_verb(leaf: Turn, probe: Probe) -> Any:
             probe.stopped = key
             if probe.mode == "before":
                 probe.mid_turn = key
-        if (await loop(ctx, key)).paused:
-            return None
+        result = await loop(ctx, key)
+        if result is not None and result.paused and ctx.halt is not None and ctx.halt.is_set():
+            return None  # paused by the halt; a turn a shortcut finished carries on
         done = ctx.state.data.setdefault("done", {})
         done[key] = 3 * x + leaf.c
         probe.executed.append(key)
@@ -604,6 +639,8 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     """Append ``node`` to ``flow`` as one chain step."""
     if isinstance(node, Pan):
         return flow.call(_panel_verb(node, probe))
+    if isinstance(node, Cut):
+        return flow.call(_cut_flow(node, probe, parallel))
     if isinstance(node, Ckpt):
         sub = FlowFactory(LG).create().with_checkpointer()
         _add(node.body, sub, probe, parallel)
@@ -631,6 +668,19 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
             else_=lambda b: _add(node.else_, b, probe, parallel),
         )
     return _add_fan(node, flow, probe, parallel)
+
+
+def _cut_flow(node: Cut, probe: Probe, parallel: bool) -> Flow:
+    """The subflow for a :class:`Cut`: its children, then ``with_shortcut("cut")``."""
+    sub = FlowFactory(LG).create()
+    children = node.children[:-1] if node.to else node.children
+    for child in children:
+        _add(child, sub, probe, parallel)
+    if node.to:
+        landing = node.children[-1]
+        assert type(landing) is Leaf, "a Cut lands on a plain leaf"
+        sub.call(_leaf_verb(landing, probe), name="to")
+    return sub.with_shortcut("cut", to="to" if node.to else None)
 
 
 def _merge_scope(parent: dict[str, Any], child: dict[str, Any]) -> None:
@@ -679,6 +729,8 @@ def _flow(
         flow = flow.with_checkpoint_policy(**{probe.policy: True})
     if halt is not None:
         flow = flow.with_halt(halt)
+    if _has(shape, Cut):
+        flow = flow.with_signal("cut", probe.cut)
     for step in shape.children:
         _add(step, flow, probe, parallel)
     return flow
@@ -1015,3 +1067,122 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
     in_order = [k for k in resumed.executed if k not in captured] == missing
     assert in_order or not _ordered(shape, False)
     assert set(resumed.executed) - set(captured) == set(missing)
+
+
+# --- Shortcuts --------------------------------------------------------------
+#
+# A shortcut changes what an uninterrupted run does, so its oracle is the
+# same flow run with the cut and without a halt. Each case cuts at one
+# plain leaf's execution and halts at a leaf entry (before or after its
+# work), then resumes: a halt before the cut leaves resume to cut the same
+# way, one during the shortcut leaves it recorded in the halt checkpoint,
+# one after it lands is an ordinary halt. Either way the resumed run ends
+# with the oracle's result and state — except a halt before the cut in a
+# parallel map, where the resumed run's interleaving decides how far each
+# item got when it cuts: that one is checked to finish.
+
+_CUT_INNER: dict[str, Node] = {
+    "cut(seq)": Cut((_L, _L, _L)),
+    "cut(seq,to)": Cut((_L, _L, _L), to=True),
+    "cut(iter)": Cut((Iter(_L, 3),)),
+    "cut(fan)": Cut((Fan(_L, 3),)),
+    "cut(turn,to)": Cut((_T, _L, _L), to=True),
+    "cut(iter(sub),to)": Cut((Iter(Seq((_L, _L)), 2), _L), to=True),
+    "iter(cut(seq))": Iter(Cut((_L, _L)), 2),
+    "fan(cut(seq,to))": Fan(Cut((_L, _L, _L), to=True), 2),
+    "campaign": Cut((Iter(Cut((_L, Fan(Cut((_L, _T, _L), to=True), 2), _L)), 2),)),
+}
+
+CUT_SHAPES: dict[str, Seq] = {
+    f"leaf>{key}>leaf": Seq((_label(_L, [0]), _label(inner, [1]), Leaf("l99", 99)))
+    for key, inner in _CUT_INNER.items()
+}
+
+
+def _plain_leaf_names(node: Node) -> set[str]:
+    """Names of the leaves in ``node`` that are not Loop turns."""
+    if isinstance(node, Turn):
+        return set()
+    if isinstance(node, Leaf):
+        return {node.name}
+    if isinstance(node, Seq | Cut):
+        return set().union(*(_plain_leaf_names(child) for child in node.children))
+    if isinstance(node, Iter | Fan):
+        return _plain_leaf_names(node.body)
+    return set()
+
+
+@dataclass(frozen=True)
+class CutCase:
+    """One point of the shortcut section."""
+
+    shape: str
+    cut_key: str
+    stop_at: int
+    mode: str
+    parallel: bool
+
+    @property
+    def id(self) -> str:
+        run = "par" if self.parallel else "seq"
+        return f"{self.shape}-cut{self.cut_key}-halt{self.stop_at}-{self.mode}-{run}"
+
+
+def _cut_params() -> Iterator[Any]:
+    for name, shape in CUT_SHAPES.items():
+        keys = list(model(shape)[1])
+        plain = _plain_leaf_names(shape)
+        cut_keys = [k for k in keys if k.split(":")[0] in plain]
+        for parallel in (False, True) if _has(shape, Fan) else (False,):
+            for cut_key in cut_keys:
+                for stop_at in range(1, len(keys) + 1):
+                    for mode in ("before", "after"):
+                        case = CutCase(name, cut_key, stop_at, mode, parallel)
+                        yield pytest.param(case, id=case.id)
+
+
+async def _head_done(store: CheckpointStore) -> dict[str, int]:
+    history = History(store, FLOW_NAME)
+    head = await history.head()
+    assert head is not None
+    return dict((await history.snapshot(head)).root.get("done", {}))
+
+
+@pytest.mark.parametrize("case", list(_cut_params()))
+async def test_halt_around_a_shortcut_resumes_to_the_cut_run(case: CutCase) -> None:
+    shape = CUT_SHAPES[case.shape]
+    oracle_store = InMemoryCheckpointStore()
+    oracle = Probe(cut_key=case.cut_key)
+    expected = await _flow(shape, oracle, oracle_store, parallel=case.parallel).run(RUN_INPUT)
+    expected_done = await _head_done(oracle_store)
+
+    inner = InMemoryCheckpointStore()
+    store = CrashableStore(inner)
+    halt = asyncio.Event()
+    probe = Probe(
+        stop="halt",
+        stop_at=case.stop_at,
+        mode=case.mode,
+        halt=halt,
+        store=store,
+        cut_key=case.cut_key,
+    )
+    result = await _flow(shape, probe, store, parallel=case.parallel, halt=halt).run(RUN_INPUT)
+    if await History(inner, FLOW_NAME).is_complete():
+        assert result == expected
+        assert await _head_done(inner) == expected_done
+        return
+    assert result is None
+
+    resumed = Probe(cut_key=case.cut_key)
+    flow = _flow(shape, resumed, inner, parallel=case.parallel)
+    result = await flow.run(RUN_INPUT, resume="latest")
+    assert await History(inner, FLOW_NAME).is_complete()
+    if case.parallel and not probe.cut_before_halt:
+        # Halted before the cut, with items running at once: the halt stopped
+        # each item where it was, so where an item is when the cut comes — in
+        # the stopped run or the resumed one — is not where it was without
+        # the halt.
+        return
+    assert result == expected
+    assert await _head_done(inner) == expected_done

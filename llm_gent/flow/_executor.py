@@ -44,7 +44,7 @@ from .state.cas import (
     CommitOutcome,
     TraceRef,
 )
-from .state.snapshot import ARM, Cursor, ScopePath
+from .state.snapshot import ARM, Cursor, Live, ScopePath
 
 
 if TYPE_CHECKING:
@@ -303,6 +303,7 @@ async def _run_subflow(
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=path,
+            parent_shortcuts=env.shortcuts,
             **node_kwargs,
         )
         await _merge_state(merge_fn, env.state, child_state)
@@ -376,8 +377,12 @@ def _restore_scope_state(
 
     Companion to :func:`_project_state` — same shape as the fresh
     projection but uses ``factory.restore(raw)`` (or a passthrough when
-    ``factory is None``) instead of running ``state_fn(parent.data)``.
+    ``factory is None``) instead of running ``state_fn(parent.data)``. A
+    restaged scope (:class:`~llm_gent.flow.state.snapshot.Live`) is the
+    child :class:`State` itself.
     """
+    if isinstance(raw, Live):
+        return raw.value  # type: ignore[no-any-return]
     child_payload = factory.restore(raw) if factory is not None else raw
     return State(data=child_payload, _parent=parent, _factory=factory)
 
@@ -515,6 +520,7 @@ async def _run_arm(
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=path,
+            parent_shortcuts=env.shortcuts,
         )
 
 

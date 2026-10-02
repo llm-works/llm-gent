@@ -37,6 +37,7 @@ from .state.snapshot import ScopePath, ScopeRegistry
 
 if TYPE_CHECKING:
     from ._checkpoint_ctx import CheckpointContext
+    from ._shortcut import ShortcutRun
     from .flow import Flow
 
 from .checkpoint import CheckpointPolicy
@@ -245,6 +246,10 @@ class _RunEnv:
     the iterate pass and map item coordinates that tell repeated
     executions apart (:mod:`llm_gent.flow.state.snapshot`). Scopes opened
     under this Flow register at ``path`` extended by their owner.
+
+    ``shortcut`` is this Flow's own :meth:`Flow.with_shortcut` for this
+    run (its chain, iterates and maps follow it); ``shortcuts`` holds it
+    and every enclosing flow's, for the Loop calls under them.
     """
 
     runtime: Flow
@@ -259,6 +264,8 @@ class _RunEnv:
     extra: dict[str, Any] = field(default_factory=dict)
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
     path: ScopePath = ()
+    shortcut: ShortcutRun | None = None
+    shortcuts: tuple[ShortcutRun, ...] = ()
 
     @property
     def scopes(self) -> ScopeRegistry:
@@ -332,3 +339,14 @@ class _Node:
     state_fn: StateProject | None = None
     merge_fn: StateMerge | None = None
     state_factory: StateFactory[Any] | None = None
+    name: str | None = None
+    """A ``.call`` / ``.then`` step's label; primitives carry theirs on the target."""
+
+
+def step_name(node: _Node) -> str | None:
+    """The ``name=`` a chain step was built with: its own, or its primitive's."""
+    if node.name is not None:
+        return node.name
+    if isinstance(node.target, _Branch | _Iterate | _Map):
+        return node.target.name
+    return None

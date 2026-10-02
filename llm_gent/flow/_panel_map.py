@@ -97,5 +97,6 @@ class _PanelItemRunner(MapItemRunner):
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=self.path,
+            parent_shortcuts=env.shortcuts,
             **owner.kwargs,
         )

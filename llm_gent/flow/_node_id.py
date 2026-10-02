@@ -58,7 +58,8 @@ def _target_qualname(target: Any) -> str:
     Targets whose strings are equal — unnamed primitives, two Loops with
     the same label — are told apart only by their order among
     themselves, so removing an earlier one hands its id to the next.
-    Labels exist to prevent that.
+    Labels exist to prevent that; a ``.call`` step's ``name=`` is added
+    by :func:`_step_target`.
     """
     from .flow import Flow
 
@@ -80,6 +81,12 @@ _PRIMITIVE_KINDS: dict[type, str] = {_Branch: "branch", _Iterate: "iterate", _Ma
 def _node_kind(node: _Node) -> str:
     """Chain-step kind for the composition tree hash: ``call`` / ``branch`` / ``iterate`` / ``map``."""
     return _PRIMITIVE_KINDS.get(type(node.target), "call")
+
+
+def _step_target(node: _Node) -> str:
+    """The step's target qualname, with ``#<name>`` when a ``.call`` step was named."""
+    qualname = _target_qualname(node.target)
+    return qualname if node.name is None else f"{qualname}#{node.name}"
 
 
 def _compute_node_ids(chain_context: str, nodes: list[_Node]) -> tuple[str, ...]:
@@ -109,7 +116,7 @@ def _compute_node_ids(chain_context: str, nodes: list[_Node]) -> tuple[str, ...]
     seen: dict[tuple[str, str], int] = {}
     ids: list[str] = []
     for node in nodes:
-        local = (_node_kind(node), _target_qualname(node.target))
+        local = (_node_kind(node), _step_target(node))
         occurrence = seen.get(local, 0)
         seen[local] = occurrence + 1
         payload = f"{chain_context}|{local[0]}|{occurrence}|{local[1]}"
@@ -151,7 +158,7 @@ def _flow_structure(flow: Any, ancestors: tuple[int, ...]) -> Any:
     return [
         {
             "kind": _node_kind(node),
-            "target": _target_qualname(node.target),
+            "target": _step_target(node),
             "children": {
                 boundary: _flow_structure(child, inner) for boundary, child in _child_flows(node)
             },
