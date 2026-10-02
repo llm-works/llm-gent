@@ -76,7 +76,7 @@ from .nodes import UNSET, Failure, Interrupted, RestoredError, Skipped, Unset
 from .panel import Panel
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
-from .structure import FlowStructure, StructureDiff
+from .structure import FlowStructure, StepPath, StructureDiff, path_label
 from .verb import verb
 
 
@@ -105,12 +105,14 @@ __all__ = [
     "StateData",
     "StateDataclass",
     "StateFactory",
+    "StepPath",
     "StructureDiff",
     "TypeStateFactory",
     "Unset",
     "collect_unreachable",
     "extractor",
     "grader",
+    "path_label",
     "planner",
     "synthesizer",
     "verb",

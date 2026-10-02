@@ -125,7 +125,7 @@ class FlowStructure:
         """The structure as the blob a commit's tree holds; its hash is :attr:`hash`."""
         return Blob.from_bytes(canonical_json(self.to_json()))
 
-    @property
+    @cached_property
     def hash(self) -> str:
         """The structure hash, recorded on every commit as ``flow_root_hash``."""
         return self.blob().content_hash
@@ -164,7 +164,7 @@ class StructureDiff:
     @property
     def changed(self) -> bool:
         """Whether the structures differ at all, step order included (their hashes differ)."""
-        return self.old.to_json() != self.new.to_json()
+        return self.old.hash != self.new.hash
 
     @cached_property
     def _old_paths(self) -> dict[StepPath, Step]:
