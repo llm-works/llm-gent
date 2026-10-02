@@ -1257,14 +1257,28 @@ class TestFlowWithHalt:
         assert observed == [halt, halt, halt]
 
     @pytest.mark.asyncio
-    async def test_nested_subflow_inherits_intermediate_halt(self) -> None:
-        """A child subflow inherits its parent's halt, not the root's.
+    async def test_nested_flow_with_a_halt_of_its_own_raises_at_run_start(self) -> None:
+        """A run has one halt, on its top-level flow."""
+        ran: list[int] = []
 
-        Scenario: outer.with_halt(root) → middle.with_halt(local) → child (no halt)
-        The child should observe ``local``, not ``root``.
-        """
-        root_halt = asyncio.Event()
-        local_halt = asyncio.Event()
+        @verb(role=ROLE_A)
+        async def capture(ctx: Context, x: int) -> int:
+            ran.append(x)
+            return x
+
+        child = make_ff().create().call(capture)
+        middle = make_ff().create().with_halt(asyncio.Event()).call(child)
+        outer = make_ff().create().with_halt(asyncio.Event()).call(middle)
+
+        with pytest.raises(RuntimeError, match="a run has one halt"):
+            await outer.run(1)
+        assert ran == []
+
+    @pytest.mark.asyncio
+    async def test_nested_flows_carrying_the_run_halt_observe_it(self) -> None:
+        """Flows a FlowFactory(halt=...) builds all carry the same event: that is the run's."""
+        halt = asyncio.Event()
+        ff = make_ff().with_halt(halt)
         observed: list[asyncio.Event | None] = []
 
         @verb(role=ROLE_A)
@@ -1272,18 +1286,9 @@ class TestFlowWithHalt:
             observed.append(ctx.halt)
             return x
 
-        child = make_ff().create()
-        child.call(capture)
-
-        middle = make_ff().create().with_halt(local_halt)
-        middle.call(child)
-
-        outer = make_ff().create().with_halt(root_halt)
-        outer.call(middle)
-
-        await outer.run(1)
-        # Child inherited middle's local_halt, not root_halt.
-        assert observed == [local_halt]
+        middle = ff.create().call(ff.create().call(capture))
+        await ff.create().call(middle).run(1)
+        assert observed == [halt]
 
     @pytest.mark.asyncio
     async def test_dispatch_accepts_halt_parameter(self) -> None:

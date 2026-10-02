@@ -158,34 +158,3 @@ class TestHaltInLastStep:
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
         assert not await history.is_complete()
-
-
-class TestSubflowLocalHalt:
-    """A subflow's own ``.with_halt`` stops that subtree; the run carries on normally."""
-
-    async def test_map_skip_under_subflow_halt_does_not_leave_run_incomplete(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        local = asyncio.Event()
-        ran: list[int] = []
-
-        @verb
-        async def item(ctx: Context[dict[str, Any]], x: int) -> int:
-            ran.append(x)
-            local.set()
-            return x
-
-        sub = FlowFactory(make_test_logger()).create()
-        sub.map(lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1)
-        sub.with_halt(local)
-        flow = (
-            FlowFactory(make_test_logger())
-            .create(state={})
-            .with_checkpoint_store(store, "local-map")
-            .with_checkpointer()
-            .call(sub)
-        )
-        await flow.run()
-
-        assert ran == [1]
-        assert await History(store, "local-map").is_complete()

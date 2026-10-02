@@ -413,6 +413,36 @@ class TestPassAndCallBudgets:
         assert ran == ["check", "after:0.5", "after:None"]
         assert root.spent == pytest.approx(2.5)
 
+    async def test_flow_carrying_the_run_halt_inside_a_capped_call_stops_at_the_cap(
+        self,
+    ) -> None:
+        """Every flow a FlowFactory(halt=...) builds carries the run's halt; the cap still applies."""
+        root = _tracker()
+        ff = FlowFactory(make_test_logger(), halt=asyncio.Event())
+        ran: list[str] = []
+
+        @verb
+        async def spend(ctx: Context[Any], cost: float) -> float:
+            _spend(ctx, cost)
+            return cost
+
+        @verb
+        async def check(ctx: Context[Any], cost: float) -> float:
+            ran.append("check")
+            return cost
+
+        inner = ff.create().call(spend).then(check)
+        sub = ff.create().with_budget(1.0).call(inner)
+
+        @verb
+        async def after(ctx: Context[Any], prev: Any) -> Any:
+            ran.append(f"after:{prev}")
+            return prev
+
+        flow = ff.create(state={}).with_budget(root).call(sub).then(after)
+        assert await flow.run(2.0) is None
+        assert ran == ["after:None"]
+
     async def test_map_total_through_a_capped_enclosing_flow(self) -> None:
         """Items share the map's 1.0; once it is gone the map stops and the run carries on."""
         root = _tracker()

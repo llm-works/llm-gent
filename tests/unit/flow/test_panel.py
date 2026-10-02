@@ -358,14 +358,12 @@ class TestPanel:
         assert caller_observed == [{"counter": 2, "a_ran": True, "b_ran": True}]
 
     @pytest.mark.asyncio
-    async def test_panel_propagates_local_halt_in_subflow(self) -> None:
-        """Panel.run passes ctx.halt to dispatched verbs, not the outer flow's halt.
+    async def test_panel_in_a_subflow_passes_the_run_halt(self) -> None:
+        """Panel.run passes ctx.halt to dispatched verbs: the run's halt, from any depth.
 
-        Scenario: outer.with_halt(root) → middle.with_halt(local) → Panel.run
-        The Panel's verbs should observe ``local``, not ``root``.
+        Scenario: outer.with_halt(root) → middle → Panel.run
         """
         root_halt = asyncio.Event()
-        local_halt = asyncio.Event()
         observed: list[asyncio.Event | None] = []
 
         @verb(role=ROLE_A)
@@ -387,8 +385,7 @@ class TestPanel:
             """Run Panel from within a subflow with a local halt."""
             return await panel.run(ctx)
 
-        # Build a middle subflow that has its own local halt event.
-        middle = make_ff().create().with_halt(local_halt)
+        middle = make_ff().create()
         middle.call(run_panel)
 
         # Build the outer/root flow with a different (root) halt event.
@@ -400,8 +397,7 @@ class TestPanel:
 
         results = await outer.run(())
         assert set(results) == {"a", "b"}
-        # Panel verbs received the middle flow's local_halt, not root_halt.
-        assert observed == [local_halt, local_halt]
+        assert observed == [root_halt, root_halt]
 
 
 class TestPanelInsideIterateResumeBoundary:

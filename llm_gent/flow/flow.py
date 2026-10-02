@@ -64,7 +64,7 @@ from ..core.traits import Registry as TraitRegistry
 from ._budget import Budget, RunBudget, check_budget, check_caps_have_a_tracker, run_budget
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext, check_one_repo
-from ._halt_observer import HaltPoint
+from ._halt_observer import HaltPoint, check_one_halt
 from ._node_id import flow_root_hash
 from ._resume import (
     Resume,
@@ -729,7 +729,7 @@ class Flow:
         return self
 
     def with_halt(self, event: asyncio.Event) -> Flow:
-        """Attach an ambient halt signal that reaches every node in this Flow.
+        """Set the run's halt: the app sets ``event`` to pause the whole run.
 
         Threads ``event`` through the execution environment as ``ctx.halt``,
         available to any verb that wants to observe it. :meth:`map` and
@@ -740,9 +740,9 @@ class Flow:
         cancellation should read ``ctx.halt`` itself. A halted
         :meth:`~Flow.run` returns ``None``; state is in the halt checkpoint.
 
-        A subflow inherits the outer runtime's halt event automatically;
-        calling ``.with_halt`` on a subflow overrides the ambient event for
-        that subtree.
+        A run has one halt, set on its top-level flow; every subflow
+        observes it. :meth:`run` raises when a nested flow sets a different
+        event.
 
         Returns ``self`` for chaining.
         """
@@ -1009,6 +1009,7 @@ class Flow:
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode
                 was requested without :meth:`with_checkpointer` wired, OR
+                a nested flow sets a halt other than this flow's, OR
                 a flow in the tree has ``with_budget(cap)`` with no tracker
                 on any flow enclosing it. Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
@@ -1040,7 +1041,7 @@ class Flow:
         return result
 
     def _check_run_args(self, resume: ResumeMode | str) -> None:
-        """Reject an empty flow, a bad ``resume``, a misplaced store or checkpointer, or a lone cap.
+        """Reject an empty flow, a bad ``resume``, a misplaced store, checkpointer or halt, or a lone cap.
 
         Runs before anything is read or written, so a misconfigured run
         leaves no new history behind.
@@ -1062,6 +1063,7 @@ class Flow:
                 f"store — call .with_checkpoint_store(store, client_flow_id) first"
             )
         check_one_repo(self)
+        check_one_halt(self)
         check_caps_have_a_tracker(self)
 
     async def _start_state(
@@ -1098,14 +1100,16 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_halt`` / ``parent_budget`` / ``parent_checkpointer`` /
-        ``parent_policy`` are the effective ambients from the calling scope
-        — nested subflows fall back to them when they have no local
-        ``.with_halt()`` / ``.with_budget()`` / ``.with_checkpointer()`` /
-        ``.with_checkpoint_policy()``, preserving an intermediate layer's
-        ambient through arbitrarily deep nesting. ``parent_checkpoint_ctx``
-        is the run's repo, set on the top-level flow only. The run's budget context (its tracker,
-        and the halt it observes when capped) comes from
+        ``parent_budget`` / ``parent_checkpointer`` / ``parent_policy`` are
+        the effective ambients from the calling scope — nested subflows
+        fall back to them when they have no local ``.with_budget()`` /
+        ``.with_checkpointer()`` / ``.with_checkpoint_policy()``,
+        preserving an intermediate layer's ambient through arbitrarily
+        deep nesting. ``parent_halt`` is the halt the calling scope
+        observes: the run's halt, or a capped run's stop event.
+        ``parent_checkpoint_ctx`` is the run's repo; repo and halt are set
+        on the top-level flow only. The run's budget context (its tracker,
+        and the halt it observes) comes from
         :func:`~llm_gent.flow._budget.run_budget`.
 
         ``parent_chain_context`` is the hash the executor uses to compute
@@ -1133,8 +1137,7 @@ class Flow:
                 parent_policy=parent_policy,
                 parent_path=parent_path,
             )
-            own_halt = runtime is not self and self._owns_halt(parent_halt)
-            return await self._run_in(env, context, args, kwargs, own_halt=own_halt)
+            return await self._run_in(env, context, args, kwargs)
 
     async def _run_in(
         self,
@@ -1142,8 +1145,6 @@ class Flow:
         context: RunBudget,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-        *,
-        own_halt: bool,
     ) -> Any:
         """Walk this Flow under ``env``; a capped run already out of budget does nothing."""
         label = self._name or "<anonymous>"
@@ -1155,13 +1156,9 @@ class Flow:
             "starting flow run",
             extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
         )
-        result = await self._walk(env, args, kwargs, own_halt=own_halt, context=context)
+        result = await self._walk(env, args, kwargs, context=context)
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
-
-    def _owns_halt(self, parent_halt: asyncio.Event | None) -> bool:
-        """True when this Flow has a halt event of its own, not the one it inherits."""
-        return self._halt_event is not None and self._halt_event is not parent_halt
 
     async def _walk(
         self,
@@ -1169,21 +1166,20 @@ class Flow:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         *,
-        own_halt: bool,
         context: RunBudget,
     ) -> Any:
-        """Walk this Flow's chain; a run stopped by its own halt or budget returns ``None``.
+        """Walk this Flow's chain; a run stopped by its own budget returns ``None``.
 
         That subtree ends there and the run carries on, with no result
-        from it: what the halt stopped inside it is no position of the
+        from it: what the stop interrupted inside it is no position of the
         run's, so it leaves the snapshots. A capped run stopped because the
-        halt it would observe uncapped was set is not stopped by its budget:
-        the interruption carries on up.
+        run's halt was set is not stopped by its budget: the interruption
+        carries on up.
         """
         try:
             return await Chain(self, env).walk(args, kwargs)
         except Interrupted:
-            if not (own_halt or context.stopped_by_budget()):
+            if not context.stopped_by_budget():
                 raise
             env.scopes.close_under(env.path)
             return None

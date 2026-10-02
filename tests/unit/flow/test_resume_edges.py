@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Resume around rescue policies, a subflow's own halt, and typed state.
+"""Resume around rescue policies and typed state.
 
 A structure that stops early keeps its position registered for the run's
 halt checkpoint; whatever carries on past it drops that position — a
-chain moving past a step a rescue policy recovered, a subflow ending its
-own halt's interruption. Positions dropped that way must not reach a
-later checkpoint, or resume would continue a step that already ended.
+chain moving past a step a rescue policy recovered. Positions dropped
+that way must not reach a later checkpoint, or resume would continue a
+step that already ended.
 Typed values — dataclass state, pydantic models between steps, in an
 iterate's carry and as map items — come back as the types they were.
 """
@@ -100,70 +100,6 @@ class TestRescue:
         ran.clear()
         assert await build(asyncio.Event(), arm=False).run(0, resume="latest") == -1
         assert ran == ["last"]
-
-
-class TestSubflowOwnHalt:
-    async def test_subflow_stopped_by_its_own_halt_leaves_no_position_behind(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
-        """A subflow's own halt ends it mid-iterate; the run's later halt checkpoint has none of it."""
-        ran: list[str] = []
-
-        def build(run_halt: asyncio.Event, arm: bool) -> Any:
-            local = asyncio.Event()
-
-            @verb
-            async def step(ctx: Context[dict[str, Any]], x: int) -> int:
-                ran.append(f"step:{x}")
-                if x == 1:
-                    local.set()
-                    raise Interrupted()
-                return x + 1
-
-            sub = FlowFactory(make_test_logger()).create()
-            sub.iterate(lambda b: b.call(step), max_iters=3).with_halt(local)
-            return (
-                FlowFactory(make_test_logger())
-                .create(state={})
-                .with_checkpoint_store(store, "sub-halt")
-                .with_checkpointer()
-                .with_halt(run_halt)
-                .call(sub)
-                .then(_stop_then_halt(run_halt, ran, arm))
-            )
-
-        assert await build(asyncio.Event(), arm=True).run(0) is None
-        assert ran == ["step:0", "step:1", "last"]
-        assert await _paths(store, "sub-halt") == [""]
-
-        ran.clear()
-        assert await build(asyncio.Event(), arm=False).run(0, resume="latest") is None
-        assert ran == ["last"]
-
-    async def test_subflow_stops_after_a_completed_step_once_its_halt_is_set(self) -> None:
-        local = asyncio.Event()
-        ran: list[str] = []
-
-        @verb
-        async def first(ctx: Context[dict[str, Any]], _p: Any = None) -> str:
-            ran.append("first")
-            local.set()
-            return "first"
-
-        @verb
-        async def second(ctx: Context[dict[str, Any]], _p: Any = None) -> str:
-            ran.append("second")
-            return "second"
-
-        @verb
-        async def after(ctx: Context[dict[str, Any]], prev: Any) -> Any:
-            ran.append("after")
-            return prev
-
-        sub = FlowFactory(make_test_logger()).create().call(first).then(second).with_halt(local)
-        flow = FlowFactory(make_test_logger()).create(state={}).call(sub).then(after)
-        assert await flow.run() is None
-        assert ran == ["first", "after"]
 
 
 class Item(BaseModel):
