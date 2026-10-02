@@ -18,10 +18,9 @@ Halt-observation contract:
 
 - Halt at tracker level N fires when N's own cap crosses.
 - Cascading halt observation across scopes is a Flow-layer concern —
-  a nested Flow that wants to observe both a parent and a local halt
-  either uses :meth:`Flow.with_halt` inheritance (the default) or the
-  consumer wires the events externally (e.g. mirror one event into
-  another with a small async task).
+  a run has one halt (:meth:`Flow.with_halt` on its top-level flow), and
+  a capped flow (``with_budget(cap)``) runs on a stop event that both its
+  cap and the run's halt set.
 
 This separation of concerns is deliberate: the tracker records and
 fires; the Flow decides what to observe.

@@ -202,10 +202,13 @@ chain. Chains, iterates and maps that stop before their end raise
 `Interrupted` to the step running them, and each part stays registered
 where it stopped. Once everything has stopped, `run()` writes one
 `halted` commit holding every position and returns `None`: the halted
-run's state is in that commit. A subflow with its own `.with_halt` ends
-the interruption at its boundary, without a commit, as does a run stopped
-by its own budget cap (see Budgets). A halted history is never marked
-complete.
+run's state is in that commit. A run stopped by its own budget cap ends
+the interruption at its boundary, without a commit (see Budgets). A
+halted history is never marked complete.
+
+A run has one halt, set with `.with_halt(event)` on its top-level flow;
+every subflow observes it. `run()` raises when a nested flow sets a
+different event.
 
 A map's cursor is its item list — resolved once, never evaluated again
 on resume — and its completed items with their results. On resume a

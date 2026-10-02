@@ -11,8 +11,9 @@ and raises :class:`~llm_gent.flow.Interrupted` to the step running it;
 once everything has stopped, :meth:`Flow.run` writes the run's one halt
 checkpoint from those positions (:func:`~llm_gent.flow._resume.commit_halt`).
 
-:func:`note_halt` records where the run's halt was first observed, for
-that commit's metadata.
+A run has one halt, set on its top-level flow (:func:`check_one_halt`).
+:func:`note_halt` records where it was first observed, for that commit's
+metadata.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
+    from .flow import Flow
     from .nodes import _RunEnv
     from .state import State
 
@@ -44,6 +46,31 @@ class HaltPoint:
     state: State[Any]
 
 
+def check_one_halt(root: Flow) -> None:
+    """Raise when a flow inside ``root``'s run sets a halt other than ``root``'s.
+
+    The halt pauses the whole run, so a run has one, on its top-level
+    flow. A nested flow carrying the same event (as every flow a
+    ``FlowFactory(halt=...)`` builds does) sets no other halt.
+
+    Raises:
+        RuntimeError: A nested flow's ``with_halt`` event is not the
+            top-level flow's.
+    """
+    from ._node_id import iter_flows
+
+    for flow in iter_flows(root)[1:]:
+        if flow._halt_event is not None and flow._halt_event is not root._halt_event:
+            raise RuntimeError(
+                f"Flow {_label(flow)} sets a halt but runs inside {_label(root)}: a run "
+                f"has one halt, set on its top-level flow with with_halt(event)"
+            )
+
+
+def _label(flow: Flow) -> str:
+    return repr(flow._name or "<anonymous>")
+
+
 def is_halt_signaled(env: _RunEnv) -> bool:
     """True when the halt event in effect under ``env`` is set."""
     return env.halt is not None and env.halt.is_set()
@@ -52,9 +79,11 @@ def is_halt_signaled(env: _RunEnv) -> bool:
 def note_halt(env: _RunEnv, iteration: int, node_id: str) -> None:
     """Record where the run's halt was observed, unless an earlier observation was recorded.
 
-    A subflow's own ``.with_halt`` is not the run's halt: it stops that
-    subtree, which then ends the interruption without a halt checkpoint.
+    Only the run's halt is recorded: a capped run stopped by its own
+    budget, with the run's halt not set, ends that run without a halt
+    checkpoint.
     """
     runtime = env.runtime
-    if env.halt is runtime._halt_event and runtime._halt_at is None:
+    halt = runtime._halt_event
+    if halt is not None and halt.is_set() and runtime._halt_at is None:
         runtime._halt_at = HaltPoint(env.ancestor_chain, iteration, node_id, env.state)

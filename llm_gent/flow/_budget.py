@@ -138,7 +138,9 @@ async def run_budget(
             reached outside its parent's composition tree, e.g. through
             ``ctx.flow.dispatch``).
     """
-    enclosing = flow._halt_event if flow._halt_event is not None else parent_halt
+    # The run's halt is on the top-level flow (check_one_halt); a nested run
+    # observes what its parent does, which under a cap is the cap's stop.
+    enclosing = flow._halt_event if parent_halt is None else parent_halt
     own = flow._budget
     if own is None:
         yield RunBudget(parent_budget, enclosing)
