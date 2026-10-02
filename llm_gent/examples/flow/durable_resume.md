@@ -41,10 +41,11 @@ flow ─ .iterate(until=not pending, max_iters=2)     node e62e0596ecc27e3c
   next `Backend.chat` sees the event through `abort_signal`, raises `PauseRequested`, and
   `saia.complete` returns `TaskResult(paused=True)`.
 
-Node ids are blake2b hashes of each node's position, kind, and target within the flow, so they are
-stable across processes and runs of the same script — which is what lets run 2 find where run 1
-stopped. A checkpoint records positions by node id: resume into a flow that no longer has the saved
-step raises, naming the path.
+Node ids are blake2b hashes of each node's kind and target (a named step: its name) and of the
+steps above it, not of its position in the chain, so they are stable across processes and runs of
+the same script — which is what lets run 2 find where run 1 stopped. A checkpoint records positions
+by node id, and holds the structure of the flow that wrote it (`History.structure`): resume into a
+flow that no longer has the saved step raises, naming the path.
 
 ## Run 1 — fresh, halts mid-turn
 

@@ -6,8 +6,8 @@
 A history is the chain of commits one flow instance writes, addressed by
 the agent's ``client_flow_id``. :class:`History` resolves the name to the
 internal ``flow_id`` and exposes the history as data: its head, the last
-completed run, the commit chain, and the state each commit holds. It
-never writes; the framework owns every write.
+completed run, the commit chain, and the state and flow structure each
+commit holds. It never writes; the framework owns every write.
 
 ``None`` means absent — no history under the name, no commit yet, no
 completed run. A hash the history holds (ref, tag, parent, tree entry)
@@ -20,6 +20,7 @@ Every method works with sync and async stores alike.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import TypeVar
 
@@ -34,8 +35,9 @@ from .checkpoint import (
     maybe_await,
 )
 from .state import StateFactory, restore_state_data
-from .state.cas import Commit
-from .state.snapshot import Snapshot, read_snapshot
+from .state.cas import Commit, Tree
+from .state.snapshot import FLOW, Snapshot, read_snapshot
+from .structure import FlowStructure
 
 
 T = TypeVar("T")
@@ -168,6 +170,22 @@ class History:
             return await self._object(flow_id, kind, content_hash)
 
         return await read_snapshot(commit.root_tree_hash, load)
+
+    async def structure(self, commit: Commit) -> FlowStructure | None:
+        """The structure of the flow that wrote ``commit``.
+
+        Compare it with a flow today through
+        :meth:`~llm_gent.flow.structure.FlowStructure.diff`. ``None`` for a
+        commit that carries no state, or one written before commits held
+        their structure.
+        """
+        flow_id = commit.meta.flow_id
+        tree = Tree.from_bytes(await self._object(flow_id, "tree", commit.root_tree_hash))
+        entry = next((e for e in tree.entries if e.scope_id == FLOW), None)
+        if entry is None:
+            return None
+        raw = json.loads(await self._object(flow_id, "blob", entry.child_hash))
+        return FlowStructure.from_json(raw)
 
     async def root_state(self, commit: Commit, factory: StateFactory[T]) -> T | None:
         """Top-level state ``commit`` holds, restored through ``factory``.

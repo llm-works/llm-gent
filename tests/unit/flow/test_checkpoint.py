@@ -1543,8 +1543,9 @@ class TestHistoryLineage:
         """After gc_history the next commit starts a new history with no parent."""
         from llm_gent.flow._checkpoint_ctx import CheckpointContext
         from llm_gent.flow.state.cas import Tree
+        from llm_gent.flow.structure import FlowStructure
 
-        ctx = CheckpointContext(store, "lineage-gc", lambda: "")
+        ctx = CheckpointContext(store, "lineage-gc", lambda: FlowStructure(()))
         tree = Tree.from_entries([])
         await ctx.put_tree(tree)
 
@@ -1750,9 +1751,10 @@ class TestCompletionTag:
         from llm_gent.flow.checkpoint import COMPLETE_TAG
         from llm_gent.flow.state import State
         from llm_gent.flow.state.snapshot import ScopeRegistry
+        from llm_gent.flow.structure import FlowStructure
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
-        ctx = CheckpointContext(store, "torn-completion", lambda: "")
+        ctx = CheckpointContext(store, "torn-completion", lambda: FlowStructure(()))
         scopes = ScopeRegistry()
         scopes.begin(State(data={"n": 7}))
         tree = await ctx.put_snapshot(scopes)

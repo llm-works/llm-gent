@@ -245,11 +245,25 @@ paused Loop turn in a verb resumes mid-turn. Its verbs' results follow
 the map items' rule above. Like everything in an interrupted step, a
 Panel that finished before the step stopped runs again with it.
 
+Positions are recorded by node id: a step's kind, its target and its
+order among the chain's steps with the same kind and target — not its
+position in the chain. A named step (`name=` on `.call`, `.then`,
+`.iterate`, `.map`, `.branch`) is identified by its name alone, so
+moving or renaming the verb it calls keeps its id; an unnamed `.call`
+step is identified by its verb's module and qualname. Name the steps
+whose positions should survive refactors.
+
+Every commit holds the structure of the flow that wrote it (steps by
+these identities), and records its hash as `flow_root_hash`:
+`History.structure(commit)` reads it back, and
+`FlowStructure.diff(FlowStructure.of(flow))` says which steps a flow
+today kept, added (and where) and removed.
+
 Current limits:
 
-- Positions are recorded by node id. A deploy that inserts steps keeps
-  them valid; resuming into a flow that no longer has the saved step
-  raises, naming its path. Reordering steps can make a step run again.
+- A deploy that inserts steps keeps positions valid; resuming into a
+  flow that no longer has the saved step raises, naming its path.
+  Reordering steps can make a step run again.
 - Adding `name=` to a step changes its node id (and its descendants').
   A checkpoint at that step fails to resume until the run completes.
 

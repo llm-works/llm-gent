@@ -25,6 +25,7 @@ from llm_gent.flow.state.snapshot import (
     read_snapshot,
 )
 from llm_gent.flow.stores import InMemoryCheckpointStore
+from llm_gent.flow.structure import FlowStructure
 
 from .conftest import make_test_logger
 
@@ -34,9 +35,12 @@ pytestmark = pytest.mark.unit
 LG = make_test_logger()
 
 
+_STRUCTURE = FlowStructure(()).blob()
+
+
 async def _round_trip(scopes: ScopeRegistry) -> tuple[Snapshot, dict[str, Blob | Tree]]:
     """Build the snapshot tree for ``scopes`` and read it back from the objects it made."""
-    tree, objects = build_snapshot_tree(scopes.capture())
+    tree, objects = build_snapshot_tree(scopes.capture(), _STRUCTURE)
     by_hash = {obj.content_hash: obj for obj in objects}
 
     async def load(kind: Any, content_hash: str) -> bytes:
@@ -47,8 +51,10 @@ async def _round_trip(scopes: ScopeRegistry) -> tuple[Snapshot, dict[str, Blob |
 
 
 def _blobs(objects: dict[str, Blob | Tree]) -> set[str]:
-    """Hashes of the blobs among ``objects``."""
-    return {h for h, obj in objects.items() if isinstance(obj, Blob)}
+    """Hashes of the blobs among ``objects``, the flow structure's aside."""
+    return {
+        h for h, obj in objects.items() if isinstance(obj, Blob) and h != _STRUCTURE.content_hash
+    }
 
 
 class _FixedCursor:

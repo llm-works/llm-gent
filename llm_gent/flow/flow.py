@@ -71,7 +71,6 @@ from ._cost import (
     run_cost,
 )
 from ._halt_observer import HaltPoint, check_one_halt, is_run_halted
-from ._node_id import flow_root_hash
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
@@ -128,6 +127,7 @@ from .nodes import (
 from .role import Role
 from .state import State, StateFactory
 from .state.snapshot import ScopePath, ScopeRegistry, Snapshot
+from .structure import FlowStructure
 
 
 class Flow:
@@ -921,7 +921,9 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
-        self._checkpoint_ctx = CheckpointContext(store, client_flow_id, self.root_hash)
+        self._checkpoint_ctx = CheckpointContext(
+            store, client_flow_id, lambda: FlowStructure.of(self)
+        )
         return self
 
     def with_checkpointer(self, name: str | None = None) -> Flow:
@@ -964,10 +966,11 @@ class Flow:
         Recorded as ``flow_root_hash`` on every commit this flow writes.
         Equal hashes mean every chain step gets the same node id, so a
         checkpoint written by one flow can be resumed by the other.
-        Covers step kinds, positions, targets and nested flows — not
-        parameters such as ``max_iters`` or predicates.
+        Covers step kinds, positions, targets (a named step: its name)
+        and nested flows — not parameters such as ``max_iters`` or
+        predicates. See :class:`~llm_gent.flow.structure.FlowStructure`.
         """
-        return flow_root_hash(self)
+        return FlowStructure.of(self).hash
 
     def with_checkpoint_policy(
         self,

@@ -195,6 +195,32 @@ def test_name_enters_the_root_hash() -> None:
     assert a.root_hash() != b.root_hash()
 
 
+def test_a_named_step_is_identified_by_its_name_alone() -> None:
+    """Moving or renaming the verb a named step calls keeps its id and the root hash."""
+    a = _mkflow().call(verb_alpha, name="plan").then(verb_gamma)
+    b = _mkflow().call(verb_beta, name="plan").then(verb_gamma)
+    assert _chain_step_ids(a) == _chain_step_ids(b)
+    assert a.root_hash() == b.root_hash()
+
+
+def test_an_unnamed_step_is_identified_by_its_verb() -> None:
+    a = _mkflow().call(verb_alpha)
+    b = _mkflow().call(verb_beta)
+    assert _chain_step_ids(a) != _chain_step_ids(b)
+    assert a.root_hash() != b.root_hash()
+
+
+def test_steps_sharing_a_name_are_told_apart_by_order() -> None:
+    flow = _mkflow().call(verb_alpha, name="step").then(verb_beta, name="step")
+    assert len(set(_chain_step_ids(flow))) == 2
+
+
+def test_naming_a_step_changes_its_id() -> None:
+    named = _chain_step_ids(_mkflow().call(verb_alpha, name="plan"))
+    unnamed = _chain_step_ids(_mkflow().call(verb_alpha))
+    assert named != unnamed
+
+
 def test_kind_swap_flips_id() -> None:
     """Same target but a different composition kind → different ID."""
     a = _mkflow().call(verb_alpha)
