@@ -16,9 +16,11 @@ import from :mod:`llm_gent.flow.state.paused_turn` explicitly.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 
+from . import codec
 from .cas import canonical_json
 from .snapshot import TURN
 
@@ -30,23 +32,34 @@ class PausedTurnEnvelope:
     ``conversation`` is the ``to_dict()`` payload of the paused
     ``SerializableConversationLike``; rebuilding a ``Conversation`` from
     it is the :class:`ConversationFactory`'s job, not this envelope's.
+    ``result`` is what ``saia.complete`` returned when it paused the turn:
+    a call that finishes the turn without continuing it (a shortcut)
+    returns it. It is stored when :mod:`.codec` can store it (SAIA's
+    ``TaskResult`` can), else left out (``None``).
     """
 
     task: str
     conversation: dict[str, Any]
+    result: Any = None
 
     def to_dict(self) -> dict[str, Any]:
-        """The envelope as a JSON-compatible dict."""
-        return {"task": self.task, "conversation": self.conversation}
+        """The envelope as a JSON-compatible dict; ``result`` encoded, when it can be."""
+        data = {"task": self.task, "conversation": self.conversation}
+        if self.result is not None:
+            with contextlib.suppress(TypeError):
+                data["result"] = codec.encode(self.result, "paused turn result")
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PausedTurnEnvelope:
         """Inverse of :meth:`to_dict`; raises on missing keys."""
-        return cls(task=data["task"], conversation=data["conversation"])
+        raw = data.get("result")
+        result = None if raw is None else codec.decode(raw, "paused turn result")
+        return cls(task=data["task"], conversation=data["conversation"], result=result)
 
     def to_bytes(self) -> bytes:
-        """Canonical JSON bytes of :meth:`to_dict`."""
-        return canonical_json(self.to_dict())
+        """Canonical JSON bytes of the task and conversation."""
+        return canonical_json({"task": self.task, "conversation": self.conversation})
 
 
 class PausedTurn:

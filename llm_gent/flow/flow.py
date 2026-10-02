@@ -64,12 +64,21 @@ from ..core.traits import Registry as TraitRegistry
 from ._budget import Budget, RunBudget, check_budget, check_caps_have_a_tracker, run_budget
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext, check_one_repo
-from ._halt_observer import HaltPoint, check_one_halt
+from ._halt_observer import HaltPoint, check_one_halt, is_run_halted
 from ._node_id import flow_root_hash
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
     commit_halt,
+)
+from ._shortcut import (
+    Shortcut,
+    ShortcutRun,
+    check_shortcut,
+    check_shortcuts,
+    check_signal,
+    run_shortcut,
+    run_signals,
 )
 from ._validation import (
     _check_node_name,
@@ -177,6 +186,8 @@ class Flow:
         self._traits = traits
         self._state_factory = state_factory
         self._halt_event: asyncio.Event | None = None
+        self._signals: dict[str, asyncio.Event] = {}
+        self._shortcut: Shortcut | None = None
         self._budget: Budget | None = None
         self._checkpoint_ctx: CheckpointContext | None = None
         self._checkpointer: Checkpointer | None = None
@@ -324,6 +335,7 @@ class Flow:
         state: StateProject | None = None,
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
+        name: str | None = None,
     ) -> Flow:
         """Append a node to the composition chain.
 
@@ -353,9 +365,14 @@ class Flow:
         state to isolate); ``merge`` also requires ``state`` — nothing to
         merge without an isolated child.
 
+        ``name`` labels the step: it enters the step's node id (see
+        :meth:`iterate`) and is how :meth:`with_shortcut` (``to=``) refers
+        to it.
+
         Returns ``self`` for chaining.
         """
         _validate_target(target)
+        _check_node_name(name, ".call")
         if target is self:
             label = self._name or "<anonymous>"
             raise ValueError(f"Flow {label!r} cannot call itself as a node")
@@ -374,6 +391,7 @@ class Flow:
                 state_fn=state,
                 merge_fn=merge,
                 state_factory=state_factory,
+                name=name,
             )
         )
         return self
@@ -388,6 +406,7 @@ class Flow:
         state: StateProject | None = None,
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
+        name: str | None = None,
     ) -> Flow:
         """Append a chained node — semantic alias for :meth:`call`.
 
@@ -403,6 +422,7 @@ class Flow:
             state=state,
             merge=merge,
             state_factory=state_factory,
+            name=name,
         )
 
     def rescue(self, policy: RescuePolicy) -> Flow:
@@ -749,6 +769,56 @@ class Flow:
         self._halt_event = event
         return self
 
+    def with_signal(self, name: str, event: asyncio.Event) -> Flow:
+        """Declare the run's signal ``name``: an event the app sets, for :meth:`with_shortcut`.
+
+        Signals belong to the run, like its halt: they are declared on the
+        top-level flow, and :meth:`run` raises when a nested flow declares
+        one. Which signals are set is recorded in every checkpoint the run
+        takes, and resume sets them again before the first step; a run that
+        finishes records none.
+
+        Returns ``self`` for chaining.
+        """
+        name, event = check_signal(name, event)
+        self._signals[name] = event
+        return self
+
+    def with_shortcut(self, signal: str, to: str | None = None) -> Flow:
+        """On the run's ``signal``, stop exploring and continue at step ``to`` with what there is.
+
+        ``signal`` names a signal the top-level flow declares with
+        :meth:`with_signal`. When the app sets it, this flow stops as the
+        run's halt stops it — every part at its next boundary, a Loop turn
+        paused — and then continues at once from where it stopped, in
+        shortcut mode, until it reaches ``to``:
+
+        - the step that was running runs again from where it stopped; a
+          Loop turn held there is not continued: the call returns the
+          result SAIA paused it with;
+        - an iterate in this flow's chain starts no new pass and returns
+          its carried value; a map in it starts no new item (those are
+          :class:`Skipped`) and its started items finish;
+        - the chain then continues at ``to`` — the ``name=`` of one of its
+          steps — skipping the steps before it (``to`` gets the last
+          completed result), or ends when ``to`` is ``None``.
+
+        Flows under this one run normally unless they declare a shortcut
+        of their own; one signal can drive several. Steps at and after
+        ``to`` run normally: a signal set once the chain is there does
+        nothing. A run of this flow that starts while the signal is set (a
+        later step, the next iterate pass, a map item) starts in shortcut
+        mode. The run's halt still stops everything; a halt during a
+        shortcut is recorded with it, and resume continues the shortcut.
+
+        Checked at run start: ``signal`` is declared, and ``to`` names
+        exactly one step of this flow's chain.
+
+        Returns ``self`` for chaining.
+        """
+        self._shortcut = check_shortcut(signal, to)
+        return self
+
     def with_budget(self, budget: Budget) -> Flow:
         """Set this flow's budget context, reachable as ``ctx.budget``.
 
@@ -1009,7 +1079,9 @@ class Flow:
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode
                 was requested without :meth:`with_checkpointer` wired, OR
-                a nested flow sets a halt other than this flow's, OR
+                a nested flow sets a halt other than this flow's or declares
+                a signal, OR a shortcut's signal is not declared or its
+                ``to`` names no step (or several) of its chain, OR
                 a flow in the tree has ``with_budget(cap)`` with no tracker
                 on any flow enclosing it. Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
@@ -1026,13 +1098,14 @@ class Flow:
         self._scopes.begin(active_state, saved)
         self._halt_at = None
         try:
-            result = await self._run_as_subflow(
-                *args,
-                state=active_state,
-                runtime=self,
-                parent_extra=extra,
-                **kwargs,
-            )
+            with run_signals(self):
+                result = await self._run_as_subflow(
+                    *args,
+                    state=active_state,
+                    runtime=self,
+                    parent_extra=extra,
+                    **kwargs,
+                )
         except Interrupted:
             # Everything has stopped, each part registered where it stopped.
             await commit_halt(self)
@@ -1041,7 +1114,7 @@ class Flow:
         return result
 
     def _check_run_args(self, resume: ResumeMode | str) -> None:
-        """Reject an empty flow, a bad ``resume``, a misplaced store, checkpointer or halt, or a lone cap.
+        """Reject an empty flow, a bad ``resume``, misplaced wiring, a bad shortcut, a lone cap.
 
         Runs before anything is read or written, so a misconfigured run
         leaves no new history behind.
@@ -1064,6 +1137,7 @@ class Flow:
             )
         check_one_repo(self)
         check_one_halt(self)
+        check_shortcuts(self)
         check_caps_have_a_tracker(self)
 
     async def _start_state(
@@ -1090,6 +1164,7 @@ class Flow:
         parent_extra: dict[str, Any] | None = None,
         parent_policy: CheckpointPolicy | None = None,
         parent_path: ScopePath = (),
+        parent_shortcuts: tuple[ShortcutRun, ...] = (),
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
@@ -1110,7 +1185,9 @@ class Flow:
         ``parent_checkpoint_ctx`` is the run's repo; repo and halt are set
         on the top-level flow only. The run's budget context (its tracker,
         and the halt it observes) comes from
-        :func:`~llm_gent.flow._budget.run_budget`.
+        :func:`~llm_gent.flow._budget.run_budget`; a shortcut this flow
+        declares (:func:`~llm_gent.flow._shortcut.run_shortcut`) adds its
+        own stop on top. ``parent_shortcuts`` are the enclosing flows'.
 
         ``parent_chain_context`` is the hash the executor uses to compute
         this Flow's chain-step node IDs (empty at run root; extended by
@@ -1122,9 +1199,11 @@ class Flow:
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        async with run_budget(
-            self, parent_path, runtime._scopes, parent_budget, parent_halt
-        ) as context:
+        scopes = runtime._scopes
+        async with (
+            run_budget(self, parent_path, scopes, parent_budget, parent_halt) as context,
+            run_shortcut(self, parent_path, scopes, context.halt, runtime._signals) as shortcut,
+        ):
             env = self._make_run_env(
                 runtime=runtime,
                 state=state,
@@ -1136,6 +1215,8 @@ class Flow:
                 parent_extra=parent_extra,
                 parent_policy=parent_policy,
                 parent_path=parent_path,
+                shortcut=shortcut,
+                parent_shortcuts=parent_shortcuts,
             )
             return await self._run_in(env, context, args, kwargs)
 
@@ -1175,14 +1256,20 @@ class Flow:
         run's, so it leaves the snapshots. A capped run stopped because the
         run's halt was set is not stopped by its budget: the interruption
         carries on up.
+
+        A run its shortcut stopped walks again at once, in shortcut mode,
+        from the positions it stopped at (restaged as a checkout's).
         """
         try:
             return await Chain(self, env).walk(args, kwargs)
         except Interrupted:
-            if not context.stopped_by_budget():
+            if context.stopped_by_budget():
+                env.scopes.close_under(env.path)
+                return None
+            if env.shortcut is None or not env.shortcut.take_over(is_run_halted(env)):
                 raise
-            env.scopes.close_under(env.path)
-            return None
+        env.scopes.restage_under(env.path)
+        return await self._walk(env, args, kwargs, context=context)
 
     def _make_run_env(
         self,
@@ -1197,15 +1284,18 @@ class Flow:
         parent_policy: CheckpointPolicy | None = None,
         parent_path: ScopePath = (),
         parent_checkpointer: Checkpointer | None = None,
+        shortcut: ShortcutRun | None = None,
+        parent_shortcuts: tuple[ShortcutRun, ...] = (),
     ) -> _RunEnv:
         """Resolve local-override-wins ambients and build the per-run environment.
 
         Local ``.with_checkpointer`` / ``.with_checkpoint_policy`` wins over
         the caller's parent ambients; unset locals fall back to the parent
         so an intermediate layer's ambient survives arbitrarily deep
-        nesting. Halt and budget come resolved in ``context``. The repo is
-        the top-level flow's (:func:`check_one_repo` keeps nested flows
-        from setting one).
+        nesting. Halt and budget come resolved in ``context``; this flow's
+        ``shortcut``, when it declares one, puts its stop in place of the
+        halt. The repo is the top-level flow's (:func:`check_one_repo`
+        keeps nested flows from setting one).
 
         ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
         verbatim: the descent sites in :mod:`._executor` are the ones
@@ -1217,7 +1307,7 @@ class Flow:
             runtime=runtime,
             state=state,
             lg=runtime._lg,
-            halt=context.halt,
+            halt=shortcut.stop if shortcut is not None else context.halt,
             budget=context.tracker,
             checkpoint_ctx=checkpoint_ctx,
             checkpointer=self._checkpointer or parent_checkpointer,
@@ -1226,6 +1316,8 @@ class Flow:
             extra=parent_extra if parent_extra is not None else {},
             policy=policy,
             path=parent_path,
+            shortcut=shortcut,
+            shortcuts=parent_shortcuts + ((shortcut,) if shortcut is not None else ()),
         )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:

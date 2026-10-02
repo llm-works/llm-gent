@@ -85,6 +85,7 @@ class MapRunner:
         self.env = env
         self.node_id = node_id
         self.path: ScopePath = env.owner_path(node_id) if path is None else path
+        self.is_step = path is None
         # The cursor. Kept here, not in run's locals, so a checkpoint reads it.
         self.items: list[Any] = []
         self.done: dict[int, _Done] = {}
@@ -253,10 +254,15 @@ class MapItemRunner:
         inside its body — by the halt, or raising out of a strict map —
         stays registered where it stopped (its scope and its body's
         cursors), for the run's halt checkpoint and any checkpoint a
-        sibling takes meanwhile.
+        sibling takes meanwhile. In shortcut mode an item that had not
+        started is :class:`Skipped` (:meth:`_shortcut_skips`).
         """
         if is_halt_signaled(self.env):
             return _INTERRUPTED
+        if self._shortcut_skips():
+            skipped = Skipped(item=self.item)
+            await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
+            return skipped
         try:
             outcome = await self._run_item()
         except Interrupted:
@@ -264,6 +270,18 @@ class MapItemRunner:
         # Merged back, skipped or failed: the item leaves the snapshot.
         self.env.scopes.close_under(self.path)
         return outcome
+
+    def _shortcut_skips(self) -> bool:
+        """True when this map is a step of a flow in shortcut mode and the item had not started.
+
+        An item that was running when the flow stopped (its positions are
+        saved) continues from them. A map run by a Panel inside a step is
+        not a step of the flow: its items run.
+        """
+        shortcut = self.env.shortcut
+        if shortcut is None or not shortcut.active or not self.owner.is_step:
+            return False
+        return not self.env.scopes.has_saved_under(self.path)
 
     async def merge_saved(self, result: Any) -> Any:
         """Finish an item whose body completed before the checkpoint but whose merge had not.
@@ -336,6 +354,7 @@ class MapItemRunner:
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=self.path,
+            parent_shortcuts=env.shortcuts,
         )
 
     async def _on_success(

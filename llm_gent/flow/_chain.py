@@ -20,18 +20,37 @@ Constructed once per :meth:`Flow._run_as_subflow` entry:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import is_halt_signaled, note_halt
 from ._node_id import _compute_node_ids
-from .nodes import UNSET, Interrupted
+from ._shortcut import SHORTCUT
+from .nodes import Interrupted
 from .state.snapshot import CHAIN, TURN, path_str
 
 
 if TYPE_CHECKING:
     from .flow import Flow
     from .nodes import _RunEnv
+
+
+Inputs = tuple[tuple[Any, ...], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _Saved:
+    """Where a checkout continues a chain: the step, its input, and whether it had started.
+
+    ``pending`` marks a step the chain stopped before (it moved past a
+    completed one); ``prev`` is that completed step's result.
+    """
+
+    index: int
+    inputs: Inputs
+    pending: bool
+    prev: Any
 
 
 class Chain:
@@ -47,24 +66,34 @@ class Chain:
         self.env = env
         self.ids: tuple[str, ...] = _compute_node_ids(env.chain_context, flow._nodes)
         # The cursor: the step running and the input it gets. Kept here, not
-        # in _walk_steps' locals, so a checkpoint reads it.
+        # in _walk_steps' locals, so a checkpoint reads it. ``pending``: the
+        # chain stopped past a completed step, before this one started;
+        # ``prev`` is that completed step's result.
         self.index: int | None = None
         self.step_args: tuple[Any, ...] = ()
         self.step_kwargs: dict[str, Any] = {}
+        self.pending = False
+        self.prev: Any = None
 
     def cursor(self) -> dict[str, Any]:
-        """The step this chain is at (its node id) and that step's input.
+        """The step this chain is at (its node id), that step's input, and its mode.
 
         ``resume="latest"`` continues the chain at this step with this
-        input (:meth:`_saved_step`).
+        input (:meth:`_saved_step`). A step the chain stopped before also
+        carries ``pending`` and the result it follows (``prev``); a chain
+        in shortcut mode carries ``shortcut``.
         """
         if self.index is None:
             return {}
-        step = {
+        step: dict[str, Any] = {
             "step": self.ids[self.index],
             "args": list(self.step_args),
             "kwargs": dict(self.step_kwargs),
         }
+        if self.pending:
+            step["pending"], step["prev"] = True, self.prev
+        if self.env.shortcut is not None and self.env.shortcut.active:
+            step[SHORTCUT] = True
         return {CHAIN: step}
 
     async def walk(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
@@ -73,15 +102,12 @@ class Chain:
         Starts at the first step, or at the step a checkout saved for this
         chain. The chain's cursor is in every snapshot taken while it walks.
         """
-        start_index, first_input = 0, None
         saved = self._saved_step()
-        if saved is not None:
-            start_index, first_input = saved
         with _running(self.env, self.env.path, self):
-            return await self._walk_steps(start_index, args, kwargs, first_input)
+            return await self._walk_steps(saved, args, kwargs)
 
-    def _saved_step(self) -> tuple[int, tuple[tuple[Any, ...], dict[str, Any]]] | None:
-        """The step and input a checkout continues this chain at; ``None`` when not resuming.
+    def _saved_step(self) -> _Saved | None:
+        """Where a checkout continues this chain; ``None`` when not resuming.
 
         Steps before it completed before the checkpoint and do not run
         again; the step itself runs with the input it had.
@@ -99,48 +125,98 @@ class Chain:
                 f"Flow {label!r}: the checkpoint's cursor at {where!r} is at step "
                 f"{step['step']!r}, which this chain no longer has"
             )
-        return self.ids.index(step["step"]), (tuple(step["args"]), step["kwargs"])
+        index = self.ids.index(step["step"])
+        inputs = (tuple(step["args"]), step["kwargs"])
+        return _Saved(index, inputs, bool(step.get("pending")), step.get("prev"))
 
     async def _walk_steps(
-        self,
-        start_index: int,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        first_input: tuple[tuple[Any, ...], dict[str, Any]] | None,
+        self, saved: _Saved | None, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
-        """Execute chain steps from ``start_index`` onward, threading returns.
+        """Execute chain steps from the first (or the saved) one onward, threading returns.
 
-        With ``first_input`` (a checkout) the step at ``start_index`` gets
-        the input it had when the checkpoint was taken. The cursor moves
-        to each step, with the step's input (after ``project``), before the
-        step runs; after it returns, :meth:`_halted_after` observes the halt.
+        A saved step gets the input it had when the checkpoint was taken.
+        The cursor moves to each step, with the step's input (after
+        ``project``), before the step runs; after it returns,
+        :meth:`_halted_after` observes the halt. In shortcut mode only the
+        step that was interrupted runs before the landing step
+        (:meth:`_shortcut_jump`).
 
         Raises:
             Interrupted: The halt stopped the chain before its last step
                 completed.
         """
-        result: Any = UNSET
-        for index in range(start_index, len(self.flow._nodes)):
-            node = self.flow._nodes[index]
-            node_id = self.ids[index]
-            node_args: tuple[Any, ...]
-            node_kwargs: dict[str, Any]
-            if index == start_index and first_input is not None:
-                node_args, node_kwargs = first_input
+        index = saved.index if saved is not None else 0
+        rerun = saved.index if saved is not None and not saved.pending else None
+        last = (True, saved.prev) if saved is not None and saved.pending else (False, None)
+        while index < len(self.flow._nodes):
+            jump = self._shortcut_jump(index, rerun, last, args, kwargs)
+            if jump is not None:
+                target, inputs = jump
+                if target is None:
+                    return _passed_through(last, args, kwargs)
+                index = target
+            elif saved is not None and index == saved.index:
+                inputs = saved.inputs
             else:
-                node_args, node_kwargs = _step_inputs(index, node, result, args, kwargs)
-            self.index, self.step_args, self.step_kwargs = index, node_args, node_kwargs
-            result, interrupted = await self._run_step(node, node_id, node_args, node_kwargs)
-            if self._halted_after(index, result, interrupted, args, kwargs):
-                # The chain stops before its end: it is interrupted, so the step
-                # running it (a .call, an iterate pass, a map item) is too. What
-                # the halt stopped under this step stays registered where it
-                # stopped, for the run's halt checkpoint.
-                raise Interrupted()
-            # Past this step: a paused turn left under it was paused by a halt
-            # that is not the run's, and belongs to no later snapshot.
-            self.env.scopes.close_under(self.env.owner_path(node_id))
+                inputs = _step_inputs(index, self.flow._nodes[index], last[1], args, kwargs)
+            last = (True, await self._step(index, inputs, args, kwargs))
+            index += 1
+        return last[1]
+
+    async def _step(
+        self, index: int, inputs: Inputs, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        """Run step ``index`` with ``inputs``; its result, unless the halt stops the chain.
+
+        Raises:
+            Interrupted: The halt stopped the chain at or after this step.
+        """
+        node, node_id = self.flow._nodes[index], self.ids[index]
+        self.index, (self.step_args, self.step_kwargs), self.pending = index, inputs, False
+        result, interrupted = await self._run_step(node, node_id, *inputs)
+        if self._halted_after(index, result, interrupted, args, kwargs):
+            # The chain stops before its end: it is interrupted, so the step
+            # running it (a .call, an iterate pass, a map item) is too. What
+            # the halt stopped under this step stays registered where it
+            # stopped, for the run's halt checkpoint.
+            raise Interrupted()
+        # Past this step: a paused turn left under it was paused by a halt
+        # that is not the run's, and belongs to no later snapshot.
+        self.env.scopes.close_under(self.env.owner_path(node_id))
         return result
+
+    def _shortcut_jump(
+        self,
+        index: int,
+        rerun: int | None,
+        last: tuple[bool, Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[int | None, Inputs] | None:
+        """Where a shortcut takes the chain before step ``index``; ``None`` to run it.
+
+        Reaching the landing step uses the shortcut up. Before it, in
+        shortcut mode, only the step that was interrupted (``rerun``)
+        runs; any other jumps to the landing step with the last completed
+        result as its input (the chain's input when none completed), or
+        ends the chain (landing step ``None``).
+        """
+        shortcut = self.env.shortcut
+        if shortcut is None or shortcut.landed:
+            return None
+        target = shortcut.to_index
+        if target is not None and index >= target:
+            shortcut.active, shortcut.landed = False, True
+            return None
+        if not shortcut.active or index == rerun:
+            return None
+        shortcut.active, shortcut.landed = False, True
+        if target is None:
+            return None, (args, kwargs)
+        has_result, prev = last
+        if not has_result:
+            return target, (args, kwargs)
+        return target, _step_inputs(target, self.flow._nodes[target], prev, args, kwargs)
 
     async def _run_step(
         self, node: Any, node_id: str, node_args: tuple[Any, ...], node_kwargs: dict[str, Any]
@@ -202,7 +278,19 @@ class Chain:
     def _move_to(
         self, index: int, prev_result: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> None:
-        """Move the cursor to step ``index`` with the input it gets after ``prev_result``."""
+        """Move the cursor to step ``index`` (not started) with its input after ``prev_result``."""
         node = self.flow._nodes[index]
-        self.index = index
+        self.index, self.pending, self.prev = index, True, prev_result
         self.step_args, self.step_kwargs = _step_inputs(index, node, prev_result, args, kwargs)
+
+
+def _passed_through(last: tuple[bool, Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """What a chain a shortcut ended returns: its last completed result, else its input.
+
+    The input passes through when it is one positional value; otherwise
+    nothing does (``None``).
+    """
+    has_result, prev = last
+    if has_result:
+        return prev
+    return args[0] if len(args) == 1 and not kwargs else None

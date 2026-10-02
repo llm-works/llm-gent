@@ -156,7 +156,7 @@ async def run_budget(
     _restore(scopes, path, context.tracker)
     cursor = _BudgetCursor(context.tracker)
     scopes.open_cursor(path, cursor)
-    link = _link(enclosing, context.stop)
+    link = follow(enclosing, context.stop)
     try:
         yield context
         scopes.close_cursor(path, cursor)
@@ -179,8 +179,10 @@ def _restore(scopes: ScopeRegistry, path: ScopePath, tracker: Tracker) -> None:
         raise TypeError(f"cursor at {where!r} cannot be restored: {e}") from e
 
 
-def _link(enclosing: asyncio.Event | None, stop: asyncio.Event | None) -> asyncio.Task[None] | None:
-    """Set ``stop`` once ``enclosing`` is set; ``None`` when there is nothing to link."""
+def follow(
+    enclosing: asyncio.Event | None, stop: asyncio.Event | None
+) -> asyncio.Task[None] | None:
+    """Set ``stop`` once ``enclosing`` is set; the task doing it, ``None`` when nothing to do."""
     if enclosing is None or stop is None:
         return None
     if enclosing.is_set():

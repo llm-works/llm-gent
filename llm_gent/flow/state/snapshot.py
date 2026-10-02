@@ -24,6 +24,7 @@ that tell repeated executions apart::
     n/<node>/i/<index>/state          scope of map item <index>
     n/<node>/i/<index>/chain          cursor of map item <index>'s body
     budget, <run path>/budget         a run's own budget tracker: spend so far
+    signals                           the run's signals that are set
 
 A dict payload is stored as a tree with one blob per top-level key, so
 keys that did not change keep their hash from one commit to the next.
@@ -79,12 +80,27 @@ DONE = "done"
 BUDGET = "budget"
 """Cursor entry: a running flow's own budget tracker — its spend and spend by op."""
 
-CURSOR_ENTRIES = frozenset({PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, BUDGET})
+SIGNALS = "signals"
+"""Cursor entry at the root: the run's signals (``Flow.with_signal``) that are set."""
+
+CURSOR_ENTRIES = frozenset({PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, BUDGET, SIGNALS})
 """Tree entries that hold cursor values rather than a scope."""
 
 
 _NOT_SAVED = object()
 """Marker for "no saved cursor entry": a saved value can be ``None``."""
+
+
+@dataclass(frozen=True)
+class Live:
+    """A saved entry that was never stored: the live value of a position, handed back as is.
+
+    :meth:`ScopeRegistry.restage_under` saves positions this way, so a
+    block continuing in the same process gets its objects back without a
+    JSON round trip; a checkpoint taken before they are taken encodes them.
+    """
+
+    value: Any
 
 
 class Cursor(Protocol):
@@ -155,7 +171,8 @@ class ScopeRegistry:
         """Pop the saved payload of the scope at ``path``; ``(False, None)`` when there is none.
 
         Each saved scope is handed out once: a block entered again at the
-        same path projects a fresh scope.
+        same path projects a fresh scope. A restaged scope comes back as
+        :class:`Live` holding the :class:`State` itself.
         """
         if path not in self._saved:
             return False, None
@@ -165,7 +182,8 @@ class ScopeRegistry:
         """Pop the saved cursor entry ``name`` at ``path``, decoded; ``(False, None)`` when none.
 
         Like a saved scope, each entry is handed out once, to the first
-        runner that reaches ``path``.
+        runner that reaches ``path``. A restaged entry comes back as the
+        live value it held.
 
         Raises:
             TypeError: The stored value cannot be rebuilt (see
@@ -174,7 +192,50 @@ class ScopeRegistry:
         raw = self._saved_cursors.pop((path, name), _NOT_SAVED)
         if raw is _NOT_SAVED:
             return False, None
+        if isinstance(raw, Live):
+            return True, raw.value
         return True, codec.decode(raw, f"cursor at {path_str((*path, name))!r}")
+
+    def has_saved_under(self, prefix: ScopePath) -> bool:
+        """True when a saved scope or cursor entry nothing has taken is at or below ``prefix``.
+
+        A block that has some is one that was running when the snapshot (or
+        restage) was taken: it continues where it was.
+        """
+        n = len(prefix)
+        return any(p[:n] == prefix for p in self._saved) or any(
+            p[:n] == prefix for p, _ in self._saved_cursors
+        )
+
+    def peek_cursor(self, path: ScopePath, name: str) -> Any:
+        """The saved cursor entry ``name`` at ``path`` without taking it; ``None`` when none."""
+        raw = self._saved_cursors.get((path, name))
+        return raw.value if isinstance(raw, Live) else raw
+
+    def restage_under(self, prefix: ScopePath) -> None:
+        """Turn the positions under ``prefix`` back into saved entries, for a block to continue.
+
+        A block that stopped and continues in the same process walks again
+        and takes its positions as a checkout's: every scope and runner
+        below ``prefix``, and the chain at ``prefix``, move to the saved
+        entries as :class:`Live` values. What else is at ``prefix`` — the
+        block's own scope and budget — belongs to its caller and stays.
+        Loop call and Panel numbering below ``prefix`` restarts, so a step
+        that runs again gives its calls the paths they had.
+        """
+        n = len(prefix)
+        for path in [p for p in self._scopes if p[:n] == prefix and len(p) > n]:
+            self._saved[path] = Live(self._scopes.pop(path))
+        for key, runner in list(self._cursors.items()):
+            path = key[0]
+            if path[:n] != prefix or (len(path) == n and CHAIN not in runner.cursor()):
+                continue
+            for name, value in runner.cursor().items():
+                self._saved_cursors[(path, name)] = Live(value)
+            del self._cursors[key]
+        for counts in (self._turns, self._panels):
+            for step in [s for s in counts if s[:n] == prefix]:
+                del counts[step]
 
     def drop_saved(self) -> list[ScopePath]:
         """Forget the saved scopes and cursor entries nothing has taken; return their paths."""
@@ -268,9 +329,10 @@ class ScopeRegistry:
             raise RuntimeError("ScopeRegistry.capture() before begin()")
         flat: dict[ScopePath, Any] = {(STATE,): _to_json(self._root, ())}
         for path, value in self._saved.items():
-            flat[(*path, STATE)] = value
+            flat[(*path, STATE)] = _to_json(value.value, path) if isinstance(value, Live) else value
         for (path, name), raw in self._saved_cursors.items():
-            flat[(*path, name)] = raw
+            where = f"cursor at {path_str((*path, name))!r}"
+            flat[(*path, name)] = codec.encode(raw.value, where) if isinstance(raw, Live) else raw
         for path, scope in self._scopes.items():
             flat[(*path, STATE)] = _to_json(scope, path)
         for (path, _), runner in self._cursors.items():

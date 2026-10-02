@@ -240,6 +240,62 @@ Current limits:
 - Positions are recorded by node id. A deploy that inserts steps keeps
   them valid; resuming into a flow that no longer has the saved step
   raises, naming its path. Reordering steps can make a step run again.
+- Adding `name=` to a step changes its node id (and its descendants').
+  A checkpoint at that step fails to resume until the run completes.
+
+### Shortcuts
+
+A halt pauses the run. A shortcut moves it forward: on a signal, a flow
+stops exploring and continues at a later step with what it has, and the
+run still ends with a result.
+
+Signals are named events the app sets, declared on the top-level flow
+with `with_signal(name, event)`; any flow declares a shortcut on one with
+`with_shortcut(name, to=None)`, where `to` is the `name=` of a later step
+of its own chain (`.call`, `.then`, `.iterate`, `.map` and `.branch` take
+`name=`) and `None` its end:
+
+```python
+item = (
+    ff.create()
+    .call(query)
+    .then(explore)
+    .then(extract, name="extract")
+    .then(digest)
+    .with_shortcut("cut", to="extract")
+)
+wave_body = ff.create().call(plan).map(item).then(revise).with_shortcut("cut")
+waves = ff.create().iterate(wave_body, max_iters=20).with_shortcut("cut")
+campaign = ff.create(...).with_halt(pause).with_signal("cut", cut).call(waves).then(synthesis)
+```
+
+When the signal is set, the flow stops exactly as the halt stops it —
+every part at its next boundary, a Loop turn paused and held — and then
+continues at once from where it stopped, in shortcut mode:
+
+- The step that was running runs again from its positions. A Loop call
+  holding a paused turn does not continue it: it returns the result
+  SAIA paused it with (SAIA's `TaskResult`, `paused=True`) and the step
+  carries on.
+- An iterate in the flow's chain starts no new pass and returns its
+  carried value; a map in it starts no new item (those are `Skipped`,
+  `on_item_complete` fires) and its started items finish.
+- The chain then continues at `to`, skipping the steps before it (`to`
+  gets the last completed result), or the flow ends with it.
+
+Flows under it run normally unless they declare a shortcut of their own;
+in the example above an item stopped before `extract` jumps there, one
+stopped inside `explore` finishes its turn with the paused result and
+goes on to `extract`, and one past `extract` finishes normally. A flow
+that starts while its signal is set — a later step, the next iterate
+pass, a map item — starts in shortcut mode; a signal set once a flow is
+at or past its `to` does nothing there.
+
+Pausing works at any point of a shortcut. Which signals are set is in
+every checkpoint, and so is a flow being in shortcut mode (its chain's
+cursor); resume sets the signals again and continues every shortcut
+where it was. A finished run records no signal: the next session starts
+with none set.
 
 ### Budgets
 

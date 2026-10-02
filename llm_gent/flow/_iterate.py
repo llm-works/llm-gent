@@ -114,7 +114,9 @@ class IterateRunner:
         A halt that stops the loop before its bounds do interrupts it: a
         body interrupted inside a pass raises :class:`Interrupted` through
         the loop, which neither advances nor writes a policy commit after
-        it, and leaves the iterate registered in that pass.
+        it, and leaves the iterate registered in that pass. In shortcut
+        mode the loop ends before a pass that had not started, with the
+        carried value (:meth:`_shortcut_ends`).
 
         Raises:
             Interrupted: The halt stopped the loop before its bounds or
@@ -138,6 +140,8 @@ class IterateRunner:
                 note_halt(self.env, self.iteration, self.node_id)
                 raise Interrupted()
             pass_path = (*path, "p", str(self.iteration))
+            if self._shortcut_ends(pass_path):
+                break
             result = await self._dispatch_body(child_state, self.carry, pass_path)
             self.carry, self.iteration, self.done = result, self.iteration + 1, None
             self.done = await self._until_holds(child_state)
@@ -146,6 +150,17 @@ class IterateRunner:
             if self.done:
                 break
         return self.carry
+
+    def _shortcut_ends(self, pass_path: ScopePath) -> bool:
+        """True when this iterate's flow is in shortcut mode and the pass had not started.
+
+        A pass that was running when the flow stopped (its positions are
+        saved) runs again from them; no other pass starts.
+        """
+        shortcut = self.env.shortcut
+        if shortcut is None or not shortcut.active:
+            return False
+        return not self.env.scopes.has_saved_under(pass_path)
 
     async def _until_holds(self, child_state: State[Any]) -> bool:
         """``until``'s verdict on the carried value; ``False`` without ``until``."""
@@ -178,4 +193,5 @@ class IterateRunner:
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=pass_path,
+            parent_shortcuts=env.shortcuts,
         )
