@@ -228,7 +228,7 @@ class _RunEnv:
     is the ambient :class:`asyncio.Event` attached via :meth:`Flow.with_halt`
     (or inherited from the outer runtime); ``None`` when no halt is in
     scope. ``cost`` is the run's cost tracker (``ctx.cost``): one attached
-    via :meth:`Flow.with_cost_tracker`, a capped run's child, or the one
+    via :meth:`Flow.with_cost_tracker`, a budgeted run's child, or the one
     inherited; ``None`` when none is in scope. ``checkpoint_ctx`` is the run's repo (the top-level flow's
     checkpoint store); ``checkpointer`` the innermost
     :meth:`Flow.with_checkpointer` on this flow or above it — saves write

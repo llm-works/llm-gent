@@ -296,12 +296,11 @@ not have raises `ValueError`; for a name, the error lists the checkpoint names t
 
 ## Cost across resume
 
-The example tracks no cost. With a cost tracker — `with_cost_tracker(tracker)` on the flow, or a
-budget per item with `with_budget(limit)` on a map body — each run's tracker is in the halt commit
-at
-that run's path (`cost`: spend so far, and spend by op), and run 2 restores it before the run
-continues: run 2 spends what is left of the budget, not the whole budget again. A finished run's
-`$end` commit holds no tracker, so a fresh cycle starts from the tracker as given. See
+The example tracks no cost. With a budget per item — `with_budget(limit)` on a map body, under a
+`with_cost_tracker(tracker)` — each item's child tracker is in the halt commit at that item's path
+(`cost`: spend so far, and spend by op), and run 2 restores it before the item continues: the item
+has what is left of its budget, not the whole budget again. The app's own tracker is not in any
+commit: the app seeds it for each session. A finished run's `$end` commit holds no tracker. See
 `docs/index.md`, "Cost and budgets".
 
 ## Two contracts the example depends on

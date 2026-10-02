@@ -26,7 +26,6 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ._cost import follow
 from .nodes import step_name
 from .state.snapshot import CHAIN, SIGNALS, ScopePath, ScopeRegistry
 
@@ -217,6 +216,23 @@ class ShortcutRun:
         await self.event.wait()
         if not self.landed:
             self.stop.set()
+
+
+def follow(
+    enclosing: asyncio.Event | None, stop: asyncio.Event | None
+) -> asyncio.Task[None] | None:
+    """Set ``stop`` once ``enclosing`` is set; the task doing it, ``None`` when nothing to do."""
+    if enclosing is None or stop is None:
+        return None
+    if enclosing.is_set():
+        stop.set()
+        return None
+
+    async def follow() -> None:
+        await enclosing.wait()
+        stop.set()
+
+    return asyncio.create_task(follow())
 
 
 @contextlib.asynccontextmanager
