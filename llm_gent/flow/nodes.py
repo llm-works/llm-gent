@@ -5,10 +5,11 @@
 
 Internal to :mod:`llm_gent.flow`: the private dataclasses (:class:`_Node`,
 :class:`_Branch`, :class:`_Iterate`, :class:`_Map`, :class:`_RunEnv`), and
-the type aliases used by the fluent builder's callback slots. Three public
+the type aliases used by the fluent builder's callback slots. Public
 symbols are routed through this module as well: :class:`Failure`, the
 sentinel returned in place of a failed item by :meth:`Flow.map` when
-``strict=False``; :class:`Skipped`, the sentinel returned in place of an
+``strict=False`` (with :class:`RestoredError` for a failure restored from
+a checkpoint); :class:`Skipped`, the sentinel returned in place of an
 item whose :meth:`Flow.guard` predicate returned falsy; and :data:`UNSET`
 (with its :class:`Unset` type), the "no value here" sentinel used by
 :meth:`Flow.run`'s ``state=`` default and by rescue policies'
@@ -108,6 +109,13 @@ termination.
 ItemsFn = Callable[[Any, Context[Any]], Any]
 """Map item source: ``(prev_result, ctx) -> iterable``. May be async. Consumed eagerly to a list."""
 
+MaxConcurrencyFn = Callable[[list[Any], Context[Any]], Any]
+"""Map concurrency cap computed at map start: ``(items, ctx) -> int``. May be async.
+
+Called once per map run with the resolved items, when any are left to
+run; must return an ``int >= 1``. Not saved: a resumed map calls it again.
+"""
+
 AggregateFn = Callable[[list[Any]], Any]
 """Map result reducer: ``list[R] -> R'``. May be async. If omitted, .map returns the list as-is."""
 
@@ -171,10 +179,30 @@ class Failure:
     """
 
     exception: BaseException
-    """The exception the item's subflow raised (never :class:`asyncio.CancelledError`)."""
+    """The exception the item's subflow raised (never :class:`asyncio.CancelledError`).
+
+    A :class:`RestoredError` when the item failed before the checkpoint the
+    run resumed from.
+    """
 
     item: Any
     """The input item whose subflow run failed."""
+
+
+class RestoredError(Exception):
+    """A map item's failure, restored from a checkpoint: the original exception's type and message.
+
+    A failed item of a ``strict=False`` map stays failed across resume: it
+    does not run again, and its :class:`Failure` carries this in place of
+    the exception it raised, which a checkpoint cannot store.
+    """
+
+    def __init__(self, type_name: str, message: str) -> None:
+        super().__init__(f"{type_name}: {message}")
+        self.type_name = type_name
+        """The original exception's class name, e.g. ``"ValueError"``."""
+        self.message = message
+        """The original exception's message (``str(exception)``)."""
 
 
 @dataclass(frozen=True)
@@ -314,7 +342,7 @@ class _Map:
     guard: GuardFn | None = None
     on_error: OnErrorFn | None = None
     on_item_complete: OnItemCompleteFn | None = None
-    max_concurrency: int | None = None
+    max_concurrency: int | MaxConcurrencyFn | None = None
     state_factory: StateFactory[Any] | None = None
     name: str | None = None
 

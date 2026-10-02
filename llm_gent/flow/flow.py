@@ -91,6 +91,7 @@ from ._validation import (
     _materialize,
     _require_state_for_merge,
     _validate_target,
+    check_concurrency,
 )
 from .checkpoint import (
     CheckpointPolicy,
@@ -109,6 +110,7 @@ from .nodes import (
     GuardFn,
     Interrupted,
     ItemsFn,
+    MaxConcurrencyFn,
     OnErrorFn,
     OnItemCompleteFn,
     ProjectFn,
@@ -588,7 +590,7 @@ class Flow:
         items: ItemsFn | None = None,
         aggregate: AggregateFn | None = None,
         strict: bool = True,
-        max_concurrency: int | None = None,
+        max_concurrency: int | MaxConcurrencyFn | None = None,
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
         state: StateProject | None = None,
@@ -613,11 +615,16 @@ class Flow:
                 the aggregator can partition successes from failures. Under
                 ``strict=False`` a state-projection failure is also wrapped
                 as :class:`Failure` (symmetric with guard/body failures).
-            max_concurrency: Cap on in-flight per-item runners. Must be
-                ``>= 1`` when set. Omitted → unbounded (all items dispatch
-                immediately as one ``asyncio.gather``). Load-bearing for
-                callers that need to respect an external rate limit (LLM
-                requests, downstream service quota).
+            max_concurrency: Cap on in-flight per-item runners; items over
+                it wait for a free slot. An ``int >= 1``, or
+                ``(items, ctx) -> int`` (may be async) computed once when the
+                map starts, with the resolved items — e.g. from the budget
+                left in ``ctx.cost``. Not saved: a resumed map computes it
+                again; not called when no item is left to run. Omitted →
+                unbounded (all items dispatch immediately as one
+                ``asyncio.gather``). Load-bearing for callers that need to
+                respect an external rate limit (LLM requests, downstream
+                service quota) or a budget.
             rescue: Attached to the map node — fires if the map itself raises
                 (item resolution, body exceptions in strict mode, or aggregate).
             after: Attached to the map node — fires with the final (possibly
@@ -645,10 +652,8 @@ class Flow:
         """
         _require_state_for_merge(state, merge, ".map")
         _check_node_name(name, ".map")
-        if max_concurrency is not None and (
-            type(max_concurrency) is not int or max_concurrency < 1
-        ):
-            raise ValueError(f".map(max_concurrency=) must be an int >= 1; got {max_concurrency}")
+        if max_concurrency is not None and not callable(max_concurrency):
+            check_concurrency(max_concurrency, ".map(max_concurrency=)")
         body_flow = _materialize(body, self._lg, "map.body")
         node = _Node(
             target=_Map(

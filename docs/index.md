@@ -210,12 +210,23 @@ every subflow observes it. `run()` raises when a nested flow sets a
 different event.
 
 A map's cursor is its item list — resolved once, never evaluated again
-on resume — and its completed items with their results. On resume a
+on resume — and its done items with their results. On resume a
 completed item does not run again and its merge is not applied again, a
-running item continues where it was, and items that had not started,
-failed or were skipped by the guard run. Items and their results must be
-plain JSON, pydantic models, or objects with `to_dict()` and a
-classmethod `from_dict()`.
+running item continues where it was, and items that had not started
+run. A failed item of a `strict=False` map and an item the guard skipped
+are done too: they do not run again, the guard is not asked again, and
+the map's result holds their `Failure` / `Skipped` as before — a
+restored `Failure` carries a `RestoredError` with the original
+exception's type name and message (an exception is not storable). A
+`strict=True` failure raises out of the run, so its item runs again from
+the last save. Items and their results must be plain JSON, pydantic
+models, or objects with `to_dict()` and a classmethod `from_dict()`.
+
+A map's `max_concurrency` can be computed when the map starts:
+`(items, ctx) -> int` with the resolved items, e.g. from the budget left
+in `ctx.cost`. Items over it wait for a free slot, and every item counts
+against the same tracker. It is not saved: a resumed map computes it
+again from the restored spend.
 
 A step that runs again gets the input it had. Consequence: **verbs must
 be idempotent-in-effects** at the step level. Reading state, mutating

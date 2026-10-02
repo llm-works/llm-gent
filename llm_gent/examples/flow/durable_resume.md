@@ -255,9 +255,10 @@ input it had, and a Loop call in it resumes its paused turn.
 | A run that raises | — | Writes nothing: the head stays at the last save, where `latest` continues. |
 
 **Maps.** A running map's cursor (`n/<map>/items`, `n/<map>/done`) holds its item list and its
-completed items with their results; each running item keeps its own positions under
-`n/<map>/i/<index>/`. On resume a completed item does not run again, a running one continues where
-it was, and the rest run.
+done items with their results; each running item keeps its own positions under
+`n/<map>/i/<index>/`. On resume a completed item does not run again — nor does an item that failed
+in a `strict=False` map or was skipped by the guard — a running one continues where it was, and the
+rest run.
 
 ## Named checkpoints
 

@@ -41,7 +41,8 @@ Public surface:
   when a referenced object is missing from the store
 - :func:`collect_unreachable` — delete the objects of a history no ref
   reaches (left by ``resume=<name>`` or a process that died mid-commit)
-- :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``
+- :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``;
+  :class:`RestoredError` — its exception when the failure was restored from a checkpoint
 - :class:`Skipped` — sentinel returned for an item gated out by
   ``Flow.guard`` on a ``Flow.map`` node
 - :class:`Interrupted` — raised by a step that stops because of the halt
@@ -69,7 +70,7 @@ from .flow import Flow
 from .gc import collect_unreachable
 from .history import History, HistoryCorrupt
 from .loop import Loop, LoopFactory
-from .nodes import UNSET, Failure, Interrupted, Skipped, Unset
+from .nodes import UNSET, Failure, Interrupted, RestoredError, Skipped, Unset
 from .panel import Panel
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
@@ -91,6 +92,7 @@ __all__ = [
     "Loop",
     "LoopFactory",
     "Panel",
+    "RestoredError",
     "ResumeMode",
     "Role",
     "SAIAFactory",
