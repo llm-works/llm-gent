@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Tests for BudgetTrait: tracker accessor + lifecycle hooks."""
+"""Tests for CostTrait: tracker accessor + lifecycle hooks."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ from unittest.mock import MagicMock
 import pytest
 from appinfra.log import quick_console_logger
 
-from llm_gent.core.budget import PricingConfig, Tracker
-from llm_gent.core.traits import BudgetTrait
+from llm_gent.core.cost import CostTracker, PricingConfig
+from llm_gent.core.traits import CostTrait
 
 
 pytestmark = pytest.mark.unit
 
 
-def _tracker() -> Tracker:
+def _tracker() -> CostTracker:
     lg = quick_console_logger("test", config={"level": "error"})
-    return Tracker(lg, PricingConfig(), budget=1.0)
+    return CostTracker(lg, PricingConfig(), budget=1.0)
 
 
 def _agent() -> MagicMock:
@@ -29,18 +29,18 @@ def _agent() -> MagicMock:
     return agent
 
 
-class TestBudgetTrait:
+class TestCostTrait:
     """Thin wrapper: exposes tracker; logs on lifecycle hooks."""
 
     def test_tracker_accessor(self) -> None:
         tracker = _tracker()
-        trait = BudgetTrait(_agent(), tracker=tracker)
+        trait = CostTrait(_agent(), tracker=tracker)
         assert trait.tracker is tracker
 
     def test_on_start_logs(self) -> None:
         agent = _agent()
         tracker = _tracker()
-        trait = BudgetTrait(agent, tracker=tracker)
+        trait = CostTrait(agent, tracker=tracker)
         trait.on_start()
         agent.lg.trace.assert_called_once()
         call = agent.lg.trace.call_args
@@ -49,7 +49,7 @@ class TestBudgetTrait:
     def test_on_stop_logs_summary(self) -> None:
         agent = _agent()
         tracker = _tracker()
-        trait = BudgetTrait(agent, tracker=tracker)
+        trait = CostTrait(agent, tracker=tracker)
         trait.on_stop()
         agent.lg.info.assert_called_once()
         extra = agent.lg.info.call_args.kwargs["extra"]

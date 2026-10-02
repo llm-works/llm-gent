@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ._budget import follow
+from ._cost import follow
 from .nodes import step_name
 from .state.snapshot import CHAIN, SIGNALS, ScopePath, ScopeRegistry
 

@@ -3,13 +3,13 @@
 
 """Pricing configuration — currency-agnostic op cost lookup.
 
-:class:`PricingProvider` is the plug seam :class:`Tracker` calls on
+:class:`PricingProvider` is the plug seam :class:`CostTracker` calls on
 every recorded usage event. Substrate ships :class:`PricingConfig` as
 the default static implementation — a name-indexed :class:`Op`
 registry with prefix/default fallback. Consumers that need dynamic or
 provider-aware pricing (per-request surcharges, negotiated rates,
 invoice reconciliation) implement their own :class:`PricingProvider`
-and inject it on :class:`Tracker` construction.
+and inject it on :class:`CostTracker` construction.
 
 An :class:`Op` is a named, billable operation. Each Op exposes a
 ``cost()`` method whose signature is implementation-defined; callers
@@ -46,7 +46,7 @@ class Op(Protocol):
     - ``cost(**usage) -> float`` — computes cost from usage kwargs.
 
     The ``cost()`` signature is implementation-defined. Callers of
-    :meth:`Tracker.track` pass usage kwargs matching the Op they're
+    :meth:`CostTracker.track` pass usage kwargs matching the Op they're
     tracking; the tracker forwards them to ``op.cost(**usage)``.
     """
 
@@ -109,7 +109,7 @@ class FixedOp:
 
 
 class PricingProvider(Protocol):
-    """Cost-computation seam :class:`Tracker` calls on every event.
+    """Cost-computation seam :class:`CostTracker` calls on every event.
 
     Implementations own the pricing math. The default
     :class:`PricingConfig` computes from a static per-op registry;
@@ -119,7 +119,7 @@ class PricingProvider(Protocol):
     changing the tracker or verb-body call shape.
 
     Wiring: pass the implementation as the ``pricing`` argument to
-    :class:`Tracker`. Every :meth:`Tracker.track` call forwards
+    :class:`CostTracker`. Every :meth:`CostTracker.track` call forwards
     ``op_name`` and the usage kwargs directly to :meth:`compute`.
     """
 
@@ -127,7 +127,7 @@ class PricingProvider(Protocol):
         """Compute cost for one usage event.
 
         The kwargs are whatever the caller passed to
-        :meth:`Tracker.track` alongside ``op_name`` (token counts,
+        :meth:`CostTracker.track` alongside ``op_name`` (token counts,
         cached-token counts, provider signals, ...). Implementations
         return the cost in the consumer's chosen currency.
 

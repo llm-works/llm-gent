@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from llm_gent.core.budget import FixedOp, LLMOp, PricingConfig
+from llm_gent.core.cost import FixedOp, LLMOp, PricingConfig
 
 
 pytestmark = pytest.mark.unit

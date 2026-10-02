@@ -294,13 +294,15 @@ characters, the form of a commit hash. `run(resume=...)` with a hash or a name t
 not have raises `ValueError`; for a name, the error lists the checkpoint names the history has
 (`History.checkpoint_names()`).
 
-## Budgets across resume
+## Cost across resume
 
-The example wires no budget. With one — `with_budget(tracker)` on the flow, or a cap per item with
-`with_budget(cap)` on a map body — each run's tracker is in the halt commit at that run's path
-(`budget`: spend so far, and spend by op), and run 2 restores it before the run continues: run 2
-spends what is left of the cap, not the whole cap again. A finished run's `$end` commit holds no
-tracker, so a fresh cycle starts from the tracker as given. See `docs/index.md`, "Budgets".
+The example tracks no cost. With a cost tracker — `with_cost_tracker(tracker)` on the flow, or a
+budget per item with `with_budget(limit)` on a map body — each run's tracker is in the halt commit
+at
+that run's path (`cost`: spend so far, and spend by op), and run 2 restores it before the run
+continues: run 2 spends what is left of the budget, not the whole budget again. A finished run's
+`$end` commit holds no tracker, so a fresh cycle starts from the tracker as given. See
+`docs/index.md`, "Cost and budgets".
 
 ## Two contracts the example depends on
 

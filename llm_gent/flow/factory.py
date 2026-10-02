@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from appinfra.log import Logger
 
-from ..core.budget import Tracker
+from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
 from .checkpoint import CheckpointStore
 from .nodes import UNSET
@@ -97,7 +97,7 @@ class FlowFactory:
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
         halt: asyncio.Event | None = None,
-        budget: Tracker | None = None,
+        cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
         checkpoint_store: CheckpointStore | None = None,
     ) -> None:
@@ -119,8 +119,8 @@ class FlowFactory:
                 :meth:`Flow.with_halt` on every built flow. Wire once at
                 the factory to thread the same halt handle through an
                 entire agent shape.
-            budget: Optional :class:`Tracker` attached via
-                :meth:`Flow.with_budget` on every built flow. Wire once at
+            cost_tracker: Optional :class:`CostTracker` attached via
+                :meth:`Flow.with_cost_tracker` on every built flow. Wire once at
                 the factory to thread the same cost tracker through an
                 entire agent shape.
             state_factory: Optional :class:`StateFactory` threaded into
@@ -144,7 +144,7 @@ class FlowFactory:
         self._state = state
         self._traits = traits
         self._halt = halt
-        self._budget = budget
+        self._cost_tracker = cost_tracker
         self._state_factory = state_factory
         self._checkpoint_store = checkpoint_store
 
@@ -206,8 +206,8 @@ class FlowFactory:
         effective_halt = halt if halt is not None else self._halt
         if effective_halt is not None:
             flow.with_halt(effective_halt)
-        if self._budget is not None:
-            flow.with_budget(self._budget)
+        if self._cost_tracker is not None:
+            flow.with_cost_tracker(self._cost_tracker)
         if checkpointer is not None:
             store, flow_id = checkpointer
             flow.with_checkpoint_store(store, flow_id)
@@ -219,7 +219,7 @@ class FlowFactory:
         """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
 
         Every other captured slot (``lg``, ``state``, ``traits``, ``halt``,
-        ``budget``, ``state_factory``, ``checkpoint_store``) carries over.
+        ``cost_tracker``, ``state_factory``, ``checkpoint_store``) carries over.
         Useful for subsystems that share the app's logger but need a
         different saia builder (e.g. a plugin with its own model wiring).
         """
@@ -229,7 +229,7 @@ class FlowFactory:
             state=self._state,
             traits=self._traits,
             halt=self._halt,
-            budget=self._budget,
+            cost_tracker=self._cost_tracker,
             state_factory=self._state_factory,
             checkpoint_store=self._checkpoint_store,
         )
@@ -246,7 +246,7 @@ class FlowFactory:
             state=self._state,
             traits=traits,
             halt=self._halt,
-            budget=self._budget,
+            cost_tracker=self._cost_tracker,
             state_factory=self._state_factory,
             checkpoint_store=self._checkpoint_store,
         )
@@ -264,17 +264,18 @@ class FlowFactory:
             state=self._state,
             traits=self._traits,
             halt=event,
-            budget=self._budget,
+            cost_tracker=self._cost_tracker,
             state_factory=self._state_factory,
             checkpoint_store=self._checkpoint_store,
         )
 
-    def with_budget(self, tracker: Tracker) -> FlowFactory:
-        """Return a new :class:`FlowFactory` whose budget tracker is swapped.
+    def with_cost_tracker(self, tracker: CostTracker) -> FlowFactory:
+        """Return a new :class:`FlowFactory` whose cost tracker is swapped.
 
         Every other captured slot carries over. Every subsequently created
-        :class:`Flow` gets ``tracker`` attached via :meth:`Flow.with_budget`
-        — one wiring reaches every layer that observes ``ctx.budget``.
+        :class:`Flow` gets ``tracker`` attached via
+        :meth:`Flow.with_cost_tracker` — one wiring reaches every layer that
+        observes ``ctx.cost``.
         """
         return FlowFactory(
             self._lg,
@@ -282,7 +283,7 @@ class FlowFactory:
             state=self._state,
             traits=self._traits,
             halt=self._halt,
-            budget=tracker,
+            cost_tracker=tracker,
             state_factory=self._state_factory,
             checkpoint_store=self._checkpoint_store,
         )
@@ -302,7 +303,7 @@ class FlowFactory:
             state=self._state,
             traits=self._traits,
             halt=self._halt,
-            budget=self._budget,
+            cost_tracker=self._cost_tracker,
             state_factory=self._state_factory,
             checkpoint_store=store,
         )
@@ -320,7 +321,7 @@ class FlowFactory:
             state=self._state,
             traits=self._traits,
             halt=self._halt,
-            budget=self._budget,
+            cost_tracker=self._cost_tracker,
             state_factory=state_factory,
             checkpoint_store=self._checkpoint_store,
         )
