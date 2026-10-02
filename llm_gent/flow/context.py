@@ -39,7 +39,7 @@ from typing import Any, Generic, TypeVar
 
 from appinfra.log import Logger
 
-from ..core.budget import Tracker
+from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
 from .checkpoint import checkpoint_tag
 from .role import Role
@@ -114,16 +114,17 @@ class Context(Generic[T]):
     Subflows inherit the outer runtime's halt unless they declare their own.
     """
 
-    budget: Tracker | None = None
-    """Cost tracker attached via :meth:`Flow.with_budget`, or ``None``.
+    cost: CostTracker | None = None
+    """The run's cost tracker, or ``None``.
 
-    Verbs record LLM and operation costs via ``ctx.budget.track(...)`` (or
-    against a child obtained via ``ctx.budget.child(budget=...)`` for
-    per-scope caps). The tracker enforces its cap and, when configured
-    with a halt event, trips it on the first cross into ``exceeded``;
-    ancestors in the tracker chain do the same on their own caps.
-    Subflows inherit the outer runtime's budget unless they declare their
-    own via :meth:`Flow.with_budget`.
+    Set with :meth:`Flow.with_cost_tracker`; a run of a flow with
+    :meth:`Flow.with_budget` gets a child of it with that budget. Verbs
+    record LLM and operation costs via ``ctx.cost.track(...)``;
+    ``ctx.cost.spent`` is the cost so far and ``ctx.cost.budget`` the
+    limit it is checked against. The tracker enforces its budget and,
+    when configured with a halt event, trips it on the first cross into
+    ``exceeded``; ancestors in the tracker chain do the same on their own
+    budgets. Subflows inherit the outer runtime's tracker.
     """
 
     extra: dict[str, Any] = field(default_factory=dict)

@@ -59,11 +59,17 @@ from typing import Any, get_args
 
 from appinfra.log import Logger
 
-from ..core.budget import Tracker
+from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
-from ._budget import Budget, RunBudget, check_budget, check_caps_have_a_tracker, run_budget
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext, check_one_repo
+from ._cost import (
+    RunCost,
+    check_budget,
+    check_budgets_have_a_tracker,
+    check_cost_tracker,
+    run_cost,
+)
 from ._halt_observer import HaltPoint, check_one_halt, is_run_halted
 from ._node_id import flow_root_hash
 from ._resume import (
@@ -188,7 +194,8 @@ class Flow:
         self._halt_event: asyncio.Event | None = None
         self._signals: dict[str, asyncio.Event] = {}
         self._shortcut: Shortcut | None = None
-        self._budget: Budget | None = None
+        self._cost_tracker: CostTracker | None = None
+        self._budget: float | None = None
         self._checkpoint_ctx: CheckpointContext | None = None
         self._checkpointer: Checkpointer | None = None
         self._verbs: dict[str, Any] = {}
@@ -259,7 +266,7 @@ class Flow:
         name: str,
         *args: Any,
         halt: Any = UNSET,
-        budget: Any = UNSET,
+        cost: Any = UNSET,
         scope_state: Any = UNSET,
         extra: Any = UNSET,
         **kwargs: Any,
@@ -280,11 +287,11 @@ class Flow:
         construction. A ``State`` instance passes through as-is; any other
         value is wrapped with this flow's ``state_factory``.
 
-        Pass ``halt=ctx.halt`` and ``budget=ctx.budget`` from an in-flight
+        Pass ``halt=ctx.halt`` and ``cost=ctx.cost`` from an in-flight
         verb to propagate its effective ambients to the dispatched sibling;
         omitting either (or passing ``UNSET``) defaults to this flow's
-        ``.with_halt()`` / ``.with_budget(tracker)`` binding if any (a
-        ``.with_budget(cap)`` has no enclosing tracker here: none).
+        ``.with_halt()`` / ``.with_cost_tracker()`` binding if any (a
+        ``.with_budget()`` makes no child here: there is no run).
 
         Pass ``extra=ctx.extra`` from an in-flight verb to propagate the
         caller-supplied opaque dict to the dispatched sibling. Omitting
@@ -302,8 +309,7 @@ class Flow:
             else scope_state
         )
         effective_halt = self._halt_event if halt is UNSET else halt
-        own_tracker = self._budget if isinstance(self._budget, Tracker) else None
-        effective_budget = own_tracker if budget is UNSET else budget
+        effective_cost = self._cost_tracker if cost is UNSET else cost
         effective_extra: dict[str, Any] = {} if extra is UNSET else extra
         wrapped_state = (
             payload
@@ -316,7 +322,7 @@ class Flow:
             flow=self,
             traits=self._traits,
             halt=effective_halt,
-            budget=effective_budget,
+            cost=effective_cost,
             extra=effective_extra,
         )
         return await verb(ctx, *args, **kwargs)
@@ -819,35 +825,46 @@ class Flow:
         self._shortcut = check_shortcut(signal, to)
         return self
 
-    def with_budget(self, budget: Budget) -> Flow:
-        """Set this flow's budget context, reachable as ``ctx.budget``.
+    def with_cost_tracker(self, tracker: CostTracker) -> Flow:
+        """Run every run of this flow on ``tracker``, reachable as ``ctx.cost``.
 
-        - A :class:`Tracker`: every run of this flow runs on it. Verbs
-          record LLM and operation costs against it. Auto-halt is opt-in
-          on the tracker side: pass a shared ``asyncio.Event`` to both
-          :meth:`Tracker.__init__` (``halt=``) and :meth:`with_halt`, and
-          the tracker sets the event on the first cross into ``exceeded``.
-        - A cap (``float``): each run of this flow runs on a child of the
-          enclosing flow's tracker with that cap — spend rolls up and every
-          cap on the chain applies. A map body runs once per item, an
-          iterate body once per pass, a subflow once per ``.call``. Crossing
-          the cap stops that run with halt semantics (in-flight LLM calls
-          finish, everything under it stops) and it ends with no result
-          (``None``); the enclosing flow carries on. The run also stops on
-          the halt it would observe uncapped. A cap needs a tracker on an
-          enclosing flow: :meth:`run` raises otherwise.
-
-        Without ``with_budget`` a flow shares the enclosing tracker.
-
-        A run's own tracker (its tracker, or its capped child) is in every
-        checkpoint taken while the run is in progress, and restored when it
-        resumes; see :mod:`llm_gent.flow._budget`.
+        Verbs record LLM and operation costs against it. Auto-halt is
+        opt-in on the tracker side: pass a shared ``asyncio.Event`` to both
+        :meth:`CostTracker.__init__` (``halt=``) and :meth:`with_halt`, and
+        the tracker sets the event on the first cross into ``exceeded``.
+        Without a tracker of its own a flow shares the enclosing one.
 
         Returns ``self`` for chaining.
 
         Raises:
-            TypeError: ``budget`` is neither a Tracker nor a number.
-            ValueError: A cap that is not finite and > 0.
+            TypeError: ``tracker`` is not a :class:`CostTracker`.
+        """
+        self._cost_tracker = check_cost_tracker(tracker)
+        return self
+
+    def with_budget(self, budget: float) -> Flow:
+        """Give each run of this flow its own budget: a child tracker with that limit.
+
+        Each run runs on a child of the flow's tracker (its own, else the
+        enclosing flow's) with ``budget`` as its limit — cost rolls up and
+        every budget on the chain applies. A map body runs once per item,
+        an iterate body once per pass, a subflow once per ``.call``.
+        Crossing the budget stops that run with halt semantics (in-flight
+        LLM calls finish, everything under it stops) and it ends with no
+        result (``None``); the enclosing flow carries on. The run also
+        stops on the halt it would observe without a budget. A budget
+        needs a tracker on this flow or an enclosing one: :meth:`run`
+        raises otherwise.
+
+        A run's own tracker (its tracker, or its budgeted child) is in every
+        checkpoint taken while the run is in progress, and restored when it
+        resumes; see :mod:`llm_gent.flow._cost`.
+
+        Returns ``self`` for chaining.
+
+        Raises:
+            TypeError: ``budget`` is not a number.
+            ValueError: ``budget`` is not finite and > 0.
         """
         self._budget = check_budget(budget)
         return self
@@ -885,10 +902,10 @@ class Flow:
           pass N and resuming with ``max_iters=M`` runs passes N to M-1.
           A counter that already meets the bound exits without running
           the body.
-        - **Ambients** (halt, budget, saia, traits, logger,
+        - **Ambients** (halt, cost tracker, saia, traits, logger,
           checkpointer itself) are never serialized — they reattach
           from the current runtime, so a resumed run gets fresh
-          handles under whichever ``.with_halt`` / ``.with_budget`` /
+          handles under whichever ``.with_halt`` / ``.with_cost_tracker`` /
           ``.with_traits`` were wired at resume time.
         - **Deadline** is not restored — the wall clock starts fresh
           each run.
@@ -1082,8 +1099,8 @@ class Flow:
                 a nested flow sets a halt other than this flow's or declares
                 a signal, OR a shortcut's signal is not declared or its
                 ``to`` names no step (or several) of its chain, OR
-                a flow in the tree has ``with_budget(cap)`` with no tracker
-                on any flow enclosing it. Missing :class:`SAIAFactory` no longer raises at run
+                a flow in the tree has ``with_budget(...)`` with no cost
+                tracker on it or any flow enclosing it. Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
@@ -1138,7 +1155,7 @@ class Flow:
         check_one_repo(self)
         check_one_halt(self)
         check_shortcuts(self)
-        check_caps_have_a_tracker(self)
+        check_budgets_have_a_tracker(self)
 
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode | str
@@ -1156,7 +1173,7 @@ class Flow:
         state: State[Any],
         runtime: Flow,
         parent_halt: asyncio.Event | None = None,
-        parent_budget: Tracker | None = None,
+        parent_cost: CostTracker | None = None,
         parent_checkpoint_ctx: CheckpointContext | None = None,
         parent_checkpointer: Checkpointer | None = None,
         parent_chain_context: str = "",
@@ -1175,17 +1192,18 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_budget`` / ``parent_checkpointer`` / ``parent_policy`` are
+        ``parent_cost`` / ``parent_checkpointer`` / ``parent_policy`` are
         the effective ambients from the calling scope — nested subflows
-        fall back to them when they have no local ``.with_budget()`` /
+        fall back to them when they have no local
+        ``.with_cost_tracker()`` / ``.with_budget()`` /
         ``.with_checkpointer()`` / ``.with_checkpoint_policy()``,
         preserving an intermediate layer's ambient through arbitrarily
         deep nesting. ``parent_halt`` is the halt the calling scope
-        observes: the run's halt, or a capped run's stop event.
+        observes: the run's halt, or a budgeted run's stop event.
         ``parent_checkpoint_ctx`` is the run's repo; repo and halt are set
-        on the top-level flow only. The run's budget context (its tracker,
+        on the top-level flow only. The run's cost context (its tracker,
         and the halt it observes) comes from
-        :func:`~llm_gent.flow._budget.run_budget`; a shortcut this flow
+        :func:`~llm_gent.flow._cost.run_cost`; a shortcut this flow
         declares (:func:`~llm_gent.flow._shortcut.run_shortcut`) adds its
         own stop on top. ``parent_shortcuts`` are the enclosing flows'.
 
@@ -1201,7 +1219,7 @@ class Flow:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
         scopes = runtime._scopes
         async with (
-            run_budget(self, parent_path, scopes, parent_budget, parent_halt) as context,
+            run_cost(self, parent_path, scopes, parent_cost, parent_halt) as context,
             run_shortcut(self, parent_path, scopes, context.halt, runtime._signals) as shortcut,
         ):
             env = self._make_run_env(
@@ -1223,11 +1241,11 @@ class Flow:
     async def _run_in(
         self,
         env: _RunEnv,
-        context: RunBudget,
+        context: RunCost,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
-        """Walk this Flow under ``env``; a capped run already out of budget does nothing."""
+        """Walk this Flow under ``env``; a run already over its budget does nothing."""
         label = self._name or "<anonymous>"
         is_subflow = env.runtime is not self
         if context.stopped_by_budget():
@@ -1247,13 +1265,13 @@ class Flow:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         *,
-        context: RunBudget,
+        context: RunCost,
     ) -> Any:
         """Walk this Flow's chain; a run stopped by its own budget returns ``None``.
 
         That subtree ends there and the run carries on, with no result
         from it: what the stop interrupted inside it is no position of the
-        run's, so it leaves the snapshots. A capped run stopped because the
+        run's, so it leaves the snapshots. A budgeted run stopped because the
         run's halt was set is not stopped by its budget: the interruption
         carries on up.
 
@@ -1276,7 +1294,7 @@ class Flow:
         *,
         runtime: Flow,
         state: State[Any],
-        context: RunBudget,
+        context: RunCost,
         parent_checkpoint_ctx: CheckpointContext | None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
@@ -1308,7 +1326,7 @@ class Flow:
             state=state,
             lg=runtime._lg,
             halt=shortcut.stop if shortcut is not None else context.halt,
-            budget=context.tracker,
+            cost=context.tracker,
             checkpoint_ctx=checkpoint_ctx,
             checkpointer=self._checkpointer or parent_checkpointer,
             chain_context=parent_chain_context,

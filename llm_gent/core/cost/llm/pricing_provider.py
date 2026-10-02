@@ -119,7 +119,7 @@ class LLMPricingProvider:
             ),
         })
         provider = LLMPricingProvider(pricing)
-        tracker = Tracker(lg, provider, budget=100.0)
+        tracker = CostTracker(lg, provider, budget=100.0)
 
     Verb bodies pass an llm-infer ``ChatResponse`` (or any object with
     ``provider`` / ``raw`` attributes) as ``response=`` for provider

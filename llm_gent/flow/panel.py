@@ -121,7 +121,7 @@ class Panel:
         ``ctx.flow``. Positional and keyword args are forwarded to every verb.
 
         Ambient forwarding — each dispatch receives ``scope_state=ctx.state``,
-        ``halt=ctx.halt``, ``budget=ctx.budget``, and ``extra=ctx.extra``
+        ``halt=ctx.halt``, ``cost=ctx.cost``, and ``extra=ctx.extra``
         so inner verbs see the caller's live scope, not the flow's
         construction defaults.
         Inside a ``.map(state=...)`` or ``.call(state=...)`` block this
@@ -179,7 +179,7 @@ class Panel:
                     *args,
                     scope_state=ctx.state,
                     halt=ctx.halt,
-                    budget=ctx.budget,
+                    cost=ctx.cost,
                     extra=ctx.extra,
                     **kwargs,
                 )

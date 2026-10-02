@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 from llm_infer.client import Provider
 
-from llm_gent.core.budget import (
+from llm_gent.core.cost import (
     FixedOp,
     LLMOp,
     LLMPricingProvider,

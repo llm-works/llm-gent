@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Budgets as flow context — ``with_budget(tracker | cap)``, stops on crossing, resume.
+"""Cost tracking as flow context — ``with_cost_tracker`` / ``with_budget``, resume.
 
-A ``with_budget(cap)`` flow runs each of its runs (a map item, an iterate
-pass, a ``.call``) on a child of the enclosing tracker; crossing the cap
-stops that run, which ends with ``None``. Every run's own tracker is in the
-checkpoints taken while it runs and restored when it resumes. "A fresh
-process" here is a new Flow and a new Tracker over the same store.
+A ``with_budget(limit)`` flow runs each of its runs (a map item, an
+iterate pass, a ``.call``) on a child of its cost tracker with that budget;
+crossing the budget stops that run, which ends with ``None``. Every run's
+own tracker is in the checkpoints taken while it runs and restored when it
+resumes. "A fresh process" here is a new Flow and a new CostTracker over
+the same store.
 """
 
 from __future__ import annotations
@@ -18,9 +19,9 @@ from typing import Any
 
 import pytest
 
-from llm_gent.core.budget import PricingConfig, Tracker
+from llm_gent.core.cost import CostTracker, PricingConfig
 from llm_gent.flow import Context, FlowFactory, History, Interrupted, Loop, Role, verb
-from llm_gent.flow.state.snapshot import BUDGET
+from llm_gent.flow.state.snapshot import COST
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
 from .conftest import make_test_logger
@@ -32,13 +33,13 @@ NAME = "budget"
 ROLE = Role(name="r", backend="openai", model="none")
 
 
-def _tracker(cap: float | None = None, halt: asyncio.Event | None = None) -> Tracker:
-    return Tracker(make_test_logger(), PricingConfig(), cap, halt=halt)
+def _tracker(cap: float | None = None, halt: asyncio.Event | None = None) -> CostTracker:
+    return CostTracker(make_test_logger(), PricingConfig(), cap, halt=halt)
 
 
 def _spend(ctx: Context[Any], cost: float, op: str = "llm") -> None:
-    assert ctx.budget is not None
-    ctx.budget.track(op, override_cost=cost)
+    assert ctx.cost is not None
+    ctx.cost.track(op, override_cost=cost)
 
 
 def _ff() -> FlowFactory:
@@ -47,7 +48,7 @@ def _ff() -> FlowFactory:
 
 class TestRootTrackerAcrossResume:
     @staticmethod
-    def _flow(store: Any, tracker: Tracker, halt: asyncio.Event, seen: list[float]) -> Any:
+    def _flow(store: Any, tracker: CostTracker, halt: asyncio.Event, seen: list[float]) -> Any:
         """``a`` spends 2 (llm), ``b`` 3 (op) and sets the halt, ``c`` 1 (llm)."""
 
         @verb
@@ -65,8 +66,8 @@ class TestRootTrackerAcrossResume:
         async def c(ctx: Context[Any], x: int) -> int:
             if ctx.halt is not None and ctx.halt.is_set():
                 raise Interrupted()
-            assert ctx.budget is not None
-            seen.append(ctx.budget.spent)
+            assert ctx.cost is not None
+            seen.append(ctx.cost.spent)
             _spend(ctx, 1.0)
             return x
 
@@ -76,7 +77,7 @@ class TestRootTrackerAcrossResume:
             .with_checkpoint_store(store, NAME)
             .with_checkpointer()
             .with_halt(halt)
-            .with_budget(tracker)
+            .with_cost_tracker(tracker)
             .call(a)
             .then(b)
             .then(c)
@@ -129,13 +130,13 @@ class TestRootTrackerAcrossResume:
             _spend(ctx, 2.0)
             return x
 
-        def flow(tracker: Tracker) -> Any:
+        def flow(tracker: CostTracker) -> Any:
             return (
                 _ff()
                 .create(state={})
                 .with_checkpoint_store(store, NAME)
                 .with_checkpointer()
-                .with_budget(tracker)
+                .with_cost_tracker(tracker)
                 .call(a)
             )
 
@@ -143,7 +144,7 @@ class TestRootTrackerAcrossResume:
         head = await History(store, NAME).head()
         assert head is not None
         assert all(
-            BUDGET not in c for c in (await History(store, NAME).snapshot(head)).cursors.values()
+            COST not in c for c in (await History(store, NAME).snapshot(head)).cursors.values()
         )
 
         fresh = _tracker()
@@ -152,7 +153,7 @@ class TestRootTrackerAcrossResume:
 
 
 def _item_flow(
-    root: Tracker,
+    root: CostTracker,
     halt: asyncio.Event,
     costs: dict[int, list[float]],
     seen: dict[int, Any],
@@ -172,7 +173,7 @@ def _item_flow(
 
     @verb
     async def first(ctx: Context[Any], item: int) -> int:
-        seen[item] = ctx.budget
+        seen[item] = ctx.cost
         _spend(ctx, costs[item][0])
         if arm and len(seen) == len(costs):
             halt.set()
@@ -183,9 +184,9 @@ def _item_flow(
         await asyncio.sleep(0)  # lets a set run halt reach the item's own halt
         if cooperative and ctx.halt is not None and ctx.halt.is_set():
             raise Interrupted()
-        assert ctx.budget is not None
+        assert ctx.cost is not None
         if before_second is not None:
-            before_second[item] = ctx.budget.spent
+            before_second[item] = ctx.cost.spent
         _spend(ctx, costs[item][1])
         return item * 10
 
@@ -193,7 +194,7 @@ def _item_flow(
         _ff()
         .create(state={})
         .with_halt(halt)
-        .with_budget(root)
+        .with_cost_tracker(root)
         .map(
             lambda b: b.with_budget(cap).call(first).then(second),
             items=lambda _p, _c: sorted(costs),
@@ -225,13 +226,13 @@ class TestItemBudgets:
 
         @verb
         async def step(ctx: Context[Any], item: int) -> int:
-            seen.append(ctx.budget)
+            seen.append(ctx.cost)
             return item
 
         flow = (
             _ff()
             .create(state={})
-            .with_budget(root)
+            .with_cost_tracker(root)
             .map(lambda b: b.call(step), items=lambda _p, _c: [0, 1])
         )
         await flow.run()
@@ -316,7 +317,7 @@ class _SpendingSAIA:
     def __init__(self, costs: dict[str, float]) -> None:
         self.role = ROLE
         self._costs = costs
-        self.trackers: dict[str, Tracker] = {}
+        self.trackers: dict[str, CostTracker] = {}
         self.paused: list[str] = []
 
     async def complete(self, task: str, **kwargs: Any) -> _TurnResult:
@@ -339,7 +340,7 @@ class TestLoopInACappedItem:
         @verb
         async def research(ctx: Context[Any], task: str) -> str:
             def hand_over(s: Any, c: Context[Any]) -> None:
-                s.trackers[task] = c.budget
+                s.trackers[task] = c.cost
 
             loop = Loop(
                 ROLE, saia=saia, conversation_factory=_ConvFactory(), on_executor_ready=hand_over
@@ -350,7 +351,7 @@ class TestLoopInACappedItem:
         flow = (
             _ff()
             .create(state={})
-            .with_budget(root)
+            .with_cost_tracker(root)
             .map(
                 lambda b: b.with_budget(1.0).call(research),
                 items=lambda _p, _c: ["a", "b"],
@@ -369,14 +370,14 @@ class TestPassAndCallBudgets:
 
         @verb
         async def step(ctx: Context[Any], x: int) -> int:
-            seen.append(ctx.budget)
+            seen.append(ctx.cost)
             _spend(ctx, 0.5)
             return x + 1
 
         flow = (
             _ff()
             .create(state={})
-            .with_budget(root)
+            .with_cost_tracker(root)
             .iterate(lambda b: b.with_budget(1.0).call(step), max_iters=3)
         )
         assert await flow.run(0) == 3
@@ -407,7 +408,7 @@ class TestPassAndCallBudgets:
             ran.append(f"after:{prev}")
             return prev
 
-        flow = _ff().create(state={}).with_budget(root).call(sub).then(after)
+        flow = _ff().create(state={}).with_cost_tracker(root).call(sub).then(after)
         assert await flow.run(0.5) == 0.5
         assert await flow.run(2.0) is None
         assert ran == ["check", "after:0.5", "after:None"]
@@ -439,7 +440,7 @@ class TestPassAndCallBudgets:
             ran.append(f"after:{prev}")
             return prev
 
-        flow = ff.create(state={}).with_budget(root).call(sub).then(after)
+        flow = ff.create(state={}).with_cost_tracker(root).call(sub).then(after)
         assert await flow.run(2.0) is None
         assert ran == ["after:None"]
 
@@ -465,14 +466,14 @@ class TestPassAndCallBudgets:
         async def after(ctx: Context[Any], prev: Any) -> str:
             return f"after:{prev}"
 
-        flow = _ff().create(state={}).with_budget(root).call(capped_map).then(after)
+        flow = _ff().create(state={}).with_cost_tracker(root).call(capped_map).then(after)
         assert await flow.run() == "after:None"
         assert ran == [0, 1, 2]
         assert root.spent == pytest.approx(1.2)
 
 
 class TestValidation:
-    async def test_cap_without_an_enclosing_tracker_raises_at_run_start(self) -> None:
+    async def test_budget_without_a_cost_tracker_raises_at_run_start(self) -> None:
         ran: list[str] = []
 
         @verb
@@ -486,16 +487,36 @@ class TestValidation:
             .call(step)
             .map(lambda b: b.with_budget(1.0).call(step), items=lambda _p, _c: [1])
         )
-        with pytest.raises(RuntimeError, match="no tracker encloses it"):
+        with pytest.raises(RuntimeError, match="no cost tracker"):
             await flow.run(1)
         assert ran == []
 
+    async def test_a_budget_on_a_flow_with_its_own_tracker_is_a_child_of_it(self) -> None:
+        own = _tracker()
+        seen: list[Any] = []
+
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            seen.append(ctx.cost)
+            _spend(ctx, 0.25)
+            return x
+
+        flow = _ff().create(state={}).with_cost_tracker(own).with_budget(1.0).call(step)
+        assert await flow.run(1) == 1
+        assert seen[0].parent is own and seen[0].budget == 1.0
+        assert own.spent == pytest.approx(0.25)
+
     @pytest.mark.parametrize("bad", [0, -1.0, float("inf"), float("nan")])
-    async def test_cap_must_be_finite_and_positive(self, bad: float) -> None:
+    async def test_budget_must_be_finite_and_positive(self, bad: float) -> None:
         with pytest.raises(ValueError, match="finite and > 0"):
             _ff().create().with_budget(bad)
 
-    @pytest.mark.parametrize("bad", [True, "1.0", None])
-    async def test_budget_must_be_a_tracker_or_a_number(self, bad: Any) -> None:
-        with pytest.raises(TypeError, match="Tracker or a cap"):
+    @pytest.mark.parametrize("bad", [True, "1.0", None, _tracker()])
+    async def test_budget_must_be_a_number(self, bad: Any) -> None:
+        with pytest.raises(TypeError, match="with_budget takes a number"):
             _ff().create().with_budget(bad)
+
+    @pytest.mark.parametrize("bad", [1.0, None, "tracker"])
+    async def test_cost_tracker_must_be_a_cost_tracker(self, bad: Any) -> None:
+        with pytest.raises(TypeError, match="with_cost_tracker takes a CostTracker"):
+            _ff().create().with_cost_tracker(bad)

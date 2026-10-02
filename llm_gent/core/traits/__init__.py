@@ -7,7 +7,7 @@ from enum import StrEnum
 
 from .base import BaseTrait, Trait
 from .builtin import (
-    BudgetTrait,
+    CostTrait,
     Directive,
     DirectiveTrait,
     HTTPConfig,
@@ -38,7 +38,7 @@ class TraitName(StrEnum):
     Agents can declare required/optional traits using these enum values.
     """
 
-    BUDGET = "budget"
+    COST = "cost"
     DIRECTIVE = "directive"
     LLM = "llm"
     MEMORY = "memory"
@@ -53,7 +53,7 @@ class TraitName(StrEnum):
 
 # All trait types available in the platform
 ALL_TRAITS: list[TraitName] = [
-    TraitName.BUDGET,
+    TraitName.COST,
     TraitName.DIRECTIVE,
     TraitName.LLM,
     TraitName.MEMORY,
@@ -77,8 +77,8 @@ __all__ = [
     # Factory & Registry
     "Registry",
     "TraitFactory",
-    # Budget
-    "BudgetTrait",
+    # Cost
+    "CostTrait",
     # Directive/Method
     "Directive",
     "DirectiveTrait",

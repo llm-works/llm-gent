@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Tests for Tracker: hierarchy, cap enforcement, halt integration."""
+"""Tests for CostTracker: hierarchy, cap enforcement, halt integration."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from appinfra.log import quick_console_logger
 
-from llm_gent.core.budget import FixedOp, LLMOp, PricingConfig, PricingProvider, Tracker
+from llm_gent.core.cost import CostTracker, FixedOp, LLMOp, PricingConfig, PricingProvider
 
 
 pytestmark = pytest.mark.unit
@@ -35,14 +35,14 @@ class TestInitValidation:
 
     def test_zero_raises(self) -> None:
         with pytest.raises(ValueError):
-            Tracker(_lg(), _pricing(), budget=0)
+            CostTracker(_lg(), _pricing(), budget=0)
 
     def test_negative_raises(self) -> None:
         with pytest.raises(ValueError):
-            Tracker(_lg(), _pricing(), budget=-1)
+            CostTracker(_lg(), _pricing(), budget=-1)
 
     def test_uncapped_allowed(self) -> None:
-        t = Tracker(_lg(), _pricing())
+        t = CostTracker(_lg(), _pricing())
         assert t.budget is None
         assert t.exceeded is False
         assert t.remaining is None
@@ -52,24 +52,24 @@ class TestTrackDispatch:
     """.track() forwards kwargs to the Op's .cost() signature."""
 
     def test_llm_op_receives_token_kwargs(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         cost = t.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)
         assert t.spent == pytest.approx(1.0)
 
     def test_fixed_op_receives_count_kwarg(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         cost = t.track("web_search", count=3)
         assert cost == pytest.approx(0.003)
 
     def test_unknown_op_returns_zero(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         assert t.track("nothing-here") == 0.0
         assert t.spent == 0.0
 
 
 class TestPricingProviderSeam:
-    """Tracker delegates cost computation to its PricingProvider."""
+    """CostTracker delegates cost computation to its PricingProvider."""
 
     def test_stub_provider_return_wins(self) -> None:
         calls: list[tuple[str, dict[str, Any]]] = []
@@ -79,7 +79,7 @@ class TestPricingProviderSeam:
                 calls.append((op_name, dict(usage)))
                 return 0.42
 
-        t = Tracker(_lg(), StubProvider(), budget=1.0)
+        t = CostTracker(_lg(), StubProvider(), budget=1.0)
         cost = t.track("some-model", input_tokens=1000, output_tokens=100)
         assert cost == pytest.approx(0.42)
         assert t.spent == pytest.approx(0.42)
@@ -87,7 +87,7 @@ class TestPricingProviderSeam:
 
     def test_pricing_config_satisfies_protocol(self) -> None:
         provider: PricingProvider = PricingConfig(ops={"m": FixedOp(name="m", unit_cost=0.05)})
-        t = Tracker(_lg(), provider, budget=1.0)
+        t = CostTracker(_lg(), provider, budget=1.0)
         assert t.track("m", count=3) == pytest.approx(0.15)
 
     def test_override_cost_skips_provider(self) -> None:
@@ -98,7 +98,7 @@ class TestPricingProviderSeam:
                 calls.append((op_name, dict(usage)))
                 return 999.0
 
-        t = Tracker(_lg(), StubProvider(), budget=10.0)
+        t = CostTracker(_lg(), StubProvider(), budget=10.0)
         cost = t.track("some-model", override_cost=0.05, input_tokens=1000)
         assert cost == pytest.approx(0.05)
         assert t.spent == pytest.approx(0.05)
@@ -110,19 +110,19 @@ class TestPricingProviderSeam:
         def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             flags.append(overridden)
 
-        t = Tracker(_lg(), _pricing(), budget=10.0, on_cost=cb)
+        t = CostTracker(_lg(), _pricing(), budget=10.0, on_cost=cb)
         t.track("web_search", count=1)  # computed
         t.track("web_search", override_cost=0.123)  # overridden
         assert flags == [False, True]
 
     def test_override_cost_rejects_nan(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=10.0)
+        t = CostTracker(_lg(), _pricing(), budget=10.0)
         with pytest.raises(ValueError, match="cost must be finite"):
             t.track("op", override_cost=float("nan"))
         assert t.spent == 0.0  # no corruption
 
     def test_override_cost_rejects_inf(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=10.0)
+        t = CostTracker(_lg(), _pricing(), budget=10.0)
         with pytest.raises(ValueError, match="cost must be finite"):
             t.track("op", override_cost=float("inf"))
         assert t.spent == 0.0
@@ -132,7 +132,7 @@ class TestPricingProviderSeam:
             def compute(self, op_name: str, /, **usage: Any) -> float:
                 return float("nan")
 
-        t = Tracker(_lg(), NanProvider(), budget=10.0)
+        t = CostTracker(_lg(), NanProvider(), budget=10.0)
         with pytest.raises(ValueError, match="cost must be finite"):
             t.track("op")
         assert t.spent == 0.0
@@ -142,26 +142,26 @@ class TestCap:
     """spent / remaining / exceeded on a capped tracker."""
 
     def test_starts_at_zero(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         assert t.spent == 0.0
         assert t.remaining == pytest.approx(1.0)
         assert t.exceeded is False
         assert t.urgent_wrapup is False
 
     def test_remaining_clamps_at_zero(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=0.001)
+        t = CostTracker(_lg(), _pricing(), budget=0.001)
         t.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert t.remaining == 0.0
         assert t.exceeded is True
 
     def test_urgent_wrapup_latches_on_cross(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=0.001)
+        t = CostTracker(_lg(), _pricing(), budget=0.001)
         assert t.urgent_wrapup is False
         t.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert t.urgent_wrapup is True
 
     def test_uncapped_never_exceeds(self) -> None:
-        t = Tracker(_lg(), _pricing())
+        t = CostTracker(_lg(), _pricing())
         t.track("some-model", input_tokens=1_000_000, output_tokens=1_000_000)
         assert t.exceeded is False
         assert t.urgent_wrapup is False
@@ -171,7 +171,7 @@ class TestPerOpAggregation:
     """costs_by_op accumulates per invocation and reports up."""
 
     def test_totals_and_per_op(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=10.0)
+        t = CostTracker(_lg(), _pricing(), budget=10.0)
         t.track("some-model", input_tokens=1_000_000, output_tokens=0)
         t.track("web_search", count=5)
         assert t.spent == pytest.approx(1.005)
@@ -181,7 +181,7 @@ class TestPerOpAggregation:
         }
 
     def test_costs_by_op_returns_copy(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         t.track("web_search", count=1)
         snapshot = t.costs_by_op
         snapshot["web_search"] = 999.0
@@ -192,14 +192,14 @@ class TestHierarchy:
     """Costs recorded at any level propagate up the parent chain."""
 
     def test_child_spent_reports_to_parent(self) -> None:
-        root = Tracker(_lg(), _pricing(), budget=10.0)
+        root = CostTracker(_lg(), _pricing(), budget=10.0)
         child = root.child(budget=1.0)
         child.track("web_search", count=5)
         assert child.spent == pytest.approx(0.005)
         assert root.spent == pytest.approx(0.005)
 
     def test_arbitrary_depth(self) -> None:
-        root = Tracker(_lg(), _pricing(), budget=10.0)
+        root = CostTracker(_lg(), _pricing(), budget=10.0)
         wave = root.child(budget=3.0)
         run = wave.child(budget=1.0)
         run.track("web_search", count=2)
@@ -208,7 +208,7 @@ class TestHierarchy:
         assert root.spent == pytest.approx(0.002)
 
     def test_sibling_children_independent(self) -> None:
-        root = Tracker(_lg(), _pricing(), budget=10.0)
+        root = CostTracker(_lg(), _pricing(), budget=10.0)
         a = root.child(budget=1.0)
         b = root.child(budget=1.0)
         a.track("web_search", count=3)
@@ -218,20 +218,20 @@ class TestHierarchy:
         assert root.spent == pytest.approx(0.005)
 
     def test_parent_property(self) -> None:
-        root = Tracker(_lg(), _pricing(), budget=1.0)
+        root = CostTracker(_lg(), _pricing(), budget=1.0)
         child = root.child(budget=0.5)
         assert child.parent is root
         assert root.parent is None
 
     def test_child_inherits_pricing(self) -> None:
         pricing = _pricing()
-        root = Tracker(_lg(), pricing, budget=1.0)
+        root = CostTracker(_lg(), pricing, budget=1.0)
         child = root.child(budget=0.5)
         cost = child.track("web_search", count=1)
         assert cost == pytest.approx(0.001)
 
     def test_costs_by_op_aggregates_up(self) -> None:
-        root = Tracker(_lg(), _pricing(), budget=10.0)
+        root = CostTracker(_lg(), _pricing(), budget=10.0)
         a = root.child()
         b = root.child()
         a.track("web_search", count=1)
@@ -246,7 +246,7 @@ class TestHaltIntegration:
 
     def test_root_halt_fires_on_root_cross(self) -> None:
         halt = asyncio.Event()
-        root = Tracker(_lg(), _pricing(), budget=0.001, halt=halt)
+        root = CostTracker(_lg(), _pricing(), budget=0.001, halt=halt)
         assert not halt.is_set()
         root.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert halt.is_set()
@@ -254,7 +254,7 @@ class TestHaltIntegration:
     def test_child_halt_fires_on_child_cross(self) -> None:
         root_halt = asyncio.Event()
         child_halt = asyncio.Event()
-        root = Tracker(_lg(), _pricing(), budget=10.0, halt=root_halt)
+        root = CostTracker(_lg(), _pricing(), budget=10.0, halt=root_halt)
         child = root.child(budget=0.001, halt=child_halt)
         child.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert child_halt.is_set()
@@ -262,14 +262,14 @@ class TestHaltIntegration:
 
     def test_root_halt_fires_when_descendant_pushes_root_over(self) -> None:
         root_halt = asyncio.Event()
-        root = Tracker(_lg(), _pricing(), budget=0.001, halt=root_halt)
+        root = CostTracker(_lg(), _pricing(), budget=0.001, halt=root_halt)
         child = root.child(budget=1.0)
         child.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert root_halt.is_set()
 
     def test_halt_only_set_on_transition(self) -> None:
         halt = asyncio.Event()
-        t = Tracker(_lg(), _pricing(), budget=0.001, halt=halt)
+        t = CostTracker(_lg(), _pricing(), budget=0.001, halt=halt)
         t.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert halt.is_set()
         halt.clear()
@@ -279,7 +279,7 @@ class TestHaltIntegration:
     def test_sibling_children_have_independent_halts(self) -> None:
         halt_a = asyncio.Event()
         halt_b = asyncio.Event()
-        root = Tracker(_lg(), _pricing(), budget=10.0)
+        root = CostTracker(_lg(), _pricing(), budget=10.0)
         a = root.child(budget=0.001, halt=halt_a)
         root.child(budget=0.001, halt=halt_b)
         a.track("some-model", input_tokens=1_000_000, output_tokens=0)
@@ -296,7 +296,7 @@ class TestCallback:
         def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             events.append((cost, ctx, overridden))
 
-        t = Tracker(_lg(), _pricing(), budget=1.0, on_cost=cb)
+        t = CostTracker(_lg(), _pricing(), budget=1.0, on_cost=cb)
         t.track("web_search", count=2, context={"phase": "x"})
         assert len(events) == 1
         cost, ctx, was_overridden = events[0]
@@ -310,7 +310,7 @@ class TestCallback:
         def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             events.append(ctx)
 
-        t = Tracker(_lg(), _pricing(), budget=1.0, on_cost=cb)
+        t = CostTracker(_lg(), _pricing(), budget=1.0, on_cost=cb)
         t.track("web_search", count=1, context={"op": "outer", "phase": "x"})
         assert events[0] == {"op": "outer", "phase": "x"}
 
@@ -323,7 +323,7 @@ class TestCallback:
 
             return cb
 
-        root = Tracker(_lg(), _pricing(), budget=10.0, on_cost=make_cb("root"))
+        root = CostTracker(_lg(), _pricing(), budget=10.0, on_cost=make_cb("root"))
         wave = root.child(budget=1.0, on_cost=make_cb("wave"))
         run = wave.child(budget=0.1, on_cost=make_cb("run"))
         run.track("web_search", count=1)
@@ -336,7 +336,7 @@ class TestCallback:
         def cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             observed.append(halt.is_set())
 
-        t = Tracker(_lg(), _pricing(), budget=0.001, on_cost=cb, halt=halt)
+        t = CostTracker(_lg(), _pricing(), budget=0.001, on_cost=cb, halt=halt)
         t.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert observed == [True]
 
@@ -346,7 +346,7 @@ class TestCallback:
         def bad_cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             raise RuntimeError("intentional")
 
-        t = Tracker(_lg(), _pricing(), budget=0.001, on_cost=bad_cb, halt=halt)
+        t = CostTracker(_lg(), _pricing(), budget=0.001, on_cost=bad_cb, halt=halt)
         with pytest.raises(RuntimeError):
             t.track("some-model", input_tokens=1_000_000, output_tokens=0)
         assert halt.is_set()
@@ -357,7 +357,7 @@ class TestCallback:
         def bad_cb(cost: float, ctx: dict[str, Any], *, overridden: bool) -> None:
             raise RuntimeError("intentional")
 
-        root = Tracker(_lg(), _pricing(), budget=10.0, on_cost=bad_cb)
+        root = CostTracker(_lg(), _pricing(), budget=10.0, on_cost=bad_cb)
         child = root.child(budget=1.0)
         with pytest.raises(RuntimeError):
             child.track("web_search", count=5)
@@ -369,17 +369,17 @@ class TestUpdateBudget:
     """update_budget replaces the cap."""
 
     def test_amend(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         t.update_budget(2.0)
         assert t.budget == pytest.approx(2.0)
 
     def test_zero_raises(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         with pytest.raises(ValueError):
             t.update_budget(0)
 
     def test_amend_below_spent_makes_exceeded(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=10.0)
+        t = CostTracker(_lg(), _pricing(), budget=10.0)
         t.track("web_search", count=10)
         t.update_budget(0.005)
         assert t.exceeded is True
@@ -389,19 +389,19 @@ class TestRestoreSpent:
     """restore_spent is this-level-only and unconditional."""
 
     def test_restore(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         t.restore_spent(0.75)
         assert t.spent == pytest.approx(0.75)
         assert t.remaining == pytest.approx(0.25)
 
     def test_overwrites_live_spend(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=1.0)
+        t = CostTracker(_lg(), _pricing(), budget=1.0)
         t.track("web_search", count=5)
         t.restore_spent(0.5)
         assert t.spent == pytest.approx(0.5)
 
     def test_does_not_walk_up(self) -> None:
-        root = Tracker(_lg(), _pricing(), budget=10.0)
+        root = CostTracker(_lg(), _pricing(), budget=10.0)
         child = root.child(budget=1.0)
         child.track("web_search", count=1)
         child.restore_spent(0.5)
@@ -413,16 +413,16 @@ class TestSnapshotRestore:
     """snapshot / restore round-trip this level's accounting; restore re-applies the cap."""
 
     def test_round_trip(self) -> None:
-        t = Tracker(_lg(), _pricing(), budget=10.0)
+        t = CostTracker(_lg(), _pricing(), budget=10.0)
         t.track("web_search", count=3)
         t.track("op", override_cost=0.5)
-        fresh = Tracker(_lg(), _pricing(), budget=10.0)
+        fresh = CostTracker(_lg(), _pricing(), budget=10.0)
         fresh.restore(**t.snapshot())
         assert fresh.snapshot() == t.snapshot()
         assert fresh.costs_by_op == {"web_search": pytest.approx(0.003), "op": 0.5}
 
     def test_snapshot_is_detached(self) -> None:
-        t = Tracker(_lg(), _pricing())
+        t = CostTracker(_lg(), _pricing())
         t.track("op", override_cost=1.0)
         snap = t.snapshot()
         t.track("op", override_cost=1.0)
@@ -430,18 +430,18 @@ class TestSnapshotRestore:
 
     def test_restore_over_the_cap_latches_wrapup_and_fires_halt(self) -> None:
         halt = asyncio.Event()
-        t = Tracker(_lg(), _pricing(), budget=1.0, halt=halt)
+        t = CostTracker(_lg(), _pricing(), budget=1.0, halt=halt)
         t.restore(1.5, {"op": 1.5})
         assert t.exceeded and t.urgent_wrapup and halt.is_set()
 
     def test_restore_under_the_cap_does_not_fire(self) -> None:
         halt = asyncio.Event()
-        t = Tracker(_lg(), _pricing(), budget=1.0, halt=halt)
+        t = CostTracker(_lg(), _pricing(), budget=1.0, halt=halt)
         t.restore(0.5, {"op": 0.5})
         assert not t.urgent_wrapup and not halt.is_set()
 
     def test_does_not_walk_up(self) -> None:
-        root = Tracker(_lg(), _pricing(), budget=10.0)
+        root = CostTracker(_lg(), _pricing(), budget=10.0)
         child = root.child(budget=1.0)
         child.restore(0.5, {"op": 0.5})
         assert root.spent == 0.0
@@ -449,4 +449,4 @@ class TestSnapshotRestore:
     @pytest.mark.parametrize("bad", [(float("nan"), {}), (1.0, {"op": float("inf")})])
     def test_non_finite_raises(self, bad: tuple[float, dict[str, float]]) -> None:
         with pytest.raises(ValueError, match="finite"):
-            Tracker(_lg(), _pricing()).restore(*bad)
+            CostTracker(_lg(), _pricing()).restore(*bad)

@@ -23,7 +23,7 @@ that tell repeated executions apart::
     n/<node>/items, n/<node>/done     cursor of a running .map
     n/<node>/i/<index>/state          scope of map item <index>
     n/<node>/i/<index>/chain          cursor of map item <index>'s body
-    budget, <run path>/budget         a run's own budget tracker: spend so far
+    cost, <run path>/cost             a run's own cost tracker: spend so far
     signals                           the run's signals that are set
 
 A dict payload is stored as a tree with one blob per top-level key, so
@@ -77,13 +77,13 @@ ITEMS = "items"
 DONE = "done"
 """Cursor entry: a running map's completed items — index to result and whether it merged."""
 
-BUDGET = "budget"
-"""Cursor entry: a running flow's own budget tracker — its spend and spend by op."""
+COST = "cost"
+"""Cursor entry: a running flow's own cost tracker — its spend and spend by op."""
 
 SIGNALS = "signals"
 """Cursor entry at the root: the run's signals (``Flow.with_signal``) that are set."""
 
-CURSOR_ENTRIES = frozenset({PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, BUDGET, SIGNALS})
+CURSOR_ENTRIES = frozenset({PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, COST, SIGNALS})
 """Tree entries that hold cursor values rather than a scope."""
 
 
@@ -219,7 +219,7 @@ class ScopeRegistry:
         and takes its positions as a checkout's: every scope and runner
         below ``prefix``, and the chain at ``prefix``, move to the saved
         entries as :class:`Live` values. What else is at ``prefix`` — the
-        block's own scope and budget — belongs to its caller and stays.
+        block's own scope and cost tracker — belongs to its caller and stays.
         Loop call and Panel numbering below ``prefix`` restarts, so a step
         that runs again gives its calls the paths they had.
         """
