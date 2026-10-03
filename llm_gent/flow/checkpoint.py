@@ -44,8 +44,8 @@ The store is a Protocol with four surfaces:
   and the name mapping of one ``flow_id``. :meth:`list_refs`,
   :meth:`list_objects` and :meth:`delete_objects` let
   :func:`~llm_gent.flow.collect_unreachable` remove only the objects no
-  ref reaches — commits off the history's line after ``resume=<name>`` or
-  ``resume=<hash>`` moved ``HEAD`` back, or written by a process that died
+  ref reaches — commits off the history's line after a run resumed with
+  ``resume=<name>`` or ``resume=<hash>`` committed, or written by a process that died
   before moving it. The framework calls :meth:`gc_history` on a
   fully successful :meth:`Flow.run` when the store's retention policy is
   ``"gc_on_success"``; the default ``"retain"`` keeps successful
@@ -200,9 +200,10 @@ A commit hash (:func:`is_commit_hash`; ``ctx.checkpoint()`` returns the
 one it wrote) checks out that commit of the history, and any other string
 names a checkpoint taken with ``ctx.checkpoint(name)`` (see
 :func:`checkpoint_tag`). Either way the run checks the commit out the same
-way and moves ``HEAD`` back to it, so its commits continue from there. The
-commits written after it leave the history's line but stay resumable by
-hash until :func:`~llm_gent.flow.collect_unreachable` deletes them.
+way and its commits continue from there. Once the run commits, the commits
+written after it leave the history's line but stay resumable by hash until
+:func:`~llm_gent.flow.collect_unreachable` deletes them; a run that fails
+before its first commit leaves ``HEAD`` where it was.
 """
 
 

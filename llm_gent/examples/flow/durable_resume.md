@@ -276,9 +276,9 @@ await flow.run(resume="before-review")
 `ctx.checkpoint(name)` writes a checkpoint like any other — the chain running the step is at that
 step — and tags it `tags/<name>`; taking it again moves the tag. `run(resume=name)` checks the
 tagged commit out as `latest` checks out the newest one, so the step that took the checkpoint runs
-again with the input it had. It also moves `HEAD` back to that commit: the run's commits continue
-from there, and the commits written after the checkpoint leave the history's line — `latest` no
-longer sees them.
+again with the input it had. The run's commits continue from that commit: once the run commits, the
+commits written after the checkpoint leave the history's line — `latest` no longer sees them. A run
+that fails before its first commit leaves `HEAD` where it was.
 
 Every commit can be checked out the same way by its hash. `ctx.checkpoint()` returns the hash of
 the commit it wrote, named or not, and `History.head()` gives the newest one:

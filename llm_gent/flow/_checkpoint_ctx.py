@@ -122,10 +122,13 @@ class CheckpointContext:
         self._run_structure: Blob | None = None
         self._flow_id: str | None = None
         self._flow_id_lock = asyncio.Lock()
-        # Head of the history: the newest commit, parent of the next one.
-        # Loaded from the store on first append, then maintained here —
+        # Parent of the next commit, and the commit HEAD points at: the same
+        # commit, the newest, except after continue_from(), which parents the
+        # run's commits on an earlier one while HEAD stays until the first of
+        # them. Loaded from the store on first append, then maintained here —
         # the context assumes it is the history's single writer for the run.
         self._head: str | None = None
+        self._head_ref: str | None = None
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
         # (kind, hash) of the blobs / trees this context already put during
@@ -147,6 +150,7 @@ class CheckpointContext:
         self._flow_id = None
         self._flow_id_lock = asyncio.Lock()
         self._head = None
+        self._head_ref = None
         self._head_loaded = False
         self._commit_lock = asyncio.Lock()
         self._written = set()
@@ -256,6 +260,7 @@ class CheckpointContext:
             # instead of trusting a flow_id the store may have half-removed.
             self._flow_id = None
             self._head = None
+            self._head_ref = None
             self._head_loaded = False
             self._written.clear()
 
@@ -269,7 +274,8 @@ class CheckpointContext:
         instead of forking it silently. Serialized so concurrent saves
         (parallel map items) form one linear history rather than sibling
         commits sharing a parent. The first commit of a history has no
-        parent.
+        parent. After :meth:`continue_from`, the parent is the commit it
+        named, and ``HEAD`` moves from where it pointed then.
         """
         async with self._commit_lock:
             parent = await self._load_head()
@@ -279,14 +285,25 @@ class CheckpointContext:
                 meta=meta,
             )
             await self.put_commit(commit)
-            await self.move_ref(HEAD_REF, commit.content_hash, parent)
-            self._head = commit.content_hash
+            await self.move_ref(HEAD_REF, commit.content_hash, self._head_ref)
+            self._head = self._head_ref = commit.content_hash
             return commit
+
+    def continue_from(self, commit_hash: str, head: str | None) -> None:
+        """Parent the run's commits on ``commit_hash``; ``HEAD`` moves from ``head`` at the first.
+
+        ``head`` is where ``HEAD`` points now. Until the run commits,
+        ``HEAD`` stays there: a run that fails first leaves the history as
+        it was.
+        """
+        self._head = commit_hash
+        self._head_ref = head
+        self._head_loaded = True
 
     async def _load_head(self) -> str | None:
         """Return the cached head, reading ``HEAD`` on first use."""
         if not self._head_loaded:
-            self._head = await self.get_ref(HEAD_REF)
+            self._head = self._head_ref = await self.get_ref(HEAD_REF)
             self._head_loaded = True
         return self._head
 

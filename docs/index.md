@@ -493,9 +493,10 @@ running then run again.
   state — the same call starts the next session of a long-lived agent.
   Iteration bounds count across runs.
 - `"<name>"` — check out the named checkpoint `ctx.checkpoint("<name>")`
-  took, the same way, and move `HEAD` back to it: the run's commits
-  continue from there, and the commits written after the checkpoint leave
-  the history's line (`"latest"` no longer sees them). `"off"`,
+  took, the same way: the run's commits continue from there. Once the run
+  commits, the commits written after the checkpoint leave the history's
+  line (`"latest"` no longer sees them); a run that fails before its first
+  commit leaves `HEAD` where it was. `"off"`,
   `"latest"` and `"complete"` cannot name a checkpoint, nor can a string
   of a commit hash's form; an unknown name raises `ValueError` listing
   the names the history has.
@@ -547,8 +548,8 @@ snapshot tree with its cursors.
 ### Cleaning up a history
 
 Objects stay in the store when nothing reaches them any more: the commits
-written after a checkpoint once `resume=<name>` or `resume=<hash>` moves
-`HEAD` back to it (resumable by hash until collected), and the objects of
+written after a checkpoint once a run resumed from it with `resume=<name>`
+or `resume=<hash>` commits (resumable by hash until collected), and the objects of
 a commit whose process died before moving `HEAD` to it. The framework never deletes them on its own;
 `collect_unreachable` does, keeping every ref and everything a ref
 reaches:

@@ -84,22 +84,22 @@ class Resume:
         return fallback, None
 
     async def checkout_at(self, target: str) -> tuple[State[Any], Snapshot]:
-        """Check out the commit ``target`` names and reset ``HEAD`` to it.
+        """Check out the commit ``target`` names; the run's commits are parented on it.
 
         ``target`` is a commit hash of the history or a checkpoint name.
         The run continues from that commit's snapshot as ``latest`` does
-        from the newest one. ``HEAD`` moves back to the commit
-        (compare-and-set), so the run's commits are parented on it: the
-        commits written after it leave the history's line, and ``latest``
-        no longer sees them. They stay resumable by hash until
-        :func:`~llm_gent.flow.collect_unreachable` deletes them.
+        from the newest one. Its first commit moves ``HEAD`` from where it
+        points now (compare-and-set), and the commits written after
+        ``target`` leave the history's line: ``latest`` no longer sees
+        them. They stay resumable by hash until
+        :func:`~llm_gent.flow.collect_unreachable` deletes them. A run that
+        fails before its first commit leaves ``HEAD`` where it was.
 
         Raises:
             ValueError: The history holds no commit ``target`` (a hash) or
                 no checkpoint named ``target`` (the error lists the names it
                 has), ``target`` cannot name a checkpoint, or the commit
                 holds no state.
-            ConcurrentWriteError: ``HEAD`` moved under the reset.
         """
         commit = await self._resolve(target)
         snapshot = await self._history.snapshot(commit)
@@ -111,9 +111,7 @@ class Resume:
         root = self._root_state(snapshot.root)
         ctx = self.flow._checkpoint_ctx
         assert ctx is not None
-        head = await ctx.get_ref(HEAD_REF)
-        if head != commit.content_hash:
-            await ctx.move_ref(HEAD_REF, commit.content_hash, head)
+        ctx.continue_from(commit.content_hash, await ctx.get_ref(HEAD_REF))
         return root, snapshot
 
     async def _resolve(self, target: str) -> Commit:
