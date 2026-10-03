@@ -100,31 +100,34 @@ class MapRunner:
 
     Its cursor — the items it runs over and the completed ones with their
     results — is state on the runner, in every snapshot taken while it
-    runs. Items that are running keep their own positions under
-    ``<map>/i/<index>``. On ``resume="latest"`` the map runs over the saved
-    items: a completed item does not run again — nor does one that failed
-    (``strict=False``) or was skipped — a running one continues where it
-    was, and the rest run.
+    runs. Each item has a key: its index in a map over items, the member's
+    key in a map over members. Items that are running keep their own
+    positions under ``<map>/i/<key>``. On ``resume="latest"`` a map over
+    items runs over the saved items; a map over members over its current
+    members, matched to their records by key. Either way a completed item
+    does not run again — nor does one that failed (``strict=False``) or was
+    skipped — a running one continues where it was, and the rest run.
     """
 
-    def __init__(self, mp: _Map, env: _RunEnv, node_id: str, path: ScopePath | None = None) -> None:
-        """Run ``mp`` as the step ``node_id`` of ``env``'s flow, at ``path`` (default: the step's).
-
-        A map that is not a step of its own (a :class:`~llm_gent.flow.Panel`
-        inside a verb) passes the path it runs at.
-        """
+    def __init__(self, mp: _Map, env: _RunEnv, node_id: str) -> None:
+        """Run ``mp`` as the step ``node_id`` of ``env``'s flow."""
         self.mp = mp
         self.env = env
         self.node_id = node_id
-        self.path: ScopePath = env.owner_path(node_id) if path is None else path
-        self.is_step = path is None
+        self.path: ScopePath = env.owner_path(node_id)
         # The cursor. Kept here, not in run's locals, so a checkpoint reads it.
         self.items: list[Any] = []
-        self.done: dict[int, _Done] = {}
+        self.keys: list[str] = []
+        self.done: dict[str, _Done] = {}
 
     def cursor(self) -> dict[str, Any]:
-        """The items and the done ones: index to its record (:meth:`_Done.stored`)."""
-        return {ITEMS: self.items, DONE: {str(i): d.stored() for i, d in self.done.items()}}
+        """The items (a map over items) and the done ones: key to its record (:meth:`_Done.stored`).
+
+        A map over members saves no items: its members come from the flow,
+        and each runs on the step's input, which the chain's cursor holds.
+        """
+        done = {DONE: {k: d.stored() for k, d in self.done.items()}}
+        return done if self.mp.over_members else {ITEMS: self.items, **done}
 
     async def run(self, node_args: tuple[Any, ...]) -> Any:
         """Resolve items, spawn per-item runners, aggregate.
@@ -162,19 +165,27 @@ class MapRunner:
         """Continue with the items and completed items a checkout saved; else resolve the items.
 
         Saved items are used as stored — ``items`` is not evaluated again,
-        since what it reads may have changed since the map started.
+        since what it reads may have changed since the map started. A map
+        over members takes its members from the flow and keeps the saved
+        records of the members it still has.
         """
+        prev_result = node_args[0] if node_args else None
         scopes = self.env.scopes
+        if self.mp.over_members:
+            self.keys = list(self.mp.member_keys)
+            self.items = [prev_result] * len(self.keys)
+            _, done = scopes.take_cursor(self.path, DONE)
+            saved = {k: d for k, d in (done or {}).items() if k in self.keys}
+            self.done = {k: _Done.from_stored(d, prev_result) for k, d in saved.items()}
+            return
         found, items = scopes.take_cursor(self.path, ITEMS)
         if found:
-            self.items = items
+            self.items, self.keys = items, [str(i) for i in range(len(items))]
             _, done = scopes.take_cursor(self.path, DONE)
-            self.done = {
-                int(i): _Done.from_stored(d, items[int(i)]) for i, d in (done or {}).items()
-            }
+            self.done = {k: _Done.from_stored(d, items[int(k)]) for k, d in (done or {}).items()}
             return
-        prev_result = node_args[0] if node_args else None
         self.items = await _resolve_items(self.mp.items, prev_result, self._build_ctx())
+        self.keys = [str(i) for i in range(len(self.items))]
 
     def _build_ctx(self) -> Context[Any]:
         """Build the :class:`Context` passed to ``items_fn`` and a computed ``max_concurrency``.
@@ -208,8 +219,8 @@ class MapRunner:
         sem = asyncio.Semaphore(cap) if cap is not None else None
 
         async def _gated(index: int, item: Any) -> Any:
-            runner = self._item_runner(item, index, merge_lock)
-            done = self.done.get(index)
+            runner = MapItemRunner(self, item, index, merge_lock)
+            done = self.done.get(runner.key)
             if done is not None:
                 return done.result if done.merged else await runner.merge_saved(done.result)
             if sem is None:
@@ -238,16 +249,12 @@ class MapRunner:
         cap = self.mp.max_concurrency
         if cap is None or isinstance(cap, int):
             return cap
-        if all(i in self.done for i in range(len(items))):
+        if all(k in self.done for k in self.keys):
             return None
         value = cap(items, self._build_ctx())
         if inspect.isawaitable(value):
             value = await value
         return check_concurrency(value, f"map {self.mp.name or self.node_id!r}: max_concurrency")
-
-    def _item_runner(self, item: Any, index: int, merge_lock: asyncio.Lock) -> MapItemRunner:
-        """The runner for item ``index``; a subclass runs a different body per item."""
-        return MapItemRunner(self, item, index, merge_lock)
 
     async def _aggregate(self, results: list[Any]) -> Any:
         """Apply ``mp.aggregate`` (if attached); await when it returns a coroutine."""
@@ -291,8 +298,10 @@ class MapItemRunner:
         self.node_id = owner.node_id
         self.item = item
         self.item_index = item_index
+        self.key = owner.keys[item_index]
+        self.body = self.mp.bodies[item_index] if self.mp.over_members else self.mp.bodies[0]
         self.merge_lock = merge_lock
-        self.path: ScopePath = (*owner.path, "i", str(item_index))
+        self.path: ScopePath = (*owner.path, "i", self.key)
 
     async def run(self) -> Any:
         """Drive this item through the run pipeline.
@@ -312,7 +321,7 @@ class MapItemRunner:
             return _INTERRUPTED
         if self._shortcut_skips():
             skipped = Skipped(item=self.item)
-            self.owner.done[self.item_index] = _Done(skipped, merged=True)
+            self.owner.done[self.key] = _Done(skipped, merged=True)
             await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
             return skipped
         try:
@@ -325,18 +334,17 @@ class MapItemRunner:
         # never both. (A completed one was recorded when its body returned.)
         self.env.scopes.close_under(self.path)
         if isinstance(outcome, Failure | Skipped):
-            self.owner.done[self.item_index] = _Done(outcome, merged=True)
+            self.owner.done[self.key] = _Done(outcome, merged=True)
         return outcome
 
     def _shortcut_skips(self) -> bool:
-        """True when this map is a step of a flow in shortcut mode and the item had not started.
+        """True when this map's flow is in shortcut mode and the item had not started.
 
         An item that was running when the flow stopped (its positions are
-        saved) continues from them. A map run by a Panel inside a step is
-        not a step of the flow: its items run.
+        saved) continues from them.
         """
         shortcut = self.env.shortcut
-        if shortcut is None or not shortcut.active or not self.owner.is_step:
+        if shortcut is None or not shortcut.active:
             return False
         return not self.env.scopes.has_saved_under(self.path)
 
@@ -349,7 +357,7 @@ class MapItemRunner:
         """
         found, raw = self.env.scopes.take_saved(self.path)
         if not found:
-            self.owner.done.pop(self.item_index, None)
+            self.owner.done.pop(self.key, None)
             return await self.run()
         factory = self.mp.state_factory or self.env.state._factory
         child_state = _restore_scope_state(self.env.state, raw, factory)
@@ -393,12 +401,12 @@ class MapItemRunner:
         """Run the body subflow with per-item composition-tree identity.
 
         Each item descends with a distinct ``chain_context`` keyed
-        by ``item_index``, so nested iterates produce unique node
-        IDs per item, and under its own path (``self.path``), so its
-        scopes and cursors are distinct in every snapshot.
+        by its key, so nested iterates produce unique node IDs per item,
+        and under its own path (``self.path``), so its scopes and cursors
+        are distinct in every snapshot.
         """
         env = self.env
-        return await self.mp.body._run_as_subflow(
+        return await self.body._run_as_subflow(
             self.item,
             state=child_state,
             runtime=env.runtime,
@@ -406,7 +414,7 @@ class MapItemRunner:
             parent_cost=env.cost,
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
-            parent_chain_context=_descend_context(self.node_id, f"map:{self.item_index}"),
+            parent_chain_context=_descend_context(self.node_id, f"map:{self.key}"),
             parent_ancestor_chain=env.ancestor_chain + (self.node_id,),
             parent_extra=env.extra,
             parent_policy=env.policy,
@@ -442,14 +450,14 @@ class MapItemRunner:
         applied exactly once.
         """
         scoped = self.mp.state_fn is not None
-        self.owner.done[self.item_index] = _Done(result, merged=not scoped)
+        self.owner.done[self.key] = _Done(result, merged=not scoped)
         rollback: list[Any] = []
         try:
             await self._merge_and_save(child_state, scoped, rollback)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self.owner.done.pop(self.item_index, None)
+            self.owner.done.pop(self.key, None)
             if rollback:
                 _restore_state_data(self.env.state.data, rollback[0])
             if self.mp.on_error is not None:
@@ -477,7 +485,7 @@ class MapItemRunner:
                 # or the merge mutates the snapshot the rollback restores from.
                 rollback.append(copy.deepcopy(serialize_state_data(self.env.state.data)))
             await _merge_state(self.mp.merge_fn, self.env.state, child_state)
-            self.owner.done[self.item_index].merged = True
+            self.owner.done[self.key].merged = True
             self.env.scopes.close(self.path)
             if self.env.policy.on_map_item:
                 await _save_scope_commit(

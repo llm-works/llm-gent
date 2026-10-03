@@ -122,10 +122,14 @@ def _compute_node_ids(chain_context: str, nodes: list[_Node]) -> tuple[str, ...]
         local = (_node_kind(node), _step_target(node))
         occurrence = seen.get(local, 0)
         seen[local] = occurrence + 1
-        payload = f"{chain_context}|{local[0]}|{occurrence}|{local[1]}"
-        digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=_NODE_ID_DIGEST_SIZE)
-        ids.append(digest.hexdigest())
+        ids.append(node_id(chain_context, local[0], local[1], occurrence))
     return tuple(ids)
+
+
+def node_id(chain_context: str, kind: str, target: str, occurrence: int) -> str:
+    """The id of a local key ``(kind, target, occurrence)`` in ``chain_context``: a blake2b hex."""
+    payload = f"{chain_context}|{kind}|{occurrence}|{target}"
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=_NODE_ID_DIGEST_SIZE).hexdigest()
 
 
 def iter_flows(root: Any) -> list[Any]:
@@ -153,10 +157,31 @@ def _child_flows(node: _Node) -> list[tuple[str, Any]]:
     if isinstance(target, _Iterate):
         return [("body", target.body)]
     if isinstance(target, _Map):
-        return [("map", target.body)]
+        if target.over_members:
+            return [(f"map:{k}", b) for k, b in zip(target.member_keys, target.bodies, strict=True)]
+        return [("map", target.bodies[0])]
     if isinstance(target, Flow):
         return [("call", target)]
     return []
+
+
+def member_keys(members: list[Any]) -> tuple[str, ...]:
+    """Keys identifying a map's members: each one's target and occurrence, hashed.
+
+    A member is identified like a chain step — what it runs (a verb's
+    module and qualname, ``flow:<name>``) and its order among members with
+    the same target — not by its position, so reordering members keeps
+    each one's key. Hashed to the length of a node id: keys are path
+    segments.
+    """
+    seen: dict[str, int] = {}
+    keys: list[str] = []
+    for member in members:
+        target = _target_qualname(member)
+        occurrence = seen.get(target, 0)
+        seen[target] = occurrence + 1
+        keys.append(node_id("", "member", target, occurrence))
+    return tuple(keys)
 
 
 def _descend_context(parent_node_id: str, boundary: str) -> str:

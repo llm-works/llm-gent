@@ -358,9 +358,16 @@ class _Iterate:
 
 @dataclass
 class _Map:
-    """Composition-graph node: fan out a subflow over items and (optionally) reduce."""
+    """Composition-graph node: fan out over items or members, and (optionally) reduce.
 
-    body: Flow
+    A map over items runs its one body on each item. A map over members
+    (``member_keys`` set) runs each of its bodies once, on the step's input;
+    a member's key identifies it across reorders (its target and its
+    occurrence among members with the same target).
+    """
+
+    bodies: tuple[Flow, ...]
+    member_keys: tuple[str, ...]
     items: ItemsFn | None
     aggregate: AggregateFn | None
     strict: bool
@@ -372,6 +379,11 @@ class _Map:
     max_concurrency: int | MaxConcurrencyFn | None = None
     state_factory: StateFactory[Any] | None = None
     name: str | None = None
+
+    @property
+    def over_members(self) -> bool:
+        """Whether the map runs its members on one input, not one body on many items."""
+        return bool(self.member_keys)
 
 
 @dataclass

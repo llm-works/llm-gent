@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Flow, Panel, State, verb
+from llm_gent.flow import Context, Flow, State, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
@@ -271,32 +271,22 @@ class TestCtxExtraPropagation:
         assert got == [(1, sentinel), (2, sentinel), (3, sentinel)]
 
     @pytest.mark.asyncio
-    async def test_extra_forwarded_through_panel(self) -> None:
-        """``Panel`` forwards ``ctx.extra`` to each inner verb's dispatch."""
+    async def test_extra_reaches_map_members(self) -> None:
+        """A map over members surfaces ``ctx.extra`` at each member."""
         sentinel = object()
 
         @verb
-        async def pane_a(ctx: Context) -> object:
-            """Return the extra handle observed inside pane a."""
+        async def member_a(ctx: Context, _x: Any = None) -> object:
+            """Return the extra handle observed inside member a."""
             return ctx.extra["h"]
 
         @verb
-        async def pane_b(ctx: Context) -> object:
-            """Return the extra handle observed inside pane b."""
+        async def member_b(ctx: Context, _x: Any = None) -> object:
+            """Return the extra handle observed inside member b."""
             return ctx.extra["h"]
 
         flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
-        flow.register(pane_a)
-        flow.register(pane_b)
-        panel = Panel([pane_a, pane_b], aggregate=list)
-
-        @verb
-        async def outer(ctx: Context) -> list[object]:
-            """Run the panel and return its aggregate."""
-            return await panel.run(ctx)
-
-        flow.register(outer)
-        flow.call(outer)
+        flow.map([member_a, member_b])
         got = await flow.run(extra={"h": sentinel})
         assert got == [sentinel, sentinel]
 

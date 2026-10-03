@@ -7,8 +7,7 @@ A :class:`Flow` plays two roles that share one object:
 
 1. **Runtime / registry.** Holds a :class:`SAIAFactory` (for turning roles
    into saia instances, cached per-role), a shared user-owned ``state``
-   object, and an optional verb-by-name registry used by :meth:`dispatch`
-   and by :class:`Panel`.
+   object, and an optional verb-by-name registry used by :meth:`dispatch`.
 
 2. **Composition graph.** A sequence of nodes built up via the fluent
    methods :meth:`call` / :meth:`then` / :meth:`rescue` / :meth:`after` /
@@ -87,6 +86,7 @@ from ._shortcut import (
 )
 from ._validation import (
     _check_node_name,
+    _map_bodies,
     _materialize,
     _require_state_for_merge,
     _validate_target,
@@ -278,12 +278,11 @@ class Flow:
 
         The verb receives a fresh :class:`Context` as its first argument,
         followed by ``*args`` / ``**kwargs`` from the caller. ``dispatch`` is
-        the low-level entrypoint used by :class:`Panel` and by verbs that
-        invoke sibling verbs directly.
+        the low-level entrypoint for verbs that invoke sibling verbs
+        directly.
 
         ``scope_state=`` wins over the flow's construction state — pass
-        ``scope_state=ctx.state`` from an in-flight verb (or a Panel, which
-        does this automatically) to hand the dispatched sibling the live
+        ``scope_state=ctx.state`` from an in-flight verb to hand the dispatched sibling the live
         scope payload, not the flow's construction default. Omitting
         ``scope_state=`` (or passing ``UNSET``) falls back to ``self._state``,
         defaulting to a fresh empty ``dict`` when none was supplied at
@@ -599,17 +598,31 @@ class Flow:
         state_factory: StateFactory[Any] | None = None,
         name: str | None = None,
     ) -> Flow:
-        """Append a parallel fan-out: run ``body`` per item concurrently.
+        """Append a parallel fan-out: run ``body`` per item, or each member once, concurrently.
+
+        A map over items runs one body on each item. A map over members —
+        ``body`` a list — runs each member once on the step's input, one
+        item per member: an ensemble (``.map([judge_a, judge_b, judge_c],
+        aggregate=majority)``). Every option below applies to both. A
+        member is identified by what it runs and its order among members
+        running the same thing, so a resumed run matches finished members
+        to their results after the list was reordered; an added member
+        runs, a removed one is dropped.
 
         Args:
-            body: A :class:`Flow` or ``lambda f: ...`` callback. Each item
-                becomes the body's sole positional input.
+            body: A :class:`Flow`, a verb or a ``lambda f: ...`` callback.
+                Each item becomes the body's sole positional input. A list
+                of those makes a map over members.
             items: ``(prev_result, ctx) -> iterable``. May be async. When
                 omitted, ``prev_result`` itself is treated as the iterable —
                 the common shape when the previous node already produced a list.
+                Not with members: they run on ``prev_result``.
             aggregate: ``list[R] -> R'``. Reduces per-item results into the
                 map's final output. Omitted → the list is returned as-is
-                (order preserved to match input item order).
+                (order preserved to match input item order, or member
+                order). :func:`~llm_gent.flow.aggregate.majority`,
+                ``unanimous``, ``mean`` and ``weighted`` combine an
+                ensemble's votes.
             strict: ``True`` (default) → the first non-cancellation exception
                 propagates out of :meth:`run`. ``False`` → each failing item is
                 replaced by a :class:`Failure` sentinel in the results list so
@@ -650,15 +663,20 @@ class Flow:
         trade-off for a simple ordering guarantee.
 
         Returns ``self`` for chaining.
+
+        Raises:
+            TypeError: ``items=`` with a list of members.
+            ValueError: An empty list of members.
         """
         _require_state_for_merge(state, merge, ".map")
         _check_node_name(name, ".map")
         if max_concurrency is not None and not callable(max_concurrency):
             check_concurrency(max_concurrency, ".map(max_concurrency=)")
-        body_flow = _materialize(body, self._lg, "map.body")
+        bodies, keys = _map_bodies(body, items, self._lg)
         node = _Node(
             target=_Map(
-                body=body_flow,
+                bodies=bodies,
+                member_keys=keys,
                 items=items,
                 aggregate=aggregate,
                 strict=strict,

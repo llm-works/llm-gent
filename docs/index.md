@@ -172,6 +172,22 @@ Rubric for picking a channel when only one consumer needs the value:
   state.
 - Two consumers of different kinds → both.
 
+### Map: over items, or over members
+
+`.map(body)` runs one body on each item of its input. Given a list,
+`.map([a, b, c])` runs each member once on the step's input — an
+ensemble — and `aggregate` reduces their results; `majority`,
+`unanimous`, `mean` and `weighted` (`llm_gent.flow`) cover common votes:
+
+```python
+flow.call(load).map([grade_strict, grade_lenient, grade_holistic], aggregate=majority)
+```
+
+Both are the same primitive: every map option applies to members too —
+`strict=False`, `.guard`, `.on_error`, `.on_item_complete`,
+`max_concurrency`, a per-member `state=` / `merge`, shortcut skips, halt
+and resume.
+
 ### Halt, interruption and resume
 
 A checkpoint is a snapshot of the whole run, as a git commit is of a
@@ -239,12 +255,14 @@ guarded by the verb itself (idempotency keys, "did I already do this"
 checks against state or an external record), or split into their own
 step so a rerun of a later step does not repeat them.
 
-A `Panel` run from a step is a map over its verbs, at
-`<step>/panel/<k>` (the step's `k`-th Panel): a halted Panel keeps its
-finished verbs and their results, and resume continues the rest — a
-paused Loop turn in a verb resumes mid-turn. Its verbs' results follow
-the map items' rule above. Like everything in an interrupted step, a
-Panel that finished before the step stopped runs again with it.
+A map over members — `.map([judge_a, judge_b, judge_c],
+aggregate=majority)`, each member run once on the step's input — follows
+the same rule: a halted ensemble keeps its finished members and their
+results, and resume continues the rest — a paused Loop turn in a member
+resumes mid-turn. Members are matched to their results by what they run
+and their order among members running the same thing, not by position:
+a reordered list keeps them, an added member runs, a removed one is
+dropped.
 
 Positions are recorded by node id: a step's kind, its target and its
 order among the chain's steps with the same kind and target — not its
@@ -432,7 +450,7 @@ flows with expensive state don't want a commit after every step, and
 iterate / map bodies with cheap per-item work shouldn't pay for a
 save every pass. The default (halt-only + explicit) minimizes writes
 while preserving the pause/resume promise. Single-execution
-primitives (`.call`, `.branch`, `Panel`) have no natural per-item
+primitives (`.call`, `.branch`) have no natural per-item
 cadence; verbs at those spots use `ctx.checkpoint()` if a save is
 wanted.
 
