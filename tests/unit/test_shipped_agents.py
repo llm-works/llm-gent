@@ -12,8 +12,8 @@ import yaml
 from appinfra import DotDict
 
 from llm_gent.agents.default import Factory
-from llm_gent.cli.tools.serve import ServeTool
 from llm_gent.core.platform import PlatformContext
+from llm_gent.core.traits.builtin.saia import SAIATrait
 from llm_gent.core.traits.builtin.tools import ToolsTrait
 from llm_gent.runtime.server.config import AgentServerConfig
 
@@ -29,7 +29,7 @@ def _build(path: Path, codebase: Path) -> Any:
     name = path.stem
     raw = yaml.safe_load(path.read_text())
     agent_config = AgentServerConfig.from_dict({"agents": {name: raw}}).agents[name]
-    config = ServeTool()._build_agent_config_dict(name, agent_config)
+    config = agent_config.factory_config(name)
     platform = PlatformContext.from_config(lg=MagicMock(), llm_config=DotDict({}))
     return Factory(platform=platform).create(config, variables={"CODEBASE_PATH": str(codebase)})
 
@@ -52,6 +52,18 @@ def test_scheduled_task_is_the_task_description(path, tmp_path):
 
     assert agent._default_prompt == description.replace("{{CODEBASE_PATH}}", str(tmp_path))
     assert agent._default_prompt.strip()
+
+
+@pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.stem)
+def test_task_limits_reach_the_run(path, tmp_path):
+    """The YAML's task.max_iterations and task.timeout_secs bound the agent's tool loop."""
+    raw = yaml.safe_load(path.read_text())
+    task = AgentServerConfig.from_dict({"agents": {path.stem: raw}}).agents[path.stem].task
+
+    config = _build(path, tmp_path).require_trait(SAIATrait).config
+
+    assert (config.max_iterations, config.timeout_secs) == (task.max_iterations, task.timeout_secs)
+    assert config.timeout_secs > 0
 
 
 class TestCodebaseQnaShell:
