@@ -30,6 +30,13 @@ Some cases stop twice: the resume stops again (a halt or a crash at the
 first or second leaf it runs) and a final resume finishes. Each resume
 is checked against its own resume point.
 
+The default run skips the cases that repeat a case it keeps — the same
+resume points, the same resumed run, the same result (see "Distinct
+cases" below): a policy that saves nothing in a shape, every stop point
+of a crash under no policy, a halt under a policy other than none, a
+stop before a leaf that equals one after the previous leaf.
+``pytest --full-matrix`` runs every case.
+
 Properties checked per case:
 
 - The stopped run ends as its stop dictates: a halt returns, a crash or
@@ -848,13 +855,84 @@ def _file_cases() -> Iterator[Case]:
                     yield Case(name, stop, stop_at, "after", policy, False, "file")
 
 
-def _cases() -> list[Case]:
-    return [*_memory_cases(), *_cycle_cases(), *_file_cases()]
+def _cases(full: bool) -> list[Case]:
+    """Every case with ``full`` (``--full-matrix``), else the distinct ones (:func:`_distinct`)."""
+    cases = [*_memory_cases(), *_cycle_cases(), *_file_cases()]
+    return cases if full else [case for case in cases if _distinct(case)]
 
 
-def _params() -> Iterator[Any]:
-    for case in _cases():
-        yield pytest.param(case, id=case.id)
+# --- Distinct cases ---------------------------------------------------------
+#
+# A case the default run drops behaves exactly like a case it keeps — its
+# twin: every stop leaves the same resume point (done map, paused turns,
+# commits where the rule says so), and the final resume executes the same
+# leaves and returns the same result. Each rule was checked that way over
+# every case it drops; ``--full-matrix`` runs them all.
+
+_LEAVES: dict[str, int] = {name: len(model(shape)[1]) for name, shape in SHAPES.items()}
+"""Leaf executions of each shape's uninterrupted run: its stop points."""
+
+
+def _distinct(case: Case) -> bool:
+    """Whether ``case`` is not a repeat of a case the default run keeps."""
+    return (
+        _policy_saves(case)
+        and _something_saved(case)
+        and _halt_policy_matters(case)
+        and _before_matters(case)
+    )
+
+
+def _policy_saves(case: Case) -> bool:
+    """``on_iterate`` needs an iterate and ``on_map_item`` a map: else nothing saves, as ``none``."""
+    shape = SHAPES[case.shape]
+    if case.policy == "on_iterate":
+        return _has(shape, Iter)
+    if case.policy == "on_map_item":
+        return _has(shape, Fan)
+    return True
+
+
+def _something_saved(case: Case) -> bool:
+    """A crash or an exception under ``none`` writes nothing: one stop point stands for all.
+
+    Every stop point leaves an empty history, so resume runs from the
+    start. The twin kept is the stop after the last leaf's work.
+    """
+    if case.stop == "halt" or case.policy != "none":
+        return True
+    return case.stop_at == _LEAVES[case.shape] and case.mode == "after"
+
+
+def _halt_policy_matters(case: Case) -> bool:
+    """Halts resume from the halt commit whatever the policy saved: the twin is policy ``none``.
+
+    Holds for a case whose every stop is a halt. Kept: ``on_map_item``
+    with a parallel map, whose item commits race the halt.
+    """
+    if any(stop != "halt" for stop, _, _ in case.stops()) or case.policy == "none":
+        return True
+    return case.policy == "on_map_item" and case.parallel
+
+
+def _before_matters(case: Case) -> bool:
+    """Under ``leaf`` without a map or Panel, a crash or exception before leaf k is one after k-1.
+
+    Nothing saves between two leaves there. With a map or Panel it does
+    not hold: the other items run on after one stops, and save.
+    """
+    if case.stop == "halt" or case.mode != "before" or case.policy != "leaf":
+        return True
+    shape = SHAPES[case.shape]
+    return case.stop_at == 1 or _has(shape, Fan) or _has(shape, Pan)
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """The stop/resume test's cases: the distinct ones, every one with ``--full-matrix``."""
+    if metafunc.function.__name__ != "test_resume_after_stop_matches_uninterrupted_run":
+        return
+    full = bool(metafunc.config.getoption("--full-matrix"))
+    metafunc.parametrize("case", [pytest.param(c, id=c.id) for c in _cases(full)])
 
 
 # --- Tests ------------------------------------------------------------------
@@ -990,7 +1068,6 @@ async def _check_finished(history: History, baseline: dict[str, int], merges: li
     assert sorted(root.get("merges", [])) == merges, "a scoped map merged an item twice or never"
 
 
-@pytest.mark.parametrize("case", list(_params()))
 async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path: Path) -> None:
     shape = SHAPES[case.shape]
     expected_result, baseline, merges = model(shape)

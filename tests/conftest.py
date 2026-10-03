@@ -95,6 +95,17 @@ def _resolve_pg_endpoint() -> tuple[str, int] | None:
     return parsed.hostname, parsed.port or 5432
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """``--full-matrix``: run every halt/restart matrix case (``test_halt_restart_matrix.py``)."""
+    parser.addoption(
+        "--full-matrix",
+        action="store_true",
+        default=False,
+        help="run every halt/restart matrix case, also those that repeat a case the "
+        "default run keeps",
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Probe Postgres once per session and stash reachability + endpoint."""
     endpoint = _resolve_pg_endpoint()
