@@ -72,7 +72,8 @@ class Factory(BaseFactory):
     ) -> Agent:
         """Create prompt-based Agent from configuration.
 
-        Extends base create() to extract default_prompt from task config.
+        Extends base create() to set the agent's ``default_prompt`` (what
+        ``run_once()`` runs) from ``task.description``.
 
         Args:
             config: Configuration dictionary.
@@ -83,13 +84,9 @@ class Factory(BaseFactory):
         """
         from appinfra import DotDict
 
-        # Extract default_prompt and inject into config.config for base Factory
+        # Agent reads default_prompt from the top level of its config
         task_config = config.get("task", {})
-        default_prompt = task_config.get("description", "")
-
-        if "config" not in config:
-            config["config"] = {}
-        config["config"]["default_prompt"] = default_prompt
+        config["default_prompt"] = task_config.get("description", config.get("default_prompt", ""))
 
         # Convert to DotDict once for consistent usage
         dotdict_config = DotDict(config)

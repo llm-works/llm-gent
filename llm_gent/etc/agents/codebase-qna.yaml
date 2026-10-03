@@ -1,6 +1,10 @@
 type: prompt
 
-identity: |
+# Learning profile - where this agent's memory is stored
+identity:
+  name: "codebase-qna"
+
+directive: |
   You are becoming an expert codebase analyst.
 
   Over time, you develop:
@@ -61,15 +65,15 @@ task:
 
 tools:
   shell:
+    # Each listed program is fully trusted: the agent can do whatever it can.
+    # These only read; find (-exec) and git (aliases) can run other programs.
+    # working_dir is where commands start, not a boundary.
     allowed_commands:
       - grep
-      - find
-      - git
       - ls
       - wc
       - head
       - tail
-      - tree
     working_dir: "{{CODEBASE_PATH}}"
     timeout: 30.0
   read_file:
