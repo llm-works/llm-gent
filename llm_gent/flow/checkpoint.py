@@ -32,8 +32,8 @@ The store is a Protocol with four surfaces:
   one; :meth:`set_ref` moves it with compare-and-set: the write lands only
   while the ref still points where the writer expects, so a second writer
   on the same history is detected instead of silently forking it.
-  :data:`HEAD_REF` is the newest commit of the history, where every new
-  commit is parented. Tags are refs under ``tags/``: on a clean exit the
+  :data:`HEAD_REF` is the newest commit on the history's line.
+  Tags are refs under ``tags/``: on a clean exit the
   framework commits the final state at :data:`END_NODE_PATH` and moves
   :data:`COMPLETE_TAG` to it. The history is complete while ``HEAD`` is
   that final-state commit; the tag keeps pointing at the last finished
@@ -44,8 +44,8 @@ The store is a Protocol with four surfaces:
   and the name mapping of one ``flow_id``. :meth:`list_refs`,
   :meth:`list_objects` and :meth:`delete_objects` let
   :func:`~llm_gent.flow.collect_unreachable` remove only the objects no
-  ref reaches — commits off the history's line after ``resume=<name>`` or
-  ``resume=<hash>`` moved ``HEAD`` back, or written by a process that died
+  ref reaches — commits off the history's line after a run resumed with
+  ``resume=<name>`` or ``resume=<hash>`` committed, or written by a process that died
   before moving it. The framework calls :meth:`gc_history` on a
   fully successful :meth:`Flow.run` when the store's retention policy is
   ``"gc_on_success"``; the default ``"retain"`` keeps successful
@@ -97,16 +97,15 @@ Values match :mod:`llm_gent.flow.state.cas`:
 
 
 HEAD_REF = "HEAD"
-"""Ref naming a history's newest commit: the parent of the next commit and
-the commit ``resume="latest"`` starts its walk from."""
+"""Ref naming the newest commit on a history's line."""
 
 
 class ConcurrentWriteError(RuntimeError):
     """A ref moved under a writer: a second writer is committing to the same history.
 
-    A history has one writer at a time. Every commit moves :data:`HEAD_REF`
-    by compare-and-set from its parent, so a second writer is detected at
-    its next commit instead of silently forking the history.
+    A history has one writer at a time. Each commit moves :data:`HEAD_REF`
+    by compare-and-set, so a concurrent writer is detected at its next
+    commit instead of silently forking the history.
     """
 
     def __init__(self, client_flow_id: str, ref: str, expected: str | None) -> None:
@@ -200,9 +199,10 @@ A commit hash (:func:`is_commit_hash`; ``ctx.checkpoint()`` returns the
 one it wrote) checks out that commit of the history, and any other string
 names a checkpoint taken with ``ctx.checkpoint(name)`` (see
 :func:`checkpoint_tag`). Either way the run checks the commit out the same
-way and moves ``HEAD`` back to it, so its commits continue from there. The
-commits written after it leave the history's line but stay resumable by
-hash until :func:`~llm_gent.flow.collect_unreachable` deletes them.
+way and its commits continue from there. Once the run commits, the commits
+written after it leave the history's line but stay resumable by hash until
+:func:`~llm_gent.flow.collect_unreachable` deletes them; a run that fails
+before its first commit leaves ``HEAD`` where it was.
 """
 
 

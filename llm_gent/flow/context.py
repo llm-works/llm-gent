@@ -266,8 +266,8 @@ class Context(Generic[T]):
         The commit goes to the run's repo (the top-level flow's
         :meth:`~llm_gent.flow.Flow.with_checkpoint_store`), wherever in the
         flow tree this step runs. Returns the commit's hash:
-        ``run(resume=<hash>)`` checks it out later, also after a reset took
-        it off the history's line. With ``name``, the checkpoint is also
+        ``run(resume=<hash>)`` checks it out later, even after a later run
+        leaves it off the history's line. With ``name``, the checkpoint is also
         tagged ``tags/<name>``: ``run(resume=name)`` checks it out. Taking
         it again (at this step or elsewhere) moves the tag to the new
         commit. A named :meth:`~llm_gent.flow.Flow.with_checkpointer` this

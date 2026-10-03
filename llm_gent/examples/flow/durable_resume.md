@@ -276,21 +276,23 @@ await flow.run(resume="before-review")
 `ctx.checkpoint(name)` writes a checkpoint like any other — the chain running the step is at that
 step — and tags it `tags/<name>`; taking it again moves the tag. `run(resume=name)` checks the
 tagged commit out as `latest` checks out the newest one, so the step that took the checkpoint runs
-again with the input it had. It also moves `HEAD` back to that commit: the run's commits continue
-from there, and the commits written after the checkpoint leave the history's line — `latest` no
-longer sees them.
+again with the input it had. The run's commits continue from that commit: once the run commits, the
+commits written after the checkpoint leave the history's line — `latest` no longer sees them. A run
+that fails before its first commit leaves `HEAD` where it was.
 
 Every commit can be checked out the same way by its hash. `ctx.checkpoint()` returns the hash of
 the commit it wrote, named or not, and `History.head()` gives the newest one:
 
 ```python
 halted = (await History(store, "history-42").head()).content_hash
-await flow.run(resume="before-review")  # HEAD moves back; the halted commit leaves the line
-await flow.run(resume=halted)  # HEAD moves to the halted commit; the run continues there
+await flow.run(
+    resume="before-review"
+)  # the run continues there; once it commits, the halted commit leaves the line
+await flow.run(resume=halted)  # the run continues from the halted commit
 ```
 
-Moving `HEAD` deletes nothing: a commit off the line stays resumable by hash, and a named one by
-its name, until `collect_unreachable` deletes what no ref reaches.
+A commit left off the line stays resumable by hash, and a named one by its name, until
+`collect_unreachable` deletes what no ref reaches.
 
 `"off"`, `"latest"` and `"complete"` cannot name a checkpoint, nor can a string of 64 lowercase hex
 characters, the form of a commit hash. `run(resume=...)` with a hash or a name the history does

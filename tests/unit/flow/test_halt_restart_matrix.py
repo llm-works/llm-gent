@@ -1107,10 +1107,10 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
     """A finished run's history, checked out at any leaf's named checkpoint, finishes again.
 
     Every leaf takes a checkpoint named after itself, after its work.
-    ``run(resume=<name>)`` moves ``HEAD`` back there and continues: the
-    result and state are the uninterrupted ones, the leaves the
-    checkpoint lacks run once, and of the ones it holds only the leaf
-    that took it runs again (its step had not completed).
+    ``run(resume=<name>)`` continues from there: the result and state
+    are the uninterrupted ones, the leaves the checkpoint lacks run
+    once, and of the ones it holds only the leaf that took it runs
+    again (its step had not completed).
     """
     shape = SHAPES[shape_name]
     expected_result, baseline, merges = model(shape)

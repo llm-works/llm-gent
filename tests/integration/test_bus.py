@@ -7,12 +7,14 @@ These tests start real ZMQ sockets on localhost and test actual
 message passing between coordinator and worker bus instances.
 """
 
+import errno
 import socket
 import threading
 import time
 from typing import Any
 
 import pytest
+import zmq
 from appinfra.service import BufferedChannel, ChannelTimeoutError
 
 from llm_gent.bus.protocol import (
@@ -25,31 +27,22 @@ from llm_gent.bus.protocol import (
     Response,
     UnregisterRequest,
 )
-from llm_gent.bus.transport import (
-    CoordinatorBusConfig,
-    WorkerBusConfig,
-    ZMQCoordinatorBus,
-    ZMQWorkerBus,
+from llm_gent.bus.transport import ZMQCoordinatorBus, ZMQWorkerBus
+from tests.integration._ports import (
+    coordinator_config,
+    start_on_free_ports,
+    worker_config,
 )
 
 
 pytestmark = pytest.mark.integration
 
 
-def _reserve_ports(n: int) -> tuple[list[int], list[socket.socket]]:
-    """Reserve n ephemeral ports, returning ports and open sockets.
-
-    Callers must close the returned sockets immediately before ZMQ binds
-    to minimize the TOCTOU race window between port discovery and use.
-    """
-    socks = []
-    ports = []
-    for _ in range(n):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("", 0))
-        ports.append(s.getsockname()[1])
-        socks.append(s)
-    return ports, socks
+def _start_coordinator(lg: Any, ports: list[int]) -> tuple[ZMQCoordinatorBus, list[int]]:
+    """A started coordinator bus bound to ``ports``."""
+    coord = ZMQCoordinatorBus(lg, coordinator_config(ports))
+    coord.start()
+    return coord, ports
 
 
 def _wait_for_zmq_connect(seconds: float = 0.2) -> None:
@@ -73,18 +66,9 @@ def bus_pair():
     from unittest.mock import MagicMock
 
     lg = MagicMock()
-    ports, socks = _reserve_ports(3)
-
-    coord_config = CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-    worker_config = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-
-    coord = ZMQCoordinatorBus(lg, coord_config)
-    worker = ZMQWorkerBus(lg, "test-worker", worker_config)
-
-    for s in socks:
-        s.close()
-    coord.start()
+    coord, ports = start_on_free_ports(lambda p: _start_coordinator(lg, p))
     _wait_for_zmq_connect(0.1)
+    worker = ZMQWorkerBus(lg, "test-worker", worker_config(ports))
     worker.start()
     _wait_for_zmq_connect(0.2)
 
@@ -209,23 +193,13 @@ class TestMultiWorker:
         from unittest.mock import MagicMock
 
         lg = MagicMock()
-        ports, socks = _reserve_ports(3)
-
-        coord_config = CoordinatorBusConfig(
-            router_port=ports[0], pub_port=ports[1], sub_port=ports[2]
-        )
-        coord = ZMQCoordinatorBus(lg, coord_config)
-
-        for s in socks:
-            s.close()
-        coord.start()
+        coord, ports = start_on_free_ports(lambda p: _start_coordinator(lg, p))
         _wait_for_zmq_connect(0.1)
 
         workers = []
         channels = []
         for i in range(3):
-            cfg = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-            w = ZMQWorkerBus(lg, f"worker-{i}", cfg)
+            w = ZMQWorkerBus(lg, f"worker-{i}", worker_config(ports))
             w.start()
             workers.append(w)
 
@@ -300,22 +274,12 @@ class TestAgentToAgent:
         from unittest.mock import MagicMock
 
         lg = MagicMock()
-        ports, socks = _reserve_ports(3)
-
-        coord_config = CoordinatorBusConfig(
-            router_port=ports[0], pub_port=ports[1], sub_port=ports[2]
-        )
-        coord = ZMQCoordinatorBus(lg, coord_config)
-
-        for s in socks:
-            s.close()
-        coord.start()
+        coord, ports = start_on_free_ports(lambda p: _start_coordinator(lg, p))
         _wait_for_zmq_connect(0.1)
 
         workers = []
         for name in ("alice", "bob"):
-            cfg = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-            w = ZMQWorkerBus(lg, name, cfg)
+            w = ZMQWorkerBus(lg, name, worker_config(ports))
             w.start()
             workers.append(w)
             # Register transport so coordinator can route to this agent
@@ -352,3 +316,75 @@ class TestAgentToAgent:
         assert len(received) == 1
         assert isinstance(received[0], HeartbeatRequest)
         assert received[0].stats.ticks == 99
+
+
+class TestFailedStart:
+    """A coordinator whose bind fails leaves no port bound."""
+
+    def test_ports_bound_before_the_failure_are_released(self):
+        """Router and pub bind, sub finds its port taken: all three are free afterwards."""
+        from unittest.mock import MagicMock
+
+        # Hold all 3 ports to minimize the race window.
+        holders = [socket.socket(socket.AF_INET, socket.SOCK_STREAM) for _ in range(3)]
+        for s in holders:
+            s.bind(("", 0))
+        ports = [s.getsockname()[1] for s in holders]
+
+        # Release ports 0/1 just before start(); keep port 2 so SUB fails.
+        holders[0].close()
+        holders[1].close()
+        try:
+            coord = ZMQCoordinatorBus(MagicMock(), coordinator_config(ports))
+            with pytest.raises(zmq.ZMQError) as raised:
+                coord.start()
+            assert raised.value.errno == errno.EADDRINUSE
+        finally:
+            holders[2].close()
+
+        # Verify all 3 ports are free: the coordinator released the ones it bound.
+        for port in ports:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind(("", port))
+            finally:
+                s.close()
+
+
+class TestStartOnFreePorts:
+    """Starting retries with fresh ports while a port is in use."""
+
+    def test_a_port_in_use_is_retried_with_fresh_ports(self):
+        calls: list[list[int]] = []
+
+        def start(ports: list[int]) -> str:
+            calls.append(ports)
+            if len(calls) == 1:
+                raise zmq.ZMQError(errno.EADDRINUSE)
+            return "started"
+
+        assert start_on_free_ports(start) == "started"
+        assert len(calls) == 2
+
+    def test_another_error_is_not_retried(self):
+        calls: list[list[int]] = []
+
+        def start(ports: list[int]) -> str:
+            calls.append(ports)
+            raise zmq.ZMQError(errno.EACCES)
+
+        with pytest.raises(zmq.ZMQError) as raised:
+            start_on_free_ports(start)
+        assert raised.value.errno == errno.EACCES
+        assert len(calls) == 1
+
+    def test_the_last_attempt_raises(self):
+        calls: list[list[int]] = []
+
+        def start(ports: list[int]) -> str:
+            calls.append(ports)
+            raise zmq.ZMQError(errno.EADDRINUSE)
+
+        with pytest.raises(zmq.ZMQError):
+            start_on_free_ports(start, attempts=3)
+        assert len(calls) == 3

@@ -122,11 +122,16 @@ class CheckpointContext:
         self._run_structure: Blob | None = None
         self._flow_id: str | None = None
         self._flow_id_lock = asyncio.Lock()
-        # Head of the history: the newest commit, parent of the next one.
-        # Loaded from the store on first append, then maintained here —
-        # the context assumes it is the history's single writer for the run.
+        # _parent: parent of the next commit (normally HEAD, but an earlier
+        # commit after continue_from). _head: where HEAD points, used as the
+        # expected value for compare-and-set. The two are the same except
+        # after continue_from, which parents on an earlier commit while HEAD
+        # stays put until the run's first commit. Loaded from the store on
+        # first append, then maintained here — the context assumes it is the
+        # history's single writer for the run.
+        self._parent: str | None = None
         self._head: str | None = None
-        self._head_loaded = False
+        self._head_loaded: bool = False
         self._commit_lock = asyncio.Lock()
         # (kind, hash) of the blobs / trees this context already put during
         # the run. Scopes that did not change since the last commit are
@@ -146,8 +151,7 @@ class CheckpointContext:
         self._run_structure = None
         self._flow_id = None
         self._flow_id_lock = asyncio.Lock()
-        self._head = None
-        self._head_loaded = False
+        self._forget_head()
         self._commit_lock = asyncio.Lock()
         self._written = set()
 
@@ -255,8 +259,7 @@ class CheckpointContext:
             # Also on a failed gc: the next access re-reads the name binding
             # instead of trusting a flow_id the store may have half-removed.
             self._flow_id = None
-            self._head = None
-            self._head_loaded = False
+            self._forget_head()
             self._written.clear()
 
     # --- history: append a commit on top of the head ---
@@ -264,12 +267,13 @@ class CheckpointContext:
     async def append_commit(self, root_tree_hash: str, meta: CommitMeta) -> Commit:
         """Build a commit whose parent is the current head, store it, and move ``HEAD`` to it.
 
-        ``HEAD`` moves by compare-and-set from the parent, so a second
-        writer on the same history raises :class:`ConcurrentWriteError`
-        instead of forking it silently. Serialized so concurrent saves
-        (parallel map items) form one linear history rather than sibling
-        commits sharing a parent. The first commit of a history has no
-        parent.
+        ``HEAD`` moves by compare-and-set, so a concurrent writer raises
+        :class:`ConcurrentWriteError` instead of forking the history
+        silently. Serialized so concurrent saves (parallel map items)
+        form one linear history rather than sibling commits sharing a
+        parent. The first commit of a history has no parent. After
+        :meth:`continue_from`, the parent is the commit it named, and
+        ``HEAD`` moves from where it pointed then, not from the parent.
         """
         async with self._commit_lock:
             parent = await self._load_head()
@@ -279,16 +283,32 @@ class CheckpointContext:
                 meta=meta,
             )
             await self.put_commit(commit)
-            await self.move_ref(HEAD_REF, commit.content_hash, parent)
-            self._head = commit.content_hash
+            await self.move_ref(HEAD_REF, commit.content_hash, self._head)
+            self._parent = self._head = commit.content_hash
             return commit
 
+    async def continue_from(self, commit_hash: str) -> None:
+        """Parent the run's commits on ``commit_hash``; ``HEAD`` moves from where it points now.
+
+        Until the run commits, ``HEAD`` stays where it is: a run that
+        fails first leaves the history as it was.
+        """
+        self._parent = commit_hash
+        self._head = await self.get_ref(HEAD_REF)
+        self._head_loaded = True
+
     async def _load_head(self) -> str | None:
-        """Return the cached head, reading ``HEAD`` on first use."""
+        """Return the cached parent, reading ``HEAD`` on first use."""
         if not self._head_loaded:
-            self._head = await self.get_ref(HEAD_REF)
+            self._parent = self._head = await self.get_ref(HEAD_REF)
             self._head_loaded = True
-        return self._head
+        return self._parent
+
+    def _forget_head(self) -> None:
+        """Clear the cached head so the next access re-reads ``HEAD``."""
+        self._parent = None
+        self._head = None
+        self._head_loaded = False
 
     # --- compound: save a scope commit ---
 

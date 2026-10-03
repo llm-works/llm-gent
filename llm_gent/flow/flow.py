@@ -1102,10 +1102,12 @@ class Flow:
                 raises :class:`HistoryCorrupt`. A commit hash (as
                 ``ctx.checkpoint()`` returns) or a checkpoint name (as
                 ``ctx.checkpoint(name)`` took) selects one commit: the run
-                checks it out the same way and moves ``HEAD`` back to it,
-                so its commits continue from there. The commits after it
-                leave the history's line and stay resumable by hash until
-                :func:`~llm_gent.flow.collect_unreachable` deletes them.
+                checks it out the same way and its commits continue from
+                there. Once the run commits, the commits after it leave
+                the history's line and stay resumable by hash until
+                :func:`~llm_gent.flow.collect_unreachable` deletes them; a
+                run that fails before its first commit leaves ``HEAD``
+                where it was.
                 Resuming requires
                 :meth:`with_checkpointer`. Bound parameter: not forwarded
                 to the first node.
