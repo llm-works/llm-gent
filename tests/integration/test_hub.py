@@ -3,7 +3,6 @@
 
 """Integration tests for the Hub with real ZMQ bus."""
 
-import socket
 import time
 from typing import Any
 
@@ -13,25 +12,26 @@ from appinfra.service import BufferedChannel
 from llm_gent.bus.protocol import RegisterRequest, UnregisterRequest
 from llm_gent.bus.transport import CoordinatorBusConfig, WorkerBusConfig, ZMQWorkerBus
 from llm_gent.hub import Hub, HubConfig
+from tests.integration._ports import start_on_free_ports
 
 
 pytestmark = pytest.mark.integration
 
 
-def _reserve_ports(n: int) -> tuple[list[int], list[socket.socket]]:
-    """Reserve n ephemeral ports, returning ports and open sockets.
+def _worker_config(ports: list[int]) -> WorkerBusConfig:
+    return WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
 
-    Callers must close the returned sockets immediately before ZMQ binds
-    to minimize the TOCTOU race window between port discovery and use.
-    """
-    socks = []
-    ports = []
-    for _ in range(n):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("", 0))
-        ports.append(s.getsockname()[1])
-        socks.append(s)
-    return ports, socks
+
+def _start_hub(lg: Any, ports: list[int]) -> tuple[Hub, list[int]]:
+    """A started Hub bound to ``ports``; no shutdown grace (these tests run no agents)."""
+    hub_config = HubConfig(
+        bus=CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2]),
+        health_check_interval=60.0,
+        shutdown_grace_secs=0.0,
+    )
+    hub = Hub(lg, hub_config, bus_config=_worker_config(ports))
+    hub.start()
+    return hub, ports
 
 
 def _wait_for_zmq_connect(seconds: float = 0.2) -> None:
@@ -50,21 +50,9 @@ def hub_and_worker():
     from unittest.mock import MagicMock
 
     lg = MagicMock()
-    ports, socks = _reserve_ports(3)
-
-    hub_config = HubConfig(
-        bus=CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2]),
-        health_check_interval=60.0,
-    )
-    worker_config = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-
-    hub = Hub(lg, hub_config, bus_config=worker_config)
-    worker = ZMQWorkerBus(lg, "test-worker", worker_config)
-
-    for s in socks:
-        s.close()
-    hub.start()
+    hub, ports = start_on_free_ports(lambda p: _start_hub(lg, p))
     _wait_for_zmq_connect(0.1)
+    worker = ZMQWorkerBus(lg, "test-worker", _worker_config(ports))
     worker.start()
     _wait_for_zmq_connect(0.2)
 
@@ -128,26 +116,13 @@ class TestHubMultipleWorkers:
         from unittest.mock import MagicMock
 
         lg = MagicMock()
-        ports, socks = _reserve_ports(3)
-
-        wcfg = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-        hub_config = HubConfig(
-            bus=CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2]),
-            health_check_interval=60.0,
-        )
-
-        hub = Hub(lg, hub_config, bus_config=wcfg)
-
-        for s in socks:
-            s.close()
-        hub.start()
+        hub, ports = start_on_free_ports(lambda p: _start_hub(lg, p))
         _wait_for_zmq_connect(0.1)
 
         workers = []
         channels = []
         for i in range(3):
-            cfg = WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-            w = ZMQWorkerBus(lg, f"worker-{i}", cfg)
+            w = ZMQWorkerBus(lg, f"worker-{i}", _worker_config(ports))
             w.start()
             workers.append(w)
             assert w.transport is not None
