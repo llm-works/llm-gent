@@ -770,7 +770,7 @@ class Flow:
         its body ran; iterate exits the loop between passes. In-flight
         bodies are not interrupted — a verb that needs mid-request
         cancellation should read ``ctx.halt`` itself. A halted
-        :meth:`~Flow.run` returns ``None``; state is in the halt checkpoint.
+        :meth:`~Flow.run` returns :data:`HALTED`; state is in the halt checkpoint.
 
         A run has one halt, set on its top-level flow; every subflow
         observes it. :meth:`run` raises when a nested flow sets a different
