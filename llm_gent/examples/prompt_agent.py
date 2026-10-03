@@ -114,6 +114,12 @@ def _llm_config(args: argparse.Namespace) -> dict[str, Any]:
         local["base_url"] = base_url if base_url.endswith("/v1") else base_url + "/v1"
     if args.model:
         local["model"] = args.model
+    if args.smoke:
+        # Disable non-local backends so they don't initialize (the scripted
+        # model replaces local anyway, and CI may not have provider packages).
+        for name, backend in llm["backends"].items():
+            if name != "local":
+                backend["enabled"] = False
     return llm
 
 
