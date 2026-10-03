@@ -889,7 +889,7 @@ def _policy_saves(case: Case) -> bool:
     if case.policy == "on_iterate":
         return _has(shape, Iter)
     if case.policy == "on_map_item":
-        return _has(shape, Fan)
+        return _has(shape, Fan) or _has(shape, Pan)
     return True
 
 
@@ -912,7 +912,7 @@ def _halt_policy_matters(case: Case) -> bool:
     """
     if any(stop != "halt" for stop, _, _ in case.stops()) or case.policy == "none":
         return True
-    return case.policy == "on_map_item" and case.parallel
+    return case.policy == "on_map_item" and (case.parallel or _has(SHAPES[case.shape], Pan))
 
 
 def _before_matters(case: Case) -> bool:
