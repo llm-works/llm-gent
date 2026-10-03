@@ -215,64 +215,58 @@ class TestShellTool:
         assert result.success is False
         assert "Empty command" in result.error
 
-    def test_shell_metacharacters_blocked_with_allowlist(self):
-        """Shell metacharacters are blocked when allowlist is enabled to prevent bypass."""
-        tool = ShellTool(allowed_commands=["echo", "ls"])
+    @pytest.mark.parametrize(
+        "syntax",
+        [
+            "; touch {m}",
+            "&& touch {m}",
+            "|| touch {m}",
+            "| touch {m}",
+            "& touch {m}",
+            "$(touch {m})",
+            "`touch {m}`",
+            "> {m}",
+            ">> {m}",
+        ],
+    )
+    def test_shell_syntax_is_plain_arguments_with_allowlist(self, tmp_path, syntax):
+        """With an allowlist nothing runs in a shell: chaining, substitution and redirects run nothing."""
+        marker = tmp_path / "marker"
+        tool = ShellTool(allowed_commands=["echo"])
 
-        # Command chaining with semicolon
-        result = tool.execute(command="echo hello; rm -rf /")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        result = tool.execute(command=f"echo hello {syntax.format(m=marker)}")
 
-        # Command chaining with &&
-        result = tool.execute(command="echo hello && cat /etc/passwd")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        assert result.success is True
+        assert result.output.startswith("hello ")
+        assert not marker.exists()
 
-        # Pipe
-        result = tool.execute(command="ls | grep secret")
-        assert result.success is False
-        assert "metacharacters" in result.error
+    def test_variables_are_not_expanded_with_allowlist(self):
+        tool = ShellTool(allowed_commands=["echo"])
 
-        # Command substitution
-        result = tool.execute(command="echo $(whoami)")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        result = tool.execute(command="echo $HOME ${PATH}")
 
-        # Backticks
-        result = tool.execute(command="echo `id`")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        assert result.output.strip() == "$HOME ${PATH}"
 
-        # Variable expansion with braces ${VAR}
-        result = tool.execute(command="echo ${PATH}")
-        assert result.success is False
-        assert "metacharacters" in result.error
+    def test_quoted_arguments_with_allowlist(self, tmp_path):
+        (tmp_path / "a file.txt").write_text("needle here\n")
+        tool = ShellTool(working_dir=str(tmp_path), allowed_commands=["grep"])
 
-        # Variable reference $VAR
-        result = tool.execute(command="echo $HOME")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        result = tool.execute(command="grep -n 'needle here' 'a file.txt'")
 
-        # Output redirection
-        result = tool.execute(command="echo x > /tmp/test")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        assert result.success is True
+        assert result.output.strip() == "1:needle here"
 
-        # Append redirection
-        result = tool.execute(command="echo x >> /tmp/test")
-        assert result.success is False
-        assert "metacharacters" in result.error
+    def test_unbalanced_quotes_are_rejected_with_allowlist(self):
+        tool = ShellTool(allowed_commands=["echo"])
 
-        # Input redirection
-        result = tool.execute(command="cat < /etc/passwd")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        result = tool.execute(command="echo 'unterminated")
 
-        # Heredoc
-        result = tool.execute(command="cat << EOF")
         assert result.success is False
-        assert "metacharacters" in result.error
+        assert "Cannot parse command" in result.error
+
+    def test_allowlist_description_says_no_shell(self):
+        assert "without a shell" in ShellTool(allowed_commands=["ls"]).description
+        assert "without a shell" not in ShellTool().description
 
     def test_invalid_command_type(self):
         """Non-string command argument is rejected."""
