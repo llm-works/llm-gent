@@ -86,7 +86,7 @@ class Factory(BaseFactory):
 
         # Agent reads default_prompt from the top level of its config
         task_config = config.get("task", {})
-        config["default_prompt"] = task_config.get("description", "")
+        config["default_prompt"] = task_config.get("description", config.get("default_prompt", ""))
 
         # Convert to DotDict once for consistent usage
         dotdict_config = DotDict(config)
