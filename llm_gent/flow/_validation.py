@@ -118,6 +118,26 @@ def _check_node_name(name: str | None, method: str) -> None:
         raise ValueError(f"{method}(name=) must be a non-empty str; got {name!r}")
 
 
+def _map_bodies(body: Any, items: Any, lg: Logger) -> tuple[tuple[Flow, ...], tuple[str, ...]]:
+    """A map's bodies and member keys: one body over items, or a list of members.
+
+    Raises:
+        TypeError: ``items`` given with a list of members (they run on the
+            step's input).
+        ValueError: An empty list of members.
+    """
+    from ._node_id import member_keys
+
+    if not isinstance(body, list | tuple):
+        return (_materialize(body, lg, "map.body"),), ()
+    if items is not None:
+        raise TypeError(".map(items=) is not valid with a list of members: they run on its input")
+    if not body:
+        raise ValueError(".map() needs at least one member")
+    members = tuple(_materialize(m, lg, f"map.member[{i}]") for i, m in enumerate(body))
+    return members, member_keys(list(body))
+
+
 def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
     """Turn a :data:`Buildable` (Flow, verb, or ``lambda f: ...`` callback) into a Flow.
 

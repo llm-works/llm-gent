@@ -5,7 +5,7 @@
 
 # ci-run:
 
-"""Batch grader — .map(strict=False) + Panel majority-vote + .guard + .rescue.
+"""Batch grader — .map(strict=False) + a map over graders, majority-voted + .guard + .rescue.
 
 Shape:
 
@@ -22,9 +22,10 @@ Shape:
    short-circuits the item before ``grade_one`` runs, filling the slot
    with :class:`~llm_gent.flow.Skipped`. Empty answers are skipped.
 
-4. **grade_one** — a pure-Python verb (no LLM of its own) that fans out
-   a :class:`~llm_gent.flow.Panel` of three grader verbs, each bound to
-   a distinct :class:`Role` / model, and majority-votes on the score.
+4. **grade_one** — the per-submission body: a map over three grader
+   verbs (``.map([grade_strict, grade_lenient, grade_holistic])``), each
+   bound to a distinct :class:`Role` / model, run on the submission and
+   majority-voted on the score; then ``report_grade`` prints it.
    Each grader verb calls
    :meth:`llm_saia.SAIA.complete_structured(prompt, Grade)` — no string
    parsing.
@@ -44,8 +45,8 @@ The canned batch is designed to exercise every primitive on one run:
 * item 1 — valid answer, three graders agree on 4 → majority-vote 4.
 * item 2 — valid answer, graders split 4/5/4 → majority-vote 4.
 * item 3 — empty answer → guard returns falsy → :class:`Skipped`.
-* item 4 — valid answer, one grader raises → Panel's gather propagates
-  the exception → strict=False wraps it as :class:`Failure`.
+* item 4 — valid answer, one grader raises → the graders' map (strict)
+  raises → the outer map's strict=False wraps it as :class:`Failure`.
 
 ``assert_batch_quality`` then raises because ``n_failed >= 1`` →
 rescue lands the degraded summary.
@@ -74,15 +75,15 @@ from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFact
 from llm_gent.flow import (
     Context,
     Failure,
+    Flow,
     FlowFactory,
-    Panel,
     Role,
     Skipped,
     StateDataclass,
     TypeStateFactory,
+    majority,
     verb,
 )
-from llm_gent.flow.panel import majority
 
 
 # ── schemas + roles ─────────────────────────────────────────────────
@@ -240,7 +241,7 @@ def _score_majority(grades: list[Grade]) -> Grade:
     """Return the :class:`Grade` whose score wins a majority vote across graders.
 
     Ties break by first-occurrence order (mirrors
-    :func:`llm_gent.flow.panel.majority`). The returned rationale is the
+    :func:`llm_gent.flow.majority`). The returned rationale is the
     first grade whose score matches the winning value, so downstream
     consumers see a real, model-authored explanation rather than a
     synthesized composite.
@@ -252,25 +253,20 @@ def _score_majority(grades: list[Grade]) -> Grade:
     raise AssertionError("unreachable: winning score always came from the list")
 
 
-_grader_panel = Panel(
-    [grade_strict, grade_lenient, grade_holistic],
-    aggregate=_score_majority,
-)
-"""Three-model panel that majority-votes on the score for one submission."""
-
-
 # ── per-item body + guard ───────────────────────────────────────────
 
 
 @verb(role=None)
-async def grade_one(ctx: Context[BatchGradingState], submission: Submission) -> Grade:
-    """Fan out the grader panel for a single submission and majority-vote."""
-    grade = await _grader_panel.run(ctx, submission)
-    # Panel.run is typed as ``-> Any`` because the aggregate is caller-defined;
-    # narrow to Grade here so downstream consumers see the concrete type.
-    assert isinstance(grade, Grade)
-    print(f"[grade_one/{submission.student_id}] score={grade.score} rationale={grade.rationale!r}")
+async def report_grade(ctx: Context[BatchGradingState], grade: Grade) -> Grade:
+    """Print the voted grade of one submission and pass it on."""
+    print(f"[grade] score={grade.score} rationale={grade.rationale!r}")
     return grade
+
+
+def grade_one(body: Flow) -> None:
+    """Per-submission body: the three graders on the submission, majority-voted, then reported."""
+    graders = [grade_strict, grade_lenient, grade_holistic]
+    body.map(graders, aggregate=_score_majority).then(report_grade)
 
 
 def is_well_formed(item: Submission, _ctx: Context[BatchGradingState]) -> bool:
@@ -376,8 +372,8 @@ def _demo_scripts() -> dict[str, list[tuple[type, Any]]]:
     consumes no responses.
 
     Split votes on ``s2``: strict says 5, lenient and holistic say 4 →
-    majority 4. On ``s4`` the strict grader raises so the whole panel
-    (asyncio.gather) fails and the item is wrapped as :class:`Failure`.
+    majority 4. On ``s4`` the strict grader raises so the graders' map
+    (strict) fails and the item is wrapped as :class:`Failure`.
     """
     return {
         "strict-grader": [
@@ -442,15 +438,6 @@ async def main() -> int:
 
     submissions = _demo_submissions()
     flow = ff.create("batch-grade", state=BatchGradingState(submissions=submissions))
-
-    # Panel dispatches inner verbs via ctx.flow.dispatch(name), which
-    # requires them to be registered on the flow that carries the
-    # runtime. The map/aggregate verbs are wired positionally by
-    # .call() / .map() and do not need explicit registration.
-    flow.register(grade_strict)
-    flow.register(grade_lenient)
-    flow.register(grade_holistic)
-
     (
         flow.call(load_submissions)
         .map(grade_one, aggregate=summarize, strict=False)

@@ -28,6 +28,6 @@ Modules:
   ``.branch`` + ``.iterate``.
 - :mod:`subflow_research` — multi-topic research agent:
   ``.map(state=, merge=)`` + ``state.root()`` + synthesizer.
-- :mod:`batch_grade` — batch grader: ``.map(strict=False)`` + Panel
+- :mod:`batch_grade` — batch grader: ``.map(strict=False)`` + a map over graders
   majority vote + ``.guard`` + ``.rescue``.
 """

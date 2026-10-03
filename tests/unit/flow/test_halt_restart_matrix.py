@@ -73,7 +73,6 @@ from llm_gent.flow import (
     History,
     Interrupted,
     Loop,
-    Panel,
     Role,
     verb,
 )
@@ -143,11 +142,11 @@ def _until(result: int) -> bool:
     return result % 4 == 0
 
 
-FanMode = Literal["strict", "lenient", "scoped"]
+MapMode = Literal["strict", "lenient", "scoped"]
 
 
 @dataclass(frozen=True)
-class Fan:
+class Map:
     """``.map(body)`` over ``[10 * x + i for i in range(width)]``, summed.
 
     ``lenient``: ``strict=False`` with a guard that skips the last item.
@@ -158,7 +157,7 @@ class Fan:
 
     body: Node
     width: int
-    mode: FanMode = "strict"
+    mode: MapMode = "strict"
 
 
 @dataclass(frozen=True)
@@ -177,12 +176,8 @@ class Scope:
 
 
 @dataclass(frozen=True)
-class Pan:
-    """A step whose verb runs a :class:`Panel` of its member leaves, each on the step's input, summed.
-
-    The members run concurrently, in the run's snapshots as a map at
-    ``<step>/panel/0``.
-    """
+class MapMembers:
+    """``.map([leaf, ...])``: each member leaf runs once on the step's input, summed."""
 
     members: tuple[Leaf, ...]
 
@@ -212,7 +207,7 @@ class Cut:
     to: bool = False
 
 
-Node = Leaf | Seq | Iter | Fan | Branch | Scope | Pan | Ckpt | Cut
+Node = Leaf | Seq | Iter | Map | Branch | Scope | MapMembers | Ckpt | Cut
 
 _L = Leaf("", 0)
 _T = Turn("", 0)
@@ -227,12 +222,12 @@ def _label(node: Node, counter: list[int], prefix: str = "l") -> Node:
         return Seq(tuple(_label(child, counter, prefix) for child in node.children))
     if isinstance(node, Iter):
         return Iter(_label(node.body, counter, prefix), node.n, node.until)
-    if isinstance(node, Fan):
-        return Fan(_label(node.body, counter, prefix), node.width, node.mode)
+    if isinstance(node, Map):
+        return Map(_label(node.body, counter, prefix), node.width, node.mode)
     if isinstance(node, Branch):
         return Branch(_label(node.then, counter, prefix), _label(node.else_, counter, prefix))
-    if isinstance(node, Pan):
-        return Pan(tuple(type(m)(*_leaf_label(counter, prefix)) for m in node.members))
+    if isinstance(node, MapMembers):
+        return MapMembers(tuple(type(m)(*_leaf_label(counter, prefix)) for m in node.members))
     if isinstance(node, Ckpt):
         return Ckpt(_label(node.body, counter, "c"))
     if isinstance(node, Cut):
@@ -248,53 +243,53 @@ def _leaf_label(counter: list[int], prefix: str) -> tuple[str, int]:
 
 _INNER: dict[str, Node] = {
     "iter": Iter(_L, 2),
-    "fan": Fan(_L, 2),
+    "map": Map(_L, 2),
     "sub": Seq((_L, _L)),
     "branch": Branch(_L, _L),
     "scope": Scope(Seq((_L, _L))),
     "iter(sub)": Iter(Seq((_L, _L)), 2),
-    "iter(fan)": Iter(Fan(_L, 2), 2),
+    "iter(map)": Iter(Map(_L, 2), 2),
     "iter(branch)": Iter(Branch(_L, _L), 2),
     "iter(scope)": Iter(Scope(_L), 2),
-    "fan(iter)": Fan(Iter(_L, 2), 2),
-    "fan(scope)": Fan(Scope(_L), 2),
-    "scope(fan)": Scope(Fan(_L, 2)),
-    "sub(fan,iter)": Seq((Fan(_L, 2), Iter(_L, 2))),
-    "iter(fan(sub))": Iter(Fan(Seq((_L, _L)), 2), 2),
-    "fan(iter(fan))": Fan(Iter(Fan(_L, 2), 2), 2),
+    "map(iter)": Map(Iter(_L, 2), 2),
+    "map(scope)": Map(Scope(_L), 2),
+    "scope(map)": Scope(Map(_L, 2)),
+    "sub(map,iter)": Seq((Map(_L, 2), Iter(_L, 2))),
+    "iter(map(sub))": Iter(Map(Seq((_L, _L)), 2), 2),
+    "map(iter(map))": Map(Iter(Map(_L, 2), 2), 2),
     "sub(iter(branch))": Seq((Iter(Branch(_L, _L), 2), _L)),
     "turn": _T,
     "sub(turn,turn)": Seq((_T, _T)),
     "iter(turn)": Iter(_T, 2),
-    "fan(turn)": Fan(_T, 2),
+    "map(turn)": Map(_T, 2),
     "branch(turn)": Branch(_T, _T),
     "scope(turn)": Scope(Seq((_T, _L))),
-    "iter(fan(turn))": Iter(Fan(_T, 2), 2),
+    "iter(map(turn))": Iter(Map(_T, 2), 2),
     "until": Iter(_L, 4, until=True),
-    "until(fan)": Iter(Fan(_L, 2), 4, until=True),
+    "until(map)": Iter(Map(_L, 2), 4, until=True),
     "until(sub)": Iter(Seq((_L, _L)), 4, until=True),
-    "lenient": Fan(_L, 3, "lenient"),
-    "lenient(iter)": Fan(Iter(_L, 2), 3, "lenient"),
-    "lenient(turn)": Fan(_T, 3, "lenient"),
-    "scoped": Fan(_L, 2, "scoped"),
-    "scoped(sub)": Fan(Seq((_L, _L)), 2, "scoped"),
-    "scoped(scoped)": Fan(Fan(_L, 2, "scoped"), 2, "scoped"),
-    "iter(scoped)": Iter(Fan(_L, 2, "scoped"), 2),
-    "scope(scoped)": Scope(Fan(_L, 2, "scoped")),
-    "scoped(turn)": Fan(_T, 2, "scoped"),
+    "lenient": Map(_L, 3, "lenient"),
+    "lenient(iter)": Map(Iter(_L, 2), 3, "lenient"),
+    "lenient(turn)": Map(_T, 3, "lenient"),
+    "scoped": Map(_L, 2, "scoped"),
+    "scoped(sub)": Map(Seq((_L, _L)), 2, "scoped"),
+    "scoped(scoped)": Map(Map(_L, 2, "scoped"), 2, "scoped"),
+    "iter(scoped)": Iter(Map(_L, 2, "scoped"), 2),
+    "scope(scoped)": Scope(Map(_L, 2, "scoped")),
+    "scoped(turn)": Map(_T, 2, "scoped"),
     "bare": _B,
     "iter(bare)": Iter(_B, 2),
-    "fan(bare)": Fan(_B, 2),
-    "panel": Pan((_L, _L)),
-    "panel(turn)": Pan((_T, _L)),
-    "panel(bare)": Pan((_B, _L)),
-    "iter(panel)": Iter(Pan((_L, _L)), 2),
-    "fan(panel)": Fan(Pan((_L, _T)), 2),
-    "sub(panel,panel)": Seq((Pan((_L, _L)), Pan((_T, _L)))),
+    "map(bare)": Map(_B, 2),
+    "members": MapMembers((_L, _L)),
+    "members(turn)": MapMembers((_T, _L)),
+    "members(bare)": MapMembers((_B, _L)),
+    "iter(members)": Iter(MapMembers((_L, _L)), 2),
+    "map(members)": Map(MapMembers((_L, _T)), 2),
+    "sub(members,members)": Seq((MapMembers((_L, _L)), MapMembers((_T, _L)))),
     "ckpt": Ckpt(Seq((_L, _L))),
     "ckpt(iter)": Ckpt(Iter(_L, 2)),
-    "fan(ckpt)": Fan(Ckpt(_L), 2),
-    "iter(ckpt(fan))": Iter(Ckpt(Fan(_L, 2)), 2),
+    "map(ckpt)": Map(Ckpt(_L), 2),
+    "iter(ckpt(map))": Iter(Ckpt(Map(_L, 2)), 2),
     "ckpt(turn)": Ckpt(Seq((_T, _L))),
     "sub(ckpt,leaf)": Seq((Ckpt(_L), _L)),
 }
@@ -305,19 +300,24 @@ for _key, _inner in _INNER.items():
     SHAPES[f"{_key}>leaf"] = Seq((_label(_inner, [0]), Leaf("l99", 99)))
 
 
-def _has(node: Node, kind: type, mode: FanMode | None = None) -> bool:
-    """True when ``node`` contains a node of ``kind`` (a ``Fan`` in ``mode``, when given)."""
+def _has(node: Node, kind: type, mode: MapMode | None = None) -> bool:
+    """True when ``node`` contains a node of ``kind`` (a ``Map`` in ``mode``, when given)."""
     if isinstance(node, kind) and (mode is None or getattr(node, "mode", None) == mode):
         return True
     if isinstance(node, Seq | Cut):
         return any(_has(child, kind, mode) for child in node.children)
     if isinstance(node, Branch):
         return _has(node.then, kind, mode) or _has(node.else_, kind, mode)
-    if isinstance(node, Iter | Fan | Scope | Ckpt):
+    if isinstance(node, Iter | Map | Scope | Ckpt):
         return _has(node.body, kind, mode)
-    if isinstance(node, Pan):
+    if isinstance(node, MapMembers):
         return any(_has(m, kind, mode) for m in node.members)
     return False
+
+
+def _has_map(node: Node) -> bool:
+    """True when ``node`` contains a map: over items or over members."""
+    return _has(node, Map) or _has(node, MapMembers)
 
 
 def _saving_keys(shape: Seq) -> list[str]:
@@ -327,13 +327,13 @@ def _saving_keys(shape: Seq) -> list[str]:
 
 
 def _ordered(shape: Node, parallel: bool) -> bool:
-    """True when leaves run in the model's order: no parallel map and no Panel (members run at once)."""
-    return not parallel and not _has(shape, Pan)
+    """True when leaves run in the model's order: no parallel map."""
+    return not parallel
 
 
 def _has_scope(node: Node) -> bool:
     """True when ``node`` runs anything under a ``state=`` scope: a ``Scope`` or a scoped map."""
-    return _has(node, Scope) or _has(node, Fan, "scoped")
+    return _has(node, Scope) or _has(node, Map, "scoped")
 
 
 # --- Reference model --------------------------------------------------------
@@ -359,16 +359,16 @@ def _model_node(node: Node, x: int, out: dict[str, int], merges: list[str]) -> i
             if node.until and _until(x):
                 break
         return x
-    if isinstance(node, Fan):
-        return _model_fan(node, x, out, merges)
+    if isinstance(node, Map):
+        return _model_map(node, x, out, merges)
     if isinstance(node, Branch):
         return _model_node(node.then if x % 2 == 0 else node.else_, x, out, merges)
-    if isinstance(node, Pan):
+    if isinstance(node, MapMembers):
         return sum(_model_node(m, x, out, merges) for m in node.members)
     return _model_node(node.body, x, out, merges)
 
 
-def _model_fan(node: Fan, x: int, out: dict[str, int], merges: list[str]) -> int:
+def _model_map(node: Map, x: int, out: dict[str, int], merges: list[str]) -> int:
     """A map: the lenient guard skips the last item; a scoped item merges its keys."""
     width = node.width - 1 if node.mode == "lenient" else node.width
     total = 0
@@ -629,24 +629,18 @@ def _turn_verb(leaf: Turn, probe: Probe) -> Any:
     return verb(body)
 
 
-def _panel_verb(node: Pan, probe: Probe) -> Any:
-    """Return the verb for a :class:`Pan` step: a Panel of its members' verbs, summed."""
+def _add_members(node: MapMembers, flow: Flow, probe: Probe, parallel: bool) -> Flow:
+    """Append a ``.map`` over ``node``'s members, each on the step's input, summed."""
     members = [
         _turn_verb(m, probe) if isinstance(m, Turn) else _leaf_verb(m, probe) for m in node.members
     ]
-    panel = Panel(members, aggregate=sum)
-
-    async def body(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
-        return await panel.run(ctx, x)
-
-    body.__name__ = body.__qualname__ = "panel_" + "_".join(m.name for m in node.members)
-    return verb(body)
+    return flow.map(members, aggregate=sum, max_concurrency=None if parallel else 1)
 
 
 def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     """Append ``node`` to ``flow`` as one chain step."""
-    if isinstance(node, Pan):
-        return flow.call(_panel_verb(node, probe))
+    if isinstance(node, MapMembers):
+        return _add_members(node, flow, probe, parallel)
     if isinstance(node, Cut):
         return flow.call(_cut_flow(node, probe, parallel))
     if isinstance(node, Ckpt):
@@ -675,7 +669,7 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
             then=lambda b: _add(node.then, b, probe, parallel),
             else_=lambda b: _add(node.else_, b, probe, parallel),
         )
-    return _add_fan(node, flow, probe, parallel)
+    return _add_map(node, flow, probe, parallel)
 
 
 def _cut_flow(node: Cut, probe: Probe, parallel: bool) -> Flow:
@@ -703,7 +697,7 @@ def _merge_item(parent: dict[str, Any], child: dict[str, Any]) -> None:
     parent["merges"].extend(sorted(child["done"]))
 
 
-def _add_fan(node: Fan, flow: Flow, probe: Probe, parallel: bool) -> Flow:
+def _add_map(node: Map, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     """Append a ``.map`` step for ``node`` in its mode."""
     width = node.width
     scoped: dict[str, Any] = (
@@ -810,7 +804,7 @@ class Case:
 
 def _stop_kinds(shape: Seq) -> tuple[Stop, ...]:
     """Halt, crash, exception — without exception where a ``strict=False`` map absorbs it."""
-    if _has(shape, Fan, "lenient"):
+    if _has(shape, Map, "lenient"):
         return ("halt", "crash")
     return ("halt", "crash", "exception")
 
@@ -819,7 +813,7 @@ def _memory_cases() -> Iterator[Case]:
     """Every shape × stop point × stop × policy × map mode, in memory."""
     for name, shape in SHAPES.items():
         leaves = len(model(shape)[1])
-        for parallel in (False, True) if _has(shape, Fan) else (False,):
+        for parallel in (False, True) if _has_map(shape) else (False,):
             for policy in ("none", "on_iterate", "on_map_item", "leaf"):
                 for stop in _stop_kinds(shape):
                     for stop_at in range(1, leaves + 1):
@@ -835,7 +829,7 @@ def _cycle_cases() -> Iterator[Case]:
     """Two stops: a halt or crash at every leaf, then another while the resume runs."""
     for name, shape in SHAPES.items():
         leaves = len(model(shape)[1])
-        for parallel in (False, True) if _has(shape, Fan) else (False,):
+        for parallel in (False, True) if _has_map(shape) else (False,):
             for policy in ("none", "leaf"):
                 for stop in ("halt", "crash"):
                     for stop_at in range(1, leaves + 1):
@@ -889,7 +883,7 @@ def _policy_saves(case: Case) -> bool:
     if case.policy == "on_iterate":
         return _has(shape, Iter)
     if case.policy == "on_map_item":
-        return _has(shape, Fan) or _has(shape, Pan)
+        return _has_map(shape)
     return True
 
 
@@ -912,19 +906,18 @@ def _halt_policy_matters(case: Case) -> bool:
     """
     if any(stop != "halt" for stop, _, _ in case.stops()) or case.policy == "none":
         return True
-    return case.policy == "on_map_item" and (case.parallel or _has(SHAPES[case.shape], Pan))
+    return case.policy == "on_map_item" and case.parallel
 
 
 def _before_matters(case: Case) -> bool:
-    """Under ``leaf`` without a map or Panel, a crash or exception before leaf k is one after k-1.
+    """Under ``leaf`` without a map, a crash or exception before leaf k is one after k-1.
 
-    Nothing saves between two leaves there. With a map or Panel it does
-    not hold: the other items run on after one stops, and save.
+    Nothing saves between two leaves there. With a map it does not hold:
+    the other items run on after one stops, and save.
     """
     if case.stop == "halt" or case.mode != "before" or case.policy != "leaf":
         return True
-    shape = SHAPES[case.shape]
-    return case.stop_at == 1 or _has(shape, Fan) or _has(shape, Pan)
+    return case.stop_at == 1 or _has_map(SHAPES[case.shape])
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -1163,12 +1156,12 @@ _CUT_INNER: dict[str, Node] = {
     "cut(seq)": Cut((_L, _L, _L)),
     "cut(seq,to)": Cut((_L, _L, _L), to=True),
     "cut(iter)": Cut((Iter(_L, 3),)),
-    "cut(fan)": Cut((Fan(_L, 3),)),
+    "cut(map)": Cut((Map(_L, 3),)),
     "cut(turn,to)": Cut((_T, _L, _L), to=True),
     "cut(iter(sub),to)": Cut((Iter(Seq((_L, _L)), 2), _L), to=True),
     "iter(cut(seq))": Iter(Cut((_L, _L)), 2),
-    "fan(cut(seq,to))": Fan(Cut((_L, _L, _L), to=True), 2),
-    "campaign": Cut((Iter(Cut((_L, Fan(Cut((_L, _T, _L), to=True), 2), _L)), 2),)),
+    "map(cut(seq,to))": Map(Cut((_L, _L, _L), to=True), 2),
+    "campaign": Cut((Iter(Cut((_L, Map(Cut((_L, _T, _L), to=True), 2), _L)), 2),)),
 }
 
 CUT_SHAPES: dict[str, Seq] = {
@@ -1185,7 +1178,7 @@ def _plain_leaf_names(node: Node) -> set[str]:
         return {node.name}
     if isinstance(node, Seq | Cut):
         return set().union(*(_plain_leaf_names(child) for child in node.children))
-    if isinstance(node, Iter | Fan):
+    if isinstance(node, Iter | Map):
         return _plain_leaf_names(node.body)
     return set()
 
@@ -1211,7 +1204,7 @@ def _cut_params() -> Iterator[Any]:
         keys = list(model(shape)[1])
         plain = _plain_leaf_names(shape)
         cut_keys = [k for k in keys if k.split(":")[0] in plain]
-        for parallel in (False, True) if _has(shape, Fan) else (False,):
+        for parallel in (False, True) if _has_map(shape) else (False,):
             for cut_key in cut_keys:
                 for stop_at in range(1, len(keys) + 1):
                     for mode in ("before", "after"):

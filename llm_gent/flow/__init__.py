@@ -53,18 +53,20 @@ Public surface:
 - :data:`UNSET` — "no value here" sentinel (distinct from ``None``), used by
   :meth:`Flow.run`'s ``state=`` default and by rescue callbacks'
   ``pending_input`` positional
-- :class:`Panel` — fan-out N verbs in parallel + aggregate their results
 - Archetype decorators: :func:`planner`, :func:`extractor`, :func:`grader`,
   :func:`synthesizer` — semantic tags for the standard agent shape
 
-Aggregation helpers exposed via :mod:`llm_gent.flow.panel`: ``majority``,
-``unanimous``, ``mean``, ``weighted``.
+Aggregators for ``Flow.map(aggregate=...)``, mostly an ensemble's votes
+(``.map([judge_a, judge_b], aggregate=majority)``), from
+:mod:`llm_gent.flow.aggregate`: :func:`majority`, :func:`unanimous`,
+:func:`mean`, :func:`weighted`.
 
 State (facts, KG, RAG, conversation) is not provided here — consumers
 compose those from ``llm_kelt`` (default) or their own implementations, and
 mount them via the existing trait system.
 """
 
+from .aggregate import majority, mean, unanimous, weighted
 from .archetypes import extractor, grader, planner, synthesizer
 from .checkpoint import CheckpointPolicy, CheckpointStore, ConcurrentWriteError, ResumeMode
 from .context import Context
@@ -74,7 +76,6 @@ from .gc import collect_unreachable
 from .history import History, HistoryCorrupt
 from .loop import Loop, LoopFactory
 from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, Skipped, Unset
-from .panel import Panel
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
 from .structure import FlowStructure, StepPath, StructureDiff, path_label
@@ -98,7 +99,6 @@ __all__ = [
     "Interrupted",
     "Loop",
     "LoopFactory",
-    "Panel",
     "RestoredError",
     "ResumeMode",
     "Role",
@@ -115,8 +115,12 @@ __all__ = [
     "collect_unreachable",
     "extractor",
     "grader",
+    "majority",
+    "mean",
     "path_label",
     "planner",
     "synthesizer",
+    "unanimous",
     "verb",
+    "weighted",
 ]

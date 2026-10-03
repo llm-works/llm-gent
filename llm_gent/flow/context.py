@@ -12,8 +12,8 @@ as the first argument to every verb. It exposes:
 - ``state`` — the enclosing scope's :class:`State` wrapper (user-owned payload
   reached via ``ctx.state.data`` or the shorter alias ``ctx.data``; run-wide
   payload via ``ctx.state.root().data``)
-- ``flow`` — back-reference to the dispatching flow (enables inner verb calls
-  from composition helpers like :class:`Panel`)
+- ``flow`` — back-reference to the dispatching flow (enables a verb to
+  dispatch sibling verbs)
 - ``lg`` — the dispatching flow's :class:`~appinfra.log.Logger`, so verbs
   written as module-level ``async def`` (rather than :class:`Verb` classes
   that capture ``lg`` at ``__init__``) can trace without threading it
@@ -85,8 +85,8 @@ class Context(Generic[T]):
     flow: Any
     """Back-reference to the :class:`Flow` that built this context.
 
-    Composition helpers (:class:`Panel`, etc.) use this to dispatch sibling
-    verbs with their own role-bound saia. Typed as ``Any`` to avoid a circular
+    A verb uses this to dispatch sibling verbs with their own role-bound
+    saia. Typed as ``Any`` to avoid a circular
     import — ``.dispatch(name, *args, **kwargs)`` is the only method used.
     Also the resolver for :attr:`saia`.
     """
@@ -134,7 +134,7 @@ class Context(Generic[T]):
     correlation IDs, request-scoped audit hooks, per-run callbacks).
     Supplied at :meth:`Flow.run` via the ``extra=`` kwarg; propagates
     unchanged to every dispatch inside the run — subflows, iterate
-    bodies, map items, and Panel arms all see the same dict.
+    bodies and map items all see the same dict.
 
     Framework does not inspect the contents, does not type-check the
     values, and never persists them: ``extra`` never enters a
