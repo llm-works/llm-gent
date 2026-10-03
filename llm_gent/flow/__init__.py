@@ -49,6 +49,7 @@ Public surface:
   ``Flow.guard`` on a ``Flow.map`` node
 - :class:`Interrupted` — raised by a step that stops because of the halt
   before finishing its work, so it runs again on resume
+- :data:`HALTED` — what ``Flow.run`` returns when the halt stopped the run
 - :data:`UNSET` — "no value here" sentinel (distinct from ``None``), used by
   :meth:`Flow.run`'s ``state=`` default and by rescue callbacks'
   ``pending_input`` positional
@@ -72,7 +73,7 @@ from .flow import Flow
 from .gc import collect_unreachable
 from .history import History, HistoryCorrupt
 from .loop import Loop, LoopFactory
-from .nodes import UNSET, Failure, Interrupted, RestoredError, Skipped, Unset
+from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, Skipped, Unset
 from .panel import Panel
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
@@ -81,6 +82,7 @@ from .verb import verb
 
 
 __all__ = [
+    "HALTED",
     "UNSET",
     "CheckpointPolicy",
     "CheckpointStore",
@@ -90,6 +92,7 @@ __all__ = [
     "Flow",
     "FlowFactory",
     "FlowStructure",
+    "Halted",
     "History",
     "HistoryCorrupt",
     "Interrupted",

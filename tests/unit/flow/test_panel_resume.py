@@ -17,7 +17,17 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, Interrupted, Loop, Panel, Role, verb
+from llm_gent.flow import (
+    HALTED,
+    Context,
+    FlowFactory,
+    History,
+    Interrupted,
+    Loop,
+    Panel,
+    Role,
+    verb,
+)
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from .conftest import make_test_logger
@@ -109,7 +119,7 @@ class TestPanelResume:
         store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
         halt = asyncio.Event()
         ran: list[str] = []
-        assert await _flow(store, halt, _SAIA(halt), ran).run("x") is None
+        assert await _flow(store, halt, _SAIA(halt), ran).run("x") is HALTED
         assert ran == ["quick", "talk"]
 
         ran.clear()
@@ -162,7 +172,7 @@ class TestPanelResume:
             )
             return (f.with_halt(run_halt) if run_halt is not None else f).call(step)
 
-        assert await flow(halt).run() is None
+        assert await flow(halt).run() is HALTED
         assert ran == ["b:first", "c:first", "a:first", "b:second"]
 
         ran.clear()

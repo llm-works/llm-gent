@@ -102,6 +102,7 @@ from .checkpoint import (
 from .context import Context
 from .factory import SAIAFactory
 from .nodes import (
+    HALTED,
     UNSET,
     AfterHook,
     AggregateFn,
@@ -1092,12 +1093,13 @@ class Flow:
                 to the first node.
             **kwargs: Keyword inputs to the first node.
 
-        Returns the last step's result, or ``None`` when the halt stopped
-        the run before its end: a step that stops because of the halt either
-        completes or raises :class:`Interrupted`, and the run then writes
-        its halt checkpoint and returns. The halted run's state is in that
-        checkpoint; ``resume="latest"`` continues from it. A halt set during
-        the last step, which completed, does not stop the run: it finishes.
+        Returns the last step's result, or :data:`HALTED` when the halt
+        stopped the run before its end: a step that stops because of the
+        halt either completes or raises :class:`Interrupted`, and the run
+        then writes its halt checkpoint and returns. The halted run's state
+        is in that checkpoint; ``resume="latest"`` continues from it. A halt
+        set during the last step, which completed, does not stop the run: it
+        finishes and returns that step's result (``None`` included).
 
         With a checkpointer wired, a fully successful run under
         ``retention="retain"`` commits its final state (tagged
@@ -1138,7 +1140,7 @@ class Flow:
         except Interrupted:
             # Everything has stopped, each part registered where it stopped.
             await commit_halt(self)
-            return None
+            return HALTED
         await apply_clean_exit_retention(self, active_state)
         return result
 

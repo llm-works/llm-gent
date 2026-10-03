@@ -10,10 +10,11 @@ symbols are routed through this module as well: :class:`Failure`, the
 sentinel returned in place of a failed item by :meth:`Flow.map` when
 ``strict=False`` (with :class:`RestoredError` for a failure restored from
 a checkpoint); :class:`Skipped`, the sentinel returned in place of an
-item whose :meth:`Flow.guard` predicate returned falsy; and :data:`UNSET`
+item whose :meth:`Flow.guard` predicate returned falsy; :data:`UNSET`
 (with its :class:`Unset` type), the "no value here" sentinel used by
 :meth:`Flow.run`'s ``state=`` default and by rescue policies'
-``pending_input`` positional.
+``pending_input`` positional; and :data:`HALTED` (with its :class:`Halted`
+type), what :meth:`Flow.run` returns when the halt stopped the run.
 
 Depends only on :mod:`.context` and :mod:`.state`; :class:`Flow` is
 referenced solely inside string-form annotations (via
@@ -76,6 +77,32 @@ Surfaces in two places on the public API:
 - :type:`RescuePolicy` — the ``pending_input`` positional is :data:`UNSET`
   when the failing node is the chain's first node and :meth:`Flow.run` was
   called with no positional argument.
+"""
+
+
+class Halted:
+    """Singleton sentinel type used by :data:`HALTED`.
+
+    Compare by identity: ``result is HALTED``.
+    """
+
+    _instance: Halted | None = None
+
+    def __new__(cls) -> Halted:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "HALTED"
+
+
+HALTED: Final[Halted] = Halted()
+"""What :meth:`Flow.run` returns when the halt stopped the run before its end.
+
+The run wrote its halt checkpoint; ``resume="latest"`` continues it. A run
+whose last step completed returns that step's result — ``None`` included —
+also when the halt was set during that step: it finished.
 """
 
 

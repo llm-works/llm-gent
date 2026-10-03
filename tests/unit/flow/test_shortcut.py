@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import (
+    HALTED,
     Context,
     Failure,
     FlowFactory,
@@ -501,7 +502,8 @@ class TestPauseDuringShortcut:
         store = InMemoryCheckpointStore()
         ran: list[str] = []
         assert (
-            await self._flow(store, asyncio.Event(), asyncio.Event(), ran, arm=True).run("") is None
+            await self._flow(store, asyncio.Event(), asyncio.Event(), ran, arm=True).run("")
+            is HALTED
         )
         assert ran == ["a", "a"]
         head = await History(store, "shortcut-pause").head()
@@ -541,7 +543,7 @@ class TestPauseDuringShortcut:
             )
 
         ran: list[str] = []
-        assert await build(asyncio.Event(), asyncio.Event(), ran, arm=True).run("") is None
+        assert await build(asyncio.Event(), asyncio.Event(), ran, arm=True).run("") is HALTED
         head = await History(store, "cut-before").head()
         assert head is not None
         assert (await History(store, "cut-before").snapshot(head)).cursors[""][SIGNALS] == ["cut"]
@@ -723,7 +725,7 @@ class TestSubtreeEndedEarly:
                 .then(last)
             )
 
-        assert await build(asyncio.Event(), arm=True).run(0) is None
+        assert await build(asyncio.Event(), arm=True).run(0) is HALTED
         assert ran == ["step:0", "step:1", "last"]
         history = History(store, "cut-sub")
         head = await history.head()

@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from llm_gent.core.cost import CostTracker, PricingConfig
-from llm_gent.flow import Context, FlowFactory, History, Interrupted, Loop, Role, verb
+from llm_gent.flow import HALTED, Context, FlowFactory, History, Interrupted, Loop, Role, verb
 from llm_gent.flow.state.snapshot import TRACKER
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
@@ -87,7 +87,7 @@ class TestAppTrackerAcrossResume:
 
     async def test_the_running_cost_comes_back_after_a_halt(self) -> None:
         store = InMemoryCheckpointStore()
-        assert await self._flow(store, _tracker(), asyncio.Event(), []).run(1) is None
+        assert await self._flow(store, _tracker(), asyncio.Event(), []).run(1) is HALTED
 
         fresh = _tracker(10.0)
         seen: list[float] = []
@@ -135,7 +135,7 @@ class TestAppTrackerAcrossResume:
             .call(a)
             .then(b)
         )
-        assert await flow.run(1) is None
+        assert await flow.run(1) is HALTED
         assert seen == []
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "halted"
@@ -204,7 +204,7 @@ class TestAppTrackerAcrossResume:
                 .then(inner)
             )
 
-        assert await build(_tracker(), arm=True).run(1) is None
+        assert await build(_tracker(), arm=True).run(1) is HALTED
         snapshot = await History(store, NAME).snapshot(await History(store, NAME).head())
         assert [p for p, c in snapshot.cursors.items() if TRACKER in c] == [""]
 
@@ -311,7 +311,7 @@ class TestItemBudgetsAcrossHalt:
 
         root1 = _tracker()
         flow1 = _item_flow(root1, asyncio.Event(), costs, {}, arm=True)
-        assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is None
+        assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is HALTED
         assert root1.spent == pytest.approx(0.7)
 
         root2 = _tracker()
@@ -331,7 +331,7 @@ class TestItemBudgetsAcrossHalt:
         store = InMemoryCheckpointStore()
         costs = {0: [0.9, 0.1], 1: [0.1, 0.1]}
         flow1 = _item_flow(_tracker(), asyncio.Event(), costs, {}, arm=True)
-        assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is None
+        assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is HALTED
 
         root2 = _tracker()
         before: dict[int, float] = {}
@@ -495,7 +495,7 @@ class TestPassAndCallBudgets:
         inner = ff.create().call(spend).then(check)
         sub = ff.create().with_budget(1.0).call(inner)
         flow = ff.create(state={}).with_cost_tracker(_tracker()).call(sub)
-        assert await flow.run(0.5) is None
+        assert await flow.run(0.5) is HALTED
         assert ran == []
 
     async def test_map_total_through_a_budgeted_enclosing_flow(self) -> None:

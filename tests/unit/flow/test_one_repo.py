@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, Interrupted, verb
+from llm_gent.flow import HALTED, Context, FlowFactory, History, Interrupted, verb
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
 from .conftest import make_test_logger
@@ -92,7 +92,7 @@ class TestNestedCheckpointer:
         store = InMemoryCheckpointStore()
         ran: list[str] = []
         halt = asyncio.Event()
-        assert await _nested(store, ran, crash=False, halt=halt).run(1) is None
+        assert await _nested(store, ran, crash=False, halt=halt).run(1) is HALTED
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "halted"
 

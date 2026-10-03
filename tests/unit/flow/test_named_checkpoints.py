@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, verb
+from llm_gent.flow import HALTED, Context, FlowFactory, History, verb
 from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
@@ -271,7 +271,7 @@ class TestResumeByHash:
         calls: list[str] = []
         hashes: list[str | None] = []
         first = _hash_flow(store, calls, hashes, take=True, halt=asyncio.Event())
-        assert await first.run(1) is None
+        assert await first.run(1) is HALTED
         h1 = hashes[0]
         assert h1 is not None
         halted = await history.head()

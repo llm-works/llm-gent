@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import (
+    HALTED,
     Context,
     Failure,
     FlowFactory,
@@ -107,7 +108,7 @@ class TestMapCursor:
         self, store: JsonFileCheckpointStore
     ) -> None:
         first = _Counts()
-        assert await _map_flow(store, first, asyncio.Event(), halt_at=2).run() is None
+        assert await _map_flow(store, first, asyncio.Event(), halt_at=2).run() is HALTED
         assert (first.bodies, first.merges, first.completed) == ([1, 2], [10, 20], [1, 2])
 
         resumed = _Counts()
@@ -243,7 +244,7 @@ class TestWaveShape:
                 .guard(lambda item, _ctx: item != 5)
             )
 
-        assert await build(asyncio.Event(), halt_on=1).run() is None
+        assert await build(asyncio.Event(), halt_on=1).run() is HALTED
         first = sorted(ran)
         ran.clear()
 
@@ -320,7 +321,7 @@ class TestFailedAndSkippedItemsStayDone:
         self, store: JsonFileCheckpointStore
     ) -> None:
         first = _Seen()
-        assert await _mixed_flow(store, first, asyncio.Event(), halt_at=3).run() is None
+        assert await _mixed_flow(store, first, asyncio.Event(), halt_at=3).run() is HALTED
         assert (first.bodies, first.guards) == ([1, 3], [1, 2, 3])
 
         resumed = _Seen()
@@ -431,7 +432,7 @@ class TestFailedAndSkippedItemsStayDone:
                 )
             )
 
-        assert await build(asyncio.Event(), halt_at=2).run() is None
+        assert await build(asyncio.Event(), halt_at=2).run() is HALTED
         bodies.clear()
         failure, *rest = await build(asyncio.Event(), halt_at=None).run(resume="latest")
         assert bodies == [3]

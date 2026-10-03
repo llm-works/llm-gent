@@ -201,9 +201,10 @@ moves past a completed one; a completed last step does not stop the
 chain. Chains, iterates and maps that stop before their end raise
 `Interrupted` to the step running them, and each part stays registered
 where it stopped. Once everything has stopped, `run()` writes one
-`halted` commit holding every position and returns `None`: the halted
+`halted` commit holding every position and returns `HALTED`: the halted
 run's state is in that commit. A halted history is never marked
-complete.
+complete. A run whose last step completed returns that step's result —
+`None` included — even when the halt was set during it: it finished.
 
 A run has one halt, set with `.with_halt(event)` on its top-level flow;
 every subflow observes it. `run()` raises when a nested flow sets a
