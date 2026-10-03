@@ -27,29 +27,20 @@ from llm_gent.bus.protocol import (
     Response,
     UnregisterRequest,
 )
-from llm_gent.bus.transport import (
-    CoordinatorBusConfig,
-    WorkerBusConfig,
-    ZMQCoordinatorBus,
-    ZMQWorkerBus,
+from llm_gent.bus.transport import ZMQCoordinatorBus, ZMQWorkerBus
+from tests.integration._ports import (
+    coordinator_config,
+    start_on_free_ports,
+    worker_config,
 )
-from tests.integration._ports import free_ports, start_on_free_ports
 
 
 pytestmark = pytest.mark.integration
 
 
-def _worker_config(ports: list[int]) -> WorkerBusConfig:
-    return WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-
-
-def _coordinator_config(ports: list[int]) -> CoordinatorBusConfig:
-    return CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-
-
 def _start_coordinator(lg: Any, ports: list[int]) -> tuple[ZMQCoordinatorBus, list[int]]:
     """A started coordinator bus bound to ``ports``."""
-    coord = ZMQCoordinatorBus(lg, _coordinator_config(ports))
+    coord = ZMQCoordinatorBus(lg, coordinator_config(ports))
     coord.start()
     return coord, ports
 
@@ -77,7 +68,7 @@ def bus_pair():
     lg = MagicMock()
     coord, ports = start_on_free_ports(lambda p: _start_coordinator(lg, p))
     _wait_for_zmq_connect(0.1)
-    worker = ZMQWorkerBus(lg, "test-worker", _worker_config(ports))
+    worker = ZMQWorkerBus(lg, "test-worker", worker_config(ports))
     worker.start()
     _wait_for_zmq_connect(0.2)
 
@@ -208,7 +199,7 @@ class TestMultiWorker:
         workers = []
         channels = []
         for i in range(3):
-            w = ZMQWorkerBus(lg, f"worker-{i}", _worker_config(ports))
+            w = ZMQWorkerBus(lg, f"worker-{i}", worker_config(ports))
             w.start()
             workers.append(w)
 
@@ -288,7 +279,7 @@ class TestAgentToAgent:
 
         workers = []
         for name in ("alice", "bob"):
-            w = ZMQWorkerBus(lg, name, _worker_config(ports))
+            w = ZMQWorkerBus(lg, name, worker_config(ports))
             w.start()
             workers.append(w)
             # Register transport so coordinator can route to this agent
@@ -334,18 +325,24 @@ class TestFailedStart:
         """Router and pub bind, sub finds its port taken: all three are free afterwards."""
         from unittest.mock import MagicMock
 
-        ports = free_ports(3)
-        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        holder.bind(("", ports[2]))
-        holder.listen()
+        # Hold all 3 ports to minimize the race window.
+        holders = [socket.socket(socket.AF_INET, socket.SOCK_STREAM) for _ in range(3)]
+        for s in holders:
+            s.bind(("", 0))
+        ports = [s.getsockname()[1] for s in holders]
+
+        # Release ports 0/1 just before start(); keep port 2 so SUB fails.
+        holders[0].close()
+        holders[1].close()
         try:
-            coord = ZMQCoordinatorBus(MagicMock(), _coordinator_config(ports))
+            coord = ZMQCoordinatorBus(MagicMock(), coordinator_config(ports))
             with pytest.raises(zmq.ZMQError) as raised:
                 coord.start()
             assert raised.value.errno == errno.EADDRINUSE
         finally:
-            holder.close()
+            holders[2].close()
 
+        # Verify all 3 ports are free: the coordinator released the ones it bound.
         for port in ports:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:

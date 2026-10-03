@@ -133,8 +133,8 @@ class History:
         """The history's commit ``commit_hash``, or ``None`` when the history holds no such commit.
 
         Any commit the history holds, on its line or off it — e.g. one
-        written after a checkpoint that ``resume=<name>`` moved ``HEAD``
-        back to, until :func:`~llm_gent.flow.collect_unreachable` deletes it.
+        left off the line when a run resumed from an earlier checkpoint,
+        until :func:`~llm_gent.flow.collect_unreachable` deletes it.
         """
         flow_id = await self.flow_id()
         if flow_id is None:

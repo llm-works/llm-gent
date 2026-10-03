@@ -32,8 +32,8 @@ The store is a Protocol with four surfaces:
   one; :meth:`set_ref` moves it with compare-and-set: the write lands only
   while the ref still points where the writer expects, so a second writer
   on the same history is detected instead of silently forking it.
-  :data:`HEAD_REF` is the newest commit of the history, where every new
-  commit is parented. Tags are refs under ``tags/``: on a clean exit the
+  :data:`HEAD_REF` is the newest commit on the history's line.
+  Tags are refs under ``tags/``: on a clean exit the
   framework commits the final state at :data:`END_NODE_PATH` and moves
   :data:`COMPLETE_TAG` to it. The history is complete while ``HEAD`` is
   that final-state commit; the tag keeps pointing at the last finished
@@ -97,16 +97,15 @@ Values match :mod:`llm_gent.flow.state.cas`:
 
 
 HEAD_REF = "HEAD"
-"""Ref naming a history's newest commit: the parent of the next commit and
-the commit ``resume="latest"`` starts its walk from."""
+"""Ref naming the newest commit on a history's line."""
 
 
 class ConcurrentWriteError(RuntimeError):
     """A ref moved under a writer: a second writer is committing to the same history.
 
-    A history has one writer at a time. Every commit moves :data:`HEAD_REF`
-    by compare-and-set from its parent, so a second writer is detected at
-    its next commit instead of silently forking the history.
+    A history has one writer at a time. Each commit moves :data:`HEAD_REF`
+    by compare-and-set, so a concurrent writer is detected at its next
+    commit instead of silently forking the history.
     """
 
     def __init__(self, client_flow_id: str, ref: str, expected: str | None) -> None:

@@ -285,12 +285,14 @@ the commit it wrote, named or not, and `History.head()` gives the newest one:
 
 ```python
 halted = (await History(store, "history-42").head()).content_hash
-await flow.run(resume="before-review")  # HEAD moves back; the halted commit leaves the line
-await flow.run(resume=halted)  # HEAD moves to the halted commit; the run continues there
+await flow.run(
+    resume="before-review"
+)  # the run continues there; once it commits, the halted commit leaves the line
+await flow.run(resume=halted)  # the run continues from the halted commit
 ```
 
-Moving `HEAD` deletes nothing: a commit off the line stays resumable by hash, and a named one by
-its name, until `collect_unreachable` deletes what no ref reaches.
+A commit left off the line stays resumable by hash, and a named one by its name, until
+`collect_unreachable` deletes what no ref reaches.
 
 `"off"`, `"latest"` and `"complete"` cannot name a checkpoint, nor can a string of 64 lowercase hex
 characters, the form of a commit hash. `run(resume=...)` with a hash or a name the history does

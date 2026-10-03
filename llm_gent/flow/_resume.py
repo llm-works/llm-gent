@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .checkpoint import COMPLETE_TAG, HEAD_REF, is_commit_hash
+from .checkpoint import COMPLETE_TAG, is_commit_hash
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
@@ -67,13 +67,25 @@ class Resume:
         whole runs (a stateless ``$end`` sends the walk into the previous
         run). Returns ``(fallback, None)`` when the history is empty or
         holds no commit with state (warning in the latter case).
+
+        Captures where ``HEAD`` points at the start of the walk: a writer
+        that commits between checkout and this run's first commit raises
+        :class:`~llm_gent.flow.ConcurrentWriteError` instead of being
+        absorbed silently.
         """
         skipped: list[str] = []
+        head: str | None = None
         async for commit in self._history.commits():
+            if head is None:
+                head = commit.content_hash  # first in the walk is HEAD
             snapshot = await self._history.snapshot(commit)
             if snapshot.has_state:
                 if skipped:
                     self._warn_skipped(skipped, commit)
+                # Capture HEAD now so a concurrent writer is detected at first commit.
+                ctx = self.flow._checkpoint_ctx
+                if ctx is not None and head is not None:
+                    await ctx.continue_from(head)
                 return self._root_state(snapshot.root), snapshot
             skipped.append(commit.meta.node_path)
         if skipped:
@@ -111,7 +123,7 @@ class Resume:
         root = self._root_state(snapshot.root)
         ctx = self.flow._checkpoint_ctx
         assert ctx is not None
-        ctx.continue_from(commit.content_hash, await ctx.get_ref(HEAD_REF))
+        await ctx.continue_from(commit.content_hash)
         return root, snapshot
 
     async def _resolve(self, target: str) -> Commit:

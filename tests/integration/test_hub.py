@@ -10,26 +10,22 @@ import pytest
 from appinfra.service import BufferedChannel
 
 from llm_gent.bus.protocol import RegisterRequest, UnregisterRequest
-from llm_gent.bus.transport import CoordinatorBusConfig, WorkerBusConfig, ZMQWorkerBus
+from llm_gent.bus.transport import ZMQWorkerBus
 from llm_gent.hub import Hub, HubConfig
-from tests.integration._ports import start_on_free_ports
+from tests.integration._ports import coordinator_config, start_on_free_ports, worker_config
 
 
 pytestmark = pytest.mark.integration
 
 
-def _worker_config(ports: list[int]) -> WorkerBusConfig:
-    return WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
-
-
 def _start_hub(lg: Any, ports: list[int]) -> tuple[Hub, list[int]]:
     """A started Hub bound to ``ports``; no shutdown grace (these tests run no agents)."""
     hub_config = HubConfig(
-        bus=CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2]),
+        bus=coordinator_config(ports),
         health_check_interval=60.0,
         shutdown_grace_secs=0.0,
     )
-    hub = Hub(lg, hub_config, bus_config=_worker_config(ports))
+    hub = Hub(lg, hub_config, bus_config=worker_config(ports))
     hub.start()
     return hub, ports
 
@@ -52,7 +48,7 @@ def hub_and_worker():
     lg = MagicMock()
     hub, ports = start_on_free_ports(lambda p: _start_hub(lg, p))
     _wait_for_zmq_connect(0.1)
-    worker = ZMQWorkerBus(lg, "test-worker", _worker_config(ports))
+    worker = ZMQWorkerBus(lg, "test-worker", worker_config(ports))
     worker.start()
     _wait_for_zmq_connect(0.2)
 
@@ -122,7 +118,7 @@ class TestHubMultipleWorkers:
         workers = []
         channels = []
         for i in range(3):
-            w = ZMQWorkerBus(lg, f"worker-{i}", _worker_config(ports))
+            w = ZMQWorkerBus(lg, f"worker-{i}", worker_config(ports))
             w.start()
             workers.append(w)
             assert w.transport is not None

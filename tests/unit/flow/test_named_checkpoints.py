@@ -9,7 +9,7 @@ like ``resume="latest"`` checks out the newest one, and the run's commits
 continue from there: once it commits, the commits written after the
 checkpoint leave the history's line; a run that fails first leaves ``HEAD``
 where it was. ``run(resume=<hash>)`` does the same for any commit,
-including one a reset took off the line.
+including one left off the line by a later resume.
 """
 
 from __future__ import annotations

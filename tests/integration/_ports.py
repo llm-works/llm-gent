@@ -17,8 +17,20 @@ from typing import TypeVar
 
 import zmq
 
+from llm_gent.bus.transport import CoordinatorBusConfig, WorkerBusConfig
+
 
 T = TypeVar("T")
+
+
+def worker_config(ports: list[int]) -> WorkerBusConfig:
+    """A :class:`WorkerBusConfig` connecting to a coordinator on ``ports``."""
+    return WorkerBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
+
+
+def coordinator_config(ports: list[int]) -> CoordinatorBusConfig:
+    """A :class:`CoordinatorBusConfig` binding ``ports``."""
+    return CoordinatorBusConfig(router_port=ports[0], pub_port=ports[1], sub_port=ports[2])
 
 
 def free_ports(n: int) -> list[int]:

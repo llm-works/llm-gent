@@ -180,14 +180,7 @@ class ZMQCoordinatorBus:
         for transport in transports:
             transport.close()
 
-        for sock in (self._router, self._pub, self._sub):
-            if sock is not None:
-                sock.close(linger=100)
-
-        if self._ctx is not None:
-            self._ctx.term()
-            self._ctx = None
-
+        self._discard_sockets(linger=100)
         self._lg.info("coordinator bus stopped")
 
     def _bind(self) -> None:
@@ -205,11 +198,11 @@ class ZMQCoordinatorBus:
         self._sub.bind(f"tcp://{cfg.bind_host}:{cfg.sub_port}")
         self._sub.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    def _discard_sockets(self) -> None:
+    def _discard_sockets(self, linger: int = 0) -> None:
         """Close whatever :meth:`_bind` opened, at once, and terminate the context."""
         for sock in (self._router, self._pub, self._sub):
             if sock is not None:
-                sock.close(linger=0)
+                sock.close(linger=linger)
         self._router = self._pub = self._sub = None
         if self._ctx is not None:
             self._ctx.term()
