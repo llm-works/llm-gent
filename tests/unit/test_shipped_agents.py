@@ -12,7 +12,6 @@ import yaml
 from appinfra import DotDict
 
 from llm_gent.agents.default import Factory
-from llm_gent.cli.tools.serve import ServeTool
 from llm_gent.core.platform import PlatformContext
 from llm_gent.core.traits.builtin.tools import ToolsTrait
 from llm_gent.runtime.server.config import AgentServerConfig
@@ -29,7 +28,7 @@ def _build(path: Path, codebase: Path) -> Any:
     name = path.stem
     raw = yaml.safe_load(path.read_text())
     agent_config = AgentServerConfig.from_dict({"agents": {name: raw}}).agents[name]
-    config = ServeTool()._build_agent_config_dict(name, agent_config)
+    config = agent_config.factory_config(name)
     platform = PlatformContext.from_config(lg=MagicMock(), llm_config=DotDict({}))
     return Factory(platform=platform).create(config, variables={"CODEBASE_PATH": str(codebase)})
 
