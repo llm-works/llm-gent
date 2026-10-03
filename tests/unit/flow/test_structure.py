@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import (
+    HALTED,
     Context,
     Flow,
     FlowFactory,
@@ -189,7 +190,7 @@ class TestStoredStructure:
     async def test_every_commit_holds_the_structure_it_records(self) -> None:
         store = InMemoryCheckpointStore()
         flow = _checkpointed(store, asyncio.Event(), stop=True)
-        assert await flow.run(1) is None
+        assert await flow.run(1) is HALTED
         await _checkpointed(store, asyncio.Event(), stop=False).run(resume="latest")
 
         history = History(store, "structure")

@@ -59,6 +59,7 @@ from typing import Any, Literal
 import pytest
 
 from llm_gent.flow import (
+    HALTED,
     Context,
     Flow,
     FlowFactory,
@@ -1172,7 +1173,7 @@ async def test_halt_around_a_shortcut_resumes_to_the_cut_run(case: CutCase) -> N
         assert result == expected
         assert await _head_done(inner) == expected_done
         return
-    assert result is None
+    assert result is HALTED
 
     resumed = Probe(cut_key=case.cut_key)
     flow = _flow(shape, resumed, inner, parallel=case.parallel)

@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from appinfra.log import quick_console_logger
 
 from llm_gent.flow import (
+    HALTED,
     Context,
     Flow,
     FlowFactory,
@@ -163,7 +164,8 @@ async def main() -> int:
         flow1 = _build_flow(ff, store, client_flow_id, halt=True)
         result1 = await flow1.run()
         history = History(store, client_flow_id)
-        print(f"run 1 returned: {result1} (halted: its state is in the halt checkpoint)")
+        assert result1 is HALTED
+        print(f"run 1 returned: {result1} (its state is in the halt checkpoint)")
         print(f"history head: {await _describe_head(history)}")
 
         print(f"\n--- Run 2: resume=latest (cumulative max_iters={MAX_ITERS}) ---")

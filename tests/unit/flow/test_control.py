@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Failure, Flow, Skipped, verb
+from llm_gent.flow import HALTED, Context, Failure, Flow, Skipped, verb
 
 from .conftest import ROLE_A, StubFactory, make_ff
 
@@ -886,7 +886,7 @@ class TestMapOnItemComplete:
 
         flow = make_ff().create().with_halt(halt)
         flow.call(_identity).map(_double).on_item_complete(hook)
-        assert await flow.run([1, 2, 3]) is None
+        assert await flow.run([1, 2, 3]) is HALTED
         assert observed == []
 
     @pytest.mark.asyncio
@@ -1204,8 +1204,42 @@ class TestFlowWithHalt:
 
     Once the event fires, a map runs no more queued items, an iterate runs
     no more passes, and verbs may observe ``ctx.halt`` directly. A run the
-    halt stopped before its end returns ``None``.
+    halt stopped before its end returns ``HALTED``.
     """
+
+    @pytest.mark.asyncio
+    async def test_a_halted_run_returns_halted_and_a_finished_one_its_result(self) -> None:
+        """``HALTED`` tells a paused run from a finished one whose last step returned ``None``."""
+        halt = asyncio.Event()
+
+        @verb(role=ROLE_A)
+        async def stop(_ctx: Context, x: Any) -> None:
+            halt.set()
+
+        @verb(role=ROLE_A)
+        async def nothing(_ctx: Context, x: Any) -> None:
+            return None
+
+        halted = make_ff().create().with_halt(halt).call(stop).then(nothing)
+        assert await halted.run(1) is HALTED
+        assert repr(HALTED) == "HALTED"
+
+        halt.clear()
+        finished = make_ff().create().with_halt(halt).call(_identity).then(nothing)
+        assert await finished.run(1) is None
+
+    @pytest.mark.asyncio
+    async def test_a_halt_set_during_the_last_step_does_not_stop_the_run(self) -> None:
+        """The last step completed: the run finished, and returns that step's result."""
+        halt = asyncio.Event()
+
+        @verb(role=ROLE_A)
+        async def last(_ctx: Context, x: int) -> int:
+            halt.set()
+            return x + 1
+
+        flow = make_ff().create().with_halt(halt).call(_identity).then(last)
+        assert await flow.run(1) == 2
 
     @pytest.mark.asyncio
     async def test_pre_set_halt_skips_every_map_item(self) -> None:
@@ -1222,7 +1256,7 @@ class TestFlowWithHalt:
 
         flow = make_ff().create().with_halt(halt)
         flow.call(_identity).map(track)
-        assert await flow.run([1, 2, 3]) is None
+        assert await flow.run([1, 2, 3]) is HALTED
         assert ran == []
 
     @pytest.mark.asyncio
@@ -1241,7 +1275,7 @@ class TestFlowWithHalt:
 
         flow = make_ff().create().with_halt(halt)
         flow.call(_identity).map(track, max_concurrency=1)
-        assert await flow.run([1, 2, 3, 4]) is None
+        assert await flow.run([1, 2, 3, 4]) is HALTED
         assert ran == [1]
 
     @pytest.mark.asyncio
@@ -1289,7 +1323,7 @@ class TestFlowWithHalt:
         flow = make_ff().create().with_halt(halt)
         flow.call(_identity).iterate(lambda f: f.call(tick), max_iters=10)
         # The pass that set the halt completes; the iterate stops before the next.
-        assert await flow.run(1) is None
+        assert await flow.run(1) is HALTED
         assert ticks == [1, 2]
 
     @pytest.mark.asyncio

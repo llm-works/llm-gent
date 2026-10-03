@@ -109,6 +109,7 @@ from llm_saia.core.backend import Backend
 from llm_saia.core.errors import PauseRequested
 
 from llm_gent.flow import (
+    HALTED,
     Context,
     Flow,
     FlowFactory,
@@ -486,8 +487,8 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
     result = await _build_flow(lg, ff, halt).run(resume="latest" if resuming else "off")
-    halted = await _resume_pending(history)
-    # A halted run returns None; its state is in the halt checkpoint.
+    # A halted run returns HALTED; its state is in the halt checkpoint.
+    halted = result is HALTED
     final = await _halted_state(history) if halted else result
     await _report(history, store_dir, final, halted)
     return final, halted

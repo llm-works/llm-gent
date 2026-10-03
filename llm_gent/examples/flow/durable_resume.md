@@ -71,8 +71,8 @@ Sequence inside the process:
    turn, so the step counts as interrupted: it stopped before finishing its work.
 6. The body chain sees the halt after that step and stops, its cursor on the interrupted step; the
    iterate stops in pass 0. Each stays registered where it stopped. Once the run has unwound,
-   `run()` writes the halt commit from those positions and returns `None`: the halted run's state
-   is in the halt commit.
+   `run()` writes the halt commit from those positions and returns `HALTED`: the halted run's
+   state is in the halt commit.
 
 ## Run 2 — resumes the paused turn
 

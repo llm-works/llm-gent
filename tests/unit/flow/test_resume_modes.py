@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, Interrupted, verb
+from llm_gent.flow import HALTED, Context, FlowFactory, History, Interrupted, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 from llm_gent.flow.testing.checkpoint import (
     CanonicalCounter,
@@ -350,7 +350,7 @@ class TestCursors:
                 return flow.call(step).call(step).call(step).call(step)
             return flow.iterate(lambda b: b.call(step), max_iters=4)
 
-        assert await build(asyncio.Event(), []).run(0) is None
+        assert await build(asyncio.Event(), []).run(0) is HALTED
         seen: list[Any] = []
         assert await build(None, seen).run(0, resume="latest") == 40
         assert seen == resumed

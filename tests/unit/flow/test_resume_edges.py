@@ -23,6 +23,7 @@ import pytest
 from pydantic import BaseModel
 
 from llm_gent.flow import (
+    HALTED,
     Context,
     FlowFactory,
     History,
@@ -93,7 +94,7 @@ class TestRescue:
                 .then(_stop_then_halt(halt, ran, arm))
             )
 
-        assert await build(asyncio.Event(), arm=True).run(0) is None
+        assert await build(asyncio.Event(), arm=True).run(0) is HALTED
         assert ran == ["step:0", "step:1", "last"]
         assert await _paths(store, "rescue") == [""]  # only the top chain, at `last`
 
@@ -184,7 +185,7 @@ class TestTypedValues:
     ) -> None:
         """Halted at each step in turn, resume runs that step and the rest, over typed values."""
         ran: list[str] = []
-        assert await _typed_flow(store, asyncio.Event(), ran, stop_at).run(1) is None
+        assert await _typed_flow(store, asyncio.Event(), ran, stop_at).run(1) is HALTED
         assert ran == _TYPED_STEPS[:stop_at]
 
         ran.clear()

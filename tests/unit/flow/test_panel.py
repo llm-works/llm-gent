@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Flow, Panel, Role, verb
+from llm_gent.flow import HALTED, Context, Flow, Panel, Role, verb
 from llm_gent.flow.panel import majority, mean, unanimous, weighted
 from llm_gent.flow.stores.json_file import JsonFileCheckpointStore
 
@@ -474,7 +474,7 @@ class TestPanelInsideIterateResumeBoundary:
 
         # First run: voter_a sets the halt in pass 2; voters b and c had not
         # started, so they stop before running and the run halts.
-        assert await build(with_halt=True).run() is None
+        assert await build(with_halt=True).run() is HALTED
         assert sorted(r for r in runs if r[0] == 1) == [(1, "a"), (1, "b"), (1, "c")]
         assert [r for r in runs if r[0] >= 2] == [(2, "a")]
 
