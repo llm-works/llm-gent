@@ -403,8 +403,8 @@ decide in `restore()`, e.g. charge each session only its own spend:
 
 ```python
 class SessionTracker(CostTracker):
-    def __init__(self, lg, pricing, session_id, allowance):
-        super().__init__(lg, pricing, allowance)
+    def __init__(self, lg, pricing, session_id, allowance, halt=None):
+        super().__init__(lg, pricing, allowance, halt=halt)
         self.session_id, self.allowance, self.baseline = session_id, allowance, 0.0
 
     def snapshot(self):
