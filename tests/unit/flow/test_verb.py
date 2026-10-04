@@ -96,3 +96,26 @@ class TestPureVerb:
             """Role-bound verb."""
 
         assert bio.role is ROLE  # type: ignore[attr-defined]
+
+
+class TestVerbCallable:
+    """The type of a verb is exported for consumers that hold verbs in fields."""
+
+    def test_exported_from_flow(self) -> None:
+        from llm_gent.flow import VerbCallable
+        from llm_gent.flow.verb import VerbCallable as Defined
+
+        assert VerbCallable is Defined
+
+    def test_types_verbs_of_any_arity(self) -> None:
+        """A verb field typed VerbCallable holds verbs with extra positional and keyword args."""
+        from llm_gent.flow import VerbCallable
+
+        @verb
+        async def merge(ctx: Any, left: int, right: int, *, scale: int = 1) -> int:
+            """Several arguments after ctx."""
+            return (left + right) * scale
+
+        stages: dict[str, VerbCallable] = {"merge": merge}
+
+        assert stages["merge"] is merge

@@ -8,6 +8,8 @@ Public surface:
 - :class:`Role` — pure config for a persona (name, backend, model, sampling)
 - :class:`SAIAFactory` — protocol that turns a Role into a saia instance
 - :func:`verb` — decorator marking an async function as a role-bound verb
+- :data:`VerbCallable` — the type of a verb: an async callable taking
+  ``(ctx, *args, **kwargs)``
 - :class:`Context` — runtime environment injected into every verb
 - :class:`State` — scope-aware wrapper around the user-owned payload on
   ``ctx.state`` (``.data`` reaches the payload; ``.root()`` walks to the
@@ -79,7 +81,7 @@ from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, S
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
 from .structure import FlowStructure, StepPath, StructureDiff, path_label
-from .verb import verb
+from .verb import VerbCallable, verb
 
 
 __all__ = [
@@ -112,6 +114,7 @@ __all__ = [
     "StructureDiff",
     "TypeStateFactory",
     "Unset",
+    "VerbCallable",
     "collect_unreachable",
     "extractor",
     "grader",
