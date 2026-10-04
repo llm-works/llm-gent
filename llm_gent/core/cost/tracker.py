@@ -284,12 +284,21 @@ class CostTracker:
         """This level's accounting as plain data: ``{"spent", "costs_by_op"}``.
 
         Cap, halt event and callbacks are wiring, not accounting: they are
-        not included. :meth:`restore` is the inverse.
+        not included. :meth:`restore` is the inverse. A subclass may add
+        keys of its own (JSON-serializable); a flow's checkpoints keep the
+        whole dict and hand it back to :meth:`restore` on resume.
         """
         return {"spent": self._spent, "costs_by_op": dict(self._costs_by_op)}
 
-    def restore(self, spent: float, costs_by_op: dict[str, float]) -> None:
+    def restore(self, data: dict[str, Any]) -> None:
         """Set this level's accounting to a :meth:`snapshot` taken earlier (for resume).
+
+        A flow calls it with the dict :meth:`snapshot` saved, before the
+        run's first step. This implementation takes the saved spend as
+        is, so the spend continues across the history. A subclass decides
+        what resume means for it: rebase on a baseline it keeps in its
+        snapshot, ignore the saved spend, amend the cap. When it raises
+        the cap, it does so before calling this method.
 
         This level only, like :meth:`restore_spent`: ancestors keep their
         own accounting. Restored spend at or over the cap latches
@@ -297,12 +306,16 @@ class CostTracker:
         out until its cap is raised (:meth:`update_budget`).
 
         Raises:
+            KeyError: ``spent`` or ``costs_by_op`` is missing.
+            TypeError / ValueError: they are not numbers / a mapping of numbers.
             ValueError: ``spent`` or a ``costs_by_op`` value is not finite.
         """
+        spent = float(data["spent"])
+        costs_by_op = {str(k): float(v) for k, v in data["costs_by_op"].items()}
         if not math.isfinite(spent) or not all(math.isfinite(c) for c in costs_by_op.values()):
             raise ValueError(f"restored spend must be finite, got {spent} / {costs_by_op}")
         self._spent = spent
-        self._costs_by_op = dict(costs_by_op)
+        self._costs_by_op = costs_by_op
         if self.exceeded:
             self._urgent_wrapup = True
             if self._halt is not None:

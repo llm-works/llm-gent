@@ -213,6 +213,207 @@ class TestAppTrackerAcrossResume:
         assert fresh.spent == pytest.approx(3.0 + 2.0)  # 3.0 restored, b again: 2.0
 
 
+class _SessionTracker(CostTracker):
+    """Charges each session only its own spend: keeps the session's baseline in its snapshot."""
+
+    def __init__(self, session: str, allowance: float, halt: asyncio.Event | None = None) -> None:
+        super().__init__(make_test_logger(), PricingConfig(), allowance, halt=halt)
+        self.session = session
+        self.allowance = allowance
+        self.baseline = 0.0
+
+    @property
+    def session_spent(self) -> float:
+        return self.spent - self.baseline
+
+    def snapshot(self) -> dict[str, Any]:
+        return {**super().snapshot(), "session": self.session, "baseline": self.baseline}
+
+    def restore(self, data: dict[str, Any]) -> None:
+        same = data["session"] == self.session
+        self.baseline = data["baseline"] if same else data["spent"]
+        self.update_budget(self.baseline + self.allowance)
+        super().restore(data)
+
+
+class TestTrackerSubclassAcrossResume:
+    """What resume does to the spend is the tracker's: gent hands back what its snapshot() saved."""
+
+    @staticmethod
+    def _flow(
+        store: Any,
+        tracker: CostTracker,
+        halt: asyncio.Event,
+        seen: dict[str, float],
+        stop_after: str | None = None,
+    ) -> Any:
+        """Steps ``a``..``d`` record the session's spend so far, then spend 1.0 each.
+
+        The step named ``stop_after`` sets the halt; the next one stops on it.
+        """
+
+        def step(ctx: Context[Any], name: str) -> None:
+            if ctx.halt is not None and ctx.halt.is_set():
+                raise Interrupted()
+            assert isinstance(ctx.cost, _SessionTracker)
+            seen[name] = ctx.cost.session_spent
+            _spend(ctx, 1.0)
+            if name == stop_after:
+                halt.set()
+
+        @verb
+        async def a(ctx: Context[Any], x: int) -> int:
+            step(ctx, "a")
+            return x
+
+        @verb
+        async def b(ctx: Context[Any], x: int) -> int:
+            step(ctx, "b")
+            return x
+
+        @verb
+        async def c(ctx: Context[Any], x: int) -> int:
+            step(ctx, "c")
+            return x
+
+        @verb
+        async def d(ctx: Context[Any], x: int) -> int:
+            step(ctx, "d")
+            return x
+
+        return (
+            _ff()
+            .create(state={})
+            .with_checkpoint_store(store, NAME)
+            .with_checkpointer()
+            .with_halt(halt)
+            .with_cost_tracker(tracker)
+            .call(a)
+            .then(b)
+            .then(c)
+            .then(d)
+        )
+
+    async def test_a_new_session_mid_flow_is_charged_only_its_own_spend(self) -> None:
+        store = InMemoryCheckpointStore()
+        first = _SessionTracker("s1", 10.0)
+        assert await self._flow(store, first, asyncio.Event(), {}, "b").run(1) is HALTED
+        assert first.session_spent == 2.0
+
+        second = _SessionTracker("s2", 10.0)
+        seen: dict[str, float] = {}
+        assert await self._flow(store, second, asyncio.Event(), seen).run(resume="latest") == 1
+        assert seen == {"c": 0.0, "d": 1.0}
+        assert second.spent == 4.0 and second.session_spent == 2.0
+
+    async def test_a_resume_in_the_same_session_keeps_its_baseline(self) -> None:
+        store = InMemoryCheckpointStore()
+        await self._flow(store, _SessionTracker("s1", 10.0), asyncio.Event(), {}, "a").run(1)
+        s2 = _SessionTracker("s2", 10.0)
+        assert await self._flow(store, s2, asyncio.Event(), {}, "c").run(resume="latest") is HALTED
+        assert s2.baseline == 1.0 and s2.session_spent == 2.0
+
+        again = _SessionTracker("s2", 10.0)
+        assert await self._flow(store, again, asyncio.Event(), {}).run(resume="latest") == 1
+        assert again.baseline == 1.0
+        assert again.spent == 4.0 and again.session_spent == 3.0
+
+    async def test_the_session_after_a_finished_run_is_rebased_on_its_total(self) -> None:
+        store = InMemoryCheckpointStore()
+        await self._flow(store, _SessionTracker("s1", 10.0), asyncio.Event(), {}).run(1)
+
+        second = _SessionTracker("s2", 10.0)
+        await self._flow(store, second, asyncio.Event(), {}).run(1, resume="latest")
+        assert second.spent == 8.0 and second.session_spent == 4.0
+
+    async def test_a_cap_raised_before_the_base_restore_does_not_fire_the_halt(self) -> None:
+        """Restored spend over the session's allowance: the rebased cap keeps the run going."""
+        store = InMemoryCheckpointStore()
+        await self._flow(store, _SessionTracker("s1", 10.0), asyncio.Event(), {}, "c").run(1)
+
+        halt = asyncio.Event()
+        second = _SessionTracker("s2", 2.5, halt=halt)
+        assert await self._flow(store, second, halt, {}).run(resume="latest") == 1
+        assert not halt.is_set() and not second.exceeded
+        assert second.budget == 5.5 and second.session_spent == 1.0
+
+    async def test_a_restore_that_ignores_the_saved_spend_starts_from_its_own(self) -> None:
+        """Saved 5.0 over a cap of 4.0: ignored, so the run neither halts nor counts it."""
+
+        class Ignoring(CostTracker):
+            def restore(self, data: dict[str, Any]) -> None:
+                pass
+
+        store = InMemoryCheckpointStore()
+        flow = TestAppTrackerAcrossResume._flow
+        assert await flow(store, _tracker(), asyncio.Event(), []).run(1) is HALTED
+
+        halt = asyncio.Event()
+        fresh = Ignoring(make_test_logger(), PricingConfig(), 4.0, halt=halt)
+        seen: list[float] = []
+        assert await flow(store, fresh, halt, seen).run(resume="latest") == 1
+        assert seen == [0.0]
+        assert fresh.spent == 1.0 and not halt.is_set()
+
+    async def test_a_child_override_puts_budgeted_runs_on_the_subclass(self) -> None:
+        class Owned(CostTracker):
+            def child(
+                self,
+                budget: float | None = None,
+                *,
+                on_cost: Any = None,
+                halt: asyncio.Event | None = None,
+            ) -> CostTracker:
+                return Owned(
+                    self._lg, self._pricing, budget, parent=self, on_cost=on_cost, halt=halt
+                )
+
+        root = Owned(make_test_logger(), PricingConfig())
+        seen: dict[int, Any] = {}
+        costs = {0: [0.2, 0.3], 1: [0.1, 0.1]}
+        assert await _item_flow(root, asyncio.Event(), costs, seen).run() == [0, 10]
+        assert all(type(t) is Owned and t.parent is root for t in seen.values())
+
+    async def test_a_budgeted_run_s_child_restores_through_the_subclass(self) -> None:
+        """Items halted mid-way resume on the subclass's children, through their restore()."""
+        restored: list[dict[str, Any]] = []
+
+        class Recording(CostTracker):
+            def child(
+                self,
+                budget: float | None = None,
+                *,
+                on_cost: Any = None,
+                halt: asyncio.Event | None = None,
+            ) -> CostTracker:
+                return Recording(
+                    self._lg, self._pricing, budget, parent=self, on_cost=on_cost, halt=halt
+                )
+
+            def snapshot(self) -> dict[str, Any]:
+                return {**super().snapshot(), "tag": "item" if self.parent else "root"}
+
+            def restore(self, data: dict[str, Any]) -> None:
+                restored.append(data)
+                super().restore(data)
+
+        def root() -> Recording:
+            return Recording(make_test_logger(), PricingConfig())
+
+        store = InMemoryCheckpointStore()
+        costs = {0: [0.3, 0.2], 1: [0.4, 0.1]}
+        flow1 = _item_flow(root(), asyncio.Event(), costs, {}, arm=True)
+        assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is HALTED
+
+        before: dict[int, float] = {}
+        flow2 = _item_flow(root(), asyncio.Event(), costs, {}, before_second=before)
+        assert await flow2.with_checkpoint_store(store, NAME).with_checkpointer().run(
+            resume="latest"
+        ) == [0, 10]
+        assert sorted(d["tag"] for d in restored) == ["item", "item", "root"]
+        assert before == {0: pytest.approx(0.3), 1: pytest.approx(0.4)}
+
+
 def _item_flow(
     root: CostTracker,
     halt: asyncio.Event,

@@ -22,9 +22,10 @@ hard stop is the app's choice: a tracker built with ``halt=`` the run's
 halt event pauses the run when that tracker's budget is crossed.
 
 The running cost is reconstructed across pause, resume and shortcut: a
-tracker's spend (and spend by op) is a position like a cursor, in every
-checkpoint taken while it is in use and restored before the run's first
-step on resume.
+tracker's :meth:`~llm_gent.core.cost.CostTracker.snapshot` is a position
+like a cursor, in every checkpoint taken while it is in use and handed
+back to its :meth:`~llm_gent.core.cost.CostTracker.restore` before the
+run's first step on resume.
 
 - A budgeted run's child is saved at the run's path
   (:data:`~llm_gent.flow.state.snapshot.COST`) while the run is in
@@ -36,8 +37,13 @@ step on resume.
   total. A tracker a flow inherits — the same object as its parent's —
   is saved once, where it is first declared.
 
-Spend is therefore cumulative over the whole history. A per-session
-budget is the app's limit, set on the restored spend (``update_budget``).
+A :class:`~llm_gent.core.cost.CostTracker` restores the saved spend as
+is, so its spend is cumulative over the whole history. What resume means
+for the spend is the tracker's: a subclass keeps keys of its own in
+``snapshot()`` (a session's baseline, say) and decides in ``restore()``
+— continue, rebase, ignore, amend the cap. Budgeted runs' children come
+from ``tracker.child()``, so a subclass that overrides it puts them on
+its own class too.
 """
 
 from __future__ import annotations
@@ -202,9 +208,7 @@ def _restore(scopes: ScopeRegistry, path: ScopePath, entry: str, tracker: CostTr
     if not found:
         return
     try:
-        tracker.restore(
-            float(saved["spent"]), {k: float(v) for k, v in saved["costs_by_op"].items()}
-        )
+        tracker.restore(saved)
     except (KeyError, TypeError, ValueError, AttributeError) as e:
         where = path_str((*path, entry))
         raise TypeError(f"cursor at {where!r} cannot be restored: {e}") from e
