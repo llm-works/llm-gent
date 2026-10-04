@@ -396,6 +396,32 @@ reads the spend so far from the history's head
 (`History.snapshot(head).cursors[""]["tracker"]["spent"]`) and builds the
 session's tracker with `budget=` that plus the session's allowance.
 
+What resume does to the spend is the tracker's: gent saves what its
+`snapshot()` returns and hands that dict to its `restore()`. A
+`CostTracker` subclass can keep keys of its own in the snapshot and
+decide in `restore()`, e.g. charge each session only its own spend:
+
+```python
+class SessionTracker(CostTracker):
+    def __init__(self, lg, pricing, session_id, allowance, halt=None):
+        super().__init__(lg, pricing, allowance, halt=halt)
+        self.session_id, self.allowance, self.baseline = session_id, allowance, 0.0
+
+    def snapshot(self):
+        return {**super().snapshot(), "session": self.session_id, "baseline": self.baseline}
+
+    def restore(self, data):
+        same = data.get("session") == self.session_id
+        self.baseline = data["baseline"] if same else data["spent"]
+        # Raise the cap first: the base restore fires the halt at the cap.
+        self.update_budget(self.baseline + self.allowance)
+        super().restore(data)
+```
+
+The session's spend is then `spent - baseline`. Budgeted runs' children
+come from `tracker.child()`; a subclass overriding it puts them on its
+own class.
+
 ### One repo per run
 
 A run has one repo: the checkpoint store and history name set once, on
