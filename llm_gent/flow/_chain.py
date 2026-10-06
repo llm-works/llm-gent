@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import is_halt_signaled, note_halt
 from ._node_id import _compute_node_ids
-from ._shortcut import SHORTCUT, in_shortcut_mode
+from ._shortcut import is_fast_forward
 from .nodes import Interrupted
 from .state.snapshot import CHAIN, TURN, path_str
 
@@ -76,12 +76,11 @@ class Chain:
         self.prev: Any = None
 
     def cursor(self) -> dict[str, Any]:
-        """The step this chain is at (its node id), that step's input, and its mode.
+        """The step this chain is at (its node id) and that step's input.
 
         ``resume="latest"`` continues the chain at this step with this
         input (:meth:`_saved_step`). A step the chain stopped before also
-        carries ``pending`` and the result it follows (``prev``); a chain
-        in shortcut mode carries ``shortcut``.
+        carries ``pending`` and the result it follows (``prev``).
         """
         if self.index is None:
             return {}
@@ -92,8 +91,6 @@ class Chain:
         }
         if self.pending:
             step["pending"], step["prev"] = True, self.prev
-        if self.env.shortcut is not None and self.env.shortcut.active:
-            step[SHORTCUT] = True
         return {CHAIN: step}
 
     async def walk(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
@@ -137,9 +134,10 @@ class Chain:
         A saved step gets the input it had when the checkpoint was taken.
         The cursor moves to each step, with the step's input (after
         ``project``), before the step runs; after it returns,
-        :meth:`_halted_after` observes the halt. In shortcut mode only the
-        step that was interrupted runs before the landing step
-        (:meth:`_shortcut_jump`).
+        :meth:`_halted_after` observes the halt. A chain that fast-forwards
+        (:func:`~._shortcut.is_fast_forward`) starts no new step: it ends
+        with its last completed result. The step a checkout saved as
+        running had started, so it runs again (``rerun``).
 
         Raises:
             Interrupted: The halt stopped the chain before its last step
@@ -149,13 +147,9 @@ class Chain:
         rerun = saved.index if saved is not None and not saved.pending else None
         last = (True, saved.prev) if saved is not None and saved.pending else (False, None)
         while index < len(self.flow._nodes):
-            jump = self._shortcut_jump(index, rerun, last, args, kwargs)
-            if jump is not None:
-                target, inputs = jump
-                if target is None:
-                    return _passed_through(last, args, kwargs)
-                index = target
-            elif saved is not None and index == saved.index:
+            if index != rerun and is_fast_forward(self.env):
+                return _passed_through(last, args, kwargs)
+            if saved is not None and index == saved.index:
                 inputs = saved.inputs
             else:
                 inputs = _step_inputs(index, self.flow._nodes[index], last[1], args, kwargs)
@@ -184,60 +178,6 @@ class Chain:
         # that is not the run's, and belongs to no later snapshot.
         self.env.scopes.close_under(self.env.owner_path(node_id))
         return result
-
-    def _shortcut_jump(
-        self,
-        index: int,
-        rerun: int | None,
-        last: tuple[bool, Any],
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[int | None, Inputs] | None:
-        """Where a shortcut takes the chain before step ``index``; ``None`` to run it.
-
-        The flow's own shortcut: reaching its landing step uses it up.
-        Before it, in shortcut mode, only the step that was interrupted
-        (``rerun``) runs; any other jumps to the landing step with the
-        last completed result as its input (the chain's input when none
-        completed), or ends the chain (landing step ``None``).
-
-        Without its own shortcut in shortcut mode, a chain covered by an
-        enclosing one (:func:`~._shortcut.in_shortcut_mode`) runs only the
-        step that was interrupted, then ends.
-        """
-        own = self.env.shortcut
-        if own is not None and not own.landed:
-            target = own.to_index
-            if target is not None and index >= target:
-                own.active, own.landed = False, True
-                return None
-            if own.active:
-                return self._own_jump(index, rerun, last, args, kwargs)
-        if index == rerun or not in_shortcut_mode(self.env):
-            return None
-        return None, (args, kwargs)
-
-    def _own_jump(
-        self,
-        index: int,
-        rerun: int | None,
-        last: tuple[bool, Any],
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[int | None, Inputs] | None:
-        """The jump of the flow's own shortcut in shortcut mode, before its landing step."""
-        if index == rerun:
-            return None
-        own = self.env.shortcut
-        assert own is not None
-        own.active, own.landed = False, True
-        target = own.to_index
-        if target is None:
-            return None, (args, kwargs)
-        has_result, prev = last
-        if not has_result:
-            return target, (args, kwargs)
-        return target, _step_inputs(target, self.flow._nodes[target], prev, args, kwargs)
 
     async def _run_step(
         self, node: Any, node_id: str, node_args: tuple[Any, ...], node_kwargs: dict[str, Any]
@@ -306,7 +246,7 @@ class Chain:
 
 
 def _passed_through(last: tuple[bool, Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    """What a chain a shortcut ended returns: its last completed result, else its input.
+    """What a fast-forwarded chain returns: its last completed result, else its input.
 
     The input passes through when it is one positional value; otherwise
     nothing does (``None``).

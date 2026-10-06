@@ -63,7 +63,7 @@ StepPath = tuple[Segment, ...]
 
 
 def path_label(path: StepPath) -> str:
-    """Readable form of ``path``, e.g. ``"research / map: explore"``."""
+    """Readable form of ``path``, e.g. ``"items / map: step"``."""
     return " / ".join(key.label if not b else f"{b}: {key.label}" for b, key in path)
 
 

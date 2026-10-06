@@ -200,11 +200,11 @@ class TestHierarchy:
 
     def test_arbitrary_depth(self) -> None:
         root = CostTracker(_lg(), _pricing(), budget=10.0)
-        wave = root.child(budget=3.0)
-        run = wave.child(budget=1.0)
+        mid = root.child(budget=3.0)
+        run = mid.child(budget=1.0)
         run.track("web_search", count=2)
         assert run.spent == pytest.approx(0.002)
-        assert wave.spent == pytest.approx(0.002)
+        assert mid.spent == pytest.approx(0.002)
         assert root.spent == pytest.approx(0.002)
 
     def test_sibling_children_independent(self) -> None:
@@ -324,10 +324,10 @@ class TestCallback:
             return cb
 
         root = CostTracker(_lg(), _pricing(), budget=10.0, on_cost=make_cb("root"))
-        wave = root.child(budget=1.0, on_cost=make_cb("wave"))
-        run = wave.child(budget=0.1, on_cost=make_cb("run"))
+        mid = root.child(budget=1.0, on_cost=make_cb("mid"))
+        run = mid.child(budget=0.1, on_cost=make_cb("run"))
         run.track("web_search", count=1)
-        assert seen == ["root", "wave", "run"]
+        assert seen == ["root", "mid", "run"]
 
     def test_halt_fires_before_callback(self) -> None:
         halt = asyncio.Event()

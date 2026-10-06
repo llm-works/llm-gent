@@ -300,9 +300,10 @@ class _RunEnv:
     executions apart (:mod:`llm_gent.flow.state.snapshot`). Scopes opened
     under this Flow register at ``path`` extended by their owner.
 
-    ``shortcut`` is this Flow's own :meth:`Flow.with_shortcut` for this
-    run (its chain, iterates and maps follow it); ``shortcuts`` holds it
-    and every enclosing flow's, for the Loop calls under them.
+    ``shortcuts`` are the :meth:`Flow.with_shortcut` regions this run is
+    in, outermost first: the enclosing flows' and this Flow's own. Its
+    chain, iterates, maps and Loop calls fast-forward while one of their
+    signals is set.
 
     ``resources`` are the resources this run runs with (``ctx.resource``;
     the cost tracker, ``ctx.cost``, among them): the ones this Flow
@@ -321,7 +322,6 @@ class _RunEnv:
     extra: dict[str, Any] = field(default_factory=dict)
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
     path: ScopePath = ()
-    shortcut: ShortcutRun | None = None
     shortcuts: tuple[ShortcutRun, ...] = ()
     resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
 

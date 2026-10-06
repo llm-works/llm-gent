@@ -72,17 +72,14 @@ def _label(flow: Flow) -> str:
 
 
 def is_halt_signaled(env: _RunEnv) -> bool:
-    """True when the halt event in effect under ``env`` is set, the run's halt is, or a cut is due.
+    """True when the halt in effect under ``env`` — the run's — is set.
 
-    Under a shortcut, ``env.halt`` is a stop event that follows the run's
-    halt, and the shortcut's signal, one loop tick later. Both are checked
-    directly so neither is missed in between: the run's halt, and the
-    signal of a shortcut on this flow or an enclosing one that has not
-    taken it over or landed (:attr:`~._shortcut.ShortcutRun.pending`).
+    A cut is not a halt: a region its signal cuts short fast-forwards
+    instead (:func:`~._shortcut.is_fast_forward`).
     """
     if env.halt is not None and env.halt.is_set():
         return True
-    return is_run_halted(env) or any(shortcut.pending for shortcut in env.shortcuts)
+    return is_run_halted(env)
 
 
 def is_run_halted(env: _RunEnv) -> bool:
@@ -92,11 +89,7 @@ def is_run_halted(env: _RunEnv) -> bool:
 
 
 def note_halt(env: _RunEnv, iteration: int, node_id: str) -> None:
-    """Record where the run's halt was observed, unless an earlier observation was recorded.
-
-    Only the run's halt is recorded: a flow its shortcut stopped, with the
-    run's halt not set, continues without a halt checkpoint.
-    """
+    """Record where the run's halt was observed, unless an earlier observation was recorded."""
     runtime = env.runtime
     halt = runtime._halt_event
     if halt is not None and halt.is_set() and runtime._halt_at is None:

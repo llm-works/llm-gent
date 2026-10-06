@@ -37,8 +37,8 @@ class TestConformance(CheckpointStoreConformance):
 
 class TestDirectories:
     def test_second_bind_leaves_no_directory(self, store: JsonFileCheckpointStore) -> None:
-        store.bind_flow_id("campaign-1", "history-1")
-        store.bind_flow_id("campaign-1", "history-2")
+        store.bind_flow_id("client-1", "history-1")
+        store.bind_flow_id("client-1", "history-2")
         assert not store._history_dir("history-2").exists()
 
     def test_concurrent_bind_losers_leave_no_directory(
@@ -46,7 +46,7 @@ class TestDirectories:
     ) -> None:
         with ThreadPoolExecutor(max_workers=16) as pool:
             results = list(
-                pool.map(lambda i: store.bind_flow_id("campaign-1", f"history-{i}"), range(32))
+                pool.map(lambda i: store.bind_flow_id("client-1", f"history-{i}"), range(32))
             )
         assert [p.name for p in (store._root / "histories").iterdir()] == [results[0]]
 
@@ -56,7 +56,7 @@ class TestDirectories:
         """A gc that fails partway leaves the name bound, so the retry finds and finishes it."""
         from llm_gent.flow.stores import json_file
 
-        store.bind_flow_id("campaign-1", "history-1")
+        store.bind_flow_id("client-1", "history-1")
         store.put_object("history-1", "blob", "h1", b"payload")
         real_rmtree = json_file.shutil.rmtree
 
@@ -66,11 +66,11 @@ class TestDirectories:
         monkeypatch.setattr(json_file.shutil, "rmtree", failing_rmtree)
         with pytest.raises(OSError):
             store.gc_history("history-1")
-        assert store.get_flow_id("campaign-1") == "history-1"
+        assert store.get_flow_id("client-1") == "history-1"
 
         monkeypatch.setattr(json_file.shutil, "rmtree", real_rmtree)
         store.gc_history("history-1")
-        assert store.get_flow_id("campaign-1") is None
+        assert store.get_flow_id("client-1") is None
         assert not store._history_dir("history-1").exists()
 
 
@@ -105,7 +105,7 @@ class TestPathTraversalGuards:
 
     def test_slash_and_special_chars_supported(self, store: JsonFileCheckpointStore) -> None:
         """URL-quoting round-trips arbitrary caller strings through path segments."""
-        weird_id = "campaign/2026-09-22:15h30 "
+        weird_id = "client/2026-09-22:15h30 "
         weird_ref = "tags/complete: v1"
         store.put_object(weird_id, "blob", "h", b"x")
         store.set_ref(weird_id, weird_ref, "commit-h", None)

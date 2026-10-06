@@ -44,6 +44,7 @@ from appinfra.log import Logger
 
 from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
+from ._shortcut import is_fast_forward
 from .checkpoint import checkpoint_tag
 from .resource import COST, NO_RESOURCES, R, ResourceKey
 from .role import Role
@@ -114,17 +115,17 @@ class Context(Generic[T]):
     """
 
     halt: asyncio.Event | None = None
-    """The stop this step observes: the run's halt, or ``None``.
+    """The run's halt — the top-level flow's :meth:`Flow.with_halt` event — or ``None``.
 
     Verbs that expose their own inner loop (SAIA turn-by-turn, long-running
-    external calls) can observe ``ctx.halt`` to short-circuit gracefully.
-    :meth:`Flow.map` and :meth:`Flow.iterate` observe this at their natural
-    boundaries automatically; verbs are free to poll it when useful.
+    external calls) can observe ``ctx.halt`` to short-circuit gracefully:
+    a step that stops before finishing raises :class:`Interrupted` and
+    runs again on resume. :meth:`Flow.map` and :meth:`Flow.iterate`
+    observe it at their natural boundaries automatically. Setting it from
+    a step pauses the whole run (:meth:`Flow.run` returns ``HALTED``).
 
-    Under a flow's :meth:`Flow.with_shortcut` it is that flow's stop event:
-    set by the run's halt and by the shortcut's signal alike, so a step
-    pauses on either. To pause the whole run from a step, or to tell a
-    halt from a cut, use :attr:`run_halt`.
+    A cut (:meth:`Flow.with_shortcut`) does not set it; see
+    :attr:`fast_forward`.
     """
 
     extra: dict[str, Any] = field(default_factory=dict)
@@ -270,16 +271,15 @@ class Context(Generic[T]):
             return default
 
     @property
-    def run_halt(self) -> asyncio.Event | None:
-        """The run's halt — the top-level flow's :meth:`Flow.with_halt` event — or ``None``.
+    def fast_forward(self) -> bool:
+        """True when this step runs in a :meth:`Flow.with_shortcut` region whose signal is set.
 
-        The same as :attr:`halt` except under a shortcut, where :attr:`halt`
-        is the flow's stop. Setting it from a step pauses the whole run
-        (:meth:`Flow.run` returns ``HALTED``); checking
-        ``run_halt and run_halt.is_set()`` tells a halt from a cut.
+        The region is being cut short: a step that can end early returns
+        what it has now — it completed, and nothing runs it again. (A
+        step stopping for the run's :attr:`halt` raises
+        :class:`Interrupted` instead.) ``False`` outside a run.
         """
-        halt: asyncio.Event | None = getattr(self.flow, "_halt_event", None)
-        return halt
+        return self._env is not None and is_fast_forward(self._env)
 
     @property
     def cost(self) -> CostTracker | None:

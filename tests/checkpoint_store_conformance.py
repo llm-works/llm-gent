@@ -117,35 +117,35 @@ class CheckpointStoreConformance:
     # --- name map ---
 
     def test_bind_get_round_trip(self, store: Any) -> None:
-        assert store.bind_flow_id("campaign-1", "history-1") == "history-1"
-        assert store.get_flow_id("campaign-1") == "history-1"
+        assert store.bind_flow_id("client-1", "history-1") == "history-1"
+        assert store.get_flow_id("client-1") == "history-1"
 
     def test_get_flow_id_returns_none_when_unbound(self, store: Any) -> None:
-        assert store.get_flow_id("campaign-1") is None
+        assert store.get_flow_id("client-1") is None
 
     def test_second_bind_returns_existing(self, store: Any) -> None:
-        store.bind_flow_id("campaign-1", "history-1")
-        assert store.bind_flow_id("campaign-1", "history-2") == "history-1"
-        assert store.get_flow_id("campaign-1") == "history-1"
+        store.bind_flow_id("client-1", "history-1")
+        assert store.bind_flow_id("client-1", "history-2") == "history-1"
+        assert store.get_flow_id("client-1") == "history-1"
 
     def test_flow_id_cannot_name_two_histories(self, store: Any) -> None:
-        store.bind_flow_id("campaign-1", "history-1")
+        store.bind_flow_id("client-1", "history-1")
         with pytest.raises(ValueError, match="already names"):
-            store.bind_flow_id("campaign-2", "history-1")
+            store.bind_flow_id("client-2", "history-1")
 
     def test_bind_after_unbound_writes(self, store: Any) -> None:
         """A history written to before its name was bound can still be bound."""
         store.put_object("history-1", "blob", "h", b"x")
-        assert store.bind_flow_id("campaign-1", "history-1") == "history-1"
+        assert store.bind_flow_id("client-1", "history-1") == "history-1"
         assert store.get_object("history-1", "blob", "h") == b"x"
 
     def test_concurrent_binds_agree_on_one_winner(self, store: Any) -> None:
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(
-                pool.map(lambda i: store.bind_flow_id("campaign-1", f"history-{i}"), range(16))
+                pool.map(lambda i: store.bind_flow_id("client-1", f"history-{i}"), range(16))
             )
         assert len(set(results)) == 1
-        assert store.get_flow_id("campaign-1") == results[0]
+        assert store.get_flow_id("client-1") == results[0]
 
     # --- gc_history ---
 
@@ -159,18 +159,18 @@ class CheckpointStoreConformance:
         assert store.get_ref("history-1", "tags/complete") is None
 
     def test_gc_frees_the_name(self, store: Any) -> None:
-        store.bind_flow_id("campaign-1", "history-1")
+        store.bind_flow_id("client-1", "history-1")
         store.gc_history("history-1")
-        assert store.get_flow_id("campaign-1") is None
-        store.bind_flow_id("campaign-1", "history-2")
-        assert store.get_flow_id("campaign-1") == "history-2"
+        assert store.get_flow_id("client-1") is None
+        store.bind_flow_id("client-1", "history-2")
+        assert store.get_flow_id("client-1") == "history-2"
 
     def test_gc_idempotent_when_absent(self, store: Any) -> None:
         store.gc_history("never-existed")
 
     def test_gc_leaves_other_histories_intact(self, store: Any) -> None:
-        store.bind_flow_id("campaign-a", "history-a")
-        store.bind_flow_id("campaign-b", "history-b")
+        store.bind_flow_id("client-a", "history-a")
+        store.bind_flow_id("client-b", "history-b")
         store.put_object("history-a", "blob", "h", b"a-bytes")
         store.put_object("history-b", "blob", "h", b"b-bytes")
         store.set_ref("history-b", "HEAD", "hash-b", None)
@@ -178,7 +178,7 @@ class CheckpointStoreConformance:
         assert store.get_object("history-a", "blob", "h") is None
         assert store.get_object("history-b", "blob", "h") == b"b-bytes"
         assert store.get_ref("history-b", "HEAD") == "hash-b"
-        assert store.get_flow_id("campaign-b") == "history-b"
+        assert store.get_flow_id("client-b") == "history-b"
 
     # --- listing and deleting objects ---
 

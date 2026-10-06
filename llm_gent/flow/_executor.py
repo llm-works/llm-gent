@@ -44,7 +44,7 @@ from .state.cas import (
     CommitOutcome,
     TraceRef,
 )
-from .state.snapshot import ARM, Cursor, Live, ScopePath
+from .state.snapshot import ARM, Cursor, ScopePath
 
 
 if TYPE_CHECKING:
@@ -377,12 +377,8 @@ def _restore_scope_state(
 
     Companion to :func:`_project_state` — same shape as the fresh
     projection but uses ``factory.restore(raw)`` (or a passthrough when
-    ``factory is None``) instead of running ``state_fn(parent.data)``. A
-    restaged scope (:class:`~llm_gent.flow.state.snapshot.Live`) is the
-    child :class:`State` itself.
+    ``factory is None``) instead of running ``state_fn(parent.data)``.
     """
-    if isinstance(raw, Live):
-        return raw.value  # type: ignore[no-any-return]
     child_payload = factory.restore(raw) if factory is not None else raw
     return State(data=child_payload, _parent=parent, _factory=factory)
 

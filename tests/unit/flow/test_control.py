@@ -1183,9 +1183,9 @@ class TestMapComputedConcurrency:
             make_ff()
             .create()
             .call(_identity)
-            .map(body, max_concurrency=lambda _i, _c: bad, name="wave")
+            .map(body, max_concurrency=lambda _i, _c: bad, name="items")
         )
-        with pytest.raises(ValueError, match=r"map 'wave': max_concurrency must be an int >= 1"):
+        with pytest.raises(ValueError, match=r"map 'items': max_concurrency must be an int >= 1"):
             await flow.run([1, 2])
         assert ran == []
 
@@ -1260,7 +1260,7 @@ class TestFlowWithHalt:
         assert ran == []
 
     @pytest.mark.asyncio
-    async def test_halt_mid_wave_skips_remaining_queue(self) -> None:
+    async def test_halt_mid_map_skips_remaining_queue(self) -> None:
         """A halt set by an in-flight item stops the remaining queue; the map is interrupted."""
         halt = asyncio.Event()
         ran: list[int] = []

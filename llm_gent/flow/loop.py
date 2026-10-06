@@ -13,16 +13,19 @@ verb. Its body is a single ``saia.complete(...)`` invocation, wired with:
 - halt bridging to SAIA's ``abort_signal``
 
 Halt resolution rule: an explicit ``Loop(halt=X)`` at construction wins
-over ambient ``ctx.halt`` — matches the ``ctx.saia`` precedent. Whichever
-is effective becomes SAIA's ``abort_signal``.
+over the ambient one — matches the ``ctx.saia`` precedent. The ambient
+one is the run's halt, or inside a :meth:`~llm_gent.flow.Flow.with_shortcut`
+region an event its signal sets too. Whichever is effective becomes
+SAIA's ``abort_signal``.
 
 Loop is CAS-native for durable pause capture — when a
 :class:`~llm_saia.core.conversation.ConversationFactory` is wired,
 every dispatch runs against a conversation (the caller's, or a
-factory-created one), and a paused result's task and conversation are
-held in the run's snapshots at the call's path (``<step>/t/<k>/turn``).
-A paused call leaves its step interrupted: resume runs the step again,
-and the same call continues the saved turn.
+factory-created one), and a turn the run's halt paused has its task and
+conversation held in the run's snapshots at the call's path
+(``<step>/t/<k>/turn``). It leaves its step interrupted: resume runs the
+step again, and the same call continues the saved turn. A turn a cut
+paused is not held: the call returns its result and the step goes on.
 
 :class:`LoopFactory` bundles the cross-cutting config (logger, SAIAFactory,
 halt) so consumers wire once at the app boundary and ``.create(role,
@@ -40,7 +43,8 @@ from appinfra.log import Logger
 from llm_saia import SAIA
 from llm_saia.core.conversation import ConversationFactory
 
-from ._shortcut import in_shortcut_mode
+from ._halt_observer import is_run_halted
+from ._shortcut import abort_event, is_fast_forward
 from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
@@ -118,7 +122,7 @@ Runs after the enclosing flow builds a role-bound saia and before
 :meth:`saia.complete`, on every ``Loop.__call__`` (so once per iteration
 when the Loop is an ``.iterate`` or ``.map`` body). Consumers reach into
 the saia instance's tool executor to inject per-run values that aren't
-known at saia-factory-construction time (``run_config``, ``campaign_id``,
+known at saia-factory-construction time (``run_config``, ``session_id``,
 ``budget``, etc.). May be async; return value ignored.
 """
 
@@ -272,9 +276,9 @@ class Loop:
 
         Args:
             ctx: The dispatching flow's context. ``ctx.saia`` runs
-                ``saia.complete``; ``ctx.halt`` is fallback for
-                ``abort_signal`` when no explicit halt was given at
-                construction.
+                ``saia.complete``; without an explicit halt given at
+                construction, ``abort_signal`` is the run's halt, or in
+                a region an event its signal sets too.
             task: The task/prompt handed to ``saia.complete``.
                 ``None`` is only valid when resuming from a
                 checkpoint that holds this call's paused turn —
@@ -292,9 +296,10 @@ class Loop:
             SAIA's vocab), UNLESS ``on_complete`` (non-paused path) or
             ``on_paused`` (paused path) returned a non-``None`` value —
             that value replaces the raw result. ``on_finally`` fires
-            after either path. A call that holds a paused turn while a
-            :meth:`~llm_gent.flow.Flow.with_shortcut` above it is in
-            shortcut mode does not continue the turn: it releases it and
+            after either path. A turn a cut paused (``ctx.fast_forward``
+            with the run's halt not set) is not held: the call returns
+            its result. A call holding a turn from a checkpoint while it
+            fast-forwards does not continue the turn: it releases it and
             returns the result SAIA paused it with (``None`` when that
             could not be kept), without calling SAIA or the other hooks.
 
@@ -310,7 +315,7 @@ class Loop:
         """
         turn = _LoopTurn(ctx)
         try:
-            if _in_shortcut(ctx):
+            if _fast_forward(ctx):
                 finished, paused_result = turn.finish()
                 if finished:
                     return paused_result
@@ -354,8 +359,11 @@ class Loop:
         return saia
 
     def _resolve_halt(self, ctx: Context[Any]) -> asyncio.Event | None:
-        """Explicit ``Loop(halt=X)`` wins over ambient ``ctx.halt``."""
-        return self._halt if self._halt is not None else ctx.halt
+        """Explicit ``Loop(halt=X)`` wins over the ambient abort (:func:`~._shortcut.abort_event`)."""
+        if self._halt is not None:
+            return self._halt
+        env = ctx._env
+        return ctx.halt if env is None else abort_event(env)
 
     def _make_iter_bridge(self, ctx: Context[Any]) -> Callable[[int, Any], Awaitable[None]] | None:
         """Return a SAIA-compatible per-turn bridge, or ``None`` when unwired."""
@@ -402,7 +410,8 @@ class Loop:
         an empty turn — the step still counts as interrupted and its
         rerun starts the turn over. Keeping the task lets a resumed call
         that receives no task (a direct :class:`Loop` chain step) run
-        the saved one. On the complete path the turn is released.
+        the saved one. A turn a cut paused (:func:`_cut_short`) is
+        released instead, as on the complete path: the call is done.
 
         Returns the value from ``on_paused`` / ``on_complete`` when
         the hook returned non-``None`` — :meth:`__call__` uses it to
@@ -412,7 +421,10 @@ class Loop:
         if self._on_cost is not None:
             await maybe_await(self._on_cost(result, ctx))
         if getattr(result, "paused", False):
-            turn.hold(self._capture_paused(task, conversation, result))
+            if _cut_short(ctx):
+                turn.release()
+            else:
+                turn.hold(self._capture_paused(task, conversation, result))
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
@@ -569,10 +581,16 @@ class _LoopTurn:
         return True, None if raw is None else PausedTurnEnvelope.from_dict(raw).result
 
 
-def _in_shortcut(ctx: Context[Any]) -> bool:
-    """True when the flow this call runs under is in shortcut mode, its own or an enclosing one's."""
+def _fast_forward(ctx: Context[Any]) -> bool:
+    """True when this call runs in a region whose signal is set."""
     env = ctx._env
-    return env is not None and in_shortcut_mode(env)
+    return env is not None and is_fast_forward(env)
+
+
+def _cut_short(ctx: Context[Any]) -> bool:
+    """True when this call fast-forwards and the run's halt is not set: a pause now is the cut's."""
+    env = ctx._env
+    return env is not None and is_fast_forward(env) and not is_run_halted(env)
 
 
 # ----------------------------------------------------------------------------

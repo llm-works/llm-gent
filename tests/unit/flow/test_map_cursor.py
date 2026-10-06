@@ -210,11 +210,11 @@ class TestUnmergedItem:
         assert sorted((await History(store, "unmerged").snapshot(head)).root["merged"]) == [1, 2]
 
 
-class TestWaveShape:
-    async def test_halt_mid_wave_resumes_without_rerunning_finished_items(
+class TestLenientParallelMap:
+    async def test_halt_mid_map_resumes_without_rerunning_finished_items(
         self, store: JsonFileCheckpointStore
     ) -> None:
-        """``.map(strict=False).guard(...)`` in parallel: halt mid-wave, then resume."""
+        """``.map(strict=False).guard(...)`` in parallel: halt mid-map, then resume."""
         ran: list[int] = []
 
         def build(halt: asyncio.Event, halt_on: int | None) -> Any:
@@ -231,7 +231,7 @@ class TestWaveShape:
             return (
                 Factory(make_test_logger())
                 .create(state={})
-                .with_checkpoint_store(store, "wave")
+                .with_checkpoint_store(store, "lenient-map")
                 .with_checkpointer()
                 .with_halt(halt)
                 .map(

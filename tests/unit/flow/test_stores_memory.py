@@ -50,7 +50,7 @@ class TestMemoryStore:
         "call",
         [
             lambda s: s.bind_flow_id("", "history-1"),
-            lambda s: s.bind_flow_id("campaign-1", ""),
+            lambda s: s.bind_flow_id("client-1", ""),
             lambda s: s.put_object("", "blob", "h", b"x"),
             lambda s: s.set_ref("history-1", "", "c", None),
             lambda s: s.set_ref("history-1", "HEAD", "", None),

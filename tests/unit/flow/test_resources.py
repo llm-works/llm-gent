@@ -385,8 +385,8 @@ class TestAcrossResume:
 
 
 class TestAcrossShortcut:
-    async def test_a_per_run_child_carries_through_the_shortcut(self) -> None:
-        """The continuation runs with the same child: counts before and after the cut add up once."""
+    async def test_a_region_s_per_run_child_counts_its_steps_once(self) -> None:
+        """Cut after ``a``: nothing runs again, so the child and the root count ``a`` once."""
         root = Counter()
         cut = asyncio.Event()
         seen: list[Counter] = []
@@ -396,7 +396,7 @@ class TestAcrossShortcut:
             seen.append(ctx.resource(COUNTER))
             ctx.resource(COUNTER).add(1)
             cut.set()
-            await asyncio.sleep(0)  # the stop follows the signal
+            await asyncio.sleep(0)
             return x
 
         @verb
@@ -404,67 +404,41 @@ class TestAcrossShortcut:
             ctx.resource(COUNTER).add(100)
             return x
 
-        @verb
-        async def c(ctx: Context[Any], x: int) -> int:
-            seen.append(ctx.resource(COUNTER))
-            ctx.resource(COUNTER).add(2)
-            return x
+        region = _ff().create().with_resource(COUNTER, per="call").with_shortcut("cut")
+        flow = _ff().create().with_signal("cut", cut).with_resource(COUNTER, root)
+        assert await flow.call(region.call(a).then(b)).run(1) == 1
+        assert len(seen) == 1 and seen[0].count == 1
+        assert root.count == 1
 
-        sub = (
-            _ff()
-            .create()
-            .with_resource(COUNTER, per="call")
-            .with_shortcut("cut", to="c")
-            .call(a)
-            .then(b)
-            .then(c, name="c")
-        )
-        flow = _ff().create().with_signal("cut", cut).with_resource(COUNTER, root).call(sub)
-        assert await flow.run(1) == 1
-        assert seen[0] is seen[1] and seen[0].count == 3
-        assert root.count == 3
-
-    @pytest.mark.parametrize("map_cut", [False, True], ids=["items-alone", "map-too"])
-    async def test_items_continue_with_their_children_s_counts(self, map_cut: bool) -> None:
-        """Alone, each item continues in place; with the map cut too, from restaged entries."""
+    async def test_started_items_end_with_their_children_s_counts(self) -> None:
         root = Counter()
         cut = asyncio.Event()
         gate = asyncio.Event()
-        at_extract: dict[int, int] = {}
 
         @verb
-        async def query(ctx: Context[Any], n: int) -> int:
+        async def first(ctx: Context[Any], n: int) -> int:
             ctx.resource(COUNTER).add(1)
             if n == 1:
                 cut.set()
-                await asyncio.sleep(0)  # the stop follows the signal
+                await asyncio.sleep(0)
                 gate.set()
             else:
                 await gate.wait()
             return n
 
         @verb
-        async def explore(ctx: Context[Any], n: int) -> int:
+        async def second(ctx: Context[Any], n: int) -> int:
             ctx.resource(COUNTER).add(100)
             return n
 
-        @verb
-        async def extract(ctx: Context[Any], n: int) -> int:
-            at_extract[n] = ctx.resource(COUNTER).count
-            ctx.resource(COUNTER).add(2)
-            return n
-
         def item(b: Any) -> None:
-            b.with_resource(COUNTER, per="item").call(query).then(explore)
-            b.then(extract, name="extract").with_shortcut("cut", to="extract")
+            b.with_resource(COUNTER, per="item").call(first).then(second)
 
-        waves = _ff().create().map(item, items=lambda *_: [0, 1], max_concurrency=2)
-        if map_cut:
-            waves.with_shortcut("cut")
-        flow = _ff().create().with_signal("cut", cut).with_resource(COUNTER, root).call(waves)
+        region = _ff().create().with_shortcut("cut")
+        region.map(item, items=lambda *_: [0, 1], max_concurrency=2)
+        flow = _ff().create().with_signal("cut", cut).with_resource(COUNTER, root).call(region)
         assert await flow.run() == [0, 1]
-        assert at_extract == {0: 1, 1: 1}
-        assert root.count == 2 * (1 + 2)
+        assert root.count == 2
 
 
 class TestProtocol:

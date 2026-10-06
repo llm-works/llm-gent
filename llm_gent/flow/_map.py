@@ -37,7 +37,7 @@ from ._executor import (
 )
 from ._halt_observer import is_halt_signaled
 from ._node_id import _descend_context
-from ._shortcut import in_shortcut_mode
+from ._shortcut import is_fast_forward
 from ._validation import check_concurrency
 from .context import Context
 from .nodes import Failure, Interrupted, ItemsFn, RestoredError, Skipped
@@ -315,8 +315,8 @@ class MapItemRunner:
         inside its body — by the halt, or raising out of a strict map —
         stays registered where it stopped (its scope and its body's
         cursors), for the run's halt checkpoint and any checkpoint a
-        sibling takes meanwhile. In shortcut mode an item that had not
-        started is :class:`Skipped` (:meth:`_shortcut_skips`).
+        sibling takes meanwhile. In a map that fast-forwards an item that
+        had not started is :class:`Skipped` (:meth:`_shortcut_skips`).
         """
         if is_halt_signaled(self.env):
             return _INTERRUPTED
@@ -339,14 +339,13 @@ class MapItemRunner:
         return outcome
 
     def _shortcut_skips(self) -> bool:
-        """True when this map's flow is in shortcut mode and the item had not started.
+        """True when this map fast-forwards and the item had not started.
 
-        Shortcut mode is the flow's own or an enclosing flow's
-        (:func:`~._shortcut.in_shortcut_mode`). An item that was running
-        when the flow stopped (its positions are saved) continues from
-        them.
+        It fast-forwards in a region whose signal is set
+        (:func:`~._shortcut.is_fast_forward`). An item a checkout saved as
+        running (its positions are saved) continues from them.
         """
-        if not in_shortcut_mode(self.env):
+        if not is_fast_forward(self.env):
             return False
         return not self.env.scopes.has_saved_under(self.path)
 

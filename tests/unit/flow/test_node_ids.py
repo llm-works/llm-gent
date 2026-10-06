@@ -151,8 +151,8 @@ def test_unnamed_primitives_alias_on_removal() -> None:
 
 def test_named_primitive_keeps_its_id_when_a_sibling_is_removed() -> None:
     """A named map keeps its id when another map before it is removed."""
-    both = _chain_step_ids(_mkflow().map(_item_body).map(_item_body, name="wave"))
-    named_only = _chain_step_ids(_mkflow().map(_item_body, name="wave"))
+    both = _chain_step_ids(_mkflow().map(_item_body).map(_item_body, name="items"))
+    named_only = _chain_step_ids(_mkflow().map(_item_body, name="items"))
     assert named_only == both[1:]
 
 
@@ -173,12 +173,12 @@ def test_loops_with_different_roles_do_not_alias() -> None:
 
 def test_loop_name_overrides_role_label() -> None:
     """Loops sharing a role are told apart by ``name=``."""
-    first, second = Loop(ROLE_A, name="plan"), Loop(ROLE_A, name="review")
+    first, second = Loop(ROLE_A, name="draft"), Loop(ROLE_A, name="review")
     both = _chain_step_ids(_mkflow().call(first).then(second))
     second_only = _chain_step_ids(_mkflow().call(second))
     assert second_only == both[1:]
     assert Loop(ROLE_A).node_label == ROLE_A.name
-    assert first.node_label == "plan"
+    assert first.node_label == "draft"
 
 
 @pytest.mark.parametrize("bad", ["", 3])
@@ -190,15 +190,15 @@ def test_empty_or_non_str_name_is_rejected(bad: Any) -> None:
 
 
 def test_name_enters_the_root_hash() -> None:
-    a = _mkflow().map(_item_body, name="wave")
+    a = _mkflow().map(_item_body, name="items")
     b = _mkflow().map(_item_body)
     assert a.root_hash() != b.root_hash()
 
 
 def test_a_named_step_is_identified_by_its_name_alone() -> None:
     """Moving or renaming the verb a named step calls keeps its id and the root hash."""
-    a = _mkflow().call(verb_alpha, name="plan").then(verb_gamma)
-    b = _mkflow().call(verb_beta, name="plan").then(verb_gamma)
+    a = _mkflow().call(verb_alpha, name="head").then(verb_gamma)
+    b = _mkflow().call(verb_beta, name="head").then(verb_gamma)
     assert _chain_step_ids(a) == _chain_step_ids(b)
     assert a.root_hash() == b.root_hash()
 
@@ -216,7 +216,7 @@ def test_steps_sharing_a_name_are_told_apart_by_order() -> None:
 
 
 def test_naming_a_step_changes_its_id() -> None:
-    named = _chain_step_ids(_mkflow().call(verb_alpha, name="plan"))
+    named = _chain_step_ids(_mkflow().call(verb_alpha, name="head"))
     unnamed = _chain_step_ids(_mkflow().call(verb_alpha))
     assert named != unnamed
 

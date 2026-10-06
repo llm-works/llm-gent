@@ -1,28 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Shortcuts: on a signal, a flow continues at a later step with what it has.
+"""Shortcuts: on a signal, a flow fast-forwards to its end with what it has.
 
 A run's signals are named events the app sets, declared on its top-level
-flow with :meth:`Flow.with_signal`. :meth:`Flow.with_shortcut` declares,
-on any flow F, a shortcut on one of them. When the signal is set, F stops
-the way the run's halt stops it — every part under F at its next
-boundary, a Loop turn paused and held. Unlike a halt, the run does not
-end there: F continues at once from where it stopped, in shortcut mode,
-and ends at its step ``to`` (or its end) with what the stopped work
-produced. A halt is a pause; a shortcut is a jump.
+flow with :meth:`Flow.with_signal`. :meth:`Flow.with_shortcut` makes a
+flow F a region that one of them cuts short. While the signal is set, F
+and every flow under it fast-forward (:func:`is_fast_forward`): a chain
+starts no new step and ends with its last result, an iterate starts no
+new pass and returns its carried value, a map starts no new item (those
+are ``Skipped``), and a Loop
+turn in flight is aborted, its call returning the result SAIA paused it
+with. What is already running is neither stopped nor run again: it
+finishes with what it has. The step after F then runs as usual. A signal
+set while the run is outside every region it cuts short does nothing
+until such a region starts; the region then ends at once.
 
-Shortcut mode covers F's whole subtree (:func:`in_shortcut_mode`): a flow
-below F with no shortcut of its own behaves as if it declared one with
-no ``to`` — it starts no new iterate pass or map item, and its chain
-ends after the step that was interrupted. A flow below F that declares
-its own shortcut lands where its ``to`` says; from there its steps, and
-the flows under them, run normally.
+A cut is not a halt: it writes no checkpoint and runs nothing again.
+Which signals are set is part of where the run is, though: every
+checkpoint the run takes records them (:func:`run_signals`), and resume
+sets them again before the first step, so a run halted while it
+fast-forwards goes on fast-forwarding.
 
-Which signals are set is part of where the run is: every checkpoint the
-run takes records them (:func:`run_signals`), and resume sets them again
-before the first step. A flow that starts while its signal is set — a
-later step, the next iterate pass, a map item — starts in shortcut mode.
+A region may not contain another region on the same signal
+(:func:`check_shortcuts`); regions on different signals may nest.
 """
 
 from __future__ import annotations
@@ -30,11 +31,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .nodes import step_name
-from .state.snapshot import CHAIN, SIGNALS, ScopePath, ScopeRegistry
+from .state.snapshot import SIGNALS
 
 
 if TYPE_CHECKING:
@@ -42,20 +42,11 @@ if TYPE_CHECKING:
     from .nodes import _RunEnv
 
 
-SHORTCUT = "shortcut"
-"""Field of a chain's cursor: the chain is in shortcut mode, on its way to its landing step."""
-
-
 @dataclass(frozen=True)
 class Shortcut:
-    """What :meth:`Flow.with_shortcut` declares: the signal and the step it lands on.
-
-    ``signal`` names one of the run's signals; ``to`` is the ``name=`` of a
-    step of the declaring flow's chain, ``None`` its end.
-    """
+    """What :meth:`Flow.with_shortcut` declares: the signal that cuts the flow short."""
 
     signal: str
-    to: str | None
 
 
 def check_signal(name: object, event: object) -> tuple[str, asyncio.Event]:
@@ -71,17 +62,14 @@ def check_signal(name: object, event: object) -> tuple[str, asyncio.Event]:
     return name, event  # type: ignore[return-value]
 
 
-def check_shortcut(signal: object, to: object) -> Shortcut:
-    """The :class:`Shortcut` :meth:`Flow.with_shortcut` declares, when its arguments are valid.
+def check_shortcut(signal: object) -> Shortcut:
+    """The :class:`Shortcut` :meth:`Flow.with_shortcut` declares, when ``signal`` is valid.
 
     Raises:
-        ValueError: ``signal`` is not a non-empty str, or ``to`` is neither
-            ``None`` nor one.
+        ValueError: ``signal`` is not a non-empty str.
     """
     _check_name(signal, ".with_shortcut(signal)")
-    if to is not None:
-        _check_name(to, ".with_shortcut(to=)")
-    return Shortcut(signal, to)  # type: ignore[arg-type]
+    return Shortcut(signal)  # type: ignore[arg-type]
 
 
 def _check_name(name: object, what: str) -> None:
@@ -91,15 +79,12 @@ def _check_name(name: object, what: str) -> None:
 
 
 def check_shortcuts(root: Flow) -> None:
-    """Raise unless signals are on ``root`` alone and every shortcut is on one and lands somewhere.
-
-    Checked at run start: the fluent API lets ``with_shortcut(to=...)``
-    come before the step it names is appended.
+    """Raise unless signals are on ``root`` alone, every region names one, and no region holds another on the same signal.
 
     Raises:
         RuntimeError: A nested flow declares a signal; a shortcut's signal
-            is not one of ``root``'s; or its ``to`` names no step of the
-            declaring flow's chain, or more than one.
+            is not one of ``root``'s; or a flow under a region declares a
+            shortcut on that region's signal.
     """
     from ._node_id import iter_flows
 
@@ -114,37 +99,41 @@ def check_shortcuts(root: Flow) -> None:
 
 
 def _check_one(flow: Flow, root: Flow) -> None:
-    """Raise unless ``flow``'s shortcut is on one of ``root``'s signals and lands on one step."""
-    shortcut = flow._shortcut
-    assert shortcut is not None
-    if shortcut.signal not in root._signals:
+    """Raise unless ``flow``'s shortcut is on one of ``root``'s signals and holds no other on it."""
+    signal = flow._shortcut.signal  # type: ignore[union-attr]
+    if signal not in root._signals:
         raise RuntimeError(
-            f"Flow {_label(flow)} has with_shortcut({shortcut.signal!r}) but the run declares "
-            f"no such signal: call with_signal({shortcut.signal!r}, event) on {_label(root)}"
+            f"Flow {_label(flow)} has with_shortcut({signal!r}) but the run declares no such "
+            f"signal: call with_signal({signal!r}, event) on {_label(root)}"
         )
-    if shortcut.to is None:
-        return
-    count = sum(1 for node in flow._nodes if step_name(node) == shortcut.to)
-    if count != 1:
-        found = "no step" if count == 0 else f"{count} steps"
+    inner = _inner_region(flow, signal)
+    if inner is not None:
         raise RuntimeError(
-            f"Flow {_label(flow)} has with_shortcut(to={shortcut.to!r}) but {found} of its "
-            f"chain is named {shortcut.to!r}: name exactly one step with name="
+            f"Flow {_label(inner)} has with_shortcut({signal!r}) inside Flow {_label(flow)}, "
+            f"which has it too: the outer one already cuts everything under it short"
         )
+
+
+def _inner_region(flow: Flow, signal: str) -> Flow | None:
+    """A flow under ``flow`` declaring a shortcut on ``signal``; ``None`` when there is none."""
+    from ._node_id import _child_flows
+
+    seen: set[int] = set()
+    stack: list[Flow] = [child for node in flow._nodes for _, child in _child_flows(node)]
+    while stack:
+        child = stack.pop()
+        if id(child) in seen:
+            continue
+        seen.add(id(child))
+        if child._shortcut is not None and child._shortcut.signal == signal:
+            return child
+        stack.extend(grandchild for node in child._nodes for _, grandchild in _child_flows(node))
+    return None
 
 
 def _label(flow: Flow) -> str:
     """``flow``'s name for messages."""
     return repr(flow._name or "<anonymous>")
-
-
-def target_index(flow: Flow) -> int | None:
-    """Chain index of the step ``flow``'s shortcut lands on; ``None`` for its end."""
-    shortcut = flow._shortcut
-    assert shortcut is not None
-    if shortcut.to is None:
-        return None
-    return next(i for i, node in enumerate(flow._nodes) if step_name(node) == shortcut.to)
 
 
 class _SetSignals:
@@ -182,79 +171,26 @@ def run_signals(flow: Flow) -> Iterator[None]:
 
 @dataclass
 class ShortcutRun:
-    """One run of a flow that declares a shortcut.
+    """One run of a region: its signal, and the event a Loop turn in it aborts on.
 
-    ``stop`` is the halt the run observes: set by ``parent`` (the halt it
-    would observe without a shortcut) and by the signal ``event`` while
-    the chain has not reached ``to_index`` (``None``: the flow's end).
-    ``active`` is shortcut mode, recorded in the chain's cursor; it ends
-    when the chain lands, and ``landed`` stays set from then on: the
-    shortcut is used up.
+    ``stop`` is set by ``signal`` and by what a turn around the region
+    aborts on — the run's halt or the enclosing region's ``stop``
+    (:func:`run_shortcut`). SAIA observes it as ``abort_signal``; a
+    boundary reads ``signal`` itself (:func:`is_fast_forward`).
     """
 
-    event: asyncio.Event
-    to_index: int | None
+    signal: asyncio.Event
     stop: asyncio.Event
-    parent: asyncio.Event | None
-    active: bool = False
-    landed: bool = False
-    continued: bool = field(default=False, repr=False)
-
-    def take_over(self, run_halted: bool) -> bool:
-        """After the run stopped: True when it continues now, in shortcut mode.
-
-        A stop with the signal set puts the run in shortcut mode, recorded
-        in its chain's cursor — also when the enclosing halt (``parent``,
-        or the run's: ``run_halted``) is set too: the run then stops with
-        everything else, and resume continues the shortcut. Only a stop by
-        the shortcut alone continues at once, and only once.
-        """
-        if self.landed or not self.event.is_set():
-            return False
-        self.active = True
-        halted = run_halted or (self.parent is not None and self.parent.is_set())
-        if halted or self.continued:
-            return False
-        self.continued = True
-        self.stop.clear()
-        return True
-
-    @property
-    def pending(self) -> bool:
-        """True when the signal is set and the run has neither taken it over nor landed.
-
-        Boundaries check this directly (:func:`~._halt_observer.is_halt_signaled`):
-        :attr:`stop` follows the signal one loop tick later, and a step
-        that sets the signal without awaiting reaches its boundary first.
-        """
-        return self.event.is_set() and not self.active and not self.landed
-
-    async def _watch(self) -> None:
-        """Stop the run once the signal is set, unless it has landed or taken it over by then.
-
-        A boundary can see the signal first and the run take it over
-        (:meth:`take_over` clears :attr:`stop`) before this task runs;
-        setting :attr:`stop` then would stop the continuation.
-        """
-        await self.event.wait()
-        if not self.landed and not self.active:
-            self.stop.set()
 
 
-def in_shortcut_mode(env: _RunEnv) -> bool:
-    """True when the flow running under ``env`` is in shortcut mode.
+def is_fast_forward(env: _RunEnv) -> bool:
+    """True when the flow running under ``env`` is in a region whose signal is set."""
+    return any(shortcut.signal.is_set() for shortcut in env.shortcuts)
 
-    The innermost shortcut that has taken over or landed decides — the
-    flow's own, else the nearest enclosing one: in shortcut mode until it
-    lands, normal after. A flow under a nested shortcut that has landed
-    runs normally while an enclosing one is still in shortcut mode. A
-    shortcut whose signal has not been taken over leaves it to the ones
-    around it; with none taken over, the flow runs normally.
-    """
-    for shortcut in reversed(env.shortcuts):
-        if shortcut.active or shortcut.landed:
-            return shortcut.active
-    return False
+
+def abort_event(env: _RunEnv) -> asyncio.Event | None:
+    """What a Loop turn under ``env`` aborts on: the innermost region's stop, else the run's halt."""
+    return env.shortcuts[-1].stop if env.shortcuts else env.halt
 
 
 def follow(
@@ -276,33 +212,27 @@ def follow(
 
 @contextlib.asynccontextmanager
 async def run_shortcut(
-    flow: Flow,
-    path: ScopePath,
-    scopes: ScopeRegistry,
-    halt: asyncio.Event | None,
-    signals: dict[str, asyncio.Event],
+    flow: Flow, parent: asyncio.Event | None, signals: dict[str, asyncio.Event]
 ) -> AsyncIterator[ShortcutRun | None]:
-    """The shortcut of one run of ``flow`` at ``path``; ``None`` when it declares none.
+    """The region one run of ``flow`` makes; ``None`` when it declares no shortcut.
 
-    ``signals`` are the run's. A run whose checked-out chain cursor was
-    in shortcut mode, or that starts with its signal set, starts in
-    shortcut mode.
+    ``parent`` is what a Loop turn around it aborts on (:func:`abort_event`);
+    ``signals`` are the run's.
     """
     shortcut = flow._shortcut
     if shortcut is None:
         yield None
         return
-    event = signals[shortcut.signal]
-    saved = scopes.peek_cursor(path, CHAIN)
-    resumed = isinstance(saved, dict) and bool(saved.get(SHORTCUT))
-    run = ShortcutRun(event, target_index(flow), asyncio.Event(), halt)
-    run.active = resumed or event.is_set()
-    tasks = [follow(halt, run.stop)]
-    if not run.active:
-        tasks.append(asyncio.create_task(run._watch()))
+    signal = signals[shortcut.signal]
+    run = ShortcutRun(signal, asyncio.Event())
+    tasks = [follow(parent, run.stop), follow(signal, run.stop)]
     try:
         yield run
     finally:
         for task in tasks:
             if task is not None:
                 task.cancel()
+        for task in tasks:
+            if task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task

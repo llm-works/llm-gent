@@ -288,78 +288,57 @@ Current limits:
 
 ### Shortcuts
 
-A halt pauses the run. A shortcut moves it forward: on a signal, a flow
-stops exploring and continues at a later step with what it has, and the
-run still ends with a result.
+A halt pauses the run. A shortcut moves it forward: on a signal, a part
+of the flow is cut short — it skips what it can — and the run goes on
+after it, still ending with a result.
 
 Signals are named events the app sets, declared on the top-level flow
-with `with_signal(name, event)`; any flow declares a shortcut on one with
-`with_shortcut(name, to=None)`, where `to` is the `name=` of a later step
-of its own chain (`.call`, `.then`, `.iterate`, `.map` and `.branch` take
-`name=`) and `None` its end:
+with `with_signal(name, event)`. `with_shortcut(name)` makes a flow a
+region the signal cuts short:
 
 ```python
-item = (
-    ff.create()
-    .call(query)
-    .then(explore)
-    .then(extract, name="extract")
-    .then(digest)
-    .with_shortcut("cut", to="extract")
+loop = ff.create().iterate(body, max_iters=20).with_shortcut("cut")
+flow = (
+    ff.create(...)
+    .with_halt(pause)
+    .with_signal("cut", cut)
+    .call(prepare)
+    .then(loop)  # the region: the cut ends it
+    .then(finish)  # runs as usual after it
 )
-wave_body = ff.create().call(plan).map(item).then(revise)
-waves = ff.create().iterate(wave_body, max_iters=20).with_shortcut("cut")
-campaign = ff.create(...).with_halt(pause).with_signal("cut", cut).call(waves).then(synthesis)
 ```
 
-When the signal is set, the flow stops exactly as the halt stops it —
-every part at its next boundary, a Loop turn paused and held — and then
-continues at once from where it stopped, in shortcut mode:
+While the signal is set, the region and every flow under it
+fast-forward:
 
-- The step that was running runs again from its positions. A Loop call
-  holding a paused turn does not continue it: it returns the result
-  SAIA paused it with (SAIA's `TaskResult`, `paused=True`) and the step
-  carries on.
-- An iterate in the flow's chain starts no new pass and returns its
-  carried value; a map in it starts no new item (those are `Skipped`,
-  `on_item_complete` fires) and its started items finish.
-- The chain then continues at `to`, skipping the steps before it (`to`
-  gets the last completed result), or the flow ends with it.
+- A chain starts no new step and ends with its last result; one that
+  has not started passes its input through.
+- An iterate starts no new pass and returns its carried value; a map
+  starts no new item (those are `Skipped`, `on_item_complete` fires).
+- A Loop turn in flight is aborted, and its call returns the result
+  SAIA paused it with (SAIA's `TaskResult`, `paused=True`).
 
-Shortcut mode covers the flow's whole subtree until the flow reaches
-`to`. A flow under it with no shortcut of its own behaves as if it
-declared one with no `to`: its iterates start no new pass, its maps no
-new item, and its chain ends after the step that was interrupted (a
-chain that has not started yet passes its input through). In the example
-above, `wave_body` needs no shortcut: the cut wave runs no `revise`.
+What is already running is neither stopped nor run again: it finishes
+with what it has. A step can check `ctx.fast_forward` and return early;
+it has completed. The step after the region then runs as usual.
 
-A flow under it that declares its own shortcut lands where its `to`
-says: an item stopped before `extract` jumps there, one stopped inside
-`explore` finishes its turn with the paused result and goes on to
-`extract`, and one past `extract` finishes normally. That is how a nested
-flow names a step it must still reach; work that must never be split
-belongs in one step. Once a flow lands, its steps from `to` on and the
-flows under them run normally, even while an enclosing shortcut is still
-in shortcut mode: an item that landed on `extract` runs the steps after
-it in full while the wave finishes. A flow that starts while its signal is set — a later step, the
-next iterate pass, a map item — starts in shortcut mode; a signal set
-once a flow is at or past its `to` does nothing there.
+A signal set outside the region waits for it: a cut during `prepare`
+does not touch `prepare`, and `loop` then ends as soon as it starts.
+A signal set after the region ended does nothing. A region may not hold
+another region on the same signal (run start raises); regions on
+different signals may nest. A signal set inside a step, without
+awaiting, is seen at that step's boundary.
 
-A signal set inside a step, without awaiting, stops the flow at that
-step's boundary like one set from outside.
+A cut is not a halt: it writes no checkpoint, and `ctx.halt` — the
+run's halt, `None` without `.with_halt(...)` — stays unset. A step that
+stops for the halt raises `Interrupted` and runs again on resume; a
+step that ends early on a cut returns. Setting `ctx.halt` from a step
+pauses the whole run (a stop flag stored outside the process, say).
 
-Under a shortcut, `ctx.halt` is the flow's stop: set by the run's halt
-and by the signal alike, so a step that observes it pauses on either.
-`ctx.run_halt` is the run's halt itself (or `None` without
-`.with_halt(...)`): a step sets it to pause the whole run (a stop flag
-stored outside the process, say), and checking
-`ctx.run_halt and ctx.run_halt.is_set()` tells a halt from a cut.
-
-Pausing works at any point of a shortcut. Which signals are set is in
-every checkpoint, and so is a flow being in shortcut mode (its chain's
-cursor); resume sets the signals again and continues every shortcut
-where it was. A finished run records no signal: the next session starts
-with none set.
+Pausing works while a region fast-forwards: which signals are set is in
+every checkpoint, and resume sets them again, so the region goes on
+fast-forwarding. A finished run records no signal: the next session
+starts with none set.
 
 ### Resources
 
@@ -413,8 +392,8 @@ use, and resume hands it back to its `restore()` before the run's first
 step. The top-level flow's resources are in every commit, the completion
 commit included, so a later run continues from them; one every flow
 inherits (`Factory.with_resource`) is kept once, at the top; a
-per-run child is kept while its run is in progress, and a shortcut's
-continuation carries it over. What resume means for the accounting —
+per-run child is kept while its run is in progress; a cut runs nothing
+again, so nothing is counted twice. What resume means for the accounting —
 continue, rebase, ignore — is the resource's own decision, made in
 `restore()`. Two keys with the same name in one flow's tree raise at
 `run()`: they would share one place in a checkpoint.
@@ -464,7 +443,7 @@ the cost API is sugar over it: `with_cost_tracker(t)` is
 flow = (
     ff.create(...)
     .with_cost_tracker(session_tracker)  # the run's tracker
-    .map(lambda b: b.with_budget(0.5).call(research), items=topics)  # each item: 0.5
+    .map(lambda b: b.with_budget(0.5).call(work), items=topics)  # each item: 0.5
     .call(ff.create().with_budget(3.0).map(...))  # this map: 3.0 in total
 )
 ```
@@ -487,8 +466,8 @@ step:
   top. A tracker a nested flow declares of its own is kept while that
   flow runs.
 - A budgeted run's child is kept while the run is in progress: a run
-  halted at 9.0 of a 10.0 budget resumes with 1.0 left. A shortcut's
-  continuation carries it over the same way, so nothing is counted twice.
+  halted at 9.0 of a 10.0 budget resumes with 1.0 left. A cut runs no
+  step again, so nothing is counted twice.
 - After a crash the run resumes from its last save: spend recorded after
   that save is in no checkpoint, so the step that runs again records it
   again. Cost tracking is best effort.
@@ -537,18 +516,18 @@ Saves are declared with `with_checkpointer()`, on any flow: the top
 level, a subflow, a map or iterate body. Inside a flow with a
 checkpointer on it or above it, `ctx.checkpoint()` and the checkpoint
 policy write commits; elsewhere they write nothing. A save belongs to the
-innermost checkpointer enclosing the step; `with_checkpointer("research")`
-also moves the tag `tags/research` to each of its saves, so
-`run(resume="research")` goes back to that part's latest checkpoint. Tag
+innermost checkpointer enclosing the step; `with_checkpointer("items")`
+also moves the tag `tags/items` to each of its saves, so
+`run(resume="items")` goes back to that part's latest checkpoint. Tag
 names are repo-global, shared with `ctx.checkpoint(name)`. A checkpointer
 in a run without a store makes `run()` raise.
 
 ```python
 flow = (
     ff.create(state=...)
-    .with_checkpoint_store(store, "campaign-42")  # the run's repo
-    .call(plan)
-    .map(lambda b: b.with_checkpointer("research").call(item), items=...)
+    .with_checkpoint_store(store, "session-42")  # the run's repo
+    .call(prepare)
+    .map(lambda b: b.with_checkpointer("items").call(item), items=...)
 )
 ```
 

@@ -30,7 +30,7 @@ from ._executor import (
 )
 from ._halt_observer import is_halt_signaled, note_halt
 from ._node_id import _descend_context
-from ._shortcut import in_shortcut_mode
+from ._shortcut import is_fast_forward
 from .nodes import Interrupted
 from .state import State
 from .state.snapshot import CARRY, PASS, UNTIL, ScopePath
@@ -115,8 +115,8 @@ class IterateRunner:
         A halt that stops the loop before its bounds do interrupts it: a
         body interrupted inside a pass raises :class:`Interrupted` through
         the loop, which neither advances nor writes a policy commit after
-        it, and leaves the iterate registered in that pass. In shortcut
-        mode the loop ends before a pass that had not started, with the
+        it, and leaves the iterate registered in that pass. A loop that
+        fast-forwards ends before a pass that had not started, with the
         carried value (:meth:`_shortcut_ends`).
 
         Raises:
@@ -153,14 +153,14 @@ class IterateRunner:
         return self.carry
 
     def _shortcut_ends(self, pass_path: ScopePath) -> bool:
-        """True when this iterate's flow is in shortcut mode and the pass had not started.
+        """True when this iterate fast-forwards and the pass had not started.
 
-        Shortcut mode is the flow's own or an enclosing flow's
-        (:func:`~._shortcut.in_shortcut_mode`). A pass that was running
-        when the flow stopped (its positions are saved) runs again from
-        them; no other pass starts.
+        It fast-forwards in a region whose signal is set
+        (:func:`~._shortcut.is_fast_forward`). A pass a checkout saved as
+        running (its positions are saved) runs again from them; no other
+        pass starts.
         """
-        if not in_shortcut_mode(self.env):
+        if not is_fast_forward(self.env):
             return False
         return not self.env.scopes.has_saved_under(pass_path)
 
