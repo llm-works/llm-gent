@@ -437,6 +437,7 @@ class TestConclude:
         result = await flow.run("", resume="latest")
         assert result == "a!"
         assert ran == []
+        assert project_calls == []
 
 
 class TestSignalSetInAStep:

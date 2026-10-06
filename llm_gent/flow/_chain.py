@@ -44,13 +44,15 @@ class _Saved:
     """Where a checkout continues a chain: the step, its input, and whether it had started.
 
     ``pending`` marks a step the chain stopped before (it moved past a
-    completed one); ``prev`` is that completed step's result.
+    completed one); ``prev`` is that completed step's result. ``deferred``
+    marks inputs that were not computed because the step would be skipped.
     """
 
     index: int
     inputs: Inputs
     pending: bool
     prev: Any
+    deferred: bool = False
 
 
 class Chain:
@@ -74,6 +76,7 @@ class Chain:
         self.step_kwargs: dict[str, Any] = {}
         self.pending = False
         self.prev: Any = None
+        self._deferred_inputs = False
 
     def cursor(self) -> dict[str, Any]:
         """The step this chain is at (its node id) and that step's input.
@@ -91,6 +94,8 @@ class Chain:
         }
         if self.pending:
             step["pending"], step["prev"] = True, self.prev
+            if self._deferred_inputs:
+                step["deferred"] = True
         return {CHAIN: step}
 
     async def walk(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
@@ -124,7 +129,9 @@ class Chain:
             )
         index = self.ids.index(step["step"])
         inputs = (tuple(step["args"]), step["kwargs"])
-        return _Saved(index, inputs, bool(step.get("pending")), step.get("prev"))
+        return _Saved(
+            index, inputs, bool(step.get("pending")), step.get("prev"), bool(step.get("deferred"))
+        )
 
     async def _walk_steps(
         self, saved: _Saved | None, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -154,7 +161,10 @@ class Chain:
                 index += 1
                 continue
             if saved is not None and index == saved.index:
-                inputs = saved.inputs
+                if saved.deferred and not is_fast_forward(self.env):
+                    inputs = _step_inputs(index, node, saved.prev, args, kwargs)
+                else:
+                    inputs = saved.inputs
             else:
                 prev = _passed_through(last, args, kwargs)
                 inputs = _step_inputs(index, node, prev, args, kwargs)
@@ -259,6 +269,7 @@ class Chain:
         """
         node = self.flow._nodes[index]
         self.index, self.pending, self.prev = index, True, prev_result
+        self._deferred_inputs = skip_inputs
         if skip_inputs:
             self.step_args, self.step_kwargs = (prev_result,), {}
         else:
