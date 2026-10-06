@@ -338,8 +338,10 @@ says: an item stopped before `extract` jumps there, one stopped inside
 `explore` finishes its turn with the paused result and goes on to
 `extract`, and one past `extract` finishes normally. That is how a nested
 flow names a step it must still reach; work that must never be split
-belongs in one step. The subtree under the steps from `to` on runs
-normally. A flow that starts while its signal is set — a later step, the
+belongs in one step. Once a flow lands, its steps from `to` on and the
+flows under them run normally, even while an enclosing shortcut is still
+in shortcut mode: an item that landed on `extract` runs the steps after
+it in full while the wave finishes. A flow that starts while its signal is set — a later step, the
 next iterate pass, a map item — starts in shortcut mode; a signal set
 once a flow is at or past its `to` does nothing there.
 

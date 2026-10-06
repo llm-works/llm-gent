@@ -16,7 +16,8 @@ Shortcut mode covers F's whole subtree (:func:`in_shortcut_mode`): a flow
 below F with no shortcut of its own behaves as if it declared one with
 no ``to`` — it starts no new iterate pass or map item, and its chain
 ends after the step that was interrupted. A flow below F that declares
-its own shortcut lands where its ``to`` says.
+its own shortcut lands where its ``to`` says; from there its steps, and
+the flows under them, run normally.
 
 Which signals are set is part of where the run is: every checkpoint the
 run takes records them (:func:`run_signals`), and resume sets them again
@@ -243,15 +244,17 @@ class ShortcutRun:
 def in_shortcut_mode(env: _RunEnv) -> bool:
     """True when the flow running under ``env`` is in shortcut mode.
 
-    Its own shortcut decides once it has taken over or landed: in shortcut
-    mode until it lands, normal after. Otherwise — no shortcut of its own,
-    or one whose signal has not been taken over — the flow is covered by
-    an enclosing shortcut in shortcut mode.
+    The innermost shortcut that has taken over or landed decides — the
+    flow's own, else the nearest enclosing one: in shortcut mode until it
+    lands, normal after. A flow under a nested shortcut that has landed
+    runs normally while an enclosing one is still in shortcut mode. A
+    shortcut whose signal has not been taken over leaves it to the ones
+    around it; with none taken over, the flow runs normally.
     """
-    own = env.shortcut
-    if own is not None and (own.active or own.landed):
-        return own.active
-    return any(shortcut.active for shortcut in env.shortcuts if shortcut is not own)
+    for shortcut in reversed(env.shortcuts):
+        if shortcut.active or shortcut.landed:
+            return shortcut.active
+    return False
 
 
 def follow(
