@@ -275,8 +275,8 @@ class Context(Generic[T]):
 
         The same as :attr:`halt` except under a shortcut, where :attr:`halt`
         is the flow's stop. Setting it from a step pauses the whole run
-        (:meth:`Flow.run` returns ``HALTED``); ``run_halt.is_set()`` tells a
-        halt from a cut while a step is stopping.
+        (:meth:`Flow.run` returns ``HALTED``); checking
+        ``run_halt and run_halt.is_set()`` tells a halt from a cut.
         """
         halt: asyncio.Event | None = getattr(self.flow, "_halt_event", None)
         return halt

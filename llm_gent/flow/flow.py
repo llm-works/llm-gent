@@ -865,8 +865,9 @@ class Flow:
         that step's boundary too.
 
         Under the shortcut, ``ctx.halt`` is this flow's stop (set by the
-        run's halt and by the signal); ``ctx.run_halt`` is the run's halt,
-        for a step that pauses the whole run or tells a halt from a cut.
+        run's halt and by the signal); ``ctx.run_halt`` is the run's halt
+        (requires :meth:`with_halt`), for a step that pauses the whole run
+        or tells a halt from a cut.
 
         Checked at run start: ``signal`` is declared, and ``to`` names
         exactly one step of this flow's chain.
