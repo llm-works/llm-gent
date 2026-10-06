@@ -72,13 +72,17 @@ def _label(flow: Flow) -> str:
 
 
 def is_halt_signaled(env: _RunEnv) -> bool:
-    """True when the halt event in effect under ``env`` is set, or the run's halt is.
+    """True when the halt event in effect under ``env`` is set, the run's halt is, or a cut is due.
 
     Under a shortcut, ``env.halt`` is a stop event that follows the run's
-    halt one loop tick later; the run's halt is checked directly so it is
-    never missed in between.
+    halt, and the shortcut's signal, one loop tick later. Both are checked
+    directly so neither is missed in between: the run's halt, and the
+    signal of a shortcut on this flow or an enclosing one that has not
+    taken it over or landed (:attr:`~._shortcut.ShortcutRun.pending`).
     """
-    return (env.halt is not None and env.halt.is_set()) or is_run_halted(env)
+    if env.halt is not None and env.halt.is_set():
+        return True
+    return is_run_halted(env) or any(shortcut.pending for shortcut in env.shortcuts)
 
 
 def is_run_halted(env: _RunEnv) -> bool:

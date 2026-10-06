@@ -216,6 +216,185 @@ class TestChain:
         assert ran == ["a", "b", "d"]
 
 
+class TestSignalSetInAStep:
+    """A step that sets the signal and returns without awaiting: the next boundary still sees it."""
+
+    async def test_the_next_step_does_not_start(self) -> None:
+        ran: list[str] = []
+        cut = asyncio.Event()
+
+        def make(name: str) -> Any:
+            @verb
+            async def step(ctx: Context[Any], x: str) -> str:
+                ran.append(name)
+                if name == "a":
+                    cut.set()  # no await: the boundary comes before any other task runs
+                return x + name
+
+            step.__qualname__ = f"sync_{name}"
+            return step
+
+        a, b, c, d = (make(n) for n in "abcd")
+        flow = _top(cut).with_shortcut("cut", to="c").call(a).then(b).then(c, name="c").then(d)
+        assert await flow.run("") == "acd"
+        assert ran == ["a", "c", "d"]
+
+    async def test_the_continuation_is_not_stopped_again_once_taken_over(self) -> None:
+        """The stop the signal would set a tick later must not land on the continuation.
+
+        The subflow (no shortcut of its own) stops at its boundary on the
+        signal its first step set, the outer flow takes the shortcut over
+        before any other task runs, and the subflow's next step continues
+        in shortcut mode and awaits: the signal's stop must not stop it a
+        second time.
+        """
+        ran: list[str] = []
+        cut = asyncio.Event()
+
+        @verb
+        async def a(ctx: Context[Any], x: str) -> str:
+            ran.append("a")
+            cut.set()  # no await
+            return x + "a"
+
+        @verb
+        async def b(ctx: Context[Any], x: str) -> str:
+            ran.append("b")
+            await asyncio.sleep(0)  # lets every pending task run
+            if ctx.halt is not None and ctx.halt.is_set():
+                raise Interrupted()
+            return x + "b"
+
+        inner = _ff().create().call(a).then(b)
+        flow = _top(cut).with_shortcut("cut", to="d").call(inner).then(_echo).then(_echo, name="d")
+        assert await flow.run("") == "ab"
+        assert ran == ["a", "b"]
+
+    async def test_no_new_pass_starts(self) -> None:
+        ran: list[int] = []
+        cut = asyncio.Event()
+
+        @verb
+        async def wave(ctx: Context[Any], n: int) -> int:
+            ran.append(n)
+            if n == 1:
+                cut.set()
+            return n + 1
+
+        flow = _top(cut).with_shortcut("cut").iterate(lambda b: b.call(wave), max_iters=5)
+        assert await flow.run(0) == 2
+        assert ran == [0, 1]
+
+    async def test_no_new_item_starts(self) -> None:
+        ran: list[int] = []
+        cut = asyncio.Event()
+
+        @verb
+        async def item(ctx: Context[Any], n: int) -> int:
+            ran.append(n)
+            if n == 0:
+                cut.set()
+            return n
+
+        flow = (
+            _top(cut)
+            .with_shortcut("cut")
+            .map(lambda b: b.call(item), items=lambda *_: [0, 1, 2], max_concurrency=1)
+        )
+        result = await flow.run()
+        assert ran == [0]
+        assert result[0] == 0 and all(isinstance(r, Skipped) for r in result[1:])
+
+    async def test_interrupted_raised_right_after_setting_it_is_accepted(self) -> None:
+        ran: list[str] = []
+        cut = asyncio.Event()
+        stopped: list[bool] = []
+
+        @verb
+        async def a(ctx: Context[Any], x: str) -> str:
+            ran.append("a")
+            if not stopped:
+                stopped.append(True)
+                cut.set()
+                raise Interrupted()
+            return x + "a"
+
+        @verb
+        async def b(ctx: Context[Any], x: str) -> str:
+            ran.append("b")
+            return x + "b"
+
+        flow = _top(cut).with_shortcut("cut", to="b").call(a).then(b, name="b")
+        assert await flow.run("") == "ab"
+        assert ran == ["a", "a", "b"]
+
+
+class TestRunHalt:
+    """``ctx.run_halt`` is the run's halt; under a shortcut ``ctx.halt`` is the flow's stop."""
+
+    async def test_under_a_shortcut_run_halt_is_the_run_s_halt_and_halt_the_stop(self) -> None:
+        halt, cut = asyncio.Event(), asyncio.Event()
+        seen: list[tuple[Any, Any]] = []
+
+        @verb
+        async def step(ctx: Context[Any], x: Any) -> Any:
+            seen.append((ctx.halt, ctx.run_halt))
+            return x
+
+        sub = _ff().create().with_shortcut("cut").call(step)
+        await _top(cut).with_halt(halt).call(step).then(sub).run(1)
+        (outer_halt, outer_run), (inner_halt, inner_run) = seen
+        assert outer_halt is halt and outer_run is halt
+        assert inner_run is halt and inner_halt is not halt
+
+    async def test_setting_run_halt_from_a_step_halts_the_run(self) -> None:
+        halt, cut = asyncio.Event(), asyncio.Event()
+        ran: list[str] = []
+
+        @verb
+        async def pause(ctx: Context[Any], x: str) -> str:
+            ran.append("pause")
+            assert ctx.run_halt is not None
+            ctx.run_halt.set()  # e.g. a stop flag stored outside the process
+            return x
+
+        @verb
+        async def after(ctx: Context[Any], x: str) -> str:
+            ran.append("after")
+            return x
+
+        flow = _top(cut).with_halt(halt).with_shortcut("cut").call(pause).then(after)
+        assert await flow.run("") is HALTED
+        assert ran == ["pause"]
+
+    async def test_a_step_tells_a_cut_from_a_halt(self) -> None:
+        halt, cut = asyncio.Event(), asyncio.Event()
+        stopping: list[tuple[bool, bool]] = []
+
+        @verb
+        async def a(ctx: Context[Any], x: str) -> str:
+            cut.set()
+            await asyncio.sleep(0)
+            assert ctx.halt is not None and ctx.run_halt is not None
+            stopping.append((ctx.halt.is_set(), ctx.run_halt.is_set()))
+            return x + "a"
+
+        flow = _top(cut).with_halt(halt).with_shortcut("cut", to="b").call(a).then(_echo, name="b")
+        assert await flow.run("") == "a"
+        assert stopping == [(True, False)]  # stopping for the cut, not for a halt
+
+    async def test_without_a_halt_run_halt_is_none(self) -> None:
+        seen: list[Any] = []
+
+        @verb
+        async def step(ctx: Context[Any], x: Any) -> Any:
+            seen.append(ctx.run_halt)
+            return x
+
+        await _ff().create().call(step).run(1)
+        assert seen == [None]
+
+
 class TestIterate:
     async def test_no_pass_starts_after_the_shortcut(self) -> None:
         ran: list[int] = []

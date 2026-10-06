@@ -114,13 +114,17 @@ class Context(Generic[T]):
     """
 
     halt: asyncio.Event | None = None
-    """Ambient halt event attached via :meth:`Flow.with_halt`, or ``None``.
+    """The stop this step observes: the run's halt, or ``None``.
 
     Verbs that expose their own inner loop (SAIA turn-by-turn, long-running
     external calls) can observe ``ctx.halt`` to short-circuit gracefully.
     :meth:`Flow.map` and :meth:`Flow.iterate` observe this at their natural
     boundaries automatically; verbs are free to poll it when useful.
-    Subflows inherit the outer runtime's halt unless they declare their own.
+
+    Under a flow's :meth:`Flow.with_shortcut` it is that flow's stop event:
+    set by the run's halt and by the shortcut's signal alike, so a step
+    pauses on either. To pause the whole run from a step, or to tell a
+    halt from a cut, use :attr:`run_halt`.
     """
 
     extra: dict[str, Any] = field(default_factory=dict)
@@ -264,6 +268,18 @@ class Context(Generic[T]):
                     f"with_resource(key, resource) on this flow or an enclosing one"
                 ) from None
             return default
+
+    @property
+    def run_halt(self) -> asyncio.Event | None:
+        """The run's halt — the top-level flow's :meth:`Flow.with_halt` event — or ``None``.
+
+        The same as :attr:`halt` except under a shortcut, where :attr:`halt`
+        is the flow's stop. Setting it from a step pauses the whole run
+        (:meth:`Flow.run` returns ``HALTED``); checking
+        ``run_halt and run_halt.is_set()`` tells a halt from a cut.
+        """
+        halt: asyncio.Event | None = getattr(self.flow, "_halt_event", None)
+        return halt
 
     @property
     def cost(self) -> CostTracker | None:

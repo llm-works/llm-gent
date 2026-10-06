@@ -334,6 +334,16 @@ that starts while its signal is set — a later step, the next iterate
 pass, a map item — starts in shortcut mode; a signal set once a flow is
 at or past its `to` does nothing there.
 
+A signal set inside a step, without awaiting, stops the flow at that
+step's boundary like one set from outside.
+
+Under a shortcut, `ctx.halt` is the flow's stop: set by the run's halt
+and by the signal alike, so a step that observes it pauses on either.
+`ctx.run_halt` is the run's halt itself (or `None` without
+`.with_halt(...)`): a step sets it to pause the whole run (a stop flag
+stored outside the process, say), and checking
+`ctx.run_halt and ctx.run_halt.is_set()` tells a halt from a cut.
+
 Pausing works at any point of a shortcut. Which signals are set is in
 every checkpoint, and so is a flow being in shortcut mode (its chain's
 cursor); resume sets the signals again and continues every shortcut
