@@ -244,7 +244,7 @@ class TypeStateFactory(Generic[T]):
 
     Usage::
 
-        ff = FlowFactory(lg, state_factory=TypeStateFactory(Counter))
+        ff = Factory(lg, state_factory=TypeStateFactory(Counter))
 
     State that needs runtime bindings should implement
     :class:`StateFactory` directly and inject handles in :meth:`restore`.

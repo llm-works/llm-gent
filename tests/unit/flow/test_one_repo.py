@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import HALTED, Context, FlowFactory, History, Interrupted, verb
+from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, verb
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
 from .conftest import make_test_logger
@@ -31,8 +31,8 @@ class Crash(BaseException):
     """The process died."""
 
 
-def _ff() -> FlowFactory:
-    return FlowFactory(make_test_logger())
+def _ff() -> Factory:
+    return Factory(make_test_logger())
 
 
 def _nested(store: Any, ran: list[str], *, crash: bool, halt: asyncio.Event | None = None) -> Any:

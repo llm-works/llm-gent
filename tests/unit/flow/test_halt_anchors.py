@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, Interrupted, verb
+from llm_gent.flow import Context, Factory, History, Interrupted, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from .conftest import make_test_logger
@@ -60,7 +60,7 @@ def _two_steps(
         ctx.state.data["s2"] = ctx.state.data.get("s2", 0) + 1
 
     flow = (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, name)
         .with_checkpointer()
@@ -116,7 +116,7 @@ class TestHaltInLastStep:
             raise Interrupted()
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "gc-late-halt")
             .with_checkpointer()
@@ -144,7 +144,7 @@ class TestHaltInLastStep:
             return x
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "map-last")
             .with_checkpointer()

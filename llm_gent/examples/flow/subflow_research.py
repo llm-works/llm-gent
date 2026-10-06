@@ -74,7 +74,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
 from llm_gent.flow import (
     Context,
-    FlowFactory,
+    Factory,
     Role,
     StateDataclass,
     TypeStateFactory,
@@ -433,7 +433,7 @@ async def main() -> int:
     """Run the multi-topic research flow on the canned question."""
     lg = quick_console_logger("subflow-research-example", config={"level": "warning"})
     saia_factory = StructuredStubSAIAFactory(_demo_scripts())
-    ff = FlowFactory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(ResearchState))
+    ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(ResearchState))
 
     flow = ff.create("subflow-research", state=ResearchState(question=_DEMO_QUESTION))
     (

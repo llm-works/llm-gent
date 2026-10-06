@@ -23,7 +23,7 @@ registry never needs to call the fluent methods; a subflow that only exists
 to structure composition never needs a factory of its own — it borrows from
 the runtime it is executed under.
 
-At application boundaries, prefer :class:`FlowFactory` from
+At application boundaries, prefer :class:`Factory` from
 :mod:`.factory` — it captures the ambient ``lg`` and the app-wide
 :class:`SAIAFactory` once so per-subsystem construction reads as
 ``f.create("grade").call(...)`` rather than repeating both at every site.
@@ -124,7 +124,7 @@ from .resource.cost import check_budget, check_budgets_have_a_tracker, check_cos
 from .role import Role
 from .state import State, StateFactory
 from .state.snapshot import ScopePath, ScopeRegistry, Snapshot
-from .structure import FlowStructure
+from .structure import Structure
 
 
 class Flow:
@@ -155,7 +155,7 @@ class Flow:
     ) -> None:
         """Initialize a flow.
 
-        Prefer :class:`FlowFactory` at application boundaries — it captures
+        Prefer :class:`Factory` at application boundaries — it captures
         the ambient ``lg`` and the app-wide :class:`SAIAFactory` once so
         Flow-per-subsystem construction doesn't repeat them. Constructing
         :class:`Flow` directly is still supported; the executor uses it
@@ -1005,9 +1005,7 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
-        self._checkpoint_ctx = CheckpointContext(
-            store, client_flow_id, lambda: FlowStructure.of(self)
-        )
+        self._checkpoint_ctx = CheckpointContext(store, client_flow_id, lambda: Structure.of(self))
         return self
 
     def with_checkpointer(self, name: str | None = None) -> Self:
@@ -1052,9 +1050,9 @@ class Flow:
         checkpoint written by one flow can be resumed by the other.
         Covers step kinds, positions, targets (a named step: its name)
         and nested flows — not parameters such as ``max_iters`` or
-        predicates. See :class:`~llm_gent.flow.structure.FlowStructure`.
+        predicates. See :class:`~llm_gent.flow.structure.Structure`.
         """
-        return FlowStructure.of(self).hash
+        return Structure.of(self).hash
 
     def with_checkpoint_policy(
         self,

@@ -112,7 +112,7 @@ from llm_gent.flow import (
     HALTED,
     Context,
     Flow,
-    FlowFactory,
+    Factory,
     History,
     Loop,
     Role,
@@ -323,7 +323,7 @@ class _SAIAFactory:
     """Gent :class:`~llm_gent.flow.SAIAFactory` — one backend, per-Loop executor.
 
     A single :class:`_SAIAFactory` is captured on the
-    :class:`FlowFactory`; :meth:`build` fires once per role during
+    flow :class:`~llm_gent.flow.Factory`; :meth:`build` fires once per role during
     Flow assembly. The backend is shared; each build gets a fresh
     tool executor closure so the halt-arm state (see
     :func:`_make_tool_executor`) is per-Loop, not global.
@@ -415,7 +415,7 @@ def _extract_summary(result: Any) -> str:
     return str(getattr(result, "output", "") or "")
 
 
-def _build_flow(lg: Logger, ff: FlowFactory[Flow], halt: asyncio.Event) -> Flow:
+def _build_flow(lg: Logger, ff: Factory[Flow], halt: asyncio.Event) -> Flow:
     """Assemble the demo flow: iterate over topics, summarize each.
 
     A single :meth:`Flow.iterate` drains the ``pending`` queue
@@ -478,7 +478,7 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     history = History(store, CLIENT_FLOW_ID)
     resuming = await _resume_pending(history)
     halt = asyncio.Event()
-    ff = FlowFactory(
+    ff = Factory(
         lg,
         saia_factory=_SAIAFactory(lg, backend, halt, arm_halt=not resuming),
         state_factory=TypeStateFactory(Digest),

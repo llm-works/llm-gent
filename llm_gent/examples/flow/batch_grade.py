@@ -76,7 +76,7 @@ from llm_gent.flow import (
     Context,
     Failure,
     Flow,
-    FlowFactory,
+    Factory,
     Role,
     Skipped,
     StateDataclass,
@@ -432,9 +432,7 @@ async def main() -> int:
     """Grade the demo batch end-to-end."""
     lg = quick_console_logger("batch-grade-example", config={"level": "warning"})
     saia_factory = StructuredStubSAIAFactory(_demo_scripts())
-    ff = FlowFactory(
-        lg, saia_factory=saia_factory, state_factory=TypeStateFactory(BatchGradingState)
-    )
+    ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(BatchGradingState))
 
     submissions = _demo_submissions()
     flow = ff.create("batch-grade", state=BatchGradingState(submissions=submissions))

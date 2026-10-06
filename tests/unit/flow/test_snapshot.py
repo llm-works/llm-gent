@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, verb
+from llm_gent.flow import Context, Factory, History, verb
 from llm_gent.flow.state import State
 from llm_gent.flow.state.cas import Blob, Tree
 from llm_gent.flow.state.snapshot import (
@@ -25,7 +25,7 @@ from llm_gent.flow.state.snapshot import (
     read_snapshot,
 )
 from llm_gent.flow.stores import InMemoryCheckpointStore
-from llm_gent.flow.structure import FlowStructure
+from llm_gent.flow.structure import Structure
 
 from .conftest import make_test_logger
 
@@ -35,7 +35,7 @@ pytestmark = pytest.mark.unit
 LG = make_test_logger()
 
 
-_STRUCTURE = FlowStructure(()).blob()
+_STRUCTURE = Structure(()).blob()
 
 
 async def _round_trip(scopes: ScopeRegistry) -> tuple[Snapshot, dict[str, Blob | Tree]]:
@@ -198,7 +198,7 @@ class TestFlowSnapshots:
             return item
 
         await (
-            FlowFactory(LG)
+            Factory(LG)
             .create(state={})
             .with_checkpoint_store(store, "siblings")
             .with_checkpointer()
@@ -228,7 +228,7 @@ class TestFlowSnapshots:
             return prev + 10
 
         await (
-            FlowFactory(LG)
+            Factory(LG)
             .create(state={})
             .with_checkpoint_store(store, "passes")
             .with_checkpointer()
@@ -257,7 +257,7 @@ class TestFlowSnapshots:
             return x
 
         flow = (
-            FlowFactory(LG)
+            Factory(LG)
             .create(state={})
             .with_checkpoint_store(store, "chain")
             .with_checkpointer()
@@ -281,7 +281,7 @@ class TestFlowSnapshots:
             return x
 
         await (
-            FlowFactory(LG)
+            Factory(LG)
             .create(state={})
             .with_checkpoint_store(store, "arm")
             .with_checkpointer()
@@ -304,7 +304,7 @@ class TestFlowSnapshots:
             return x
 
         flow = (
-            FlowFactory(LG)
+            Factory(LG)
             .create(state={})
             .with_checkpoint_store(InMemoryCheckpointStore(), "tuple")
             .with_checkpointer()
@@ -321,9 +321,9 @@ class TestFlowSnapshots:
         async def save(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
             await ctx.checkpoint()
 
-        sub = FlowFactory(LG).create().call(save)
+        sub = Factory(LG).create().call(save)
         await (
-            FlowFactory(LG)
+            Factory(LG)
             .create(state={"items": []})
             .with_checkpoint_store(store, "same-bytes")
             .with_checkpointer()
@@ -343,12 +343,12 @@ class TestFlowSnapshots:
             ctx.state.data["done"] = True
 
         await (
-            FlowFactory(LG)
+            Factory(LG)
             .create(state={})
             .with_checkpoint_store(store, "end")
             .with_checkpointer()
             .call(
-                FlowFactory(LG).create().iterate(lambda b: b.call(step), max_iters=2),
+                Factory(LG).create().iterate(lambda b: b.call(step), max_iters=2),
                 state=lambda _p: {},
             )
             .run()

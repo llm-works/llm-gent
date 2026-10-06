@@ -26,7 +26,7 @@ and the same call continues the saved turn.
 
 :class:`LoopFactory` bundles the cross-cutting config (logger, SAIAFactory,
 halt) so consumers wire once at the app boundary and ``.create(role,
-**hooks)`` many Loops. It mirrors :class:`FlowFactory`'s shape so a
+**hooks)`` many Loops. It mirrors the flow :class:`Factory`'s shape so a
 shared halt event threads uniformly across a mixed Loop-and-Flow tree.
 """
 
@@ -584,12 +584,12 @@ class LoopFactory:
 
     Bundles the ambient logger, :class:`SAIAFactory`, checkpointer, and
     halt event so consumers wire once at the application boundary and
-    ``.create(role, **hooks)`` many Loops. Mirrors :class:`FlowFactory`'s
+    ``.create(role, **hooks)`` many Loops. Mirrors the flow :class:`Factory`'s
     ``with_saia_factory`` / ``with_halt`` shape so a shared event threads
     uniformly across a mixed Loop-and-Flow tree::
 
         loop_f = LoopFactory(lg, saia_factory=sf).with_halt(shared_event)
-        flow_f = FlowFactory(lg, saia_factory=sf).with_halt(shared_event)
+        flow_f = Factory(lg, saia_factory=sf).with_halt(shared_event)
 
     The ``SAIAFactory`` on this factory is held for future
     standalone-Loop use (not required today — Flow-body Loops read
@@ -714,7 +714,7 @@ class LoopFactory:
         ``event`` as its default halt (per-``create`` overrides win).
         Wire once at the factory to thread the same halt through an
         entire agent shape — pair with
-        :meth:`FlowFactory.with_halt` on the same event so Loops and
+        :meth:`Factory.with_halt` on the same event so Loops and
         Flows halt in lockstep.
         """
         return LoopFactory(

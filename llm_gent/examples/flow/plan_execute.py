@@ -75,7 +75,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
 from llm_gent.flow import (
     Context,
-    FlowFactory,
+    Factory,
     Role,
     StateDataclass,
     TypeStateFactory,
@@ -376,9 +376,7 @@ async def main() -> int:
     """Run the plan-and-execute flow on the canned question."""
     lg = quick_console_logger("plan-execute-example", config={"level": "warning"})
     saia_factory = StructuredStubSAIAFactory(_demo_scripts())
-    ff = FlowFactory(
-        lg, saia_factory=saia_factory, state_factory=TypeStateFactory(PlanExecuteState)
-    )
+    ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(PlanExecuteState))
 
     question = "What is twice the population of Tokyo?"
     flow = ff.create("plan-execute", state=PlanExecuteState(question=question))

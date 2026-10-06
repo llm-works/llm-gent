@@ -107,18 +107,18 @@ class TestStateWrapper:
         assert seen == [None]
 
     async def test_construction_state_none_factory(self) -> None:
-        """FlowFactory(state=None) is preserved at run time — not replaced with {}."""
+        """Factory(state=None) is preserved at run time — not replaced with {}."""
         seen: list[object] = []
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
             seen.append(ctx.state.data)
 
-        from llm_gent.flow import FlowFactory
+        from llm_gent.flow import Factory
 
         from .conftest import StubFactory, make_test_logger
 
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), state=None)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state=None)
         flow = ff.create().call(check)
         await flow.run()
 

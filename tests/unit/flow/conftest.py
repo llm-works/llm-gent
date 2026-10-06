@@ -10,7 +10,7 @@ from typing import Any
 
 from appinfra.log import Logger, quick_console_logger
 
-from llm_gent.flow import FlowFactory, Role, SAIAFactory
+from llm_gent.flow import Factory, Role, SAIAFactory
 
 
 ROLE_A = Role(name="a", backend="openai", model="gpt-4o-mini")
@@ -54,11 +54,11 @@ class StubFactory:
         return StubSAIA(role)
 
 
-def make_ff(saia_factory: SAIAFactory | None = None) -> FlowFactory:
-    """Return a fresh :class:`FlowFactory` with a test logger + SAIAFactory.
+def make_ff(saia_factory: SAIAFactory | None = None) -> Factory:
+    """Return a fresh :class:`Factory` with a test logger + SAIAFactory.
 
     Defaults to a fresh :class:`StubFactory` per call so tests that
     introspect the factory get an isolated instance. Pass ``saia_factory=``
     when the test needs to keep a reference to inspect after the run.
     """
-    return FlowFactory(make_test_logger(), saia_factory=saia_factory or StubFactory())
+    return Factory(make_test_logger(), saia_factory=saia_factory or StubFactory())

@@ -1386,7 +1386,7 @@ class TestFlowWithHalt:
 
     @pytest.mark.asyncio
     async def test_nested_flows_carrying_the_run_halt_observe_it(self) -> None:
-        """Flows a FlowFactory(halt=...) builds all carry the same event: that is the run's."""
+        """Flows a Factory(halt=...) builds all carry the same event: that is the run's."""
         halt = asyncio.Event()
         ff = make_ff().with_halt(halt)
         observed: list[asyncio.Event | None] = []

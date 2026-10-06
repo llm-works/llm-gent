@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from appinfra.log import quick_console_logger
 
 from llm_gent.examples.flow._infra import ExampleSAIA, StubSAIAFactory
-from llm_gent.flow import Context, FlowFactory, Role, StateDataclass, TypeStateFactory, verb
+from llm_gent.flow import Context, Factory, Role, StateDataclass, TypeStateFactory, verb
 
 
 MAX_ROUNDS = 5
@@ -204,7 +204,7 @@ async def main() -> int:
     """Run the verifier flow on a canned query."""
     lg = quick_console_logger("verifier-example", config={"level": "warning"})
     saia_factory = StubSAIAFactory(_demo_scripts())
-    ff = FlowFactory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(VerifierState))
+    ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(VerifierState))
 
     query = "What is the capital of France?"
     flow = ff.create("verifier", state=VerifierState(query=query))

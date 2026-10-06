@@ -23,8 +23,8 @@ import pytest
 from llm_gent.flow import (
     HALTED,
     Context,
+    Factory,
     Failure,
-    FlowFactory,
     History,
     Interrupted,
     Loop,
@@ -43,8 +43,8 @@ from .conftest import make_test_logger
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
-def _ff() -> FlowFactory:
-    return FlowFactory(make_test_logger())
+def _ff() -> Factory:
+    return Factory(make_test_logger())
 
 
 def _top(cut: asyncio.Event) -> Any:

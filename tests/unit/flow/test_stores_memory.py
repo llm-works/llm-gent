@@ -108,7 +108,7 @@ class TestMemoryStore:
         """A second flow over the same store continues from the first run's final state."""
         from typing import Any
 
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         @verb
         async def bump(ctx: Context[dict[str, Any]]) -> int:
@@ -117,7 +117,7 @@ class TestMemoryStore:
 
         def build() -> Any:
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "c")
                 .with_checkpointer()

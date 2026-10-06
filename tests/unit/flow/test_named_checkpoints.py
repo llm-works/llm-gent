@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import HALTED, Context, FlowFactory, History, verb
+from llm_gent.flow import HALTED, Context, Factory, History, verb
 from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
@@ -65,7 +65,7 @@ def _flow(store: Any, calls: list[str], tag: str | None = "mid", fail: bool = Fa
         return x + 3
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, NAME)
         .with_checkpointer()
@@ -144,7 +144,7 @@ class TestNamedCheckpoint:
             return x
 
         changed = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, NAME)
             .with_checkpointer()
@@ -211,7 +211,7 @@ class TestNamedCheckpointErrors:
         async def a(ctx: Context[Any], x: int) -> int:
             return x
 
-        flow = FlowFactory(make_test_logger()).create().call(a)
+        flow = Factory(make_test_logger()).create().call(a)
         with pytest.raises(RuntimeError, match="no checkpoint store"):
             await flow.run(1, resume="mid")
 
@@ -231,7 +231,7 @@ class TestNamedCheckpointInIterate:
                 return x + 1
 
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, NAME)
                 .with_checkpointer()
@@ -289,7 +289,7 @@ def _hash_flow(
         return x - 1
 
     flow = (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, NAME)
         .with_checkpointer()
@@ -312,7 +312,7 @@ class TestResumeByHash:
             return x
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, NAME)
             .with_checkpointer()
@@ -328,7 +328,7 @@ class TestResumeByHash:
             seen.append(await ctx.checkpoint("mid"))
             return x
 
-        await FlowFactory(make_test_logger()).create(state={}).call(a).run(1)
+        await Factory(make_test_logger()).create(state={}).call(a).run(1)
         assert seen == [None]
 
     async def test_any_commit_stays_resumable_after_a_reset(self) -> None:
@@ -385,7 +385,7 @@ class TestResumeByHash:
             return x
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, NAME)
             .with_checkpointer()

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, HistoryCorrupt, collect_unreachable, verb
+from llm_gent.flow import Context, Factory, History, HistoryCorrupt, collect_unreachable, verb
 from llm_gent.flow.state.cas import Blob, Commit, Tree, TreeEntry
 from llm_gent.flow.stores import InMemoryCheckpointStore, JsonFileCheckpointStore
 
@@ -50,7 +50,7 @@ def _flow(store: Any, tag: str | None) -> Any:
         return x + 3
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, NAME)
         .with_checkpointer()

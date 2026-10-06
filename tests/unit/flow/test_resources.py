@@ -21,8 +21,8 @@ from llm_gent.flow import (
     COST,
     HALTED,
     Context,
+    Factory,
     Flow,
-    FlowFactory,
     History,
     Interrupted,
     Resource,
@@ -92,8 +92,8 @@ class Structural:
 COUNTER = ResourceKey[Counter]("counter")
 
 
-def _ff() -> FlowFactory[Flow]:
-    return FlowFactory(make_test_logger())
+def _ff() -> Factory[Flow]:
+    return Factory(make_test_logger())
 
 
 @verb
@@ -278,7 +278,7 @@ class TestAcrossResume:
         assert fresh.count == 7 + 7
 
     async def test_one_every_flow_inherits_is_kept_once_at_the_top(self) -> None:
-        """A FlowFactory.with_resource puts the same object on every flow: one position."""
+        """A Factory.with_resource puts the same object on every flow: one position."""
         store = InMemoryCheckpointStore()
         halt = asyncio.Event()
 
@@ -641,7 +641,7 @@ class TestFluentNames:
             bodies.append(b)
             b.with_counter(per="item").call(tick)
 
-        ff = FlowFactory(make_test_logger(), flow_class=MyFlow)
+        ff = Factory(make_test_logger(), flow_class=MyFlow)
         flow = ff.create().with_counter(root).map(body, items=lambda *_: [1, 2])
         assert isinstance(flow, MyFlow)
         assert await flow.run() == [1, 2]
@@ -653,7 +653,7 @@ class TestFluentNames:
             pass
 
         ff = (
-            FlowFactory(make_test_logger(), flow_class=MyFlow)
+            Factory(make_test_logger(), flow_class=MyFlow)
             .with_resource_method("with_counter", COUNTER)
             .with_halt(asyncio.Event())
         )

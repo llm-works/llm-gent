@@ -26,7 +26,7 @@ Public surface:
   state types (wraps a :class:`StateData` class so the framework's restore
   call routes through ``state_type.from_dict``)
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
-- :class:`FlowFactory` — app-scoped :class:`Flow` builder (captures ``lg``
+- :class:`Factory` — app-scoped :class:`Flow` builder (captures ``lg``
   and one :class:`SAIAFactory`); preferred entry point at the application
   boundary
 - :class:`Resource` — protocol of a run-scoped object checkpointed with
@@ -39,8 +39,8 @@ Public surface:
 - :class:`Loop` — Flow-body primitive wrapping one ``saia.complete()``
   invocation with lifecycle hooks + halt bridging; CAS-native
   pause/resume via the framework halt-save site
-- :class:`LoopFactory` — app-scoped :class:`Loop` builder (mirrors
-  :class:`FlowFactory` for ``with_halt``); pair on the same halt event to
+- :class:`LoopFactory` — app-scoped :class:`Loop` builder (mirrors the
+  flow :class:`Factory` for ``with_halt``); pair on the same halt event to
   thread it across a mixed Loop-and-Flow tree
 - :class:`CheckpointStore` — Flow-level pause/resume Protocol; persists
   snapshots of a run — every scope and running structure's position,
@@ -48,8 +48,8 @@ Public surface:
 - :class:`History` — read API over one checkpointed history: head, last
   completed run, commit chain, per-commit state and flow structure;
   :class:`HistoryCorrupt` when a referenced object is missing from the store
-- :class:`FlowStructure` — a flow's composition tree by step identity;
-  :class:`StructureDiff` — how two structures differ (``FlowStructure.diff``)
+- :class:`Structure` — a flow's composition tree by step identity;
+  :class:`StructureDiff` — how two structures differ (``Structure.diff``)
 - :func:`collect_unreachable` — delete the objects of a history no ref
   reaches (left by ``resume=<name>`` or a process that died mid-commit)
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``;
@@ -79,7 +79,7 @@ from .aggregate import majority, mean, unanimous, weighted
 from .archetypes import extractor, grader, planner, synthesizer
 from .checkpoint import CheckpointPolicy, CheckpointStore, ConcurrentWriteError, ResumeMode
 from .context import Context
-from .factory import FlowFactory, SAIAFactory
+from .factory import Factory, SAIAFactory
 from .flow import Flow
 from .gc import collect_unreachable
 from .history import History, HistoryCorrupt
@@ -88,7 +88,7 @@ from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, S
 from .resource import COST, Resource, ResourceKey, resource_method
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
-from .structure import FlowStructure, StepPath, StructureDiff, path_label
+from .structure import StepPath, Structure, StructureDiff, path_label
 from .verb import VerbCallable, verb
 
 
@@ -100,10 +100,9 @@ __all__ = [
     "CheckpointStore",
     "ConcurrentWriteError",
     "Context",
+    "Factory",
     "Failure",
     "Flow",
-    "FlowFactory",
-    "FlowStructure",
     "Halted",
     "History",
     "HistoryCorrupt",
@@ -122,6 +121,7 @@ __all__ = [
     "StateDataclass",
     "StateFactory",
     "StepPath",
+    "Structure",
     "StructureDiff",
     "TypeStateFactory",
     "Unset",

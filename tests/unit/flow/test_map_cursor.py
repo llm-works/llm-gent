@@ -22,8 +22,8 @@ import pytest
 from llm_gent.flow import (
     HALTED,
     Context,
+    Factory,
     Failure,
-    FlowFactory,
     History,
     Interrupted,
     RestoredError,
@@ -81,7 +81,7 @@ def _map_flow(
         counts.completed.append(item)
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, "map")
         .with_checkpointer()
@@ -184,7 +184,7 @@ class TestUnmergedItem:
                 parent.setdefault("merged", []).append(child["out"])
 
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "unmerged")
                 .with_checkpointer()
@@ -229,7 +229,7 @@ class TestWaveShape:
                 return item * 2
 
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "wave")
                 .with_checkpointer()
@@ -297,7 +297,7 @@ def _mixed_flow(
         return 1
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, "mixed")
         .with_checkpointer()
@@ -417,7 +417,7 @@ class TestFailedAndSkippedItemsStayDone:
                 parent.setdefault("merged", []).append(child["out"])
 
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "merge-fails")
                 .with_checkpointer()
@@ -455,7 +455,7 @@ class TestSerialization:
             return 1
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "opaque")
             .with_checkpointer()

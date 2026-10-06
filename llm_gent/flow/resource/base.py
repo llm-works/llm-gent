@@ -33,7 +33,7 @@ Verbs reach it with ``ctx.resource(STATS)``, typed ``Stats``.
 A fluent name of the app's own, ``flow.with_stats(...)``, is
 :func:`resource_method`: on a :class:`Flow` subclass (type-checked), or
 added to every flow a factory builds with
-:meth:`FlowFactory.with_resource_method`.
+:meth:`Factory.with_resource_method`.
 """
 
 from __future__ import annotations
@@ -195,9 +195,9 @@ def resource_method(key: ResourceKey[R]) -> _ResourceMethod[R]:
         class MyFlow(Flow):
             with_stats = resource_method(STATS)
 
-        FlowFactory(lg, flow_class=MyFlow).create().with_stats(Stats()).then(step)
+        Factory(lg, flow_class=MyFlow).create().with_stats(Stats()).then(step)
 
-    :meth:`FlowFactory.with_resource_method` adds one to every flow a
+    :meth:`Factory.with_resource_method` adds one to every flow a
     factory builds, without a subclass of the app's own (untyped).
     """
     return _ResourceMethod(key)

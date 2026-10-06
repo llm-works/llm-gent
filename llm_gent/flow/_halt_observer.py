@@ -51,7 +51,7 @@ def check_one_halt(root: Flow) -> None:
 
     The halt pauses the whole run, so a run has one, on its top-level
     flow. A nested flow carrying the same event (as every flow a
-    ``FlowFactory(halt=...)`` builds does) sets no other halt.
+    ``Factory(halt=...)`` builds does) sets no other halt.
 
     Raises:
         RuntimeError: A nested flow's ``with_halt`` event is not the
