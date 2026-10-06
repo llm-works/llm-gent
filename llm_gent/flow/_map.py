@@ -37,6 +37,7 @@ from ._executor import (
 )
 from ._halt_observer import is_halt_signaled
 from ._node_id import _descend_context
+from ._shortcut import in_shortcut_mode
 from ._validation import check_concurrency
 from .context import Context
 from .nodes import Failure, Interrupted, ItemsFn, RestoredError, Skipped
@@ -340,11 +341,12 @@ class MapItemRunner:
     def _shortcut_skips(self) -> bool:
         """True when this map's flow is in shortcut mode and the item had not started.
 
-        An item that was running when the flow stopped (its positions are
-        saved) continues from them.
+        Shortcut mode is the flow's own or an enclosing flow's
+        (:func:`~._shortcut.in_shortcut_mode`). An item that was running
+        when the flow stopped (its positions are saved) continues from
+        them.
         """
-        shortcut = self.env.shortcut
-        if shortcut is None or not shortcut.active:
+        if not in_shortcut_mode(self.env):
             return False
         return not self.env.scopes.has_saved_under(self.path)
 

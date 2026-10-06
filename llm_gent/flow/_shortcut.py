@@ -12,6 +12,12 @@ end there: F continues at once from where it stopped, in shortcut mode,
 and ends at its step ``to`` (or its end) with what the stopped work
 produced. A halt is a pause; a shortcut is a jump.
 
+Shortcut mode covers F's whole subtree (:func:`in_shortcut_mode`): a flow
+below F with no shortcut of its own behaves as if it declared one with
+no ``to`` — it starts no new iterate pass or map item, and its chain
+ends after the step that was interrupted. A flow below F that declares
+its own shortcut lands where its ``to`` says.
+
 Which signals are set is part of where the run is: every checkpoint the
 run takes records them (:func:`run_signals`), and resume sets them again
 before the first step. A flow that starts while its signal is set — a
@@ -32,6 +38,7 @@ from .state.snapshot import CHAIN, SIGNALS, ScopePath, ScopeRegistry
 
 if TYPE_CHECKING:
     from .flow import Flow
+    from .nodes import _RunEnv
 
 
 SHORTCUT = "shortcut"
@@ -231,6 +238,20 @@ class ShortcutRun:
         await self.event.wait()
         if not self.landed and not self.active:
             self.stop.set()
+
+
+def in_shortcut_mode(env: _RunEnv) -> bool:
+    """True when the flow running under ``env`` is in shortcut mode.
+
+    Its own shortcut decides once it has taken over or landed: in shortcut
+    mode until it lands, normal after. Otherwise — no shortcut of its own,
+    or one whose signal has not been taken over — the flow is covered by
+    an enclosing shortcut in shortcut mode.
+    """
+    own = env.shortcut
+    if own is not None and (own.active or own.landed):
+        return own.active
+    return any(shortcut.active for shortcut in env.shortcuts if shortcut is not own)
 
 
 def follow(

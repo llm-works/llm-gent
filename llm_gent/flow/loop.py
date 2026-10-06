@@ -40,6 +40,7 @@ from appinfra.log import Logger
 from llm_saia import SAIA
 from llm_saia.core.conversation import ConversationFactory
 
+from ._shortcut import in_shortcut_mode
 from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
@@ -569,9 +570,9 @@ class _LoopTurn:
 
 
 def _in_shortcut(ctx: Context[Any]) -> bool:
-    """True when a flow this call runs under is in shortcut mode."""
+    """True when the flow this call runs under is in shortcut mode, its own or an enclosing one's."""
     env = ctx._env
-    return env is not None and any(shortcut.active for shortcut in env.shortcuts)
+    return env is not None and in_shortcut_mode(env)
 
 
 # ----------------------------------------------------------------------------

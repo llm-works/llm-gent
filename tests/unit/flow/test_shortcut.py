@@ -203,8 +203,8 @@ class TestChain:
         assert await flow.run("") == "ad"
         assert ran == ["a", "d"]
 
-    async def test_a_subflow_without_a_shortcut_finishes_its_chain(self) -> None:
-        """The interrupted step is a subflow: it continues where it stopped, then the jump."""
+    async def test_a_subflow_without_a_shortcut_ends_after_its_interrupted_step(self) -> None:
+        """The interrupted step is a subflow: covered by the shortcut, its chain ends, then the jump."""
         ran: list[str] = []
         cut = asyncio.Event()
         s = _steps(ran, cut, cut_in="a")
@@ -212,8 +212,27 @@ class TestChain:
         flow = (
             _top(cut).with_shortcut("cut", to="d").call(inner).then(s["c"]).then(s["d"], name="d")
         )
-        assert await flow.run("") == "abd"
-        assert ran == ["a", "b", "d"]
+        assert await flow.run("") == "ad"
+        assert ran == ["a", "d"]
+
+    async def test_a_subflow_lands_where_its_own_shortcut_says(self) -> None:
+        """A flow below the declaring one with a ``to`` of its own still reaches that step."""
+        ran: list[str] = []
+        cut = asyncio.Event()
+        s = _steps(ran, cut, cut_in="a")
+        inner = (
+            _ff()
+            .create()
+            .with_shortcut("cut", to="c")
+            .call(s["a"])
+            .then(s["b"])
+            .then(s["c"], name="c")
+        )
+        flow = (
+            _top(cut).with_shortcut("cut", to="d").call(inner).then(s["b"]).then(s["d"], name="d")
+        )
+        assert await flow.run("") == "acd"
+        assert ran == ["a", "c", "d"]
 
 
 class TestSignalSetInAStep:
@@ -242,11 +261,10 @@ class TestSignalSetInAStep:
     async def test_the_continuation_is_not_stopped_again_once_taken_over(self) -> None:
         """The stop the signal would set a tick later must not land on the continuation.
 
-        The subflow (no shortcut of its own) stops at its boundary on the
-        signal its first step set, the outer flow takes the shortcut over
-        before any other task runs, and the subflow's next step continues
-        in shortcut mode and awaits: the signal's stop must not stop it a
-        second time.
+        The subflow's step sets the signal and stops at once (no await),
+        the outer flow takes the shortcut over before any other task runs,
+        and the step runs again in shortcut mode and awaits: the signal's
+        stop must not stop it a second time.
         """
         ran: list[str] = []
         cut = asyncio.Event()
@@ -254,21 +272,18 @@ class TestSignalSetInAStep:
         @verb
         async def a(ctx: Context[Any], x: str) -> str:
             ran.append("a")
-            cut.set()  # no await
-            return x + "a"
-
-        @verb
-        async def b(ctx: Context[Any], x: str) -> str:
-            ran.append("b")
+            if not cut.is_set():
+                cut.set()  # no await
+                raise Interrupted()
             await asyncio.sleep(0)  # lets every pending task run
             if ctx.halt is not None and ctx.halt.is_set():
                 raise Interrupted()
-            return x + "b"
+            return x + "a"
 
-        inner = _ff().create().call(a).then(b)
+        inner = _ff().create().call(a).then(_echo)
         flow = _top(cut).with_shortcut("cut", to="d").call(inner).then(_echo).then(_echo, name="d")
-        assert await flow.run("") == "ab"
-        assert ran == ["a", "b"]
+        assert await flow.run("") == "a"
+        assert ran == ["a", "a"]
 
     async def test_no_new_pass_starts(self) -> None:
         ran: list[int] = []
@@ -412,11 +427,9 @@ class TestIterate:
         assert await flow.run(0) == 2
         assert ran == [0, 1]
 
-    @pytest.mark.parametrize(("body_cut", "expected"), [(False, "ab"), (True, "a")])
-    async def test_the_running_pass_finishes_by_its_own_rules(
-        self, body_cut: bool, expected: str
-    ) -> None:
-        """The pass the shortcut stopped finishes its body, unless the body declares one too."""
+    @pytest.mark.parametrize("body_cut", [False, True])
+    async def test_the_running_pass_ends_after_its_interrupted_step(self, body_cut: bool) -> None:
+        """The pass the shortcut stopped ends after ``a``, covered or by its own shortcut."""
         ran: list[str] = []
         cut = asyncio.Event()
         s = _steps(ran, cut)
@@ -436,8 +449,8 @@ class TestIterate:
                 b.with_shortcut("cut")
 
         flow = _top(cut).with_shortcut("cut").iterate(body, max_iters=5)
-        assert await flow.run("") == "ab" + expected
-        assert ran == ["a", "b", *expected]
+        assert await flow.run("") == "aba"
+        assert ran == ["a", "b", "a"]
 
 
 class TestMap:
@@ -754,9 +767,107 @@ class TestPauseDuringShortcut:
         assert SIGNALS not in (await history.snapshot(head)).cursors.get("", {})
 
 
+class TestSubtreeCover:
+    """A shortcut covers the flows below it that declare none of their own."""
+
+    async def test_a_nested_iterate_starts_no_new_pass(self) -> None:
+        ran: list[Any] = []
+        cut = asyncio.Event()
+
+        @verb
+        async def wave(ctx: Context[Any], n: int) -> int:
+            ran.append(n)
+            if n == 1:
+                cut.set()
+                await asyncio.sleep(0)
+            return n + 1
+
+        @verb
+        async def last(ctx: Context[Any], n: int) -> int:
+            ran.append("last")
+            return n
+
+        waves = _ff().create().iterate(lambda b: b.call(wave), max_iters=5)
+        flow = _top(cut).with_shortcut("cut", to="last").call(waves).then(last, name="last")
+        assert await flow.run(0) == 2
+        assert ran == [0, 1, "last"]
+
+    async def test_a_nested_map_skips_its_unstarted_items(self) -> None:
+        cut = asyncio.Event()
+
+        @verb
+        async def item(ctx: Context[Any], n: int) -> int:
+            if n == 1:
+                cut.set()
+                await asyncio.sleep(0)
+            return n * 10
+
+        items = (
+            _ff()
+            .create()
+            .map(lambda b: b.call(item), items=lambda _p, _c: [0, 1, 2, 3], max_concurrency=1)
+        )
+        results = await _top(cut).with_shortcut("cut").call(items).then(_echo).run()
+        assert results[:2] == [0, 10]
+        assert [r.item for r in results[2:]] == [2, 3]
+
+    async def test_the_subtree_under_the_landing_step_runs_normally(self) -> None:
+        ran: list[str] = []
+        cut = asyncio.Event()
+        s = _steps(ran, cut, cut_in="a")
+        tail = _ff().create().call(s["c"]).then(s["d"])
+        flow = _top(cut).with_shortcut("cut", to="tail").call(s["a"]).then(s["b"])
+        flow = flow.then(tail, name="tail")
+        assert await flow.run("") == "acd"
+        assert ran == ["a", "c", "d"]
+
+    async def test_resume_keeps_the_cover(self) -> None:
+        """Halted while covered: resume ends the covered chain after the interrupted step."""
+        store = InMemoryCheckpointStore()
+
+        def build(halt: asyncio.Event, cut: asyncio.Event, ran: list[str], arm: bool) -> Any:
+            runs: list[int] = []
+
+            @verb
+            async def a(ctx: Context[Any], x: str) -> str:
+                ran.append("a")
+                runs.append(1)
+                if arm and len(runs) == 1:
+                    cut.set()
+                    await asyncio.sleep(0)
+                    raise Interrupted()
+                if arm:
+                    halt.set()
+                    raise Interrupted()
+                return x + "a"
+
+            s = _steps(ran, cut)
+            sub = _ff().create().call(a).then(s["b"])
+            return (
+                _ff()
+                .create(state={})
+                .with_checkpoint_store(store, "cover-pause")
+                .with_halt(halt)
+                .with_signal("cut", cut)
+                .with_shortcut("cut", to="d")
+                .call(sub)
+                .then(s["c"])
+                .then(s["d"], name="d")
+            )
+
+        ran: list[str] = []
+        assert await build(asyncio.Event(), asyncio.Event(), ran, arm=True).run("") is HALTED
+        assert ran == ["a", "a"]
+
+        ran.clear()
+        flow = build(asyncio.Event(), asyncio.Event(), ran, arm=False)
+        assert await flow.run("", resume="latest") == "ad"
+        assert ran == ["a", "d"]
+
+
 class TestCampaignShape:
     async def test_nested_shortcuts_on_one_signal(self) -> None:
-        """Waves, wave body and items each declare where a cut lands.
+        """Waves and items each declare where a cut lands; the wave body is covered by the waves'.
 
         Wave 1 is cut while items 0 and 1 are in ``query``: both go on to
         ``extract`` (``explore`` is not started), item 2 is skipped,
@@ -809,7 +920,7 @@ class TestCampaignShape:
             b.with_shortcut("cut", to="extract")
 
         def wave_body(b: Any) -> None:
-            b.call(plan).map(item, max_concurrency=2).then(revise).with_shortcut("cut")
+            b.call(plan).map(item, max_concurrency=2).then(revise)
 
         waves = _ff().create().iterate(wave_body, max_iters=5).with_shortcut("cut")
         campaign = _top(cut).call(waves).then(synthesis)

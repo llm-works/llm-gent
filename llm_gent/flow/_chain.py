@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import is_halt_signaled, note_halt
 from ._node_id import _compute_node_ids
-from ._shortcut import SHORTCUT
+from ._shortcut import SHORTCUT, in_shortcut_mode
 from .nodes import Interrupted
 from .state.snapshot import CHAIN, TURN, path_str
 
@@ -195,22 +195,43 @@ class Chain:
     ) -> tuple[int | None, Inputs] | None:
         """Where a shortcut takes the chain before step ``index``; ``None`` to run it.
 
-        Reaching the landing step uses the shortcut up. Before it, in
-        shortcut mode, only the step that was interrupted (``rerun``)
-        runs; any other jumps to the landing step with the last completed
-        result as its input (the chain's input when none completed), or
-        ends the chain (landing step ``None``).
+        The flow's own shortcut: reaching its landing step uses it up.
+        Before it, in shortcut mode, only the step that was interrupted
+        (``rerun``) runs; any other jumps to the landing step with the
+        last completed result as its input (the chain's input when none
+        completed), or ends the chain (landing step ``None``).
+
+        Without its own shortcut in shortcut mode, a chain covered by an
+        enclosing one (:func:`~._shortcut.in_shortcut_mode`) runs only the
+        step that was interrupted, then ends.
         """
-        shortcut = self.env.shortcut
-        if shortcut is None or shortcut.landed:
+        own = self.env.shortcut
+        if own is not None and not own.landed:
+            target = own.to_index
+            if target is not None and index >= target:
+                own.active, own.landed = False, True
+                return None
+            if own.active:
+                return self._own_jump(index, rerun, last, args, kwargs)
+        if index == rerun or not in_shortcut_mode(self.env):
             return None
-        target = shortcut.to_index
-        if target is not None and index >= target:
-            shortcut.active, shortcut.landed = False, True
+        return None, (args, kwargs)
+
+    def _own_jump(
+        self,
+        index: int,
+        rerun: int | None,
+        last: tuple[bool, Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[int | None, Inputs] | None:
+        """The jump of the flow's own shortcut in shortcut mode, before its landing step."""
+        if index == rerun:
             return None
-        if not shortcut.active or index == rerun:
-            return None
-        shortcut.active, shortcut.landed = False, True
+        own = self.env.shortcut
+        assert own is not None
+        own.active, own.landed = False, True
+        target = own.to_index
         if target is None:
             return None, (args, kwargs)
         has_result, prev = last
