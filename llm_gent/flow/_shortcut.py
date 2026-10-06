@@ -8,7 +8,8 @@ flow with :meth:`Flow.with_signal`. :meth:`Flow.with_shortcut` makes a
 flow F a region that one of them cuts short. While the signal is set, F
 and every flow under it fast-forward (:func:`is_fast_forward`): a chain
 starts no new step and ends with its last result, an iterate starts no
-new pass, a map starts no new item (those are ``Skipped``), and a Loop
+new pass and returns its carried value, a map starts no new item (those
+are ``Skipped``), and a Loop
 turn in flight is aborted, its call returning the result SAIA paused it
 with. What is already running is neither stopped nor run again: it
 finishes with what it has. The step after F then runs as usual. A signal
@@ -78,7 +79,7 @@ def _check_name(name: object, what: str) -> None:
 
 
 def check_shortcuts(root: Flow) -> None:
-    """Raise unless signals are on ``root`` alone and every region is on one of them, not nested.
+    """Raise unless signals are on ``root`` alone, every region names one, and no region holds another on the same signal.
 
     Raises:
         RuntimeError: A nested flow declares a signal; a shortcut's signal
@@ -231,3 +232,7 @@ async def run_shortcut(
         for task in tasks:
             if task is not None:
                 task.cancel()
+        for task in tasks:
+            if task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
