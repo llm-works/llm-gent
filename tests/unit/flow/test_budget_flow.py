@@ -598,7 +598,7 @@ class TestLoopInABudgetedItem:
         saia = _SpendingSAIA({"a": 0.3, "b": 1.5})
 
         @verb
-        async def research(ctx: Context[Any], task: str) -> str:
+        async def work(ctx: Context[Any], task: str) -> str:
             def hand_over(s: Any, c: Context[Any]) -> None:
                 s.trackers[task] = c.cost
 
@@ -613,7 +613,7 @@ class TestLoopInABudgetedItem:
             .create(state={})
             .with_cost_tracker(root)
             .map(
-                lambda b: b.with_budget(1.0).call(research),
+                lambda b: b.with_budget(1.0).call(work),
                 items=lambda _p, _c: ["a", "b"],
                 max_concurrency=1,
             )
@@ -725,18 +725,16 @@ class TestPassAndCallBudgets:
 
 
 class TestCostAcrossShortcut:
-    async def test_a_budgeted_flow_keeps_its_tracker_through_the_shortcut(self) -> None:
-        """The continuation runs on the same child: spend before and after the cut adds up once."""
+    async def test_a_budgeted_region_s_spend_counts_once(self) -> None:
+        """Cut after ``a``: nothing runs again, so ``a``'s spend is recorded once."""
         root = _tracker()
         cut = asyncio.Event()
-        trackers: list[Any] = []
 
         @verb
         async def a(ctx: Context[Any], x: int) -> int:
-            trackers.append(ctx.cost)
             _spend(ctx, 1.0)
             cut.set()
-            await asyncio.sleep(0)  # the stop follows the signal
+            await asyncio.sleep(0)
             return x
 
         @verb
@@ -745,73 +743,44 @@ class TestCostAcrossShortcut:
             return x
 
         @verb
-        async def c(ctx: Context[Any], x: int) -> int:
-            trackers.append(ctx.cost)
+        async def after(ctx: Context[Any], x: int) -> int:
             _spend(ctx, 0.5)
             return x
 
-        sub = (
-            _ff()
-            .create()
-            .with_budget(5.0)
-            .with_shortcut("cut", to="c")
-            .call(a)
-            .then(b)
-            .then(c, name="c")
-        )
-        flow = _ff().create().with_signal("cut", cut).with_cost_tracker(root).call(sub)
-        assert await flow.run(1) == 1
-        assert trackers[0] is trackers[1]
-        assert trackers[0].spent == pytest.approx(1.5)
+        region = _ff().create().with_budget(5.0).with_shortcut("cut").call(a).then(b)
+        flow = _ff().create().with_signal("cut", cut).with_cost_tracker(root).call(region)
+        assert await flow.then(after).run(1) == 1
         assert root.spent == pytest.approx(1.5)
 
-    @pytest.mark.parametrize("map_cut", [False, True], ids=["items-alone", "map-too"])
-    async def test_budgeted_items_continue_with_their_spend(self, map_cut: bool) -> None:
-        """Items stopped by the cut continue with their spend; none counts twice.
-
-        Alone, each item's shortcut continues it in place, on its tracker.
-        With the map's flow cut too, the items stop with it and run again
-        from restaged positions, on a child restored from their spend.
-        """
+    async def test_started_budgeted_items_end_with_their_spend(self) -> None:
         root = _tracker()
         cut = asyncio.Event()
         gate = asyncio.Event()
-        at_extract: dict[int, float] = {}
 
         @verb
-        async def query(ctx: Context[Any], n: int) -> int:
+        async def first(ctx: Context[Any], n: int) -> int:
             _spend(ctx, 0.2)
             if n == 1:
                 cut.set()
-                await asyncio.sleep(0)  # the stop follows the signal
+                await asyncio.sleep(0)
                 gate.set()
             else:
                 await gate.wait()
             return n
 
         @verb
-        async def explore(ctx: Context[Any], n: int) -> int:
+        async def second(ctx: Context[Any], n: int) -> int:
             _spend(ctx, 5.0)
             return n
 
-        @verb
-        async def extract(ctx: Context[Any], n: int) -> int:
-            assert ctx.cost is not None
-            at_extract[n] = ctx.cost.spent
-            _spend(ctx, 0.1)
-            return n
-
         def item(b: Any) -> None:
-            b.with_budget(1.0).call(query).then(explore).then(extract, name="extract")
-            b.with_shortcut("cut", to="extract")
+            b.with_budget(1.0).call(first).then(second)
 
-        waves = _ff().create().map(item, items=lambda _p, _c: [0, 1], max_concurrency=2)
-        if map_cut:
-            waves.with_shortcut("cut")
-        flow = _ff().create().with_signal("cut", cut).with_cost_tracker(root).call(waves)
+        region = _ff().create().with_shortcut("cut")
+        region.map(item, items=lambda _p, _c: [0, 1], max_concurrency=2)
+        flow = _ff().create().with_signal("cut", cut).with_cost_tracker(root).call(region)
         assert await flow.run() == [0, 1]
-        assert at_extract == {0: pytest.approx(0.2), 1: pytest.approx(0.2)}
-        assert root.spent == pytest.approx(2 * (0.2 + 0.1))
+        assert root.spent == pytest.approx(2 * 0.2)
 
 
 class TestCostAcrossCrash:

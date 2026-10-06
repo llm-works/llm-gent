@@ -61,9 +61,9 @@ class TestRoleParams:
     def test_with_params_returns_new_role_with_merged_kv(self) -> None:
         """``with_params(**kv)`` yields a new Role carrying the merged mapping."""
         r = Role(name="x", backend="y", model="z")
-        r2 = r.with_params(max_iterations=20, campaign_id="c1")
+        r2 = r.with_params(max_iterations=20, session_id="s1")
         assert r.params == {}  # original untouched
-        assert r2.params == {"max_iterations": 20, "campaign_id": "c1"}
+        assert r2.params == {"max_iterations": 20, "session_id": "s1"}
 
     def test_with_params_later_overrides_earlier(self) -> None:
         """Chained ``with_params`` merges — later keys override earlier ones."""

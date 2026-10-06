@@ -11,7 +11,7 @@ recorded at any level propagate up the parent chain, so an ancestor's
 `spent` reflects every descendant's activity and an ancestor's halt
 fires when *its* cap crosses.
 
-Arbitrary depth is supported — session → wave → run, or any other
+Arbitrary depth is supported — session → batch → run, or any other
 nesting a consumer needs. Every level has the same capabilities.
 
 Halt-observation contract:
@@ -68,7 +68,7 @@ class CostTracker:
     task or guard with a lock).
 
     Example — the substrate imposes no particular hierarchy; the
-    "session → wave → run" shape below is one common pattern, not the
+    "session → batch → run" shape below is one common pattern, not the
     only one. Consumers pick depth and names to fit their model::
 
         outer_halt = asyncio.Event()

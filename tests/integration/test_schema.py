@@ -3,7 +3,7 @@
 
 """Integration tests for :class:`llm_gent.schema.SchemaManager` coexistence with kelt.
 
-The two packages share Postgres in real deployments (xray runs both).
+The two packages can share one Postgres database in a deployment that runs both.
 This module exercises the invariants the store-side unit tests can't:
 that ``ensure_schema`` reads/writes only its own namespaced version
 table, leaves any pre-existing kelt state alone, and remains idempotent

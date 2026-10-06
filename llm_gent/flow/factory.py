@@ -50,7 +50,7 @@ class SAIAFactory(Protocol):
     verb calling code uses ``.verify(...)`` / ``.complete(...)`` / etc.
 
     Implementations MAY read :attr:`Role.params` for per-run parameters
-    (max_iterations, cost trackers, campaign identifiers, plan state —
+    (max_iterations, cost trackers, session identifiers, task state —
     anything the consumer needs at build time that isn't captured in the
     typed Role fields). Key naming inside ``params`` is a contract between
     a factory and its callers; gent itself imposes none.

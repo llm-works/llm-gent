@@ -13,7 +13,7 @@ on top of both needs a small explicit shape.
 (name, backend, model, temperature, max_tokens, style) and an open
 ``params`` mapping for per-run parameters the enclosing consumer's
 :class:`SAIAFactory` interprets at build time (max_iterations, cost
-trackers, campaign identifiers, plan state — anything gent itself doesn't
+trackers, session identifiers, task state — anything gent itself doesn't
 model). Consumers vary a role for a run via :meth:`Role.with_params`.
 """
 
@@ -54,8 +54,8 @@ class Role:
     params: dict[str, Any] = field(default_factory=dict, hash=False, compare=True)
     """Per-run parameters consumed by the enclosing :class:`SAIAFactory` at
     build time. Opaque to gent — key naming is a contract between the
-    factory and its callers (e.g. an xray factory reads ``max_iterations``,
-    ``run_cost``, ``campaign_id``, ``plan_state`` from here).
+    factory and its callers (e.g. a factory reading ``max_iterations``,
+    ``run_cost``, ``session_id``, ``task_state`` from here).
 
     Excluded from :meth:`__hash__` so ``Role`` remains hashable even when
     ``params`` values are unhashable objects (trackers, state instances).
@@ -72,7 +72,7 @@ class Role:
 
         Later calls override earlier keys::
 
-            r = ROLE_XRAY.with_params(max_iterations=20, run_cost=tracker)
+            r = ROLE.with_params(max_iterations=20, run_cost=tracker)
             r2 = r.with_params(max_iterations=30)   # r2.params["max_iterations"] == 30
         """
         return replace(self, params={**self.params, **kv})

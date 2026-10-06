@@ -59,7 +59,7 @@ class SaiaResult:
 
 
 @dataclass
-class WaveTarget:
+class Target:
     """A map item, like an app's fan-out target."""
 
     qid: int
@@ -508,7 +508,7 @@ class TestCheckpointedRunValues:
         from llm_gent.flow import Context, Factory, verb
 
         @verb
-        async def dispatch(ctx: Context[dict[str, Any]], t: WaveTarget) -> AppHandle:
+        async def dispatch(ctx: Context[dict[str, Any]], t: Target) -> AppHandle:
             if t.qid == 2:
                 raise RuntimeError("inner run failed")
             return AppHandle(t.qid)
@@ -520,11 +520,11 @@ class TestCheckpointedRunValues:
         flow = (
             Factory(make_test_logger())
             .create(state={})
-            .with_checkpoint_store(store, "wave")
+            .with_checkpoint_store(store, "targets")
             .with_checkpointer()
             .map(
                 lambda b: b.call(dispatch),
-                items=lambda _p, _c: [WaveTarget(1), WaveTarget(2), WaveTarget(3)],
+                items=lambda _p, _c: [Target(1), Target(2), Target(3)],
                 strict=False,
             )
             .guard(lambda t, _c: t.qid != 3)

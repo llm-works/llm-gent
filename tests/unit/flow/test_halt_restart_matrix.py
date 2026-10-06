@@ -197,14 +197,11 @@ class Ckpt:
 class Cut:
     """A subflow declaring ``with_shortcut("cut")`` (the run's signal is ``probe.cut``).
 
-    With ``to``, it lands on its last step.
-
-    The last child is then a :class:`Leaf`, appended with ``name="to"``.
-    Only the shortcut section uses it: the model runs it as a :class:`Seq`.
+    Only the shortcut section uses it: :func:`model` runs it as a
+    :class:`Seq`, :func:`cut_model` as the region it is.
     """
 
     children: tuple[Node, ...]
-    to: bool = False
 
 
 Node = Leaf | Seq | Iter | Map | Branch | Scope | MapMembers | Ckpt | Cut
@@ -231,7 +228,7 @@ def _label(node: Node, counter: list[int], prefix: str = "l") -> Node:
     if isinstance(node, Ckpt):
         return Ckpt(_label(node.body, counter, "c"))
     if isinstance(node, Cut):
-        return Cut(tuple(_label(child, counter, prefix) for child in node.children), node.to)
+        return Cut(tuple(_label(child, counter, prefix) for child in node.children))
     return Scope(_label(node.body, counter, prefix))
 
 
@@ -385,6 +382,75 @@ def model(shape: Seq) -> tuple[int, dict[str, int], list[str]]:
     out: dict[str, int] = {}
     merges: list[str] = []
     return _model_node(shape, RUN_INPUT, out, merges), out, sorted(merges)
+
+
+@dataclass
+class _CutRun:
+    """:func:`cut_model`'s run: leaf executions so far, and whether ``cut_key`` has run."""
+
+    cut_key: str
+    cut: bool = False
+    out: dict[str, int] = field(default_factory=dict)
+
+
+def _cut_chain(steps: tuple[Node, ...], x: int, run: _CutRun, region: bool) -> int:
+    """A chain: in a region whose signal is set, it starts no new step and ends with ``x``."""
+    for step in steps:
+        if region and run.cut:
+            return x
+        x = _cut_step(step, x, run, region)
+    return x
+
+
+def _cut_step(node: Node, x: int, run: _CutRun, region: bool) -> int:
+    """One chain step; every body it runs (pass, item, arm, subflow) is a chain of its own."""
+    if isinstance(node, Leaf):
+        key = f"{node.name}:{x}"
+        run.out[key] = 3 * x + node.c
+        run.cut = run.cut or key == run.cut_key
+        return run.out[key]
+    if isinstance(node, Cut | Seq):
+        return _cut_chain(node.children, x, run, region or isinstance(node, Cut))
+    if isinstance(node, Iter):
+        for _ in range(node.n):
+            if region and run.cut:
+                break
+            x = _cut_chain((node.body,), x, run, region)
+            if node.until and _until(x):
+                break
+        return x
+    if isinstance(node, Map | MapMembers):
+        return _cut_map(node, x, run, region)
+    if isinstance(node, Branch):
+        return _cut_chain((node.then if x % 2 == 0 else node.else_,), x, run, region)
+    return _cut_chain((node.body,), x, run, region)
+
+
+def _cut_map(node: Map | MapMembers, x: int, run: _CutRun, region: bool) -> int:
+    """A map: in a region whose signal is set, an item that has not started is skipped."""
+    if isinstance(node, MapMembers):
+        bodies = [(m, x) for m in node.members]
+    else:
+        width = node.width - 1 if node.mode == "lenient" else node.width
+        bodies = [(node.body, 10 * x + i) for i in range(width)]
+    total = 0
+    for body, item in bodies:
+        if not (region and run.cut):
+            total += _cut_chain((body,), item, run, region)
+    return total
+
+
+def cut_model(shape: Seq, cut_key: str) -> tuple[int, dict[str, int]]:
+    """The result and ``done`` map of a sequential run whose signal is set after ``cut_key``.
+
+    Computed from the shape alone: inside a :class:`Cut`, once the signal
+    is set, every chain ends with its last result before its next step,
+    every iterate before its next pass, every map before its next item.
+    A step already running finishes. Outside every ``Cut`` the run is
+    unaffected.
+    """
+    run = _CutRun(cut_key)
+    return _cut_chain(shape.children, RUN_INPUT, run, False), run.out
 
 
 # --- Store and probe --------------------------------------------------------
@@ -673,16 +739,11 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
 
 
 def _cut_flow(node: Cut, probe: Probe, parallel: bool) -> Flow:
-    """The subflow for a :class:`Cut`: its children, then ``with_shortcut("cut")``."""
-    sub = Factory(LG).create()
-    children = node.children[:-1] if node.to else node.children
-    for child in children:
+    """The subflow for a :class:`Cut`: its children, and ``with_shortcut("cut")``."""
+    sub = Factory(LG).create().with_shortcut("cut")
+    for child in node.children:
         _add(child, sub, probe, parallel)
-    if node.to:
-        landing = node.children[-1]
-        assert type(landing) is Leaf, "a Cut lands on a plain leaf"
-        sub.call(_leaf_verb(landing, probe), name="to")
-    return sub.with_shortcut("cut", to="to" if node.to else None)
+    return sub
 
 
 def _merge_scope(parent: dict[str, Any], child: dict[str, Any]) -> None:
@@ -1142,26 +1203,29 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
 
 # --- Shortcuts --------------------------------------------------------------
 #
-# A shortcut changes what an uninterrupted run does, so its oracle is the
-# same flow run with the cut and without a halt. Each case cuts at one
-# plain leaf's execution and halts at a leaf entry (before or after its
-# work), then resumes: a halt before the cut leaves resume to cut the same
-# way, one during the shortcut leaves it recorded in the halt checkpoint,
-# one after it lands is an ordinary halt. Either way the resumed run ends
-# with the oracle's result and state — except a halt before the cut in a
-# parallel map, where the resumed run's interleaving decides how far each
-# item got when it cuts: that one is checked to finish.
+# A cut changes what a run does, so its oracle is :func:`cut_model`: the
+# leaves a sequential run executes, computed from the shape alone. Each
+# case cuts at one plain leaf's execution. Uninterrupted, the run must
+# match the model and run no leaf twice. Halted at a leaf entry (before or
+# after its work) and resumed — a halt before the cut leaves resume to cut
+# the same way, one during the fast-forward leaves the signal recorded in
+# the halt checkpoint, one after the region is an ordinary halt — it must
+# end with the model's result and state. In a parallel map the model does
+# not apply (how far each item got when the cut comes depends on the
+# interleaving): there the run is checked to run no leaf twice, and a halt
+# set after the cut to resume to the unhalted cut run.
 
 _CUT_INNER: dict[str, Node] = {
     "cut(seq)": Cut((_L, _L, _L)),
-    "cut(seq,to)": Cut((_L, _L, _L), to=True),
     "cut(iter)": Cut((Iter(_L, 3),)),
     "cut(map)": Cut((Map(_L, 3),)),
-    "cut(turn,to)": Cut((_T, _L, _L), to=True),
-    "cut(iter(sub),to)": Cut((Iter(Seq((_L, _L)), 2), _L), to=True),
+    "cut(turn)": Cut((_T, _L, _L)),
+    "cut(branch)": Cut((Branch(_L, _L), _L)),
+    "cut(iter(sub))": Cut((Iter(Seq((_L, _L)), 2), _L)),
     "iter(cut(seq))": Iter(Cut((_L, _L)), 2),
-    "map(cut(seq,to))": Map(Cut((_L, _L, _L), to=True), 2),
-    "campaign": Cut((Iter(Cut((_L, Map(Cut((_L, _T, _L), to=True), 2), _L)), 2),)),
+    "map(cut(seq))": Map(Cut((_L, _L, _L)), 2),
+    "sub(leaf,cut(iter))": Seq((_L, Cut((Iter(_L, 3),)))),
+    "nested": Cut((Iter(Seq((_L, Map(Seq((_L, _T, _L)), 2), _L)), 2),)),
 }
 
 CUT_SHAPES: dict[str, Seq] = {
@@ -1180,7 +1244,41 @@ def _plain_leaf_names(node: Node) -> set[str]:
         return set().union(*(_plain_leaf_names(child) for child in node.children))
     if isinstance(node, Iter | Map):
         return _plain_leaf_names(node.body)
+    if isinstance(node, Branch):
+        return _plain_leaf_names(node.then) | _plain_leaf_names(node.else_)
     return set()
+
+
+def _cut_keys(shape: Seq) -> list[str]:
+    """The model's plain leaf executions: each is a point a case cuts at."""
+    plain = _plain_leaf_names(shape)
+    return [k for k in model(shape)[1] if k.split(":")[0] in plain]
+
+
+def _cut_run_params() -> Iterator[Any]:
+    for name, shape in CUT_SHAPES.items():
+        for parallel in (False, True) if _has_map(shape) else (False,):
+            for cut_key in _cut_keys(shape):
+                run = "par" if parallel else "seq"
+                yield pytest.param(name, cut_key, parallel, id=f"{name}-cut{cut_key}-{run}")
+
+
+@pytest.mark.parametrize(("shape_name", "cut_key", "parallel"), list(_cut_run_params()))
+async def test_a_cut_run_matches_the_cut_model(
+    shape_name: str, cut_key: str, parallel: bool
+) -> None:
+    shape = CUT_SHAPES[shape_name]
+    store = InMemoryCheckpointStore()
+    probe = Probe(cut_key=cut_key)
+    result = await _flow(shape, probe, store, parallel=parallel).run(RUN_INPUT)
+    assert len(probe.executed) == len(set(probe.executed)), "a leaf ran twice"
+    assert await History(store, FLOW_NAME).is_complete()
+    if parallel:
+        return
+    expected, done = cut_model(shape, cut_key)
+    assert probe.executed == list(done)
+    assert result == expected
+    assert await _head_done(store) == done
 
 
 @dataclass(frozen=True)
@@ -1202,10 +1300,8 @@ class CutCase:
 def _cut_params() -> Iterator[Any]:
     for name, shape in CUT_SHAPES.items():
         keys = list(model(shape)[1])
-        plain = _plain_leaf_names(shape)
-        cut_keys = [k for k in keys if k.split(":")[0] in plain]
         for parallel in (False, True) if _has_map(shape) else (False,):
-            for cut_key in cut_keys:
+            for cut_key in _cut_keys(shape):
                 for stop_at in range(1, len(keys) + 1):
                     for mode in ("before", "after"):
                         case = CutCase(name, cut_key, stop_at, mode, parallel)
@@ -1219,13 +1315,19 @@ async def _head_done(store: CheckpointStore) -> dict[str, int]:
     return dict((await history.snapshot(head)).root.get("done", {}))
 
 
+async def _cut_oracle(shape: Seq, case: CutCase) -> tuple[int, dict[str, int]]:
+    """The cut run's result and ``done``: :func:`cut_model`'s, or an unhalted parallel run's."""
+    if not case.parallel:
+        return cut_model(shape, case.cut_key)
+    store = InMemoryCheckpointStore()
+    result = await _flow(shape, Probe(cut_key=case.cut_key), store, parallel=True).run(RUN_INPUT)
+    return result, await _head_done(store)
+
+
 @pytest.mark.parametrize("case", list(_cut_params()))
 async def test_halt_around_a_shortcut_resumes_to_the_cut_run(case: CutCase) -> None:
     shape = CUT_SHAPES[case.shape]
-    oracle_store = InMemoryCheckpointStore()
-    oracle = Probe(cut_key=case.cut_key)
-    expected = await _flow(shape, oracle, oracle_store, parallel=case.parallel).run(RUN_INPUT)
-    expected_done = await _head_done(oracle_store)
+    expected, expected_done = await _cut_oracle(shape, case)
 
     inner = InMemoryCheckpointStore()
     store = CrashableStore(inner)

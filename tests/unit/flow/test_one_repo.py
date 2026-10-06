@@ -180,7 +180,7 @@ class TestNamedCheckpointer:
                 .create(state={})
                 .with_checkpoint_store(store, NAME)
                 .map(
-                    lambda b: b.with_checkpointer("research").call(item),
+                    lambda b: b.with_checkpointer("items").call(item),
                     items=lambda _p, _c: [1, 2, 3],
                     max_concurrency=1,
                 )
@@ -188,14 +188,14 @@ class TestNamedCheckpointer:
 
         assert await flow().run() == [2, 4, 6]
         history = History(store, NAME)
-        tagged = await history.checkpoint("research")
+        tagged = await history.checkpoint("items")
         assert tagged is not None
         cursors = (await history.snapshot(tagged)).cursors
         [done] = [c["done"] for c in cursors.values() if "done" in c]
         assert sorted(done) == ["0", "1"]  # the third item's own checkpoint: items 0 and 1 done
 
         ran.clear()
-        assert await flow().run(resume="research") == [2, 4, 6]
+        assert await flow().run(resume="items") == [2, 4, 6]
         assert ran == [3]
 
     async def test_a_save_moves_only_its_innermost_checkpointer_tag(self) -> None:
