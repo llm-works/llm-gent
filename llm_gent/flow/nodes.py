@@ -326,7 +326,7 @@ class _RunEnv:
     path: ScopePath = ()
     shortcut: ShortcutRun | None = None
     shortcuts: tuple[ShortcutRun, ...] = ()
-    resources: Mapping[ResourceKey[Any], Any] = NO_RESOURCES
+    resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
 
     @property
     def scopes(self) -> ScopeRegistry:

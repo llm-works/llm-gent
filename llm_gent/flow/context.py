@@ -152,7 +152,7 @@ class Context(Generic[T]):
     preserved. Default is a fresh empty dict.
     """
 
-    resources: Mapping[ResourceKey[Any], Any] = NO_RESOURCES
+    resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
     """The resources the run runs with, by key; read one with :meth:`resource`."""
 
     _env: Any = None
