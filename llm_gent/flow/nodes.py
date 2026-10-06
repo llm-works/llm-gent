@@ -411,6 +411,8 @@ class _Node:
     state_factory: StateFactory[Any] | None = None
     name: str | None = None
     """A ``.call`` / ``.then`` step's label; primitives carry theirs on the target."""
+    conclude: bool = False
+    """Appended with :meth:`Flow.conclude`: the step runs even while its chain fast-forwards."""
 
 
 def step_name(node: _Node) -> str | None:

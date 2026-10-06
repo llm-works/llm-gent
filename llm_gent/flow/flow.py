@@ -452,6 +452,48 @@ class Flow:
             name=name,
         )
 
+    def conclude(
+        self,
+        target: Any,
+        *,
+        project: ProjectFn | None = None,
+        rescue: RescuePolicy | None = None,
+        after: AfterHook | None = None,
+        state: StateProject | None = None,
+        merge: StateMerge | None = None,
+        state_factory: StateFactory[Any] | None = None,
+        name: str | None = None,
+    ) -> Self:
+        """Append a step like :meth:`then` that a cut does not skip.
+
+        Without a cut it is exactly :meth:`then`. While its chain
+        fast-forwards — the chain runs in a :meth:`with_shortcut` region
+        whose signal is set — every other step is skipped and the
+        ``conclude`` steps still run, in order, each with the last
+        completed result (the chain's input when none completed). A chain
+        the region reaches before its first step runs them too. A ``then``
+        after a ``conclude`` is still skipped.
+
+        It is not a ``finally``: a step that raises, or the run's halt,
+        stops the chain as usual. Being a ``conclude`` step does not enter
+        its node id or :meth:`root_hash`: switching a step between
+        ``then`` and ``conclude`` keeps checkpoints resumable.
+
+        Returns ``self`` for chaining.
+        """
+        self.call(
+            target,
+            project=project,
+            rescue=rescue,
+            after=after,
+            state=state,
+            merge=merge,
+            state_factory=state_factory,
+            name=name,
+        )
+        self._nodes[-1].conclude = True
+        return self
+
     def rescue(self, policy: RescuePolicy) -> Self:
         """Attach a failure policy to the most recently appended node.
 
@@ -842,7 +884,8 @@ class Flow:
         under it fast-forward, skipping what they can:
 
         - a chain starts no new step and ends with its last result (a
-          chain that has not started passes its input through);
+          chain that has not started passes its input through), except a
+          step appended with :meth:`conclude`, which still runs;
         - an iterate starts no new pass and returns its carried value; a
           map starts no new item (those are :class:`Skipped`);
         - a Loop turn in flight is aborted, and its call returns the
