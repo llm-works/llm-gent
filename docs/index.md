@@ -307,7 +307,7 @@ item = (
     .then(digest)
     .with_shortcut("cut", to="extract")
 )
-wave_body = ff.create().call(plan).map(item).then(revise).with_shortcut("cut")
+wave_body = ff.create().call(plan).map(item).then(revise)
 waves = ff.create().iterate(wave_body, max_iters=20).with_shortcut("cut")
 campaign = ff.create(...).with_halt(pause).with_signal("cut", cut).call(waves).then(synthesis)
 ```
@@ -326,13 +326,22 @@ continues at once from where it stopped, in shortcut mode:
 - The chain then continues at `to`, skipping the steps before it (`to`
   gets the last completed result), or the flow ends with it.
 
-Flows under it run normally unless they declare a shortcut of their own;
-in the example above an item stopped before `extract` jumps there, one
-stopped inside `explore` finishes its turn with the paused result and
-goes on to `extract`, and one past `extract` finishes normally. A flow
-that starts while its signal is set — a later step, the next iterate
-pass, a map item — starts in shortcut mode; a signal set once a flow is
-at or past its `to` does nothing there.
+Shortcut mode covers the flow's whole subtree until the flow reaches
+`to`. A flow under it with no shortcut of its own behaves as if it
+declared one with no `to`: its iterates start no new pass, its maps no
+new item, and its chain ends after the step that was interrupted (a
+chain that has not started yet passes its input through). In the example
+above, `wave_body` needs no shortcut: the cut wave runs no `revise`.
+
+A flow under it that declares its own shortcut lands where its `to`
+says: an item stopped before `extract` jumps there, one stopped inside
+`explore` finishes its turn with the paused result and goes on to
+`extract`, and one past `extract` finishes normally. That is how a nested
+flow names a step it must still reach; work that must never be split
+belongs in one step. The subtree under the steps from `to` on runs
+normally. A flow that starts while its signal is set — a later step, the
+next iterate pass, a map item — starts in shortcut mode; a signal set
+once a flow is at or past its `to` does nothing there.
 
 A signal set inside a step, without awaiting, stops the flow at that
 step's boundary like one set from outside.

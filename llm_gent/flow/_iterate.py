@@ -30,6 +30,7 @@ from ._executor import (
 )
 from ._halt_observer import is_halt_signaled, note_halt
 from ._node_id import _descend_context
+from ._shortcut import in_shortcut_mode
 from .nodes import Interrupted
 from .state import State
 from .state.snapshot import CARRY, PASS, UNTIL, ScopePath
@@ -154,11 +155,12 @@ class IterateRunner:
     def _shortcut_ends(self, pass_path: ScopePath) -> bool:
         """True when this iterate's flow is in shortcut mode and the pass had not started.
 
-        A pass that was running when the flow stopped (its positions are
-        saved) runs again from them; no other pass starts.
+        Shortcut mode is the flow's own or an enclosing flow's
+        (:func:`~._shortcut.in_shortcut_mode`). A pass that was running
+        when the flow stopped (its positions are saved) runs again from
+        them; no other pass starts.
         """
-        shortcut = self.env.shortcut
-        if shortcut is None or not shortcut.active:
+        if not in_shortcut_mode(self.env):
             return False
         return not self.env.scopes.has_saved_under(pass_path)
 

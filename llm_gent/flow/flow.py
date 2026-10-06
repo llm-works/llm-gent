@@ -854,10 +854,13 @@ class Flow:
           steps — skipping the steps before it (``to`` gets the last
           completed result), or ends when ``to`` is ``None``.
 
-        Flows under this one run normally unless they declare a shortcut
-        of their own; one signal can drive several. Steps at and after
-        ``to`` run normally: a signal set once the chain is there does
-        nothing. A run of this flow that starts while the signal is set (a
+        Shortcut mode covers the flows under this one until it reaches
+        ``to``: one with no shortcut of its own behaves as if it declared
+        one with no ``to`` (no new pass or item; its chain ends after the
+        step that was interrupted), and one with its own lands where its
+        ``to`` says — one signal can drive several. Steps at and after
+        ``to`` run normally, with what runs under them: a signal set once
+        the chain is there does nothing. A run of this flow that starts while the signal is set (a
         later step, the next iterate pass, a map item) starts in shortcut
         mode. The run's halt still stops everything; a halt during a
         shortcut is recorded with it, and resume continues the shortcut.
