@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Any, Final
 
 from appinfra.log import Logger
 
-from ..core.cost import CostTracker
 from .context import Context
 from .resource import NO_RESOURCES, ResourceKey
 from .state import State, StateFactory
@@ -277,15 +276,13 @@ class _RunEnv:
     """Per-run environment threaded through the execution helpers.
 
     Bundles the runtime flow (factory + saia cache + logger source), the
-    currently active :class:`State`, and any ambient halt event or cost
-    tracker so helpers do not each need to carry them as separate positional
-    arguments. ``lg`` is cached off ``runtime`` at the top of
+    currently active :class:`State`, any ambient halt event and the run's
+    resources so helpers do not each need to carry them as separate
+    positional arguments. ``lg`` is cached off ``runtime`` at the top of
     :meth:`Flow.run` for brevity in the debug/warning call sites. ``halt``
     is the ambient :class:`asyncio.Event` attached via :meth:`Flow.with_halt`
     (or inherited from the outer runtime); ``None`` when no halt is in
-    scope. ``cost`` is the run's cost tracker (``ctx.cost``): one attached
-    via :meth:`Flow.with_cost_tracker`, a budgeted run's child, or the one
-    inherited; ``None`` when none is in scope. ``checkpoint_ctx`` is the run's repo (the top-level flow's
+    scope. ``checkpoint_ctx`` is the run's repo (the top-level flow's
     checkpoint store); ``checkpointer`` the innermost
     :meth:`Flow.with_checkpointer` on this flow or above it — saves write
     commits only under one.
@@ -307,16 +304,16 @@ class _RunEnv:
     run (its chain, iterates and maps follow it); ``shortcuts`` holds it
     and every enclosing flow's, for the Loop calls under them.
 
-    ``resources`` are the resources this run runs with (``ctx.resource``):
-    the ones this Flow declares, its per-run children, and the ones
-    inherited (:mod:`llm_gent.flow._resources`).
+    ``resources`` are the resources this run runs with (``ctx.resource``;
+    the cost tracker, ``ctx.cost``, among them): the ones this Flow
+    declares, its per-run children, and the ones inherited
+    (:mod:`llm_gent.flow.resource._runtime`).
     """
 
     runtime: Flow
     state: State[Any]
     lg: Logger
     halt: asyncio.Event | None = None
-    cost: CostTracker | None = None
     checkpoint_ctx: CheckpointContext | None = None
     checkpointer: Checkpointer | None = None
     chain_context: str = ""

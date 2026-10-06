@@ -39,13 +39,13 @@ from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
 
-from ._node_id import _child_flows
-from .resource import Resource, ResourceKey, has_child
-from .state.snapshot import RESOURCES, RUN_RESOURCES, ScopePath, ScopeRegistry, path_str
+from .._node_id import _child_flows
+from ..state.snapshot import RESOURCES, RUN_RESOURCES, ScopePath, ScopeRegistry, path_str
+from .base import Resource, ResourceKey, has_child
 
 
 if TYPE_CHECKING:
-    from .flow import Flow
+    from ..flow import Flow
 
 
 Resources = Mapping[ResourceKey[Any], Any]

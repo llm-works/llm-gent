@@ -23,7 +23,7 @@ import pytest
 
 from llm_gent.core.cost import CostTracker, PricingConfig
 from llm_gent.flow import HALTED, Context, FlowFactory, History, Interrupted, Loop, Role, verb
-from llm_gent.flow.state.snapshot import TRACKER
+from llm_gent.flow.state.snapshot import RESOURCES
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
 from .conftest import make_test_logger
@@ -103,7 +103,7 @@ class TestAppTrackerAcrossResume:
         history = History(store, NAME)
         head = await history.head()
         assert head is not None
-        so_far = (await history.snapshot(head)).cursors[""][TRACKER]["spent"]
+        so_far = (await history.snapshot(head)).cursors[""][RESOURCES]["cost"]["spent"]
         assert so_far == 5.0
 
         session = _tracker(so_far + 1.5)
@@ -164,7 +164,7 @@ class TestAppTrackerAcrossResume:
         assert await history.is_complete()
         head = await history.head()
         assert head is not None
-        assert (await history.snapshot(head)).cursors[""][TRACKER]["spent"] == 2.0
+        assert (await history.snapshot(head)).cursors[""][RESOURCES]["cost"]["spent"] == 2.0
 
         fresh = _tracker()
         await flow(fresh).run(1, resume="latest")
@@ -206,7 +206,7 @@ class TestAppTrackerAcrossResume:
 
         assert await build(_tracker(), arm=True).run(1) is HALTED
         snapshot = await History(store, NAME).snapshot(await History(store, NAME).head())
-        assert [p for p, c in snapshot.cursors.items() if TRACKER in c] == [""]
+        assert [p for p, c in snapshot.cursors.items() if RESOURCES in c] == [""]
 
         fresh = _tracker()
         assert await build(fresh, arm=False).run(1, resume="latest") == 1

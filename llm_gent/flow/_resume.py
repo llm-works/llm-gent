@@ -179,7 +179,8 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
 
     A resumed run that finished without reaching some of its saved scopes
     or cursors drops them first (:func:`_drop_unreached_scopes`), so the
-    final commit holds the root scope and the run's cost tracker alone.
+    final commit holds the root scope and the top-level flow's resources
+    alone.
     """
     if flow._checkpoint_ctx is None:
         return
@@ -260,8 +261,9 @@ async def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
     """Put the run's snapshot, or an empty tree when its root ``state`` cannot be serialized.
 
     At the end of a run every child scope has closed, so the snapshot
-    holds the root scope, and the top-level flow's cost tracker when it
-    has one (:func:`~llm_gent.flow._cost.run_cost`).
+    holds the root scope, and the top-level flow's resources — its cost
+    tracker among them — when it has any
+    (:func:`~llm_gent.flow.resource._runtime.run_resources`).
     """
     ctx = flow._checkpoint_ctx
     assert ctx is not None

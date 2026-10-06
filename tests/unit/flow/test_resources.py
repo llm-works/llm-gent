@@ -16,7 +16,9 @@ from typing import Any
 
 import pytest
 
+from llm_gent.core.cost import CostTracker, PricingConfig
 from llm_gent.flow import (
+    COST,
     HALTED,
     Context,
     Flow,
@@ -497,6 +499,41 @@ class TestProtocol:
 
         with pytest.raises(TypeError, match="restore"):
             Half()  # type: ignore[abstract]
+
+
+class TestCostIsAResource:
+    """The cost API is sugar over the COST resource."""
+
+    async def test_ctx_cost_is_the_cost_resource_and_a_budget_its_child(self) -> None:
+        root = CostTracker(make_test_logger(), PricingConfig())
+        seen: list[tuple[Any, Any]] = []
+
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            seen.append((ctx.cost, ctx.resource(COST)))
+            return x
+
+        sub = _ff().create().with_budget(2.0).call(step)
+        await _ff().create().with_cost_tracker(root).call(step).then(sub).run(1)
+        (top, top_key), (child, child_key) = seen
+        assert top is root and top_key is root
+        assert child is child_key and child.parent is root and child.budget == 2.0
+
+    async def test_dispatch_cost_replaces_or_removes_the_tracker(self) -> None:
+        own = CostTracker(make_test_logger(), PricingConfig())
+        other = CostTracker(make_test_logger(), PricingConfig())
+        seen: list[Any] = []
+
+        @verb
+        async def step(ctx: Context[Any]) -> None:
+            seen.append(ctx.cost)
+
+        flow = _ff().create().with_cost_tracker(own)
+        flow.register(step)
+        await flow.dispatch("step")
+        await flow.dispatch("step", cost=other)
+        await flow.dispatch("step", cost=None)
+        assert seen == [own, other, None]
 
 
 class TestValidation:
