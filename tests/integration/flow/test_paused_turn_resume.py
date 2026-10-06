@@ -25,7 +25,7 @@ from llm_saia.core.errors import PauseRequested
 from llm_saia.core.logger import NullLogger
 from llm_saia.core.types import ChatResponse, Message, ToolCall, ToolDef
 
-from llm_gent.flow import Context, FlowFactory, History, Loop, Role, verb
+from llm_gent.flow import Context, Factory, History, Loop, Role, verb
 from llm_gent.flow.state.snapshot import TURN
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
@@ -210,11 +210,11 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     async def run_loop(ctx: Context, _prev: Any = None) -> Any:
         return await loop(ctx, ctx.extra["task"], conversation=ctx.extra["conv"])
 
-    body_ff = FlowFactory(make_test_logger())
+    body_ff = Factory(make_test_logger())
     body = body_ff.create()
     body.call(run_loop)
 
-    ff1 = FlowFactory(make_test_logger(), saia_factory=_SaiaFactory(backend1))
+    ff1 = Factory(make_test_logger(), saia_factory=_SaiaFactory(backend1))
     flow1 = (
         ff1.create(state={})
         .with_checkpoint_store(store, "real-saia-resume")
@@ -244,7 +244,7 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
     # exactly one non-structured call recorded.
     backend2.calls.append({"messages": [], "response_schema": None})
 
-    ff2 = FlowFactory(make_test_logger(), saia_factory=_SaiaFactory(backend2))
+    ff2 = Factory(make_test_logger(), saia_factory=_SaiaFactory(backend2))
     flow2 = (
         ff2.create(state={})
         .with_checkpoint_store(store, "real-saia-resume")
@@ -304,10 +304,10 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
     async def run_loop(ctx: Context, _prev: Any = None) -> Any:
         return await loop(ctx, "look up cas")
 
-    body = FlowFactory(make_test_logger()).create().call(run_loop)
+    body = Factory(make_test_logger()).create().call(run_loop)
     saia_factory = _HaltingSaiaFactory(_ToolThenPauseBackend(), halt)
     flow = (
-        FlowFactory(make_test_logger(), saia_factory=saia_factory)
+        Factory(make_test_logger(), saia_factory=saia_factory)
         .create(state={})
         .with_checkpoint_store(store, "no-caller-conv")
         .with_checkpointer()

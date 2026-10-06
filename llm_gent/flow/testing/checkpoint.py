@@ -36,7 +36,7 @@ from appinfra.log import Logger
 
 from ..checkpoint import CheckpointStore, ResumeMode
 from ..context import Context
-from ..factory import FlowFactory
+from ..factory import Factory
 from ..flow import Flow
 from ..history import History
 from ..state import StateDataclass, TypeStateFactory
@@ -182,7 +182,7 @@ def build_canonical_flow(
     if (halt is None) != (halt_after_iteration is None):
         raise ValueError("halt and halt_after_iteration must be provided together (or neither)")
 
-    ff = FlowFactory(lg, state_factory=TypeStateFactory(CanonicalCounter))
+    ff = Factory(lg, state_factory=TypeStateFactory(CanonicalCounter))
     flow = ff.create(state=state if state is not None else CanonicalCounter())
     if store is not None:
         flow.with_checkpoint_store(store, client_flow_id).with_checkpointer()

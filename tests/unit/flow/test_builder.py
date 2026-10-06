@@ -22,7 +22,7 @@ from .conftest import ROLE_A, ROLE_B, StubFactory, StubSAIA, make_ff, make_test_
 
 
 class TestConstruction:
-    """Flow construction via FlowFactory.create and direct Flow()."""
+    """Flow construction via Factory.create and direct Flow()."""
 
     def test_named_flow(self) -> None:
         """The ``name`` argument to create() becomes the flow's identifier."""

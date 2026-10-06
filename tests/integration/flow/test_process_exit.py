@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, verb
+from llm_gent.flow import Context, Factory, History, verb
 from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
@@ -46,7 +46,7 @@ def _iterate_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
         return x + 1
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, NAME)
         .with_checkpointer()
@@ -66,7 +66,7 @@ def _map_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
         return x * 10
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, NAME)
         .with_checkpointer()

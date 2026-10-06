@@ -90,7 +90,7 @@ FLOW = "flow"
 """Root tree entry: the structure of the flow that wrote the snapshot, as a blob.
 
 Its hash is the commit's ``flow_root_hash``
-(:class:`~llm_gent.flow.structure.FlowStructure`). Reachable from the
+(:class:`~llm_gent.flow.structure.Structure`). Reachable from the
 commit like every entry, so :func:`~llm_gent.flow.collect_unreachable`
 keeps it; :func:`read_snapshot` does not read it.
 """
@@ -369,7 +369,7 @@ def build_snapshot_tree(
     """Build the snapshot tree for captured values; return it and every object to store.
 
     ``structure`` is the structure of the flow writing the snapshot
-    (:meth:`~llm_gent.flow.structure.FlowStructure.blob`), held at the
+    (:meth:`~llm_gent.flow.structure.Structure.blob`), held at the
     root as :data:`FLOW`. Pure and synchronous: hashing only, no store
     access.
     """

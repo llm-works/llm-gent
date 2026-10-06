@@ -45,7 +45,7 @@ from .checkpoint import (
 )
 from .state.cas import Blob, Commit, CommitMeta, ProducedBy, Tree
 from .state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
-from .structure import FlowStructure
+from .structure import Structure
 
 
 if TYPE_CHECKING:
@@ -107,7 +107,7 @@ class CheckpointContext:
         self,
         store: CheckpointStore,
         client_flow_id: str,
-        structure: Callable[[], FlowStructure],
+        structure: Callable[[], Structure],
     ) -> None:
         """Bind the store and name; ``structure`` yields the owning flow's structure.
 

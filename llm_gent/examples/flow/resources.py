@@ -14,7 +14,7 @@ checkpoints and bring them back on resume, and the optional ``child()``
 gives each run a ``Stats`` of its own.
 
 ``MyFlow`` adds ``with_stats`` with :func:`~llm_gent.flow.resource_method`,
-and :class:`~llm_gent.flow.FlowFactory` builds it (``flow_class=``), so the
+and :class:`~llm_gent.flow.Factory` builds it (``flow_class=``), so the
 method is typed — and the subflows a map body builds are ``MyFlow`` too.
 
 1. **Run 1** — a map scores three documents; each item runs with its own
@@ -46,7 +46,7 @@ from llm_gent.flow import (
     HALTED,
     Context,
     Flow,
-    FlowFactory,
+    Factory,
     Interrupted,
     Resource,
     ResourceKey,
@@ -94,7 +94,7 @@ class MyFlow(Flow):
     with_stats = resource_method(STATS)
 
 
-def build(ff: FlowFactory[MyFlow], stats: Stats, halt: asyncio.Event, arm: bool) -> MyFlow:
+def build(ff: Factory[MyFlow], stats: Stats, halt: asyncio.Event, arm: bool) -> MyFlow:
     """Fetch every document, then score each; armed, halt once all are fetched."""
     fetched: set[str] = set()
 
@@ -130,7 +130,7 @@ async def main() -> int:
     """Run 1 halts mid-map; run 2 resumes it."""
     lg = quick_console_logger("resources-example", config={"level": "warning"})
     store = InMemoryCheckpointStore()
-    ff = FlowFactory(lg, flow_class=MyFlow, checkpoint_store=store)
+    ff = Factory(lg, flow_class=MyFlow, checkpoint_store=store)
 
     print("--- Run 1: halts once every document is fetched ---")
     stats1 = Stats()

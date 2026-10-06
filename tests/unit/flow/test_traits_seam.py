@@ -3,7 +3,7 @@
 
 """Tests for the Trait ↔ Flow seam.
 
-Flow, FlowFactory, and Context each carry an optional ``traits`` registry.
+Flow, Factory, and Context each carry an optional ``traits`` registry.
 Verbs reach mounted platform capabilities via ``ctx.traits``. When no
 registry is supplied, ``ctx.traits is None`` and behavior is unchanged
 from before the seam existed.
@@ -19,7 +19,7 @@ import pytest
 from llm_gent.core.errors import TraitNotFoundError
 from llm_gent.core.traits import Registry
 from llm_gent.core.traits.base import BaseTrait
-from llm_gent.flow import Flow, FlowFactory, verb
+from llm_gent.flow import Factory, Flow, verb
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, make_test_logger
 
@@ -131,19 +131,19 @@ class TestFlowConstructor:
 
 
 class TestFlowFactoryPropagation:
-    """FlowFactory captures ``traits`` once; every ``.create()`` inherits it."""
+    """Factory captures ``traits`` once; every ``.create()`` inherits it."""
 
     def test_factory_traits_reaches_flow(self) -> None:
-        """A FlowFactory-built flow surfaces the captured registry."""
+        """A Factory-built flow surfaces the captured registry."""
         registry = _fresh_registry()
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
         assert ff.create().traits is registry
 
     def test_factory_traits_reaches_verb(self) -> None:
-        """A verb dispatched through a FlowFactory-built flow reads ctx.traits."""
+        """A verb dispatched through a Factory-built flow reads ctx.traits."""
         memory = _MemoryStub(agent=object())
         registry = _fresh_registry(memory)
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
 
         captured: dict[str, Any] = {}
 
@@ -157,7 +157,7 @@ class TestFlowFactoryPropagation:
 
     def test_factory_default_traits_none(self) -> None:
         """Without traits= on the factory, built flows carry None."""
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory())
+        ff = Factory(make_test_logger(), saia_factory=StubFactory())
         assert ff.create().traits is None
 
 
@@ -167,14 +167,14 @@ class TestFactoryDerivers:
     def test_with_saia_factory_preserves_traits(self) -> None:
         """Swapping the SAIA factory keeps the trait registry intact."""
         registry = _fresh_registry()
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
         derived = ff.with_saia_factory(StubFactory())
         assert derived.create().traits is registry
 
     def test_with_traits_returns_new_factory(self) -> None:
         """with_traits() derives a new factory (immutable-style swap)."""
         first, second = _fresh_registry(), _fresh_registry()
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=first)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=first)
         derived = ff.with_traits(second)
         assert derived is not ff
         assert derived.create().traits is second
@@ -185,7 +185,7 @@ class TestFactoryDerivers:
         """with_traits() carries saia_factory, state, and lg forward."""
         sf = StubFactory()
         state = {"scope": "shared"}
-        ff = FlowFactory(make_test_logger(), saia_factory=sf, state=state, traits=_fresh_registry())
+        ff = Factory(make_test_logger(), saia_factory=sf, state=state, traits=_fresh_registry())
         derived = ff.with_traits(_fresh_registry())
         built = derived.create()
         assert built._saia_factory is sf
@@ -193,7 +193,7 @@ class TestFactoryDerivers:
 
     def test_with_traits_none_clears_registry(self) -> None:
         """with_traits(None) derives a factory whose flows have no registry."""
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), traits=_fresh_registry())
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=_fresh_registry())
         derived = ff.with_traits(None)
         assert derived.create().traits is None
 

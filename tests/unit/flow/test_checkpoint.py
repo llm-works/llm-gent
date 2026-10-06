@@ -202,7 +202,7 @@ class TestCheckpointPolicyIterate:
         the ``$end`` final-state commit written by the clean-exit
         retention path. No iterate-boundary commit should exist.
         """
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         @verb
@@ -210,11 +210,11 @@ class TestCheckpointPolicyIterate:
             ctx.state.data["n"] = ctx.state.data.get("n", 0) + 1
             return ctx.state.data["n"]
 
-        body = FlowFactory(make_test_logger()).create()
+        body = Factory(make_test_logger()).create()
         body.call(bump)
 
         outer = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={"n": 0})
             .with_checkpoint_store(store, "policy-halt-only")
             .with_checkpointer()
@@ -246,7 +246,7 @@ class TestCheckpointPolicyIterate:
         final-state commit — the iterate's own node_path directory carries
         one ref per iteration.
         """
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         @verb
@@ -254,11 +254,11 @@ class TestCheckpointPolicyIterate:
             ctx.state.data["n"] = ctx.state.data.get("n", 0) + 1
             return ctx.state.data["n"]
 
-        body = FlowFactory(make_test_logger()).create()
+        body = Factory(make_test_logger()).create()
         body.call(bump)
 
         outer = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={"n": 0})
             .with_checkpoint_store(store, "policy-on-iter")
             .with_checkpointer()
@@ -292,18 +292,18 @@ class TestCheckpointPolicyMap:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Under the default policy a completed map writes only the $end final-state commit."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         @verb
         async def touch(ctx: Context[dict[str, Any]], item: int) -> int:
             return item * 2
 
-        body = FlowFactory(make_test_logger()).create()
+        body = Factory(make_test_logger()).create()
         body.call(touch)
 
         outer = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "map-default")
             .with_checkpointer()
@@ -329,18 +329,18 @@ class TestCheckpointPolicyMap:
         final-state commit. Item order across saves is not asserted
         (concurrent).
         """
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         @verb
         async def touch(ctx: Context[dict[str, Any]], item: int) -> int:
             return item * 2
 
-        body = FlowFactory(make_test_logger()).create()
+        body = Factory(make_test_logger()).create()
         body.call(touch)
 
         outer = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "map-on-item")
             .with_checkpointer()
@@ -366,7 +366,7 @@ class TestCheckpointPolicyMap:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """A per-item commit that fails rolls the merge back to the prior state, not to empty."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         fail_first_commit(store)
 
@@ -380,7 +380,7 @@ class TestCheckpointPolicyMap:
             return dict(ctx.state.data)
 
         outer = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={"total": 1})
             .with_checkpoint_store(store, "map-rollback")
             .with_checkpointer()
@@ -404,7 +404,7 @@ class TestCheckpointPolicyMap:
         Item 1 writes while item 0's commit is in flight; item 0's commit
         fails. Restoring a pre-merge snapshot would drop item 1's write.
         """
-        from llm_gent.flow import Context, FlowFactory, History, verb
+        from llm_gent.flow import Context, Factory, History, verb
 
         inner = JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
         fail_first_commit(inner)
@@ -420,7 +420,7 @@ class TestCheckpointPolicyMap:
 
         state: dict[str, Any] = {}
         outer = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state=state)
             .with_checkpoint_store(store, "map-siblings")
             .with_checkpointer()  # type: ignore[arg-type]
@@ -444,7 +444,7 @@ class TestCommitConsistency:
         commit awaits the store; serializing a scope after a write would
         commit one counter from before another item's step and one from after.
         """
-        from llm_gent.flow import Context, FlowFactory, History, verb
+        from llm_gent.flow import Context, Factory, History, verb
 
         store = YieldingStore(JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp"))
 
@@ -455,10 +455,10 @@ class TestCommitConsistency:
             ctx.state.root().data["n"] += 1
             await ctx.checkpoint()
 
-        sub = FlowFactory(make_test_logger()).create()
+        sub = Factory(make_test_logger()).create()
         sub.map(lambda b: b.call(bump), items=lambda _p, _c: list(range(6)))
         await (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={"n": 0})
             .with_checkpoint_store(store, "one-moment")
             .with_checkpointer()  # type: ignore[arg-type]
@@ -481,7 +481,7 @@ class TestCheckpointedRunValues:
     """
 
     async def test_app_object_passed_between_steps(self, store: JsonFileCheckpointStore) -> None:
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         @verb
         async def make(ctx: Context[dict[str, Any]]) -> AppHandle:
@@ -492,7 +492,7 @@ class TestCheckpointedRunValues:
             return handle.qid
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "app-object")
             .with_checkpointer()
@@ -505,7 +505,7 @@ class TestCheckpointedRunValues:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Items that fail, are skipped by the guard, or return app objects all reach the next step."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         @verb
         async def dispatch(ctx: Context[dict[str, Any]], t: WaveTarget) -> AppHandle:
@@ -518,7 +518,7 @@ class TestCheckpointedRunValues:
             return [type(o).__name__ for o in outcomes]
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "wave")
             .with_checkpointer()
@@ -533,7 +533,7 @@ class TestCheckpointedRunValues:
         assert await flow.run() == ["AppHandle", "Failure", "Skipped"]
 
     async def test_non_strict_map_with_a_failed_item(self, store: JsonFileCheckpointStore) -> None:
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         @verb
         async def double(ctx: Context[dict[str, Any]], x: int) -> int:
@@ -546,7 +546,7 @@ class TestCheckpointedRunValues:
             return [r if isinstance(r, int) else "failed" for r in results]
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "failed-item")
             .with_checkpointer()
@@ -566,7 +566,7 @@ class TestCtxCheckpoint:
         boundary save fires; the only commit besides the final-state one
         that exists is the one the verb explicitly requested.
         """
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         @verb
@@ -576,7 +576,7 @@ class TestCtxCheckpoint:
             return 42
 
         outer = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "ctx-ckpt")
             .with_checkpointer()
@@ -598,7 +598,7 @@ class TestCtxCheckpoint:
 
     async def test_unchanged_state_is_not_put_again(self, store: JsonFileCheckpointStore) -> None:
         """Two checkpoints of the same state put its blob and tree once; only the commits differ."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         puts: list[str] = []
         original = store.put_object
@@ -615,7 +615,7 @@ class TestCtxCheckpoint:
             await ctx.checkpoint()
 
         await (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={"n": 1})
             .with_checkpoint_store(store, "no-reput")
             .with_checkpointer()
@@ -626,7 +626,7 @@ class TestCtxCheckpoint:
 
     async def test_ctx_checkpoint_noop_without_checkpointer(self) -> None:
         """``ctx.checkpoint()`` under a flow with no checkpointer is a no-op."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         called = 0
 
@@ -636,7 +636,7 @@ class TestCtxCheckpoint:
             called += 1
             await ctx.checkpoint()  # no checkpointer wired — must not raise
 
-        flow = FlowFactory(make_test_logger()).create().call(saver)
+        flow = Factory(make_test_logger()).create().call(saver)
         await flow.run()
         assert called == 1
 
@@ -650,7 +650,7 @@ class TestPausedTurnInSnapshot:
         """Loop paused mid-turn → the snapshot holds its task + conversation at ``<step>/t/0``."""
         from dataclasses import dataclass, field
 
-        from llm_gent.flow import Context, FlowFactory, History, Loop, Role, verb
+        from llm_gent.flow import Context, Factory, History, Loop, Role, verb
         from llm_gent.flow.state.cas import Commit
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
@@ -702,7 +702,7 @@ class TestPausedTurnInSnapshot:
         async def after(ctx: Context, _prev: Any = None) -> str:
             return "not run"
 
-        ff = FlowFactory(make_test_logger(), saia_factory=_PausingSAIAFactory())
+        ff = Factory(make_test_logger(), saia_factory=_PausingSAIAFactory())
         flow = (
             ff.create(state={})
             .with_checkpoint_store(store, "paused-turn-1")
@@ -736,7 +736,7 @@ class TestPausedTurnInSnapshot:
         """
         from dataclasses import dataclass, field
 
-        from llm_gent.flow import Context, FlowFactory, History, Loop, Role, verb
+        from llm_gent.flow import Context, Factory, History, Loop, Role, verb
         from llm_gent.flow.state.cas import Commit
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
@@ -792,7 +792,7 @@ class TestPausedTurnInSnapshot:
         async def after(ctx: Context, _prev: Any = None) -> str:
             return "not run"
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
         flow = (
             ff.create(state={})
             .with_checkpoint_store(store, "paused-turn-multi")
@@ -824,7 +824,7 @@ class TestPausedTurnInSnapshot:
         """
         from dataclasses import dataclass, field
 
-        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
+        from llm_gent.flow import Context, Factory, Loop, Role, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -894,13 +894,13 @@ class TestPausedTurnInSnapshot:
         # when the Loop's re-dispatch consumes the paused_turn entry. A pure
         # chain would halt-save at the NEXT chain step, skipping the
         # paused Loop entirely.
-        body_ff = FlowFactory(make_test_logger())
+        body_ff = Factory(make_test_logger())
         body = body_ff.create()
         body.call(run_loop)
 
         # ---- Run 1: iterate iteration 0 halts mid-Loop-turn.
         halt1 = asyncio.Event()
-        ff1 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
+        ff1 = Factory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
         flow1 = (
             ff1.create(state={})
             .with_checkpoint_store(store, "resume-round-trip")
@@ -917,7 +917,7 @@ class TestPausedTurnInSnapshot:
         # conversation — the resume path must override it with the rebuilt
         # one from the halted commit.
         halt2 = asyncio.Event()
-        ff2 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
+        ff2 = Factory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
         flow2 = (
             ff2.create(state={})
             .with_checkpoint_store(store, "resume-round-trip")
@@ -943,7 +943,7 @@ class TestPausedTurnInSnapshot:
         """Chain flow with Loop verb: halt on turn 1 → resume re-runs the loop verb."""
         from dataclasses import dataclass, field
 
-        from llm_gent.flow import Context, FlowFactory, Loop, Role, verb
+        from llm_gent.flow import Context, Factory, Loop, Role, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -1010,7 +1010,7 @@ class TestPausedTurnInSnapshot:
         # commit lands at run_loop's node (not after_step's) so resume re-runs
         # the loop verb.
         halt1 = asyncio.Event()
-        ff1 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
+        ff1 = Factory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
         flow1 = (
             ff1.create(state={})
             .with_checkpoint_store(store, "chain-resume")
@@ -1025,7 +1025,7 @@ class TestPausedTurnInSnapshot:
         # Run 2: resume. Loop is re-dispatched, consumes paused_turn, SAIA
         # completes non-paused, chain moves on to after_step.
         halt2 = asyncio.Event()
-        ff2 = FlowFactory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
+        ff2 = Factory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
         flow2 = (
             ff2.create(state={})
             .with_checkpoint_store(store, "chain-resume")
@@ -1117,7 +1117,7 @@ class TestSaveOnHaltChain:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Chain flow with no iterate: halt set by step b → commit at c; resume lands at c."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         halt = asyncio.Event()
@@ -1140,7 +1140,7 @@ class TestSaveOnHaltChain:
             ctx.state.data["c"] = ctx.state.data["b"] + 1
             return ctx.state.data["c"]
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
         pre = (
             ff.create(state={})
             .with_checkpoint_store(store, "chain-halt")
@@ -1178,7 +1178,7 @@ class TestSaveOnHaltChain:
 
     async def test_halt_without_checkpointer_is_noop(self) -> None:
         """No checkpointer bound → halt observed → no store activity."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         halt = asyncio.Event()
 
@@ -1190,7 +1190,7 @@ class TestSaveOnHaltChain:
         async def b(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
             pass
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
         flow = ff.create(state={}).with_halt(halt).call(a).then(b)
         # No .with_checkpointer — halt check fires between chain steps but
         # _save_halt_checkpoint short-circuits at env.checkpoint_ctx is None.
@@ -1201,7 +1201,7 @@ class TestSaveOnHaltChain:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Halt before a Branch containing only plain verbs → resume runs the branch."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         halt = asyncio.Event()
@@ -1224,7 +1224,7 @@ class TestSaveOnHaltChain:
             ctx.state.data["c"] = prev + 100
             return ctx.state.data["c"]
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
         pre = (
             ff.create(state={})
             .with_checkpoint_store(store, "branch-halt")
@@ -1262,7 +1262,7 @@ class TestSaveOnHaltChain:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Pre-set halt + checkpointer: checkpoint saved before second step; resume runs it."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         halt = asyncio.Event()
@@ -1278,7 +1278,7 @@ class TestSaveOnHaltChain:
             # Reads from state — halted resume runs step_b with no prev_result
             return sum(ctx.state.data["items"])
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
         pre = (
             ff.create(state={})
             .with_checkpoint_store(store, "pre-set-halt")
@@ -1313,7 +1313,7 @@ class TestSaveOnHaltChain:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Nested flow's halt doesn't emit checkpoint — only outer flow does."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
         from llm_gent.flow.state.cas import Commit
 
         halt = asyncio.Event()
@@ -1339,7 +1339,7 @@ class TestSaveOnHaltChain:
             # Reads from state — halted resume runs with no prev_result
             return ctx.state.data.get("inner_b", 0) + 1000
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
         inner = ff.create().call(inner_a).then(inner_b)
 
         pre = (
@@ -1491,17 +1491,17 @@ class TestHistoryLineage:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """Parallel map-item saves serialize into one chain, not siblings of one parent."""
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         @verb
         async def touch(ctx: Context[dict[str, Any]], item: int) -> int:
             await asyncio.sleep(0)
             return item * 2
 
-        body = FlowFactory(make_test_logger()).create()
+        body = Factory(make_test_logger()).create()
         body.call(touch)
         outer = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "lineage-map")
             .with_checkpointer()
@@ -1543,9 +1543,9 @@ class TestHistoryLineage:
         """After gc_history the next commit starts a new history with no parent."""
         from llm_gent.flow._checkpoint_ctx import CheckpointContext
         from llm_gent.flow.state.cas import Tree
-        from llm_gent.flow.structure import FlowStructure
+        from llm_gent.flow.structure import Structure
 
-        ctx = CheckpointContext(store, "lineage-gc", lambda: FlowStructure(()))
+        ctx = CheckpointContext(store, "lineage-gc", lambda: Structure(()))
         tree = Tree.from_entries([])
         await ctx.put_tree(tree)
 
@@ -1633,7 +1633,7 @@ class TestCompletionTag:
         self, store: JsonFileCheckpointStore
     ) -> None:
         """A finished run whose state can't be serialized returns normally; no state is kept."""
-        from llm_gent.flow import Context, FlowFactory, History, verb
+        from llm_gent.flow import Context, Factory, History, verb
 
         @verb
         async def attach(ctx: Context[dict[str, Any]], _prev: Any = None) -> str:
@@ -1641,7 +1641,7 @@ class TestCompletionTag:
             return "done"
 
         result = await (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "opaque-state")
             .with_checkpointer()
@@ -1658,7 +1658,7 @@ class TestCompletionTag:
 
     async def test_final_state_commit_is_tagged_head(self, store: JsonFileCheckpointStore) -> None:
         """A halt-only run with no save points still leaves its final state at the head."""
-        from llm_gent.flow import Context, FlowFactory, History, verb
+        from llm_gent.flow import Context, Factory, History, verb
         from llm_gent.flow.checkpoint import COMPLETE_TAG, COMPLETION_PRODUCER
 
         @verb
@@ -1667,7 +1667,7 @@ class TestCompletionTag:
             return ctx.state.data["n"]
 
         await (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={"n": 0})
             .with_checkpoint_store(store, "final-state")
             .with_checkpointer()
@@ -1751,10 +1751,10 @@ class TestCompletionTag:
         from llm_gent.flow.checkpoint import COMPLETE_TAG
         from llm_gent.flow.state import State
         from llm_gent.flow.state.snapshot import ScopeRegistry
-        from llm_gent.flow.structure import FlowStructure
+        from llm_gent.flow.structure import Structure
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
-        ctx = CheckpointContext(store, "torn-completion", lambda: FlowStructure(()))
+        ctx = CheckpointContext(store, "torn-completion", lambda: Structure(()))
         scopes = ScopeRegistry()
         scopes.begin(State(data={"n": 7}))
         tree = await ctx.put_snapshot(scopes)
@@ -1808,7 +1808,7 @@ class TestResumeDeterminism:
         iterate commit — would re-enter the run at that position and run
         the steps after it a second time.
         """
-        from llm_gent.flow import Context, FlowFactory, History, verb
+        from llm_gent.flow import Context, Factory, History, verb
 
         tail_calls: list[int] = []
 
@@ -1824,7 +1824,7 @@ class TestResumeDeterminism:
 
         def _flow() -> Any:
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={"counter": 0})
                 .with_checkpoint_store(store, "complete-1")
                 .with_checkpointer()
@@ -1864,7 +1864,7 @@ class TestResumeDeterminism:
         scope of its own). Without the cursor-path fix, _restore_carry would look up
         the parent's path and find nothing, causing the carry to reset to the run() arg.
         """
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         halt = asyncio.Event()
         calls: list[tuple[int, int]] = []
@@ -1879,7 +1879,7 @@ class TestResumeDeterminism:
 
         def _flow() -> Any:
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={"iter": 0})
                 .with_checkpoint_store(store, "scopeless-carry")
                 .with_checkpointer()
@@ -2006,7 +2006,7 @@ class TestScopedStateRoundTrip:
         inspecting the pre-resume commit's leaf blob and confirming the
         resume completes without a structural-drift error.
         """
-        from llm_gent.flow import Context, FlowFactory, History, verb
+        from llm_gent.flow import Context, Factory, History, verb
 
         @verb
         async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
@@ -2021,7 +2021,7 @@ class TestScopedStateRoundTrip:
                 halt.set()
             return _prev
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
         inner = ff.create().iterate(lambda body: body.call(bump).then(maybe_halt), max_iters=5)
 
         outer_pre = (
@@ -2069,7 +2069,7 @@ class TestScopedStateRoundTrip:
         in the middle scope during the pre-halt run persists — proving
         the intermediate blob is restored rather than re-projected.
         """
-        from llm_gent.flow import Context, FlowFactory, verb
+        from llm_gent.flow import Context, Factory, verb
 
         # A witness marker written into the middle scope in the pre-halt
         # run; the resume run must observe the same value in state.data.
@@ -2093,7 +2093,7 @@ class TestScopedStateRoundTrip:
                 halt.set()
             return _prev
 
-        ff_inner = FlowFactory(make_test_logger())
+        ff_inner = Factory(make_test_logger())
         # Iterate has its own state=lambda so its body runs in a NEW scope
         # (leaf, depth 2). The middle .call scope sits between root and
         # the iterate body.
@@ -2103,7 +2103,7 @@ class TestScopedStateRoundTrip:
             max_iters=5,
         )
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
         outer_pre = (
             ff.create(state={"outer": True})
             .with_checkpoint_store(store, "3-level-1")
@@ -2168,7 +2168,7 @@ class TestScopedStateRoundTrip:
         be placed in ``child_state_data`` by ``_split_scopes`` so that
         ``_resume_iteration`` returns it correctly.
         """
-        from llm_gent.flow import Context, FlowFactory, History, verb
+        from llm_gent.flow import Context, Factory, History, verb
 
         @verb
         async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
@@ -2183,7 +2183,7 @@ class TestScopedStateRoundTrip:
                 halt.set()
             return _prev
 
-        ff = FlowFactory(make_test_logger())
+        ff = Factory(make_test_logger())
 
         # Leaf iterate with its own state= projection (not inherited from .call)
         flow_pre = (

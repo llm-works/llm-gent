@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from llm_gent.flow import (
     HALTED,
     Context,
-    FlowFactory,
+    Factory,
     History,
     Interrupted,
     StateDataclass,
@@ -84,7 +84,7 @@ class TestRescue:
                 return x + 1
 
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "rescue")
                 .with_checkpointer()
@@ -159,7 +159,7 @@ def _typed_flow(store: Any, halt: asyncio.Event, ran: list[str], stop_at: int | 
         return sum(i.n for i in items)
 
     return (
-        FlowFactory(make_test_logger(), state_factory=TypeStateFactory(Totals))
+        Factory(make_test_logger(), state_factory=TypeStateFactory(Totals))
         .create(state=Totals())
         .with_checkpoint_store(store, "typed")
         .with_checkpointer()

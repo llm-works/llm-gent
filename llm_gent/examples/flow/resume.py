@@ -49,7 +49,7 @@ from llm_gent.flow import (
     HALTED,
     Context,
     Flow,
-    FlowFactory,
+    Factory,
     History,
     StateDataclass,
     TypeStateFactory,
@@ -75,7 +75,7 @@ class Counter(StateDataclass):
 
     Inherits :class:`~llm_gent.flow.StateDataclass` for ``to_dict`` /
     ``from_dict`` — flat dataclass, no override needed. Bound as
-    ``state_factory=TypeStateFactory(Counter)`` on the :class:`~llm_gent.flow.FlowFactory` so
+    ``state_factory=TypeStateFactory(Counter)`` on the :class:`~llm_gent.flow.Factory` so
     the framework calls :meth:`from_dict` on ``run(resume="latest")`` to
     reconstruct an instance from the checkpoint payload.
     """
@@ -116,7 +116,7 @@ async def stop_at_limit(ctx: Context[Counter], count: int) -> int:
 
 
 def _build_flow(
-    ff: FlowFactory[Flow],
+    ff: Factory[Flow],
     store: JsonFileCheckpointStore,
     client_flow_id: str,
     *,
@@ -127,7 +127,7 @@ def _build_flow(
     Each call returns a fresh :class:`~llm_gent.flow.Flow` pointing at the
     same checkpoint history. Only run 1 gets a halt event: run 2 resumes at
     the step that halted, and without an event that step passes through.
-    The halt and checkpointer bindings ride on :meth:`FlowFactory.create`
+    The halt and checkpointer bindings ride on :meth:`Factory.create`
     kwargs so this reads as a single construction step rather than a chain
     of ``.with_*`` setters.
     """
@@ -158,7 +158,7 @@ async def main() -> int:
     try:
         store = JsonFileCheckpointStore(lg, tmp_root)
         client_flow_id = "resume-demo"
-        ff = FlowFactory(lg, state_factory=TypeStateFactory(Counter))
+        ff = Factory(lg, state_factory=TypeStateFactory(Counter))
 
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
         flow1 = _build_flow(ff, store, client_flow_id, halt=True)

@@ -37,7 +37,7 @@ from .checkpoint import (
 from .state import StateFactory, restore_state_data
 from .state.cas import Commit, Tree
 from .state.snapshot import FLOW, Snapshot, read_snapshot
-from .structure import FlowStructure
+from .structure import Structure
 
 
 T = TypeVar("T")
@@ -171,11 +171,11 @@ class History:
 
         return await read_snapshot(commit.root_tree_hash, load)
 
-    async def structure(self, commit: Commit) -> FlowStructure | None:
+    async def structure(self, commit: Commit) -> Structure | None:
         """The structure of the flow that wrote ``commit``.
 
         Compare it with a flow today through
-        :meth:`~llm_gent.flow.structure.FlowStructure.diff`. ``None`` for a
+        :meth:`~llm_gent.flow.structure.Structure.diff`. ``None`` for a
         commit that carries no state, or one written before commits held
         their structure.
         """
@@ -185,7 +185,7 @@ class History:
         if entry is None:
             return None
         raw = json.loads(await self._object(flow_id, "blob", entry.child_hash))
-        return FlowStructure.from_json(raw)
+        return Structure.from_json(raw)
 
     async def root_state(self, commit: Commit, factory: StateFactory[T]) -> T | None:
         """Top-level state ``commit`` holds, restored through ``factory``.

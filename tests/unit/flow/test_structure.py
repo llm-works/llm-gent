@@ -13,11 +13,11 @@ import pytest
 from llm_gent.flow import (
     HALTED,
     Context,
+    Factory,
     Flow,
-    FlowFactory,
-    FlowStructure,
     History,
     Interrupted,
+    Structure,
     collect_unreachable,
     verb,
 )
@@ -67,7 +67,7 @@ def _labels(paths: tuple[StepPath, ...]) -> list[str]:
 class TestFlowStructure:
     def test_its_hash_is_the_flow_s_root_hash(self) -> None:
         flow = _flow().call(plan).map(lambda b: b.call(explore), name="wave")
-        assert FlowStructure.of(flow).hash == flow.root_hash()
+        assert Structure.of(flow).hash == flow.root_hash()
 
     def test_round_trips_through_json(self) -> None:
         flow = (
@@ -77,8 +77,8 @@ class TestFlowStructure:
             .then(research)
             .map(lambda b: b.call(explore), name="wave")
         )
-        structure = FlowStructure.of(flow)
-        assert FlowStructure.from_json(structure.to_json()) == structure
+        structure = Structure.of(flow)
+        assert Structure.from_json(structure.to_json()) == structure
 
     def test_steps_are_addressed_by_key_and_boundary(self) -> None:
         flow = (
@@ -88,7 +88,7 @@ class TestFlowStructure:
             .then(research)
             .map(lambda b: b.call(explore), name="wave")
         )
-        assert _labels(tuple(FlowStructure.of(flow).steps_by_path())) == [
+        assert _labels(tuple(Structure.of(flow).steps_by_path())) == [
             "plan",
             f"verb:{__name__}.research",
             f"verb:{__name__}.research[1]",
@@ -99,63 +99,63 @@ class TestFlowStructure:
     def test_a_recursive_flow_is_recorded_as_a_cycle(self) -> None:
         recursive = _flow().call(plan)
         recursive.branch(when=lambda *_: False, then=recursive)
-        structure = FlowStructure.of(recursive)
+        structure = Structure.of(recursive)
         assert structure.steps[1].children == {"then": Cycle(0)}
-        assert FlowStructure.from_json(structure.to_json()) == structure
+        assert Structure.from_json(structure.to_json()) == structure
 
 
 class TestStructureDiff:
     def test_identical_flows_do_not_differ(self) -> None:
-        diff = FlowStructure.of(_flow().call(plan).then(research)).diff(
-            FlowStructure.of(_flow().call(plan).then(research))
+        diff = Structure.of(_flow().call(plan).then(research)).diff(
+            Structure.of(_flow().call(plan).then(research))
         )
         assert not diff.changed
         assert (diff.added, diff.removed) == ((), ())
         assert len(diff.kept) == 2
 
     def test_a_step_added_after_another(self) -> None:
-        old = FlowStructure.of(_flow().call(plan).then(research))
-        new = FlowStructure.of(_flow().call(plan).then(research).then(synthesize))
+        old = Structure.of(_flow().call(plan).then(research))
+        new = Structure.of(_flow().call(plan).then(research).then(synthesize))
         diff = old.diff(new)
         assert diff.changed
         assert diff.added == ((("", _key(synthesize)),),)
         assert diff.added_before((("", _key(research)),)) == ()
 
     def test_a_step_added_before_another(self) -> None:
-        old = FlowStructure.of(_flow().call(plan).then(synthesize))
-        new = FlowStructure.of(_flow().call(plan).then(research).then(synthesize))
+        old = Structure.of(_flow().call(plan).then(synthesize))
+        new = Structure.of(_flow().call(plan).then(research).then(synthesize))
         diff = old.diff(new)
         assert diff.added_before((("", _key(synthesize)),)) == ((("", _key(research)),),)
         assert diff.added_before((("", _key(plan)),)) == ()
 
     def test_a_removed_step_takes_its_children_with_it(self) -> None:
-        old = FlowStructure.of(_flow().call(plan).map(lambda b: b.call(explore), name="wave"))
-        new = FlowStructure.of(_flow().call(plan))
+        old = Structure.of(_flow().call(plan).map(lambda b: b.call(explore), name="wave"))
+        new = Structure.of(_flow().call(plan))
         diff = old.diff(new)
         assert _labels(diff.removed) == ["map:wave", f"map:wave / map: verb:{__name__}.explore"]
         assert diff.added_before((("", _key(plan)),)) == ()
 
     def test_a_named_step_s_verb_can_change(self) -> None:
-        old = FlowStructure.of(_flow().call(research, name="research"))
-        new = FlowStructure.of(_flow().call(explore, name="research"))
+        old = Structure.of(_flow().call(research, name="research"))
+        new = Structure.of(_flow().call(explore, name="research"))
         assert not old.diff(new).changed
 
     def test_a_change_inside_a_map_body_is_addressed_through_the_map(self) -> None:
-        old = FlowStructure.of(_flow().map(lambda b: b.call(explore), name="wave"))
-        new = FlowStructure.of(_flow().map(lambda b: b.call(explore).then(research), name="wave"))
+        old = Structure.of(_flow().map(lambda b: b.call(explore), name="wave"))
+        new = Structure.of(_flow().map(lambda b: b.call(explore).then(research), name="wave"))
         diff = old.diff(new)
         assert _labels(diff.added) == [f"map:wave / map: verb:{__name__}.research"]
         assert _labels(diff.kept) == ["map:wave", f"map:wave / map: verb:{__name__}.explore"]
 
     def test_a_reorder_changes_the_structure_but_keeps_every_step(self) -> None:
-        diff = FlowStructure.of(_flow().call(plan).then(research)).diff(
-            FlowStructure.of(_flow().call(research).then(plan))
+        diff = Structure.of(_flow().call(plan).then(research)).diff(
+            Structure.of(_flow().call(research).then(plan))
         )
         assert diff.changed
         assert (diff.added, diff.removed) == ((), ())
 
     def test_added_before_a_step_the_new_structure_lacks_is_empty(self) -> None:
-        diff = FlowStructure.of(_flow().call(plan)).diff(FlowStructure.of(_flow().call(research)))
+        diff = Structure.of(_flow().call(plan)).diff(Structure.of(_flow().call(research)))
         assert diff.added_before((("", _key(plan)),)) == ()
 
 
@@ -175,7 +175,7 @@ def _checkpointed(store: Any, halt: asyncio.Event, *, stop: bool) -> Any:
         return x
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, "structure")
         .with_checkpointer()
@@ -198,7 +198,7 @@ class TestStoredStructure:
         assert [c.meta.outcome for c in commits] == ["ok", "halted", "ok"]  # completion first
         for commit in commits:
             structure = await history.structure(commit)
-            assert structure == FlowStructure.of(flow)
+            assert structure == Structure.of(flow)
             assert structure is not None and structure.hash == commit.meta.flow_root_hash
 
     async def test_the_snapshot_does_not_read_it(self) -> None:
@@ -226,7 +226,7 @@ class TestStoredStructure:
         """A final state that cannot be serialized commits an empty tree."""
         store = InMemoryCheckpointStore()
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={"handle": object()})
             .with_checkpoint_store(store, "stateless")
             .call(plan)

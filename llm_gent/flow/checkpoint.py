@@ -7,7 +7,7 @@ A *history* is the line of commits one flow instance writes. Two ids name
 it:
 
 - ``client_flow_id`` — the agent's name for the history, supplied through
-  the public API (``with_checkpointer`` / ``FlowFactory.create``). Used only
+  the public API (``with_checkpointer`` / ``Factory.create``). Used only
   to look the history up.
 - ``flow_id`` — gent's internal identity for the history: an opaque UUID
   generated on the first save. Every object, ref and commit is keyed by

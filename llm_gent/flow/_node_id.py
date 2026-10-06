@@ -13,7 +13,7 @@ iterate-body descents extend ``chain_context`` via
 :func:`_descend_context` so a shared subflow used at two call sites
 produces two distinct IDs for the same underlying ``_Node``.
 
-:class:`~llm_gent.flow.structure.FlowStructure` describes the same
+:class:`~llm_gent.flow.structure.Structure` describes the same
 inputs over the whole static composition tree; its hash is recorded on
 every commit a history writes.
 

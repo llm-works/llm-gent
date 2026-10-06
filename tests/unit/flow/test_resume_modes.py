@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import HALTED, Context, FlowFactory, History, Interrupted, verb
+from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 from llm_gent.flow.testing.checkpoint import (
     CanonicalCounter,
@@ -56,7 +56,7 @@ def _counting_flow(
         return ctx.state.data["n"]
 
     flow = (
-        FlowFactory(lg or make_test_logger())
+        Factory(lg or make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, name)
         .with_checkpointer()
@@ -188,7 +188,7 @@ class TestLatest:
 
         def _flow(lg: Any = None) -> Any:
             return (
-                FlowFactory(lg or make_test_logger())
+                Factory(lg or make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "stateless-end")
                 .with_checkpointer()
@@ -253,14 +253,14 @@ def _adding_flow(
         return f.iterate(lambda b: b.call(step), max_iters=4)
 
     flow = (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, name)
         .with_checkpointer()
         .with_checkpoint_policy(on_iterate=True)
     )
     if wrap == "call":
-        return flow.call(_iterate(FlowFactory(make_test_logger()).create()))
+        return flow.call(_iterate(Factory(make_test_logger()).create()))
     if wrap == "outer-iterate":
         return flow.iterate(_iterate, max_iters=1)
     return _iterate(flow)
@@ -286,7 +286,7 @@ class TestCursors:
                 return x
 
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "until")
                 .with_checkpointer()
@@ -339,7 +339,7 @@ class TestCursors:
                 return prev + 10
 
             flow = (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "h")
                 .with_checkpointer()
@@ -363,7 +363,7 @@ class TestCursors:
             raise Interrupted()
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "no-halt")
             .with_checkpointer()
@@ -391,7 +391,7 @@ class TestCursors:
                 return x
 
             return (
-                FlowFactory(make_test_logger())
+                Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "arm")
                 .with_checkpointer()
@@ -433,14 +433,14 @@ def _scoped_map_flow(
             raise _Crash()
         return x
 
-    sub = FlowFactory(make_test_logger()).create().call(leaf)
+    sub = Factory(make_test_logger()).create().call(leaf)
     item = (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create()
         .call(sub, state=lambda _p: {"tag": "call"}, merge=lambda _p, _c: None)
     )
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, name)
         .with_checkpointer()
@@ -470,15 +470,15 @@ async def _plain(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
 
 def _scoped_step_flow(store: JsonFileCheckpointStore, name: str, lg: Any) -> Any:
     """``.call(sub, state=)`` whose leaf checkpoints its scope and crashes."""
-    flow = FlowFactory(lg).create(state={}).with_checkpoint_store(store, name).with_checkpointer()
-    sub = FlowFactory(lg).create().call(_work_then_crash)
+    flow = Factory(lg).create(state={}).with_checkpoint_store(store, name).with_checkpointer()
+    sub = Factory(lg).create().call(_work_then_crash)
     return flow.call(sub, state=lambda _p: {}, merge=lambda p, c: p.update(c))
 
 
 def _plain_step_flow(store: JsonFileCheckpointStore, name: str, lg: Any) -> Any:
     """The same history after a deploy that replaced the scoped step with a plain one."""
     return (
-        FlowFactory(lg)
+        Factory(lg)
         .create(state={})
         .with_checkpoint_store(store, name)
         .with_checkpointer()
@@ -504,8 +504,8 @@ def _bounded_iterate_flow(
             raise _Crash()
         return x + 1
 
-    body = FlowFactory(lg).create().call(work)
-    flow = FlowFactory(lg).create(state={}).with_checkpoint_store(store, name).with_checkpointer()
+    body = Factory(lg).create().call(work)
+    flow = Factory(lg).create(state={}).with_checkpoint_store(store, name).with_checkpointer()
     if halt is not None:
         flow = flow.with_halt(halt)
     return flow.iterate(
@@ -590,7 +590,7 @@ class TestFailure:
             raise asyncio.CancelledError()
 
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "cancelled")
             .with_checkpointer()
@@ -602,7 +602,7 @@ class TestFailure:
 
     async def test_empty_flow_leaves_no_history(self, store: JsonFileCheckpointStore) -> None:
         flow = (
-            FlowFactory(make_test_logger())
+            Factory(make_test_logger())
             .create(state={})
             .with_checkpoint_store(store, "empty")
             .with_checkpointer()
@@ -632,7 +632,7 @@ class TestResumeModeValidation:
         async def noop(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
             return None
 
-        flow = FlowFactory(make_test_logger()).create(state={}).call(noop)
+        flow = Factory(make_test_logger()).create(state={}).call(noop)
         with pytest.raises(RuntimeError, match="resume='latest'"):
             await flow.run(resume="latest")
 

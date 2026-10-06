@@ -3,7 +3,7 @@
 
 """The structure of a flow: its chains of steps, by what their node ids are hashed from.
 
-A :class:`FlowStructure` is the static composition tree of a flow: every
+A :class:`Structure` is the static composition tree of a flow: every
 chain's steps in order, each identified by its :class:`StepKey` — kind,
 target and occurrence, the inputs of its node id — with the chains it
 descends into by boundary (``call``, ``then``, ``else``, ``body``,
@@ -13,7 +13,7 @@ not part of it.
 Its hash is the ``flow_root_hash`` every commit records, and every
 commit's tree holds it, so the structure that wrote a commit can be read
 back (:meth:`~llm_gent.flow.History.structure`) and compared with a flow
-today (:meth:`FlowStructure.diff`). Equal structures assign identical
+today (:meth:`Structure.diff`). Equal structures assign identical
 node ids to every step.
 
 A step is addressed by its :data:`StepPath`: the keys of the steps above
@@ -79,22 +79,22 @@ class Step:
     """One step of a chain: its key and the chains it descends into, by boundary."""
 
     key: StepKey
-    children: Mapping[str, FlowStructure | Cycle]
+    children: Mapping[str, Structure | Cycle]
 
 
 @dataclass(frozen=True)
-class FlowStructure:
+class Structure:
     """A flow's static composition tree: its chain's steps, in order."""
 
     steps: tuple[Step, ...]
 
     @classmethod
-    def of(cls, flow: Any) -> FlowStructure:
+    def of(cls, flow: Any) -> Structure:
         """The structure of ``flow`` as it is now."""
         return _of(flow, ())
 
     @classmethod
-    def from_json(cls, raw: list[dict[str, Any]]) -> FlowStructure:
+    def from_json(cls, raw: list[dict[str, Any]]) -> Structure:
         """The structure :meth:`to_json` wrote.
 
         Raises:
@@ -136,15 +136,15 @@ class FlowStructure:
         _collect(self, (), "", out)
         return out
 
-    def chain(self, parent: StepPath, boundary: str) -> FlowStructure | None:
+    def chain(self, parent: StepPath, boundary: str) -> Structure | None:
         """The chain step ``parent`` descends into by ``boundary`` (the top level: ``(), ""``)."""
         if not parent:
             return self if boundary == "" else None
         step = self.steps_by_path().get(parent)
         child = None if step is None else step.children.get(boundary)
-        return child if isinstance(child, FlowStructure) else None
+        return child if isinstance(child, Structure) else None
 
-    def diff(self, new: FlowStructure) -> StructureDiff:
+    def diff(self, new: Structure) -> StructureDiff:
         """How ``new`` differs from this structure."""
         return StructureDiff(self, new)
 
@@ -158,8 +158,8 @@ class StructureDiff:
     a step under a removed step is removed with it.
     """
 
-    old: FlowStructure
-    new: FlowStructure
+    old: Structure
+    new: Structure
 
     @property
     def changed(self) -> bool:
@@ -203,7 +203,7 @@ class StructureDiff:
         return tuple(p for k in ahead if (p := (*parent, (boundary, k))) not in self._old_paths)
 
 
-def _of(flow: Any, ancestors: tuple[int, ...]) -> FlowStructure:
+def _of(flow: Any, ancestors: tuple[int, ...]) -> Structure:
     """``flow``'s structure; ``ancestors`` are the ``id()`` of the flows on the descent path."""
     inner = ancestors + (id(flow),)
     seen: dict[tuple[str, str], int] = {}
@@ -212,31 +212,31 @@ def _of(flow: Any, ancestors: tuple[int, ...]) -> FlowStructure:
         local = (_node_kind(node), _step_target(node))
         occurrence = seen.get(local, 0)
         seen[local] = occurrence + 1
-        children: dict[str, FlowStructure | Cycle] = {
+        children: dict[str, Structure | Cycle] = {
             boundary: Cycle(inner.index(id(child))) if id(child) in inner else _of(child, inner)
             for boundary, child in _child_flows(node)
         }
         steps.append(Step(StepKey(local[0], local[1], occurrence), children))
-    return FlowStructure(tuple(steps))
+    return Structure(tuple(steps))
 
 
-def _child_to_json(child: FlowStructure | Cycle) -> Any:
+def _child_to_json(child: Structure | Cycle) -> Any:
     """A child chain's JSON: its steps, or ``{"cycle": depth}``."""
     return {"cycle": child.depth} if isinstance(child, Cycle) else child.to_json()
 
 
-def _child_from_json(raw: Any) -> FlowStructure | Cycle:
+def _child_from_json(raw: Any) -> Structure | Cycle:
     """The child chain :func:`_child_to_json` wrote."""
-    return Cycle(raw["cycle"]) if isinstance(raw, dict) else FlowStructure.from_json(raw)
+    return Cycle(raw["cycle"]) if isinstance(raw, dict) else Structure.from_json(raw)
 
 
 def _collect(
-    structure: FlowStructure, prefix: StepPath, boundary: str, out: dict[StepPath, Step]
+    structure: Structure, prefix: StepPath, boundary: str, out: dict[StepPath, Step]
 ) -> None:
     """Add ``structure``'s steps under ``prefix`` (entered by ``boundary``) to ``out``."""
     for step in structure.steps:
         path = (*prefix, (boundary, step.key))
         out[path] = step
         for child_boundary, child in step.children.items():
-            if isinstance(child, FlowStructure):
+            if isinstance(child, Structure):
                 _collect(child, path, child_boundary, out)

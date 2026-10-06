@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from llm_gent.core.cost import CostTracker, PricingConfig
-from llm_gent.flow import HALTED, Context, FlowFactory, History, Interrupted, Loop, Role, verb
+from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, Loop, Role, verb
 from llm_gent.flow.state.snapshot import RESOURCES
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
@@ -44,8 +44,8 @@ def _spend(ctx: Context[Any], cost: float, op: str = "llm") -> None:
     ctx.cost.track(op, override_cost=cost)
 
 
-def _ff() -> FlowFactory:
-    return FlowFactory(make_test_logger())
+def _ff() -> Factory:
+    return Factory(make_test_logger())
 
 
 class TestAppTrackerAcrossResume:
@@ -171,7 +171,7 @@ class TestAppTrackerAcrossResume:
         assert fresh.spent == 4.0
 
     async def test_a_tracker_every_flow_inherits_is_restored_once(self) -> None:
-        """A FlowFactory(cost_tracker=) puts the same tracker on every flow: one position, at the top.
+        """A Factory(cost_tracker=) puts the same tracker on every flow: one position, at the top.
 
         Restoring it again where a nested flow starts would overwrite the
         spend recorded since the run's start.
@@ -180,7 +180,7 @@ class TestAppTrackerAcrossResume:
         halt = asyncio.Event()
 
         def build(tracker: CostTracker, arm: bool) -> Any:
-            ff = FlowFactory(make_test_logger(), cost_tracker=tracker)
+            ff = Factory(make_test_logger(), cost_tracker=tracker)
 
             @verb
             async def a(ctx: Context[Any], x: int) -> int:
@@ -677,9 +677,9 @@ class TestPassAndCallBudgets:
         assert root.spent == pytest.approx(2.5)
 
     async def test_the_run_halt_reaches_a_flow_carrying_the_factory_s_halt(self) -> None:
-        """Every flow a FlowFactory(halt=...) builds carries the run's halt; nested ones see it."""
+        """Every flow a Factory(halt=...) builds carries the run's halt; nested ones see it."""
         halt = asyncio.Event()
-        ff = FlowFactory(make_test_logger(), halt=halt)
+        ff = Factory(make_test_logger(), halt=halt)
         ran: list[str] = []
 
         @verb

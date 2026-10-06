@@ -68,8 +68,8 @@ import pytest
 from llm_gent.flow import (
     HALTED,
     Context,
+    Factory,
     Flow,
-    FlowFactory,
     History,
     Interrupted,
     Loop,
@@ -644,7 +644,7 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     if isinstance(node, Cut):
         return flow.call(_cut_flow(node, probe, parallel))
     if isinstance(node, Ckpt):
-        sub = FlowFactory(LG).create().with_checkpointer()
+        sub = Factory(LG).create().with_checkpointer()
         _add(node.body, sub, probe, parallel)
         return flow.call(sub)
     if isinstance(node, Turn):
@@ -652,7 +652,7 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     if isinstance(node, Leaf):
         return flow.call(_leaf_verb(node, probe))
     if isinstance(node, Seq | Scope):
-        sub = FlowFactory(LG).create()
+        sub = Factory(LG).create()
         for child in node.children if isinstance(node, Seq) else (node.body,):
             _add(child, sub, probe, parallel)
         if isinstance(node, Seq):
@@ -674,7 +674,7 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
 
 def _cut_flow(node: Cut, probe: Probe, parallel: bool) -> Flow:
     """The subflow for a :class:`Cut`: its children, then ``with_shortcut("cut")``."""
-    sub = FlowFactory(LG).create()
+    sub = Factory(LG).create()
     children = node.children[:-1] if node.to else node.children
     for child in children:
         _add(child, sub, probe, parallel)
@@ -724,7 +724,7 @@ def _flow(
     It carries the run's store; it declares the checkpointer itself unless
     the shape declares its own in a ``Ckpt``.
     """
-    flow = FlowFactory(LG).create(state={}).with_checkpoint_store(store, FLOW_NAME)
+    flow = Factory(LG).create(state={}).with_checkpoint_store(store, FLOW_NAME)
     if not _has(shape, Ckpt):
         flow = flow.with_checkpointer()
     if probe.policy in ("on_iterate", "on_map_item"):

@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, FlowFactory, History, Loop, Role, verb
+from llm_gent.flow import Context, Factory, History, Loop, Role, verb
 from llm_gent.flow.stores import JsonFileCheckpointStore
 
 from .conftest import make_test_logger
@@ -94,7 +94,7 @@ def _map_flow(store: Any, halt: asyncio.Event, saia: _PausingSAIA) -> Any:
         return await loop(ctx, name)
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, "loop-in-map")
         .with_checkpointer()
@@ -159,7 +159,7 @@ def _two_calls_flow(store: Any, halt: asyncio.Event, saia: _ScriptedSAIA, factor
         after.append("then")
 
     return (
-        FlowFactory(make_test_logger())
+        Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, "two-calls")
         .with_checkpointer()

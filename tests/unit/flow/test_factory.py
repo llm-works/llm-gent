@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from llm_gent.core.cost import CostTracker
-from llm_gent.flow import Context, Flow, FlowFactory, Role, SAIAFactory, verb
+from llm_gent.flow import Context, Factory, Flow, Role, SAIAFactory, verb
 
 from .conftest import ROLE_A, StubFactory, make_test_logger
 
@@ -59,24 +59,24 @@ class TestSAIAFactoryProtocol:
 
 
 class TestFlowFactory:
-    """FlowFactory captures lg + saia + state; .create builds Flows."""
+    """Factory captures lg + saia + state; .create builds Flows."""
 
     def test_create_returns_flow(self) -> None:
         """The value from .create() is a fresh :class:`Flow`."""
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory())
+        ff = Factory(make_test_logger(), saia_factory=StubFactory())
         flow = ff.create("grade")
         assert isinstance(flow, Flow)
         assert flow.name == "grade"
 
     def test_create_default_name_is_empty(self) -> None:
         """.create() without a name yields an anonymous flow."""
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory())
+        ff = Factory(make_test_logger(), saia_factory=StubFactory())
         assert ff.create().name == ""
 
     def test_create_threads_saia_to_flow(self) -> None:
         """The saia captured on the factory is used by the built flow."""
         sf = StubFactory()
-        ff = FlowFactory(make_test_logger(), saia_factory=sf)
+        ff = Factory(make_test_logger(), saia_factory=sf)
         flow = ff.create()
         # Reach into the private slot — this test's point is the wiring itself.
         assert flow._saia_factory is sf
@@ -84,26 +84,26 @@ class TestFlowFactory:
     def test_create_threads_state_default(self) -> None:
         """The factory's state default is used unless overridden on create()."""
         default_state = {"scope": "app"}
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), state=default_state)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state=default_state)
         assert ff.create().state is default_state
 
     def test_create_state_override(self) -> None:
         """Passing state= on create() overrides the factory default for that Flow."""
         default_state = {"scope": "app"}
         per_flow = {"scope": "grade"}
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), state=default_state)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state=default_state)
         assert ff.create(state=per_flow).state is per_flow
 
     def test_create_state_override_with_none(self) -> None:
         """state=None explicit is honored (distinct from the UNSET default)."""
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), state={"x": 1})
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state={"x": 1})
         flow = ff.create(state=None)
         assert flow.state is None
 
     def test_with_saia_returns_new_factory(self) -> None:
-        """with_saia_factory() derives a new FlowFactory (immutable-style swap)."""
+        """with_saia_factory() derives a new Factory (immutable-style swap)."""
         a, b = StubFactory(), StubFactory()
-        ff = FlowFactory(make_test_logger(), saia_factory=a)
+        ff = Factory(make_test_logger(), saia_factory=a)
         derived = ff.with_saia_factory(b)
         assert derived is not ff
         assert derived.create()._saia_factory is b
@@ -113,23 +113,23 @@ class TestFlowFactory:
     def test_with_saia_preserves_state(self) -> None:
         """with_saia_factory() carries state and lg forward untouched."""
         state = {"scope": "shared"}
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), state=state)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state=state)
         derived = ff.with_saia_factory(StubFactory())
         assert derived.create().state is state
 
 
 class TestCreateHaltAndCheckpointer:
-    """FlowFactory.create() accepts halt= and checkpointer= for per-flow wiring."""
+    """Factory.create() accepts halt= and checkpointer= for per-flow wiring."""
 
     def test_create_halt_kwarg_binds_flow_halt(self) -> None:
         """A ``halt=`` on create() supersedes the factory's captured halt."""
         import asyncio
 
-        from llm_gent.flow import FlowFactory
+        from llm_gent.flow import Factory
 
         factory_halt = asyncio.Event()
         create_halt = asyncio.Event()
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), halt=factory_halt)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), halt=factory_halt)
         flow = ff.create("named", halt=create_halt)
         assert flow._halt_event is create_halt
 
@@ -137,10 +137,10 @@ class TestCreateHaltAndCheckpointer:
         """A ``halt=`` on create() applies even when the factory has none."""
         import asyncio
 
-        from llm_gent.flow import FlowFactory
+        from llm_gent.flow import Factory
 
         create_halt = asyncio.Event()
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory())
+        ff = Factory(make_test_logger(), saia_factory=StubFactory())
         flow = ff.create(halt=create_halt)
         assert flow._halt_event is create_halt
 
@@ -148,20 +148,20 @@ class TestCreateHaltAndCheckpointer:
         """Without ``halt=``, the factory's captured halt reaches the flow."""
         import asyncio
 
-        from llm_gent.flow import FlowFactory
+        from llm_gent.flow import Factory
 
         factory_halt = asyncio.Event()
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory(), halt=factory_halt)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), halt=factory_halt)
         flow = ff.create()
         assert flow._halt_event is factory_halt
 
     def test_create_checkpointer_pair_binds_flow(self, tmp_path: Any) -> None:
         """``checkpointer=(store, id)`` binds the run's repo via .with_checkpoint_store, nothing more."""
-        from llm_gent.flow import FlowFactory
+        from llm_gent.flow import Factory
         from llm_gent.flow.stores import JsonFileCheckpointStore
 
         store = JsonFileCheckpointStore(make_test_logger(), tmp_path)
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory())
+        ff = Factory(make_test_logger(), saia_factory=StubFactory())
         flow = ff.create(checkpointer=(store, "flow-1"))
         assert flow._checkpoint_ctx is not None
         assert flow._checkpoint_ctx.store is store
@@ -170,14 +170,12 @@ class TestCreateHaltAndCheckpointer:
 
     def test_create_checkpointer_supersedes_factory_pair(self, tmp_path: Any) -> None:
         """``checkpointer=`` wins over the factory-level store + client_flow_id."""
-        from llm_gent.flow import FlowFactory
+        from llm_gent.flow import Factory
         from llm_gent.flow.stores import JsonFileCheckpointStore
 
         factory_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "a")
         create_store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "b")
-        ff = FlowFactory(
-            make_test_logger(), saia_factory=StubFactory(), checkpoint_store=factory_store
-        )
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), checkpoint_store=factory_store)
         flow = ff.create(client_flow_id="ignored", checkpointer=(create_store, "flow-override"))
         assert flow._checkpoint_ctx is not None
         assert flow._checkpoint_ctx.store is create_store
@@ -185,7 +183,7 @@ class TestCreateHaltAndCheckpointer:
 
 
 class TestPricingProviderSwap:
-    """A stub PricingProvider injected via FlowFactory.with_budget reaches ctx.cost.track."""
+    """A stub PricingProvider injected via Factory.with_budget reaches ctx.cost.track."""
 
     @pytest.mark.asyncio
     async def test_verb_sees_stub_pricing(self) -> None:
@@ -203,7 +201,7 @@ class TestPricingProviderSwap:
         async def spend(ctx: Context) -> None:
             recorded["cost"] = ctx.cost.track("some-model", input_tokens=1000, output_tokens=100)
 
-        ff = FlowFactory(make_test_logger(), saia_factory=StubFactory()).with_cost_tracker(tracker)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory()).with_cost_tracker(tracker)
         await ff.create().call(spend).run()
         assert recorded["cost"] == pytest.approx(0.42)
         assert tracker.spent == pytest.approx(0.42)

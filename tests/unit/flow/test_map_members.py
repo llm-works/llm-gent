@@ -21,15 +21,15 @@ import pytest
 from llm_gent.flow import (
     HALTED,
     Context,
+    Factory,
     Failure,
     Flow,
-    FlowFactory,
-    FlowStructure,
     History,
     Interrupted,
     Loop,
     Role,
     Skipped,
+    Structure,
     majority,
     verb,
 )
@@ -63,7 +63,7 @@ def _flow() -> Flow:
 
 
 def _store_flow(store: Any, halt: asyncio.Event | None = None) -> Flow:
-    flow = FlowFactory(make_test_logger()).create(state={})
+    flow = Factory(make_test_logger()).create(state={})
     flow.with_checkpoint_store(store, NAME).with_checkpointer()
     return flow.with_halt(halt) if halt is not None else flow
 
@@ -140,8 +140,8 @@ class TestDeclaration:
             _flow().map([add_one], items=lambda _p, _c: [1])
 
     def test_members_are_in_the_structure(self) -> None:
-        old = FlowStructure.of(_flow().map([add_one, add_two], name="vote"))
-        new = FlowStructure.of(_flow().map([add_one, add_two, double], name="vote"))
+        old = Structure.of(_flow().map([add_one, add_two], name="vote"))
+        new = Structure.of(_flow().map([add_one, add_two, double], name="vote"))
         diff = old.diff(new)
         assert [p[-1][1].target for p in diff.added] == [f"verb:{__name__}.double"]
 

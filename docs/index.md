@@ -81,7 +81,7 @@ it back and returns the count of steps it produced.
 ```python
 from typing import Any
 from llm_gent import verb, Context
-from llm_gent.flow import FlowFactory
+from llm_gent.flow import Factory
 from llm_gent.role import Role
 
 planner = Role(name="planner", backend="anthropic", model="claude-sonnet-4-20250514")
@@ -102,7 +102,7 @@ async def execute(ctx: Context, _prev: Any) -> int:
     return target  # pretend we ran `target` steps
 
 
-ff = FlowFactory(lg)  # lg: Logger — elided for brevity
+ff = Factory(lg)  # lg: Logger — elided for brevity
 flow = ff.create("run", state={}).call(plan).call(execute)
 assert await flow.run("ship it") == 3
 ```
@@ -275,7 +275,7 @@ whose positions should survive refactors.
 Every commit holds the structure of the flow that wrote it (steps by
 these identities), and records its hash as `flow_root_hash`:
 `History.structure(commit)` reads it back, and
-`FlowStructure.diff(FlowStructure.of(flow))` says which steps a flow
+`Structure.diff(Structure.of(flow))` says which steps a flow
 today kept, added (and where) and removed.
 
 Current limits:
@@ -391,7 +391,7 @@ Each resource's `snapshot()` is in the checkpoints taken while it is in
 use, and resume hands it back to its `restore()` before the run's first
 step. The top-level flow's resources are in every commit, the completion
 commit included, so a later run continues from them; one every flow
-inherits (`FlowFactory.with_resource`) is kept once, at the top; a
+inherits (`Factory.with_resource`) is kept once, at the top; a
 per-run child is kept while its run is in progress, and a shortcut's
 continuation carries it over. What resume means for the accounting —
 continue, rebase, ignore — is the resource's own decision, made in
@@ -401,13 +401,13 @@ continue, rebase, ignore — is the resource's own decision, made in
 A fluent name of the app's own — `flow.with_stats(...)` for
 `with_resource(STATS, ...)` — is `resource_method(STATS)`:
 
-- On a `Flow` subclass, built by `FlowFactory(lg, flow_class=MyFlow)`, it
+- On a `Flow` subclass, built by `Factory(lg, flow_class=MyFlow)`, it
   is typed: the value is checked against the key's type and the chain
   keeps the subclass. Every fluent method returns `Self`, and the
   subflows a `lambda b: ...` body builds are of the enclosing flow's
   class. Type checkers see a body's parameter as typed when the body is a
   `def body(b: MyFlow)`; a lambda's is `Any`.
-- `FlowFactory.with_resource_method("with_stats", STATS)` adds it to
+- `Factory.with_resource_method("with_stats", STATS)` adds it to
   every flow that factory builds, and to their bodies, without a
   subclass of the app's own; `Flow` itself and other factories' flows
   are unchanged. Type checkers do not see it.
@@ -462,7 +462,7 @@ step:
 - The run's tracker (`with_cost_tracker` on the top-level flow) is in
   every commit, the completion commit included, so its spend is the total
   over the whole history: a later session continues it. A tracker every
-  flow inherits (a `FlowFactory(cost_tracker=...)`) is kept once, at the
+  flow inherits (a `Factory(cost_tracker=...)`) is kept once, at the
   top. A tracker a nested flow declares of its own is kept while that
   flow runs.
 - A budgeted run's child is kept while the run is in progress: a run
@@ -507,7 +507,7 @@ own class.
 
 A run has one repo: the checkpoint store and history name set once, on
 its top-level flow, with `with_checkpoint_store(store, client_flow_id)`
-(or `FlowFactory(checkpoint_store=store)` with `create(client_flow_id=...)`).
+(or `Factory(checkpoint_store=store)` with `create(client_flow_id=...)`).
 Every commit the run writes holds the whole run and goes there, wherever
 in the flow tree it was taken — committing in a subdirectory commits the
 repo. A flow inside a run cannot set a store of its own; `run()` raises.
