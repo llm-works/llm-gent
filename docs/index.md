@@ -340,6 +340,80 @@ cursor); resume sets the signals again and continues every shortcut
 where it was. A finished run records no signal: the next session starts
 with none set.
 
+### Resources
+
+A resource is a run-scoped object with behaviour — a counter, a stats
+collector, a rate limiter — whose accounting must survive pause, resume
+and shortcut. It implements the `Resource` protocol: `snapshot()` returns
+its accounting as JSON-serializable data, `restore(data)` sets it back.
+One that gives each run a child of its own also has the optional
+`child(...)`, returning a resource that reports to it. Subclassing
+`Resource` states the contract and lets type checkers check the methods
+against it (a class with the methods and no base works too).
+
+The app declares a typed key once — its name is what the resource is
+stored under, so it stays stable — and attaches resources with
+`with_resource`. Verbs read them with `ctx.resource(key)`, typed by the
+key (`ctx.resource(key, default)` when one may be missing). Type checkers
+reject a key for a class that is not a `Resource`, and a value that is
+not of its key's type.
+
+```python
+class Stats(Resource):
+    def snapshot(self) -> dict[str, Any]: ...
+    def restore(self, data: dict[str, Any]) -> None: ...
+    def child(self, per_item: bool = True) -> Stats: ...  # optional
+
+
+STATS = ResourceKey[Stats]("stats")
+
+flow = (
+    ff.create(...)
+    .with_resource(STATS, Stats())  # this flow and every flow below it
+    .map(lambda b: b.with_resource(STATS, per_item=True).call(score), items=docs)
+)
+
+
+@verb
+async def score(ctx, doc):
+    ctx.resource(STATS).record("scored")  # the item's own child Stats
+```
+
+- `with_resource(key, value)` — every run of the flow, and every flow
+  below it, runs with `value`.
+- `with_resource(key, **args)` — each run of the flow (a map item, an
+  iterate pass, a `.call`) runs with `child(**args)` of the enclosing
+  `key` resource; `run()` raises when there is none.
+- `with_resource(key, value, **args)` — each run runs with a child of
+  `value`.
+
+Each resource's `snapshot()` is in the checkpoints taken while it is in
+use, and resume hands it back to its `restore()` before the run's first
+step. The top-level flow's resources are in every commit, the completion
+commit included, so a later run continues from them; one every flow
+inherits (`FlowFactory.with_resource`) is kept once, at the top; a
+per-run child is kept while its run is in progress, and a shortcut's
+continuation carries it over. What resume means for the accounting —
+continue, rebase, ignore — is the resource's own decision, made in
+`restore()`. Two keys with the same name in one flow's tree raise at
+`run()`: they would share one place in a checkpoint.
+
+A fluent name of the app's own — `flow.with_stats(...)` for
+`with_resource(STATS, ...)` — is `resource_method(STATS)`:
+
+- On a `Flow` subclass, built by `FlowFactory(lg, flow_class=MyFlow)`, it
+  is typed: the value is checked against the key's type and the chain
+  keeps the subclass. Every fluent method returns `Self`, and the
+  subflows a `lambda b: ...` body builds are of the enclosing flow's
+  class. Type checkers see a body's parameter as typed when the body is a
+  `def body(b: MyFlow)`; a lambda's is `Any`.
+- `FlowFactory.with_resource_method("with_stats", STATS)` adds it to
+  every flow that factory builds, and to their bodies, without a
+  subclass of the app's own; `Flow` itself and other factories' flows
+  are unchanged. Type checkers do not see it.
+
+`examples/flow/resources.py` runs one through a halt and a resume.
+
 ### Cost and budgets
 
 Cost is what calls and operations cost; a cost tracker

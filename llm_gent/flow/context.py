@@ -22,6 +22,8 @@ as the first argument to every verb. It exposes:
   for handles the framework does not type (tenant IDs, correlation IDs,
   per-run callbacks); supplied at :meth:`Flow.run` via ``extra=`` and
   never checkpointed
+- ``resource(key)`` — a resource the run runs with
+  (:meth:`Flow.with_resource`), typed by its :class:`ResourceKey`
 
 Verbs read from this and (typically) mutate ``state.data`` in place.
 
@@ -34,14 +36,16 @@ payload as :data:`Any`.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, overload
 
 from appinfra.log import Logger
 
 from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
 from .checkpoint import checkpoint_tag
+from .resource import NO_RESOURCES, R, ResourceKey
 from .role import Role
 from .state import State
 
@@ -51,6 +55,11 @@ T = TypeVar("T")
 
 S = TypeVar("S")
 """SAIA type — narrows :meth:`Context.saia_as` return."""
+
+D = TypeVar("D")
+"""Default type of :meth:`Context.resource`."""
+
+_NO_DEFAULT: Any = object()
 
 
 @dataclass(frozen=True)
@@ -142,6 +151,9 @@ class Context(Generic[T]):
     re-supplies at :meth:`Flow.run`; identity across resume is not
     preserved. Default is a fresh empty dict.
     """
+
+    resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
+    """The resources the run runs with, by key; read one with :meth:`resource`."""
 
     _env: Any = None
     """Private: the executor's :class:`_RunEnv` for this dispatch.
@@ -238,6 +250,33 @@ class Context(Generic[T]):
         role-bound verbs (``@verb(role=...)``) require one.
         """
         return self.saia  # type: ignore[no-any-return]
+
+    @overload
+    def resource(self, key: ResourceKey[R]) -> R: ...
+
+    @overload
+    def resource(self, key: ResourceKey[R], default: D) -> R | D: ...
+
+    def resource(self, key: ResourceKey[Any], default: Any = _NO_DEFAULT) -> Any:
+        """The ``key`` resource the run runs with (:meth:`Flow.with_resource`), typed by ``key``.
+
+        Its own per-run child when the run's flow asks for one, else the
+        resource declared on the run's flow or the nearest flow enclosing
+        it. ``default`` when none is in scope.
+
+        Raises:
+            KeyError: No ``key`` resource is in scope and no ``default``
+                was given.
+        """
+        try:
+            return self.resources[key]
+        except KeyError:
+            if default is _NO_DEFAULT:
+                raise KeyError(
+                    f"no {key.name!r} resource in scope: declare one with "
+                    f"with_resource(key, resource) on this flow or an enclosing one"
+                ) from None
+            return default
 
     @property
     def lg(self) -> Logger:

@@ -19,7 +19,8 @@ Two factories live here, at different scopes:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Protocol
+import copy
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, overload
 
 from appinfra.log import Logger
 
@@ -27,12 +28,17 @@ from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
 from .checkpoint import CheckpointStore
 from .nodes import UNSET
+from .resource import R, ResourceKey, check_resource, resource_method
 from .role import Role
 from .state import StateFactory
 
 
 if TYPE_CHECKING:
     from .flow import Flow
+
+
+F = TypeVar("F", bound="Flow")
+"""The class of the flows a :class:`FlowFactory` builds."""
 
 
 class SAIAFactory(Protocol):
@@ -75,7 +81,7 @@ class SAIAFactory(Protocol):
         ...
 
 
-class FlowFactory:
+class FlowFactory(Generic[F]):
     """App-scoped factory for :class:`Flow` — captures ``lg`` and ``saia`` once.
 
     An application typically has one logger and one :class:`SAIAFactory`
@@ -86,8 +92,42 @@ class FlowFactory:
     :meth:`create` builds a Flow with the captured defaults;
     :meth:`with_saia_factory` returns a new :class:`FlowFactory` whose
     SAIAFactory is swapped (for subsystems that need a different saia
-    builder).
+    builder). Every ``with_*`` method returns a new factory the same way.
+
+    ``flow_class=`` builds a :class:`Flow` subclass instead — typed:
+    ``FlowFactory(lg, flow_class=MyFlow).create()`` is a ``MyFlow``, and
+    so are the subflows its ``lambda b: ...`` bodies build.
     """
+
+    @overload
+    def __init__(
+        self: FlowFactory[Flow],
+        lg: Logger,
+        *,
+        saia_factory: SAIAFactory | None = None,
+        state: Any = UNSET,
+        traits: TraitRegistry | None = None,
+        halt: asyncio.Event | None = None,
+        cost_tracker: CostTracker | None = None,
+        state_factory: StateFactory[Any] | None = None,
+        checkpoint_store: CheckpointStore | None = None,
+        flow_class: None = None,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        lg: Logger,
+        *,
+        saia_factory: SAIAFactory | None = None,
+        state: Any = UNSET,
+        traits: TraitRegistry | None = None,
+        halt: asyncio.Event | None = None,
+        cost_tracker: CostTracker | None = None,
+        state_factory: StateFactory[Any] | None = None,
+        checkpoint_store: CheckpointStore | None = None,
+        flow_class: type[F],
+    ) -> None: ...
 
     def __init__(
         self,
@@ -100,6 +140,7 @@ class FlowFactory:
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
         checkpoint_store: CheckpointStore | None = None,
+        flow_class: type[Any] | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
 
@@ -138,6 +179,9 @@ class FlowFactory:
                 scopes the history and is agent-owned per Flow instance.
                 Saves inside the run also need
                 :meth:`Flow.with_checkpointer`.
+            flow_class: A :class:`Flow` subclass to build instead of
+                :class:`Flow`; it keeps :class:`Flow`'s constructor
+                signature. ``None`` (default) builds :class:`Flow`.
         """
         self._lg = lg
         self._saia_factory = saia_factory
@@ -147,6 +191,10 @@ class FlowFactory:
         self._cost_tracker = cost_tracker
         self._state_factory = state_factory
         self._checkpoint_store = checkpoint_store
+        self._flow_class = flow_class
+        self._resources: dict[ResourceKey[Any], Any] = {}
+        self._resource_methods: dict[str, ResourceKey[Any]] = {}
+        self._built_class: type[F] | None = None
 
     def create(
         self,
@@ -156,8 +204,8 @@ class FlowFactory:
         client_flow_id: str | None = None,
         halt: asyncio.Event | None = None,
         checkpointer: tuple[CheckpointStore, str] | None = None,
-    ) -> Flow:
-        """Return a :class:`Flow` using this factory's captured environment.
+    ) -> F:
+        """Return a :class:`Flow` (``flow_class``) using this factory's captured environment.
 
         Args:
             name: Optional identifier — used in error messages and traces.
@@ -192,10 +240,8 @@ class FlowFactory:
                 ``None`` (default) inherits the factory's store paired
                 with ``client_flow_id``.
         """
-        from .flow import Flow
-
         resolved_state = self._state if state is UNSET else state
-        flow = Flow(
+        flow = self._class()(
             self._lg,
             name,
             saia_factory=self._saia_factory,
@@ -208,68 +254,121 @@ class FlowFactory:
             flow.with_halt(effective_halt)
         if self._cost_tracker is not None:
             flow.with_cost_tracker(self._cost_tracker)
+        for key, value in self._resources.items():
+            flow.with_resource(key, value)
+        self._bind_store(flow, client_flow_id, checkpointer)
+        return flow
+
+    def _bind_store(
+        self, flow: F, client_flow_id: str | None, checkpointer: tuple[CheckpointStore, str] | None
+    ) -> None:
+        """Bind ``flow``'s repo per :meth:`create`'s ``client_flow_id`` / ``checkpointer``."""
         if checkpointer is not None:
             store, flow_id = checkpointer
             flow.with_checkpoint_store(store, flow_id)
         elif self._checkpoint_store is not None and client_flow_id is not None:
             flow.with_checkpoint_store(self._checkpoint_store, client_flow_id)
-        return flow
 
-    def with_saia_factory(self, saia_factory: SAIAFactory) -> FlowFactory:
+    def _class(self) -> type[F]:
+        """The class :meth:`create` builds: ``flow_class``, with this factory's resource methods.
+
+        Without resource methods it is ``flow_class`` itself; with them, a
+        subclass of it made once per factory, so :class:`Flow` and other
+        factories' flows are unchanged.
+        """
+        if self._built_class is None:
+            from .flow import Flow
+
+            base: type[Any] = self._flow_class if self._flow_class is not None else Flow
+            if self._resource_methods:
+                methods = {n: resource_method(k) for n, k in self._resource_methods.items()}
+                attrs = {"__module__": base.__module__, "__qualname__": base.__qualname__}
+                base = type(base.__name__, (base,), {**attrs, **methods})
+            self._built_class = base
+        return self._built_class
+
+    def _replace(self, **slots: Any) -> FlowFactory[F]:
+        """A copy of this factory with ``slots`` (attribute names without ``_``) replaced."""
+        new = copy.copy(self)
+        for name, value in slots.items():
+            setattr(new, f"_{name}", value)
+        new._built_class = None
+        return new
+
+    def with_resource(self, key: ResourceKey[R], value: R) -> FlowFactory[F]:
+        """Return a new :class:`FlowFactory` that declares ``value`` under ``key`` on every flow.
+
+        Every subsequently created :class:`Flow` gets
+        :meth:`Flow.with_resource` ``(key, value)`` — the same object on
+        every flow, so it is kept once in the run's checkpoints, at the
+        top-level flow. Every other captured slot carries over.
+
+        Raises:
+            TypeError: ``key`` is not a :class:`ResourceKey`, or ``value``
+                does not implement ``snapshot()`` and ``restore(data)``.
+            ValueError: ``value`` is ``None``.
+        """
+        check_resource(key, value, {})
+        return self._replace(resources={**self._resources, key: value})
+
+    def with_resource_method(self, name: str, key: ResourceKey[Any]) -> FlowFactory[F]:
+        """Return a new :class:`FlowFactory` whose flows have ``name``: ``with_resource(key, ...)``.
+
+        ``factory.with_resource_method("with_stats", STATS)`` gives every
+        flow the new factory builds — and every subflow its ``lambda b:
+        ...`` bodies build — a ``with_stats(value, **child_args)`` that is
+        :meth:`Flow.with_resource` for ``STATS``. The method lives on a
+        subclass the factory makes once; :class:`Flow` itself and other
+        factories' flows are unchanged. Type checkers do not see it: for a
+        typed method, assign :func:`~llm_gent.flow.resource_method` on a
+        :class:`Flow` subclass and pass it as ``flow_class=``.
+
+        Raises:
+            TypeError: ``key`` is not a :class:`ResourceKey`.
+            ValueError: ``name`` is not an identifier, the flow class
+                already has an attribute ``name``, or this factory already
+                maps ``name`` to another key.
+        """
+        if not isinstance(key, ResourceKey):
+            raise TypeError(f"with_resource_method takes a ResourceKey; got {type(key).__name__}")
+        if not isinstance(name, str) or not name.isidentifier():
+            raise ValueError(f"a resource method's name must be an identifier; got {name!r}")
+        current = self._resource_methods.get(name)
+        if current is not None and current is not key:
+            raise ValueError(f"this factory already maps {name!r} to resource {current.name!r}")
+        if current is None and hasattr(self._class(), name):
+            raise ValueError(f"{name!r} is already an attribute of the flow class")
+        return self._replace(resource_methods={**self._resource_methods, name: key})
+
+    def with_saia_factory(self, saia_factory: SAIAFactory) -> FlowFactory[F]:
         """Return a new :class:`FlowFactory` whose :class:`SAIAFactory` is swapped.
 
         Every other captured slot (``lg``, ``state``, ``traits``, ``halt``,
-        ``cost_tracker``, ``state_factory``, ``checkpoint_store``) carries over.
-        Useful for subsystems that share the app's logger but need a
-        different saia builder (e.g. a plugin with its own model wiring).
+        ``cost_tracker``, ``state_factory``, ``checkpoint_store``, the flow
+        class, resources and resource methods) carries over. Useful for
+        subsystems that share the app's logger but need a different saia
+        builder (e.g. a plugin with its own model wiring).
         """
-        return FlowFactory(
-            self._lg,
-            saia_factory=saia_factory,
-            state=self._state,
-            traits=self._traits,
-            halt=self._halt,
-            cost_tracker=self._cost_tracker,
-            state_factory=self._state_factory,
-            checkpoint_store=self._checkpoint_store,
-        )
+        return self._replace(saia_factory=saia_factory)
 
-    def with_traits(self, traits: TraitRegistry | None) -> FlowFactory:
+    def with_traits(self, traits: TraitRegistry | None) -> FlowFactory[F]:
         """Return a new :class:`FlowFactory` whose trait registry is swapped.
 
         Every other captured slot carries over. Mirrors
         :meth:`with_saia_factory` for the trait dimension.
         """
-        return FlowFactory(
-            self._lg,
-            saia_factory=self._saia_factory,
-            state=self._state,
-            traits=traits,
-            halt=self._halt,
-            cost_tracker=self._cost_tracker,
-            state_factory=self._state_factory,
-            checkpoint_store=self._checkpoint_store,
-        )
+        return self._replace(traits=traits)
 
-    def with_halt(self, event: asyncio.Event) -> FlowFactory:
+    def with_halt(self, event: asyncio.Event) -> FlowFactory[F]:
         """Return a new :class:`FlowFactory` whose halt event is swapped.
 
         Every other captured slot carries over. Every subsequently created
         :class:`Flow` gets ``event`` attached via :meth:`Flow.with_halt` —
         one wiring reaches every layer that observes ``ctx.halt``.
         """
-        return FlowFactory(
-            self._lg,
-            saia_factory=self._saia_factory,
-            state=self._state,
-            traits=self._traits,
-            halt=event,
-            cost_tracker=self._cost_tracker,
-            state_factory=self._state_factory,
-            checkpoint_store=self._checkpoint_store,
-        )
+        return self._replace(halt=event)
 
-    def with_cost_tracker(self, tracker: CostTracker) -> FlowFactory:
+    def with_cost_tracker(self, tracker: CostTracker) -> FlowFactory[F]:
         """Return a new :class:`FlowFactory` whose cost tracker is swapped.
 
         Every other captured slot carries over. Every subsequently created
@@ -277,18 +376,9 @@ class FlowFactory:
         :meth:`Flow.with_cost_tracker` — one wiring reaches every layer that
         observes ``ctx.cost``.
         """
-        return FlowFactory(
-            self._lg,
-            saia_factory=self._saia_factory,
-            state=self._state,
-            traits=self._traits,
-            halt=self._halt,
-            cost_tracker=tracker,
-            state_factory=self._state_factory,
-            checkpoint_store=self._checkpoint_store,
-        )
+        return self._replace(cost_tracker=tracker)
 
-    def with_checkpoint_store(self, store: CheckpointStore) -> FlowFactory:
+    def with_checkpoint_store(self, store: CheckpointStore) -> FlowFactory[F]:
         """Return a new :class:`FlowFactory` whose checkpoint store is swapped.
 
         Every other captured slot carries over. The store binds to each
@@ -297,31 +387,13 @@ class FlowFactory:
         per Flow instance, so the factory captures the store once and
         the id is chosen at construction time.
         """
-        return FlowFactory(
-            self._lg,
-            saia_factory=self._saia_factory,
-            state=self._state,
-            traits=self._traits,
-            halt=self._halt,
-            cost_tracker=self._cost_tracker,
-            state_factory=self._state_factory,
-            checkpoint_store=store,
-        )
+        return self._replace(checkpoint_store=store)
 
-    def with_state_factory(self, state_factory: StateFactory[Any] | None) -> FlowFactory:
+    def with_state_factory(self, state_factory: StateFactory[Any] | None) -> FlowFactory[F]:
         """Return a new :class:`FlowFactory` whose state factory is swapped.
 
         Every other captured slot carries over. Useful for subsystems that
         need a different state restore strategy (e.g., a plugin with its
         own state type).
         """
-        return FlowFactory(
-            self._lg,
-            saia_factory=self._saia_factory,
-            state=self._state,
-            traits=self._traits,
-            halt=self._halt,
-            cost_tracker=self._cost_tracker,
-            state_factory=state_factory,
-            checkpoint_store=self._checkpoint_store,
-        )
+        return self._replace(state_factory=state_factory)

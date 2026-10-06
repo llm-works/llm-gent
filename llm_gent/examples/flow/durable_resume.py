@@ -415,7 +415,7 @@ def _extract_summary(result: Any) -> str:
     return str(getattr(result, "output", "") or "")
 
 
-def _build_flow(lg: Logger, ff: FlowFactory, halt: asyncio.Event) -> Flow:
+def _build_flow(lg: Logger, ff: FlowFactory[Flow], halt: asyncio.Event) -> Flow:
     """Assemble the demo flow: iterate over topics, summarize each.
 
     A single :meth:`Flow.iterate` drains the ``pending`` queue

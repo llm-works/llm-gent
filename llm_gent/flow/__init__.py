@@ -29,6 +29,12 @@ Public surface:
 - :class:`FlowFactory` — app-scoped :class:`Flow` builder (captures ``lg``
   and one :class:`SAIAFactory`); preferred entry point at the application
   boundary
+- :class:`Resource` — protocol of a run-scoped object checkpointed with
+  the run (``snapshot()`` / ``restore(data)``, optional ``child(...)`` for
+  a child per run); :class:`ResourceKey` — its typed handle, attached with
+  :meth:`Flow.with_resource` and read with ``ctx.resource(key)``;
+  :func:`resource_method` — a fluent name of the app's own for one
+  (``flow.with_stats(...)``)
 - :class:`Loop` — Flow-body primitive wrapping one ``saia.complete()``
   invocation with lifecycle hooks + halt bridging; CAS-native
   pause/resume via the framework halt-save site
@@ -78,6 +84,7 @@ from .gc import collect_unreachable
 from .history import History, HistoryCorrupt
 from .loop import Loop, LoopFactory
 from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, Skipped, Unset
+from .resource import Resource, ResourceKey, resource_method
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
 from .structure import FlowStructure, StepPath, StructureDiff, path_label
@@ -101,6 +108,8 @@ __all__ = [
     "Interrupted",
     "Loop",
     "LoopFactory",
+    "Resource",
+    "ResourceKey",
     "RestoredError",
     "ResumeMode",
     "Role",
@@ -122,6 +131,7 @@ __all__ = [
     "mean",
     "path_label",
     "planner",
+    "resource_method",
     "synthesizer",
     "unanimous",
     "verb",

@@ -118,7 +118,9 @@ def _check_node_name(name: str | None, method: str) -> None:
         raise ValueError(f"{method}(name=) must be a non-empty str; got {name!r}")
 
 
-def _map_bodies(body: Any, items: Any, lg: Logger) -> tuple[tuple[Flow, ...], tuple[str, ...]]:
+def _map_bodies(
+    body: Any, items: Any, lg: Logger, flow_class: type[Flow]
+) -> tuple[tuple[Flow, ...], tuple[str, ...]]:
     """A map's bodies and member keys: one body over items, or a list of members.
 
     Raises:
@@ -129,16 +131,16 @@ def _map_bodies(body: Any, items: Any, lg: Logger) -> tuple[tuple[Flow, ...], tu
     from ._node_id import member_keys
 
     if not isinstance(body, list | tuple):
-        return (_materialize(body, lg, "map.body"),), ()
+        return (_materialize(body, lg, "map.body", flow_class),), ()
     if items is not None:
         raise TypeError(".map(items=) is not valid with a list of members: they run on its input")
     if not body:
         raise ValueError(".map() needs at least one member")
-    members = tuple(_materialize(m, lg, f"map.member[{i}]") for i, m in enumerate(body))
+    members = tuple(_materialize(m, lg, f"map.member[{i}]", flow_class) for i, m in enumerate(body))
     return members, member_keys(list(body))
 
 
-def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
+def _materialize(buildable: Any, lg: Logger, name: str, flow_class: type[Flow]) -> Flow:
     """Turn a :data:`Buildable` (Flow, verb, or ``lambda f: ...`` callback) into a Flow.
 
     A ``Flow`` is returned as-is. A callable carrying a :class:`Role` on
@@ -147,7 +149,9 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
     verb. Any other callable is invoked against a fresh Flow it may mutate
     (the return value, if any, is ignored). Anything else is a
     :class:`TypeError` — bad Buildables fail eagerly at build time, not at
-    :meth:`Flow.run` time.
+    :meth:`Flow.run` time. The flows built here are ``flow_class`` — the
+    enclosing flow's class, so a subclass's methods are there in its
+    bodies.
     """
     from .flow import Flow
 
@@ -167,9 +171,9 @@ def _materialize(buildable: Any, lg: Logger, name: str) -> Flow:
             raise TypeError(
                 f"verb target .role must be a Role instance or None; got {type(role).__name__}"
             )
-        fresh = Flow(lg=lg, name=name)
+        fresh = flow_class(lg=lg, name=name)
         fresh.call(buildable)
         return fresh
-    fresh = Flow(lg=lg, name=name)
+    fresh = flow_class(lg=lg, name=name)
     buildable(fresh)
     return fresh

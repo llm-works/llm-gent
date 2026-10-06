@@ -54,7 +54,7 @@ Buildable materializer :func:`_materialize`.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, get_args
+from typing import Any, Self, get_args
 
 from appinfra.log import Logger
 
@@ -70,6 +70,7 @@ from ._cost import (
     run_cost,
 )
 from ._halt_observer import HaltPoint, check_one_halt, is_run_halted
+from ._resources import Resources, check_resources, run_resources
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
@@ -125,6 +126,7 @@ from .nodes import (
     _Node,
     _RunEnv,
 )
+from .resource import NO_RESOURCES, R, ResourceKey, check_resource
 from .role import Role
 from .state import State, StateFactory
 from .state.snapshot import ScopePath, ScopeRegistry, Snapshot
@@ -138,6 +140,13 @@ class Flow:
     Subflows used only for composition can be constructed without one — at
     :meth:`run` time they borrow the factory (and saia cache) of the flow
     that invoked them.
+
+    Subclassing is supported: every fluent method returns ``Self``, and
+    the subflows a ``lambda b: ...`` body builds are of the enclosing
+    flow's class, so a subclass's own methods (e.g.
+    :func:`~llm_gent.flow.resource_method`) are there in bodies too. A
+    subclass keeps this constructor's signature: the framework builds
+    those subflows as ``cls(lg=lg, name=name)``.
     """
 
     def __init__(
@@ -199,6 +208,8 @@ class Flow:
         self._shortcut: Shortcut | None = None
         self._cost_tracker: CostTracker | None = None
         self._budget: float | None = None
+        self._resources: dict[ResourceKey[Any], Any] = {}
+        self._resource_children: dict[ResourceKey[Any], dict[str, Any]] = {}
         self._checkpoint_ctx: CheckpointContext | None = None
         self._checkpointer: Checkpointer | None = None
         self._verbs: dict[str, Any] = {}
@@ -270,6 +281,7 @@ class Flow:
         *args: Any,
         halt: Any = UNSET,
         cost: Any = UNSET,
+        resources: Any = UNSET,
         scope_state: Any = UNSET,
         extra: Any = UNSET,
         **kwargs: Any,
@@ -293,7 +305,10 @@ class Flow:
         verb to propagate its effective ambients to the dispatched sibling;
         omitting either (or passing ``UNSET``) defaults to this flow's
         ``.with_halt()`` / ``.with_cost_tracker()`` binding if any (a
-        ``.with_budget()`` makes no child here: there is no run).
+        ``.with_budget()`` makes no child here: there is no run). Likewise
+        ``resources=ctx.resources``; omitted, the sibling gets the
+        resources this flow declares (no per-run children: there is no
+        run).
 
         Pass ``extra=ctx.extra`` from an in-flight verb to propagate the
         caller-supplied opaque dict to the dispatched sibling. Omitting
@@ -312,6 +327,7 @@ class Flow:
         )
         effective_halt = self._halt_event if halt is UNSET else halt
         effective_cost = self._cost_tracker if cost is UNSET else cost
+        effective_resources: Resources = dict(self._resources) if resources is UNSET else resources
         effective_extra: dict[str, Any] = {} if extra is UNSET else extra
         wrapped_state = (
             payload
@@ -326,6 +342,7 @@ class Flow:
             halt=effective_halt,
             cost=effective_cost,
             extra=effective_extra,
+            resources=effective_resources,
         )
         return await verb(ctx, *args, **kwargs)
 
@@ -344,7 +361,7 @@ class Flow:
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
         name: str | None = None,
-    ) -> Flow:
+    ) -> Self:
         """Append a node to the composition chain.
 
         ``target`` is a verb (any async callable carrying a ``.role``) or
@@ -415,7 +432,7 @@ class Flow:
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
         name: str | None = None,
-    ) -> Flow:
+    ) -> Self:
         """Append a chained node — semantic alias for :meth:`call`.
 
         Provided for readability: ``.call(a).then(b).then(c)`` reads as a
@@ -433,7 +450,7 @@ class Flow:
             name=name,
         )
 
-    def rescue(self, policy: RescuePolicy) -> Flow:
+    def rescue(self, policy: RescuePolicy) -> Self:
         """Attach a failure policy to the most recently appended node.
 
         The policy runs when the node raises anything other than
@@ -445,7 +462,7 @@ class Flow:
         self._nodes[-1].rescue = policy
         return self
 
-    def after(self, hook: AfterHook) -> Flow:
+    def after(self, hook: AfterHook) -> Self:
         """Attach a success hook to the most recently appended node.
 
         The hook runs when the node returns without raising, after any
@@ -466,7 +483,7 @@ class Flow:
         rescue: RescuePolicy | None = None,
         after: AfterHook | None = None,
         name: str | None = None,
-    ) -> Flow:
+    ) -> Self:
         """Append a conditional node: run ``then`` or ``else_`` based on ``when``.
 
         Args:
@@ -491,8 +508,9 @@ class Flow:
         Returns ``self`` for chaining.
         """
         _check_node_name(name, ".branch")
-        then_flow = _materialize(then, self._lg, "branch.then")
-        else_flow = _materialize(else_, self._lg, "branch.else") if else_ is not None else None
+        cls = type(self)
+        then_flow = _materialize(then, self._lg, "branch.then", cls)
+        else_flow = _materialize(else_, self._lg, "branch.else", cls) if else_ is not None else None
         node = _Node(
             target=_Branch(when=when, then_flow=then_flow, else_flow=else_flow, name=name),
             rescue=rescue,
@@ -514,7 +532,7 @@ class Flow:
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
         name: str | None = None,
-    ) -> Flow:
+    ) -> Self:
         """Append a bounded iteration: run ``body`` until a stop condition holds.
 
         Each iteration's return becomes the next iteration's input; the first
@@ -565,7 +583,7 @@ class Flow:
             raise ValueError(f".iterate(deadline=) must be > 0; got {deadline}")
         _require_state_for_merge(state, merge, ".iterate")
         _check_node_name(name, ".iterate")
-        body_flow = _materialize(body, self._lg, "iterate.body")
+        body_flow = _materialize(body, self._lg, "iterate.body", type(self))
         node = _Node(
             target=_Iterate(
                 body=body_flow,
@@ -597,7 +615,7 @@ class Flow:
         merge: StateMerge | None = None,
         state_factory: StateFactory[Any] | None = None,
         name: str | None = None,
-    ) -> Flow:
+    ) -> Self:
         """Append a parallel fan-out: run ``body`` per item, or each member once, concurrently.
 
         A map over items runs one body on each item. A map over members —
@@ -672,7 +690,7 @@ class Flow:
         _check_node_name(name, ".map")
         if max_concurrency is not None and not callable(max_concurrency):
             check_concurrency(max_concurrency, ".map(max_concurrency=)")
-        bodies, keys = _map_bodies(body, items, self._lg)
+        bodies, keys = _map_bodies(body, items, self._lg, type(self))
         node = _Node(
             target=_Map(
                 bodies=bodies,
@@ -692,7 +710,7 @@ class Flow:
         self._nodes.append(node)
         return self
 
-    def guard(self, fn: GuardFn) -> Flow:
+    def guard(self, fn: GuardFn) -> Self:
         """Attach a per-item skip predicate to the preceding :meth:`map` node.
 
         ``fn(item, ctx) -> bool`` (sync or async) runs after per-item state
@@ -715,7 +733,7 @@ class Flow:
         target.guard = fn
         return self
 
-    def on_error(self, fn: OnErrorFn) -> Flow:
+    def on_error(self, fn: OnErrorFn) -> Self:
         """Attach a per-item error hook to the preceding :meth:`map` node.
 
         ``fn(exception, item, ctx) -> None`` (sync or async) fires whenever
@@ -739,7 +757,7 @@ class Flow:
         target.on_error = fn
         return self
 
-    def on_item_complete(self, fn: OnItemCompleteFn) -> Flow:
+    def on_item_complete(self, fn: OnItemCompleteFn) -> Self:
         """Attach a per-item completion hook to the preceding :meth:`map` node.
 
         ``fn(item, outcome, ctx) -> None`` (sync or async) fires once per
@@ -778,7 +796,7 @@ class Flow:
         target.on_item_complete = fn
         return self
 
-    def with_halt(self, event: asyncio.Event) -> Flow:
+    def with_halt(self, event: asyncio.Event) -> Self:
         """Set the run's halt: the app sets ``event`` to pause the whole run.
 
         Threads ``event`` through the execution environment as ``ctx.halt``,
@@ -799,7 +817,7 @@ class Flow:
         self._halt_event = event
         return self
 
-    def with_signal(self, name: str, event: asyncio.Event) -> Flow:
+    def with_signal(self, name: str, event: asyncio.Event) -> Self:
         """Declare the run's signal ``name``: an event the app sets, for :meth:`with_shortcut`.
 
         Signals belong to the run, like its halt: they are declared on the
@@ -814,7 +832,7 @@ class Flow:
         self._signals[name] = event
         return self
 
-    def with_shortcut(self, signal: str, to: str | None = None) -> Flow:
+    def with_shortcut(self, signal: str, to: str | None = None) -> Self:
         """On the run's ``signal``, stop exploring and continue at step ``to`` with what there is.
 
         ``signal`` names a signal the top-level flow declares with
@@ -849,7 +867,7 @@ class Flow:
         self._shortcut = check_shortcut(signal, to)
         return self
 
-    def with_cost_tracker(self, tracker: CostTracker) -> Flow:
+    def with_cost_tracker(self, tracker: CostTracker) -> Self:
         """Run every run of this flow on ``tracker``, reachable as ``ctx.cost``.
 
         Verbs record LLM and operation costs against it through
@@ -872,7 +890,7 @@ class Flow:
         self._cost_tracker = check_cost_tracker(tracker)
         return self
 
-    def with_budget(self, budget: float) -> Flow:
+    def with_budget(self, budget: float) -> Self:
         """Give each run of this flow its own budget: a child tracker with that limit.
 
         Each run runs on a child of the flow's tracker (its own, else the
@@ -898,7 +916,48 @@ class Flow:
         self._budget = check_budget(budget)
         return self
 
-    def with_checkpoint_store(self, store: CheckpointStore, client_flow_id: str) -> Flow:
+    def with_resource(
+        self, key: ResourceKey[R], value: R | None = None, /, **child_args: Any
+    ) -> Self:
+        """Give this flow a resource under ``key``, reachable as ``ctx.resource(key)``.
+
+        - ``with_resource(key, value)`` — every run of this flow, and every
+          flow below it, runs with ``value``;
+        - ``with_resource(key, **child_args)`` — each run of this flow (a
+          map item, an iterate pass, a ``.call``) runs with
+          ``resource.child(**child_args)`` of the enclosing ``key``
+          resource;
+        - ``with_resource(key, value, **child_args)`` — each run runs with
+          a child of ``value``.
+
+        ``value`` is of ``key``'s type, a :class:`~llm_gent.flow.Resource`;
+        with child arguments, the resource the children come from has the
+        optional ``child()``. Its ``snapshot()`` is in the run's checkpoints and handed back to its
+        ``restore()`` on resume — the top-level flow's through the
+        completion commit, so a later run continues from there; a per-run
+        child's while its run is in progress (see
+        :mod:`llm_gent.flow._resources`). Calls for the same key combine:
+        a value replaces the resource, child arguments replace the per-run
+        request.
+
+        Returns ``self`` for chaining.
+
+        Raises:
+            TypeError: ``key`` is not a :class:`~llm_gent.flow.ResourceKey`;
+                ``value`` does not implement ``snapshot()`` and
+                ``restore(data)``; child arguments for a ``value`` without
+                ``child()``. Type checkers report the first two, and a
+                ``value`` not of ``key``'s type, statically.
+            ValueError: Neither a value nor child arguments.
+        """
+        check_resource(key, value, child_args)
+        if value is not None:
+            self._resources[key] = value
+        if child_args:
+            self._resource_children[key] = dict(child_args)
+        return self
+
+    def with_checkpoint_store(self, store: CheckpointStore, client_flow_id: str) -> Self:
         """Set the run's repo: a :class:`CheckpointStore` and the agent-owned ``client_flow_id``.
 
         A run has one repo, set on its top-level flow: every commit the run
@@ -946,7 +1005,7 @@ class Flow:
         )
         return self
 
-    def with_checkpointer(self, name: str | None = None) -> Flow:
+    def with_checkpointer(self, name: str | None = None) -> Self:
         """Declare that saves inside this flow write commits.
 
         ``ctx.checkpoint()`` and the checkpoint policy write commits in the
@@ -997,7 +1056,7 @@ class Flow:
         policy: CheckpointPolicy | None = None,
         /,
         **kwargs: Any,
-    ) -> Flow:
+    ) -> Self:
         """Attach a :class:`CheckpointPolicy` governing implicit saves.
 
         The policy gates automatic composition-step saves (see
@@ -1191,6 +1250,7 @@ class Flow:
         check_one_halt(self)
         check_shortcuts(self)
         check_budgets_have_a_tracker(self)
+        check_resources(self)
 
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode | str
@@ -1209,6 +1269,7 @@ class Flow:
         runtime: Flow,
         parent_halt: asyncio.Event | None = None,
         parent_cost: CostTracker | None = None,
+        parent_resources: Resources = NO_RESOURCES,
         parent_checkpoint_ctx: CheckpointContext | None = None,
         parent_checkpointer: Checkpointer | None = None,
         parent_chain_context: str = "",
@@ -1241,6 +1302,8 @@ class Flow:
         :func:`~llm_gent.flow._cost.run_cost`; a shortcut this flow
         declares (:func:`~llm_gent.flow._shortcut.run_shortcut`) adds its
         own stop on top. ``parent_shortcuts`` are the enclosing flows'.
+        ``parent_resources`` are the calling scope's resources; the run's
+        own come from :func:`~llm_gent.flow._resources.run_resources`.
 
         ``parent_chain_context`` is the hash the executor uses to compute
         this Flow's chain-step node IDs (empty at run root; extended by
@@ -1257,21 +1320,23 @@ class Flow:
             run_cost(self, parent_path, scopes, parent_cost, parent_halt) as context,
             run_shortcut(self, parent_path, scopes, context.halt, runtime._signals) as shortcut,
         ):
-            env = self._make_run_env(
-                runtime=runtime,
-                state=state,
-                context=context,
-                parent_checkpoint_ctx=parent_checkpoint_ctx,
-                parent_checkpointer=parent_checkpointer,
-                parent_chain_context=parent_chain_context,
-                parent_ancestor_chain=parent_ancestor_chain,
-                parent_extra=parent_extra,
-                parent_policy=parent_policy,
-                parent_path=parent_path,
-                shortcut=shortcut,
-                parent_shortcuts=parent_shortcuts,
-            )
-            return await self._run_in(env, args, kwargs)
+            with run_resources(self, parent_path, scopes, parent_resources) as resources:
+                env = self._make_run_env(
+                    runtime=runtime,
+                    state=state,
+                    context=context,
+                    resources=resources,
+                    parent_checkpoint_ctx=parent_checkpoint_ctx,
+                    parent_checkpointer=parent_checkpointer,
+                    parent_chain_context=parent_chain_context,
+                    parent_ancestor_chain=parent_ancestor_chain,
+                    parent_extra=parent_extra,
+                    parent_policy=parent_policy,
+                    parent_path=parent_path,
+                    shortcut=shortcut,
+                    parent_shortcuts=parent_shortcuts,
+                )
+                return await self._run_in(env, args, kwargs)
 
     async def _run_in(self, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Walk this Flow under ``env``."""
@@ -1305,6 +1370,7 @@ class Flow:
         runtime: Flow,
         state: State[Any],
         context: RunCost,
+        resources: Resources,
         parent_checkpoint_ctx: CheckpointContext | None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
@@ -1346,6 +1412,7 @@ class Flow:
             path=parent_path,
             shortcut=shortcut,
             shortcuts=parent_shortcuts + ((shortcut,) if shortcut is not None else ()),
+            resources=resources,
         )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:
