@@ -392,8 +392,8 @@ use, and resume hands it back to its `restore()` before the run's first
 step. The top-level flow's resources are in every commit, the completion
 commit included, so a later run continues from them; one every flow
 inherits (`Factory.with_resource`) is kept once, at the top; a
-per-run child is kept while its run is in progress, and a shortcut's
-continuation carries it over. What resume means for the accounting —
+per-run child is kept while its run is in progress; a cut runs nothing
+again, so nothing is counted twice. What resume means for the accounting —
 continue, rebase, ignore — is the resource's own decision, made in
 `restore()`. Two keys with the same name in one flow's tree raise at
 `run()`: they would share one place in a checkpoint.
@@ -466,8 +466,8 @@ step:
   top. A tracker a nested flow declares of its own is kept while that
   flow runs.
 - A budgeted run's child is kept while the run is in progress: a run
-  halted at 9.0 of a 10.0 budget resumes with 1.0 left. A shortcut's
-  continuation carries it over the same way, so nothing is counted twice.
+  halted at 9.0 of a 10.0 budget resumes with 1.0 left. A cut runs no
+  step again, so nothing is counted twice.
 - After a crash the run resumes from its last save: spend recorded after
   that save is in no checkpoint, so the step that runs again records it
   again. Cost tracking is best effort.
