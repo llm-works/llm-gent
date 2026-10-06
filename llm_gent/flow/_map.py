@@ -202,6 +202,7 @@ class MapRunner:
             halt=env.halt,
             cost=env.cost,
             extra=env.extra,
+            resources=env.resources,
             _env=env,
             _node_id=self.node_id,
         )
@@ -412,6 +413,7 @@ class MapItemRunner:
             runtime=env.runtime,
             parent_halt=env.halt,
             parent_cost=env.cost,
+            parent_resources=env.resources,
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(self.node_id, f"map:{self.key}"),
@@ -546,6 +548,7 @@ class MapItemRunner:
             halt=env.halt,
             cost=env.cost,
             extra=env.extra,
+            resources=env.resources,
             _env=env,
             _node_id=self.node_id,
         )

@@ -86,6 +86,12 @@ TRACKER = "tracker"
 SIGNALS = "signals"
 """Cursor entry at the root: the run's signals (``Flow.with_signal``) that are set."""
 
+RESOURCES = "resources"
+"""Cursor entry: the resources a flow declares (``with_resource``) — name to ``snapshot()``."""
+
+RUN_RESOURCES = "run_resources"
+"""Cursor entry: a running flow's per-run resource children — name to ``snapshot()``."""
+
 FLOW = "flow"
 """Root tree entry: the structure of the flow that wrote the snapshot, as a blob.
 
@@ -96,7 +102,21 @@ keeps it; :func:`read_snapshot` does not read it.
 """
 
 CURSOR_ENTRIES = frozenset(
-    {PASS, CARRY, UNTIL, CHAIN, ARM, TURN, ITEMS, DONE, COST, TRACKER, SIGNALS}
+    {
+        PASS,
+        CARRY,
+        UNTIL,
+        CHAIN,
+        ARM,
+        TURN,
+        ITEMS,
+        DONE,
+        COST,
+        TRACKER,
+        SIGNALS,
+        RESOURCES,
+        RUN_RESOURCES,
+    }
 )
 """Tree entries that hold cursor values rather than a scope."""
 

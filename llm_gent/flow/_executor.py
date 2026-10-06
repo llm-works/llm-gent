@@ -78,6 +78,7 @@ def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context
             halt=env.halt,
             cost=env.cost,
             extra=env.extra,
+            resources=env.resources,
             _env=env,
             _node_id=node_id,
         )
@@ -89,6 +90,7 @@ def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context
         halt=env.halt,
         cost=env.cost,
         extra=env.extra,
+        resources=env.resources,
         _env=env,
         _node_id=node_id,
     )
@@ -296,6 +298,7 @@ async def _run_subflow(
             runtime=env.runtime,
             parent_halt=env.halt,
             parent_cost=env.cost,
+            parent_resources=env.resources,
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(node_id, "call"),
@@ -445,6 +448,7 @@ async def _check_until(
         halt=env.halt,
         cost=env.cost,
         extra=env.extra,
+        resources=env.resources,
         _env=env,
         _node_id=node_id,
     )
@@ -513,6 +517,7 @@ async def _run_arm(
             runtime=env.runtime,
             parent_halt=env.halt,
             parent_cost=env.cost,
+            parent_resources=env.resources,
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(node_id, arm.arm),

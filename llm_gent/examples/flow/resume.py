@@ -116,7 +116,7 @@ async def stop_at_limit(ctx: Context[Counter], count: int) -> int:
 
 
 def _build_flow(
-    ff: FlowFactory,
+    ff: FlowFactory[Flow],
     store: JsonFileCheckpointStore,
     client_flow_id: str,
     *,

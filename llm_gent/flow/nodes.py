@@ -25,7 +25,7 @@ without pulling in :mod:`.flow`.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
@@ -33,6 +33,7 @@ from appinfra.log import Logger
 
 from ..core.cost import CostTracker
 from .context import Context
+from .resource import NO_RESOURCES, ResourceKey
 from .state import State, StateFactory
 from .state.snapshot import ScopePath, ScopeRegistry
 
@@ -305,6 +306,10 @@ class _RunEnv:
     ``shortcut`` is this Flow's own :meth:`Flow.with_shortcut` for this
     run (its chain, iterates and maps follow it); ``shortcuts`` holds it
     and every enclosing flow's, for the Loop calls under them.
+
+    ``resources`` are the resources this run runs with (``ctx.resource``):
+    the ones this Flow declares, its per-run children, and the ones
+    inherited (:mod:`llm_gent.flow._resources`).
     """
 
     runtime: Flow
@@ -321,6 +326,7 @@ class _RunEnv:
     path: ScopePath = ()
     shortcut: ShortcutRun | None = None
     shortcuts: tuple[ShortcutRun, ...] = ()
+    resources: Mapping[ResourceKey[Any], Any] = NO_RESOURCES
 
     @property
     def scopes(self) -> ScopeRegistry:

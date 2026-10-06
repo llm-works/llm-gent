@@ -186,6 +186,7 @@ class IterateRunner:
             runtime=env.runtime,
             parent_halt=env.halt,
             parent_cost=env.cost,
+            parent_resources=env.resources,
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(self.node_id, "body"),
