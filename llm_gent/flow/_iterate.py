@@ -185,7 +185,6 @@ class IterateRunner:
             state=child_state,
             runtime=env.runtime,
             parent_halt=env.halt,
-            parent_cost=env.cost,
             parent_resources=env.resources,
             parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,

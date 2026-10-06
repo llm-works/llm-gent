@@ -77,20 +77,14 @@ ITEMS = "items"
 DONE = "done"
 """Cursor entry: a running map's completed items — index to result and whether it merged."""
 
-COST = "cost"
-"""Cursor entry: a running flow's own cost tracker — its spend and spend by op."""
-
-TRACKER = "tracker"
-"""Cursor entry: the cost tracker a flow declares (``with_cost_tracker``) — spend and spend by op."""
-
 SIGNALS = "signals"
 """Cursor entry at the root: the run's signals (``Flow.with_signal``) that are set."""
 
 RESOURCES = "resources"
-"""Cursor entry: the resources a flow declares (``with_resource``) — name to ``snapshot()``."""
+"""Cursor entry: the resources a flow declares (``with_resource``, ``with_cost_tracker``) — name to ``snapshot()``."""
 
 RUN_RESOURCES = "run_resources"
-"""Cursor entry: a running flow's per-run resource children — name to ``snapshot()``."""
+"""Cursor entry: a running flow's per-run resource children (``with_budget``'s) — name to ``snapshot()``."""
 
 FLOW = "flow"
 """Root tree entry: the structure of the flow that wrote the snapshot, as a blob.
@@ -111,8 +105,6 @@ CURSOR_ENTRIES = frozenset(
         TURN,
         ITEMS,
         DONE,
-        COST,
-        TRACKER,
         SIGNALS,
         RESOURCES,
         RUN_RESOURCES,

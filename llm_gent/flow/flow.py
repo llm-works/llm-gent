@@ -62,15 +62,7 @@ from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext, check_one_repo
-from ._cost import (
-    RunCost,
-    check_budget,
-    check_budgets_have_a_tracker,
-    check_cost_tracker,
-    run_cost,
-)
 from ._halt_observer import HaltPoint, check_one_halt, is_run_halted
-from ._resources import Resources, check_resources, run_resources
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
@@ -126,7 +118,9 @@ from .nodes import (
     _Node,
     _RunEnv,
 )
-from .resource import NO_RESOURCES, R, ResourceKey, check_resource
+from .resource import COST, NO_RESOURCES, R, ResourceKey, check_resource
+from .resource._runtime import Resources, check_resources, run_resources
+from .resource.cost import check_budget, check_budgets_have_a_tracker, check_cost_tracker
 from .role import Role
 from .state import State, StateFactory
 from .state.snapshot import ScopePath, ScopeRegistry, Snapshot
@@ -206,8 +200,6 @@ class Flow:
         self._halt_event: asyncio.Event | None = None
         self._signals: dict[str, asyncio.Event] = {}
         self._shortcut: Shortcut | None = None
-        self._cost_tracker: CostTracker | None = None
-        self._budget: float | None = None
         self._resources: dict[ResourceKey[Any], Any] = {}
         self._resource_children: dict[ResourceKey[Any], dict[str, Any]] = {}
         self._checkpoint_ctx: CheckpointContext | None = None
@@ -301,14 +293,13 @@ class Flow:
         construction. A ``State`` instance passes through as-is; any other
         value is wrapped with this flow's ``state_factory``.
 
-        Pass ``halt=ctx.halt`` and ``cost=ctx.cost`` from an in-flight
-        verb to propagate its effective ambients to the dispatched sibling;
-        omitting either (or passing ``UNSET``) defaults to this flow's
-        ``.with_halt()`` / ``.with_cost_tracker()`` binding if any (a
-        ``.with_budget()`` makes no child here: there is no run). Likewise
-        ``resources=ctx.resources``; omitted, the sibling gets the
-        resources this flow declares (no per-run children: there is no
-        run).
+        Pass ``halt=ctx.halt`` and ``resources=ctx.resources`` from an
+        in-flight verb to propagate its effective ambients to the
+        dispatched sibling; omitting either (or passing ``UNSET``) defaults
+        to this flow's ``.with_halt()`` binding and the resources it
+        declares (no per-run children such as ``.with_budget()``'s: there
+        is no run). ``cost=`` sets the sibling's ``ctx.cost`` on top of
+        those — ``None`` for none.
 
         Pass ``extra=ctx.extra`` from an in-flight verb to propagate the
         caller-supplied opaque dict to the dispatched sibling. Omitting
@@ -326,8 +317,6 @@ class Flow:
             else scope_state
         )
         effective_halt = self._halt_event if halt is UNSET else halt
-        effective_cost = self._cost_tracker if cost is UNSET else cost
-        effective_resources: Resources = dict(self._resources) if resources is UNSET else resources
         effective_extra: dict[str, Any] = {} if extra is UNSET else extra
         wrapped_state = (
             payload
@@ -340,11 +329,25 @@ class Flow:
             flow=self,
             traits=self._traits,
             halt=effective_halt,
-            cost=effective_cost,
             extra=effective_extra,
-            resources=effective_resources,
+            resources=self._dispatch_resources(resources, cost),
         )
         return await verb(ctx, *args, **kwargs)
+
+    def _dispatch_resources(self, resources: Any, cost: Any) -> Resources:
+        """The resources a :meth:`dispatch` hands its verb: ``resources``, else this flow's.
+
+        ``cost`` (unless :data:`UNSET`) replaces the cost tracker in them;
+        ``None`` removes it.
+        """
+        found: dict[ResourceKey[Any], Any] = dict(
+            self._resources if resources is UNSET else resources
+        )
+        if cost is not UNSET:
+            found.pop(COST, None)
+            if cost is not None:
+                found[COST] = cost
+        return found
 
     # -------------------------------------------------------------------------
     # Fluent composition
@@ -875,7 +878,9 @@ class Flow:
         the top-level flow, in every commit including the completion
         commit — and handed back to its ``restore()`` on resume: the total
         over the whole history for a plain :class:`CostTracker`, whatever
-        a subclass makes of it otherwise (see :mod:`llm_gent.flow._cost`). A hard
+        a subclass makes of it otherwise. ``with_resource(COST, tracker)``:
+        the tracker is the flow's :data:`~llm_gent.flow.COST` resource (see
+        :mod:`llm_gent.flow.resource.cost`). A hard
         stop is opt-in on the tracker side: pass the run's halt event to
         both :meth:`CostTracker.__init__` (``halt=``) and :meth:`with_halt`,
         and the tracker sets it on the first cross into ``exceeded``,
@@ -887,8 +892,7 @@ class Flow:
         Raises:
             TypeError: ``tracker`` is not a :class:`CostTracker`.
         """
-        self._cost_tracker = check_cost_tracker(tracker)
-        return self
+        return self.with_resource(COST, check_cost_tracker(tracker))
 
     def with_budget(self, budget: float) -> Self:
         """Give each run of this flow its own budget: a child tracker with that limit.
@@ -904,8 +908,10 @@ class Flow:
         :meth:`run` raises otherwise.
 
         The child's spend is in every checkpoint taken while the run is in
-        progress, and restored when it resumes; see
-        :mod:`llm_gent.flow._cost`.
+        progress, and restored when it resumes. ``with_resource(COST,
+        budget=budget)``: a per-run child of the
+        :data:`~llm_gent.flow.COST` resource (see
+        :mod:`llm_gent.flow.resource.cost`).
 
         Returns ``self`` for chaining.
 
@@ -913,8 +919,7 @@ class Flow:
             TypeError: ``budget`` is not a number.
             ValueError: ``budget`` is not finite and > 0.
         """
-        self._budget = check_budget(budget)
-        return self
+        return self.with_resource(COST, budget=check_budget(budget))
 
     def with_resource(
         self, key: ResourceKey[R], value: R | None = None, /, **child_args: Any
@@ -936,7 +941,7 @@ class Flow:
         ``restore()`` on resume — the top-level flow's through the
         completion commit, so a later run continues from there; a per-run
         child's while its run is in progress (see
-        :mod:`llm_gent.flow._resources`). Calls for the same key combine:
+        :mod:`llm_gent.flow.resource._runtime`). Calls for the same key combine:
         a value replaces the resource, child arguments replace the per-run
         request.
 
@@ -1268,7 +1273,6 @@ class Flow:
         state: State[Any],
         runtime: Flow,
         parent_halt: asyncio.Event | None = None,
-        parent_cost: CostTracker | None = None,
         parent_resources: Resources = NO_RESOURCES,
         parent_checkpoint_ctx: CheckpointContext | None = None,
         parent_checkpointer: Checkpointer | None = None,
@@ -1288,22 +1292,20 @@ class Flow:
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
-        ``parent_cost`` / ``parent_checkpointer`` / ``parent_policy`` are
-        the effective ambients from the calling scope — nested subflows
-        fall back to them when they have no local
-        ``.with_cost_tracker()`` / ``.with_budget()`` /
-        ``.with_checkpointer()`` / ``.with_checkpoint_policy()``,
-        preserving an intermediate layer's ambient through arbitrarily
-        deep nesting. ``parent_halt`` is the halt the calling scope
-        observes: the run's halt, or a shortcut's stop event.
-        ``parent_checkpoint_ctx`` is the run's repo; repo and halt are set
-        on the top-level flow only. The run's cost context (its tracker,
-        and the halt it observes) comes from
-        :func:`~llm_gent.flow._cost.run_cost`; a shortcut this flow
-        declares (:func:`~llm_gent.flow._shortcut.run_shortcut`) adds its
-        own stop on top. ``parent_shortcuts`` are the enclosing flows'.
-        ``parent_resources`` are the calling scope's resources; the run's
-        own come from :func:`~llm_gent.flow._resources.run_resources`.
+        ``parent_checkpointer`` / ``parent_policy`` are the effective
+        ambients from the calling scope — nested subflows fall back to them
+        when they have no local ``.with_checkpointer()`` /
+        ``.with_checkpoint_policy()``, preserving an intermediate layer's
+        ambient through arbitrarily deep nesting. ``parent_halt`` is the
+        halt the calling scope observes: the run's halt, or a shortcut's
+        stop event. ``parent_checkpoint_ctx`` is the run's repo; repo and
+        halt are set on the top-level flow only, so a nested run observes
+        its parent's halt; a shortcut this flow declares
+        (:func:`~llm_gent.flow._shortcut.run_shortcut`) adds its own stop on
+        top. ``parent_shortcuts`` are the enclosing flows'.
+        ``parent_resources`` are the calling scope's resources — the cost
+        tracker among them; the run's own come from
+        :func:`~llm_gent.flow.resource._runtime.run_resources`.
 
         ``parent_chain_context`` is the hash the executor uses to compute
         this Flow's chain-step node IDs (empty at run root; extended by
@@ -1316,15 +1318,14 @@ class Flow:
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
         scopes = runtime._scopes
-        async with (
-            run_cost(self, parent_path, scopes, parent_cost, parent_halt) as context,
-            run_shortcut(self, parent_path, scopes, context.halt, runtime._signals) as shortcut,
-        ):
+        # The run's halt is on the top-level flow (check_one_halt).
+        halt = self._halt_event if parent_halt is None else parent_halt
+        async with run_shortcut(self, parent_path, scopes, halt, runtime._signals) as shortcut:
             with run_resources(self, parent_path, scopes, parent_resources) as resources:
                 env = self._make_run_env(
                     runtime=runtime,
                     state=state,
-                    context=context,
+                    halt=halt,
                     resources=resources,
                     parent_checkpoint_ctx=parent_checkpoint_ctx,
                     parent_checkpointer=parent_checkpointer,
@@ -1369,7 +1370,7 @@ class Flow:
         *,
         runtime: Flow,
         state: State[Any],
-        context: RunCost,
+        halt: asyncio.Event | None,
         resources: Resources,
         parent_checkpoint_ctx: CheckpointContext | None,
         parent_chain_context: str = "",
@@ -1386,7 +1387,7 @@ class Flow:
         Local ``.with_checkpointer`` / ``.with_checkpoint_policy`` wins over
         the caller's parent ambients; unset locals fall back to the parent
         so an intermediate layer's ambient survives arbitrarily deep
-        nesting. Halt and budget come resolved in ``context``; this flow's
+        nesting. ``halt`` and ``resources`` come resolved; this flow's
         ``shortcut``, when it declares one, puts its stop in place of the
         halt. The repo is the top-level flow's (:func:`check_one_repo`
         keeps nested flows from setting one).
@@ -1401,8 +1402,7 @@ class Flow:
             runtime=runtime,
             state=state,
             lg=runtime._lg,
-            halt=shortcut.stop if shortcut is not None else context.halt,
-            cost=context.tracker,
+            halt=shortcut.stop if shortcut is not None else halt,
             checkpoint_ctx=checkpoint_ctx,
             checkpointer=self._checkpointer or parent_checkpointer,
             chain_context=parent_chain_context,

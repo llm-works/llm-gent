@@ -45,7 +45,7 @@ from appinfra.log import Logger
 from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
 from .checkpoint import checkpoint_tag
-from .resource import NO_RESOURCES, R, ResourceKey
+from .resource import COST, NO_RESOURCES, R, ResourceKey
 from .role import Role
 from .state import State
 
@@ -121,19 +121,6 @@ class Context(Generic[T]):
     :meth:`Flow.map` and :meth:`Flow.iterate` observe this at their natural
     boundaries automatically; verbs are free to poll it when useful.
     Subflows inherit the outer runtime's halt unless they declare their own.
-    """
-
-    cost: CostTracker | None = None
-    """The run's cost tracker, or ``None``.
-
-    Set with :meth:`Flow.with_cost_tracker`; a run of a flow with
-    :meth:`Flow.with_budget` gets a child of it with that budget. Verbs
-    record LLM and operation costs via ``ctx.cost.track(...)``;
-    ``ctx.cost.spent`` is the cost so far and ``ctx.cost.budget`` the
-    limit it is checked against. The tracker enforces its budget and,
-    when configured with a halt event, trips it on the first cross into
-    ``exceeded``; ancestors in the tracker chain do the same on their own
-    budgets. Subflows inherit the outer runtime's tracker.
     """
 
     extra: dict[str, Any] = field(default_factory=dict)
@@ -277,6 +264,21 @@ class Context(Generic[T]):
                     f"with_resource(key, resource) on this flow or an enclosing one"
                 ) from None
             return default
+
+    @property
+    def cost(self) -> CostTracker | None:
+        """The run's cost tracker — ``resource(COST, None)`` — or ``None``.
+
+        Set with :meth:`Flow.with_cost_tracker`; a run of a flow with
+        :meth:`Flow.with_budget` gets a child of it with that budget. Verbs
+        record LLM and operation costs via ``ctx.cost.track(...)``;
+        ``ctx.cost.spent`` is the cost so far and ``ctx.cost.budget`` the
+        limit it is checked against. The tracker enforces its budget and,
+        when configured with a halt event, trips it on the first cross into
+        ``exceeded``; ancestors in the tracker chain do the same on their own
+        budgets. Subflows inherit the outer runtime's tracker.
+        """
+        return self.resource(COST, None)
 
     @property
     def lg(self) -> Logger:

@@ -421,6 +421,12 @@ Cost is what calls and operations cost; a cost tracker
 it is checked against. Verbs reach the run's tracker as `ctx.cost`:
 `ctx.cost.spent` is the cost so far, `ctx.cost.budget` the limit.
 
+The cost tracker is a resource (see Resources) under the key `COST`, and
+the cost API is sugar over it: `with_cost_tracker(t)` is
+`with_resource(COST, t)`, `with_budget(limit)` is
+`with_resource(COST, budget=limit)`, `ctx.cost` is
+`ctx.resource(COST, None)`.
+
 - `with_cost_tracker(tracker)` — every run of the flow runs on that
   tracker.
 - `with_budget(limit)` — each run of the flow runs on a child of its
@@ -448,9 +454,10 @@ agent reads through `ctx.cost` (to wrap up, say); gent stops nothing. A
 hard stop is the app's choice: a tracker built with `halt=` the run's
 halt event pauses the run when its budget is crossed.
 
-The running cost is reconstructed across pause, resume and shortcut.
-Every tracker's spend (and spend by op) is in the checkpoints, and resume
-restores it before the run's first step:
+The running cost is reconstructed across pause, resume and shortcut, the
+way every resource's accounting is. Every tracker's spend (and spend by
+op) is in the checkpoints, and resume restores it before the run's first
+step:
 
 - The run's tracker (`with_cost_tracker` on the top-level flow) is in
   every commit, the completion commit included, so its spend is the total
@@ -467,7 +474,7 @@ restores it before the run's first step:
 
 Spend is cumulative; a per-session budget is a limit set on it. The app
 reads the spend so far from the history's head
-(`History.snapshot(head).cursors[""]["tracker"]["spent"]`) and builds the
+(`History.snapshot(head).cursors[""]["resources"]["cost"]["spent"]`) and builds the
 session's tracker with `budget=` that plus the session's allowance.
 
 What resume does to the spend is the tracker's: gent saves what its
