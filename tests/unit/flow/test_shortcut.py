@@ -380,6 +380,64 @@ class TestConclude:
         assert _compute_node_ids("", then._nodes) == _compute_node_ids("", conclude._nodes)
         assert then.root_hash() == conclude.root_hash()
 
+    async def test_halt_after_conclude_skips_project_for_fast_forwarded_step(self) -> None:
+        """A halt after a conclude step does not compute inputs for a fast-forwarded step.
+
+        When both the cut (fast-forward) and halt signals are set after a conclude
+        step, the next step's inputs are not computed (project is not called) because
+        that step will be skipped anyway. This prevents project from throwing before
+        the halt checkpoint can be written.
+        """
+        store = InMemoryCheckpointStore()
+        project_calls: list[str] = []
+
+        def build(halt: asyncio.Event, cut: asyncio.Event, ran: list[str], arm: bool) -> Any:
+
+            @verb
+            async def a(ctx: Context[Any], x: str) -> str:
+                ran.append("a")
+                cut.set()
+                return x + "a"
+
+            @verb
+            async def close(ctx: Context[Any], x: str) -> str:
+                ran.append("close")
+                if arm:
+                    halt.set()
+                return x + "!"
+
+            def track_project(_prev: str) -> str:
+                project_calls.append("project")
+                return _prev
+
+            @verb
+            async def b(ctx: Context[Any], x: str) -> str:
+                ran.append("b")
+                return x + "b"
+
+            region = _region().call(a).conclude(close).then(b, project=track_project)
+            return (
+                _ff()
+                .create(state={})
+                .with_checkpoint_store(store, "halt-project")
+                .with_halt(halt)
+                .with_signal("cut", cut)
+                .call(region)
+            )
+
+        ran: list[str] = []
+        result = await build(asyncio.Event(), asyncio.Event(), ran, arm=True).run("")
+        assert result is HALTED
+        assert ran == ["a", "close"]
+        assert project_calls == []
+
+        project_calls.clear()
+        ran.clear()
+        flow = build(asyncio.Event(), asyncio.Event(), ran, arm=False)
+        result = await flow.run("", resume="latest")
+        assert result == "a!"
+        assert ran == []
+
 
 class TestSignalSetInAStep:
     """A step that sets the signal and returns without awaiting: the next boundary sees it."""

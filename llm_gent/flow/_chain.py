@@ -237,17 +237,32 @@ class Chain:
             if index + 1 == len(self.flow._nodes):
                 return False
             at = index + 1
-            self._move_to(at, result, args, kwargs)
         note_halt(self.env, 0, self.ids[at])
+        if not interrupted:
+            next_node = self.flow._nodes[at]
+            skip_inputs = not next_node.conclude and is_fast_forward(self.env)
+            self._move_to(at, result, args, kwargs, skip_inputs=skip_inputs)
         return True
 
     def _move_to(
-        self, index: int, prev_result: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+        self,
+        index: int,
+        prev_result: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        skip_inputs: bool = False,
     ) -> None:
-        """Move the cursor to step ``index`` (not started) with its input after ``prev_result``."""
+        """Move the cursor to step ``index`` (not started) with its input after ``prev_result``.
+
+        When ``skip_inputs`` is True (the step will be skipped by fast-forward),
+        the cursor position is set without computing inputs via ``project``.
+        """
         node = self.flow._nodes[index]
         self.index, self.pending, self.prev = index, True, prev_result
-        self.step_args, self.step_kwargs = _step_inputs(index, node, prev_result, args, kwargs)
+        if skip_inputs:
+            self.step_args, self.step_kwargs = (prev_result,), {}
+        else:
+            self.step_args, self.step_kwargs = _step_inputs(index, node, prev_result, args, kwargs)
 
 
 def _passed_through(last: tuple[bool, Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
