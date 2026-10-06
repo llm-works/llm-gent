@@ -135,7 +135,9 @@ class Chain:
         The cursor moves to each step, with the step's input (after
         ``project``), before the step runs; after it returns,
         :meth:`_halted_after` observes the halt. A chain that fast-forwards
-        (:func:`~._shortcut.is_fast_forward`) starts no new step: it ends
+        (:func:`~._shortcut.is_fast_forward`) starts no new step except a
+        :meth:`~llm_gent.flow.Flow.conclude` one, which gets the last
+        completed result (the chain's input when none completed); it ends
         with its last completed result. The step a checkout saved as
         running had started, so it runs again (``rerun``).
 
@@ -147,15 +149,18 @@ class Chain:
         rerun = saved.index if saved is not None and not saved.pending else None
         last = (True, saved.prev) if saved is not None and saved.pending else (False, None)
         while index < len(self.flow._nodes):
-            if index != rerun and is_fast_forward(self.env):
-                return _passed_through(last, args, kwargs)
+            node = self.flow._nodes[index]
+            if index != rerun and not node.conclude and is_fast_forward(self.env):
+                index += 1
+                continue
             if saved is not None and index == saved.index:
                 inputs = saved.inputs
             else:
-                inputs = _step_inputs(index, self.flow._nodes[index], last[1], args, kwargs)
+                prev = _passed_through(last, args, kwargs)
+                inputs = _step_inputs(index, node, prev, args, kwargs)
             last = (True, await self._step(index, inputs, args, kwargs))
             index += 1
-        return last[1]
+        return _passed_through(last, args, kwargs)
 
     async def _step(
         self, index: int, inputs: Inputs, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -246,7 +251,7 @@ class Chain:
 
 
 def _passed_through(last: tuple[bool, Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    """What a fast-forwarded chain returns: its last completed result, else its input.
+    """The chain's last completed result, else its input (what a fast-forwarded chain returns).
 
     The input passes through when it is one positional value; otherwise
     nothing does (``None``).

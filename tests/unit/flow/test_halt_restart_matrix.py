@@ -122,6 +122,11 @@ class BareTurn(Turn):
 
 
 @dataclass(frozen=True)
+class Conclude(Leaf):
+    """A leaf appended with ``.conclude``: a cut that skips its chain's other steps runs it."""
+
+
+@dataclass(frozen=True)
 class Seq:
     """A chain: the top-level flow, or a subflow step inside it."""
 
@@ -209,6 +214,7 @@ Node = Leaf | Seq | Iter | Map | Branch | Scope | MapMembers | Ckpt | Cut
 _L = Leaf("", 0)
 _T = Turn("", 0)
 _B = BareTurn("", 0)
+_C = Conclude("", 0)
 
 
 def _label(node: Node, counter: list[int], prefix: str = "l") -> Node:
@@ -394,10 +400,10 @@ class _CutRun:
 
 
 def _cut_chain(steps: tuple[Node, ...], x: int, run: _CutRun, region: bool) -> int:
-    """A chain: in a region whose signal is set, it starts no new step and ends with ``x``."""
+    """A chain: in a region whose signal is set, it starts only :class:`Conclude` steps."""
     for step in steps:
-        if region and run.cut:
-            return x
+        if region and run.cut and not isinstance(step, Conclude):
+            continue
         x = _cut_step(step, x, run, region)
     return x
 
@@ -444,10 +450,10 @@ def cut_model(shape: Seq, cut_key: str) -> tuple[int, dict[str, int]]:
     """The result and ``done`` map of a sequential run whose signal is set after ``cut_key``.
 
     Computed from the shape alone: inside a :class:`Cut`, once the signal
-    is set, every chain ends with its last result before its next step,
-    every iterate before its next pass, every map before its next item.
-    A step already running finishes. Outside every ``Cut`` the run is
-    unaffected.
+    is set, every chain skips its remaining steps but the
+    :class:`Conclude` ones, every iterate ends before its next pass, every
+    map before its next item. A step already running finishes. Outside
+    every ``Cut`` the run is unaffected.
     """
     run = _CutRun(cut_key)
     return _cut_chain(shape.children, RUN_INPUT, run, False), run.out
@@ -715,6 +721,8 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
         return flow.call(sub)
     if isinstance(node, Turn):
         return flow.call(_turn_verb(node, probe))
+    if isinstance(node, Conclude):
+        return flow.conclude(_leaf_verb(node, probe))
     if isinstance(node, Leaf):
         return flow.call(_leaf_verb(node, probe))
     if isinstance(node, Seq | Scope):
@@ -1226,6 +1234,11 @@ _CUT_INNER: dict[str, Node] = {
     "map(cut(seq))": Map(Cut((_L, _L, _L)), 2),
     "sub(leaf,cut(iter))": Seq((_L, Cut((Iter(_L, 3),)))),
     "nested": Cut((Iter(Seq((_L, Map(Seq((_L, _T, _L)), 2), _L)), 2),)),
+    "cut(seq,conclude)": Cut((_L, _L, _C, _L)),
+    "cut(iter(sub,conclude))": Cut((Iter(Seq((_L, _L, _C)), 2),)),
+    "cut(map(sub,conclude))": Cut((Map(Seq((_L, _L, _C)), 2),)),
+    "sub(leaf,cut(conclude))": Seq((_L, Cut((_L, _C)))),
+    "nested(conclude)": Cut((Iter(Seq((_L, Map(Seq((_L, _T, _C)), 2), _C)), 2),)),
 }
 
 CUT_SHAPES: dict[str, Seq] = {

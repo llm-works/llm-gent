@@ -257,6 +257,130 @@ class TestChain:
             await _top(cut).call(_region().call(a)).run("")
 
 
+class TestConclude:
+    """``.conclude(step)``: a ``then`` a cut does not skip."""
+
+    async def test_without_a_cut_it_is_then(self) -> None:
+        ran: list[str] = []
+        cut = asyncio.Event()
+        s = _steps(ran, cut)
+        region = _region().call(s["a"]).then(s["b"]).conclude(s["c"]).then(s["d"])
+        assert await _top(cut).call(region).run("") == "abcd"
+        assert ran == ["a", "b", "c", "d"]
+
+    async def test_a_cut_skips_every_step_but_the_concluding_ones(self) -> None:
+        """Cut in ``a``: ``b`` and ``d`` are skipped; ``c`` and ``e`` run, each with the last result."""
+        ran: list[str] = []
+        cut = asyncio.Event()
+        s = _steps(ran, cut, cut_in="a")
+        region = _region().call(s["a"]).then(s["b"]).conclude(s["c"]).then(s["d"])
+        region.conclude(s["e"])
+        assert await _top(cut).call(region).run("") == "ace"
+        assert ran == ["a", "c", "e"]
+
+    async def test_a_region_entered_with_the_signal_set_runs_them_on_its_input(self) -> None:
+        ran: list[str] = []
+        cut = asyncio.Event()
+        s = _steps(ran, cut, cut_in="a")
+        region = _region().call(s["b"]).conclude(s["c"])
+        assert await _top(cut).call(s["a"]).then(region).then(s["d"]).run("") == "acd"
+        assert ran == ["a", "c", "d"]
+
+    async def test_outside_a_region_it_is_then(self) -> None:
+        ran: list[str] = []
+        cut = asyncio.Event()
+        s = _steps(ran, cut, cut_in="a")
+        flow = _top(cut).call(s["a"]).then(s["b"]).conclude(s["c"])
+        assert await flow.run("") == "abc"
+        assert ran == ["a", "b", "c"]
+
+    async def test_it_is_not_a_finally(self) -> None:
+        """A step that raises stops the chain; the concluding step does not run."""
+        ran: list[str] = []
+
+        @verb
+        async def boom(ctx: Context[Any], x: str) -> str:
+            raise ValueError("boom")
+
+        s = _steps(ran, asyncio.Event())
+        flow = _top(asyncio.Event()).call(_region().call(boom).conclude(s["c"]))
+        with pytest.raises(ValueError, match="boom"):
+            await flow.run("")
+        assert ran == []
+
+    async def test_started_items_run_theirs_and_unstarted_ones_nothing(self) -> None:
+        cut = asyncio.Event()
+        gate = asyncio.Event()
+        ran: list[str] = []
+
+        @verb
+        async def first(ctx: Context[Any], n: int) -> int:
+            ran.append(f"first:{n}")
+            if n == 1:
+                cut.set()
+                await asyncio.sleep(0)
+                gate.set()
+            else:
+                await gate.wait()
+            return n
+
+        @verb
+        async def second(ctx: Context[Any], n: int) -> int:
+            ran.append(f"second:{n}")
+            return n
+
+        @verb
+        async def close(ctx: Context[Any], n: int) -> int:
+            ran.append(f"close:{n}")
+            return n * 10
+
+        item = _ff().create().call(first).then(second).conclude(close)
+        region = _region().map(item, items=lambda _p, _c: [0, 1, 2], max_concurrency=2)
+        results = await _top(cut).call(region).run()
+        assert results[:2] == [0, 10] and isinstance(results[2], Skipped)
+        assert sorted(ran) == ["close:0", "close:1", "first:0", "first:1"]
+
+    async def test_a_halt_during_it_resumes_and_finishes_the_chain(self) -> None:
+        store = InMemoryCheckpointStore()
+
+        def build(halt: asyncio.Event, cut: asyncio.Event, ran: list[str], arm: bool) -> Any:
+            s = _steps(ran, cut, cut_in="a" if arm else "")
+
+            @verb
+            async def close(ctx: Context[Any], x: str) -> str:
+                ran.append("close")
+                if arm:
+                    halt.set()
+                    raise Interrupted()
+                return x + "!"
+
+            region = _region().call(s["a"]).then(s["b"]).conclude(close).then(s["c"])
+            return (
+                _ff()
+                .create(state={})
+                .with_checkpoint_store(store, "conclude-halt")
+                .with_halt(halt)
+                .with_signal("cut", cut)
+                .call(region)
+                .then(s["d"])
+            )
+
+        ran: list[str] = []
+        assert await build(asyncio.Event(), asyncio.Event(), ran, arm=True).run("") is HALTED
+        assert ran == ["a", "close"]
+
+        ran.clear()
+        flow = build(asyncio.Event(), asyncio.Event(), ran, arm=False)
+        assert await flow.run("", resume="latest") == "a!d"
+        assert ran == ["close", "d"]
+
+    async def test_it_does_not_enter_step_ids_or_the_root_hash(self) -> None:
+        then = _ff().create().call(_echo).then(_echo)
+        conclude = _ff().create().call(_echo).conclude(_echo)
+        assert _compute_node_ids("", then._nodes) == _compute_node_ids("", conclude._nodes)
+        assert then.root_hash() == conclude.root_hash()
+
+
 class TestSignalSetInAStep:
     """A step that sets the signal and returns without awaiting: the next boundary sees it."""
 

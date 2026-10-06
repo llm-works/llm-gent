@@ -312,7 +312,8 @@ While the signal is set, the region and every flow under it
 fast-forward:
 
 - A chain starts no new step and ends with its last result; one that
-  has not started passes its input through.
+  has not started passes its input through. Steps appended with
+  `.conclude` are the exception (below).
 - An iterate starts no new pass and returns its carried value; a map
   starts no new item (those are `Skipped`, `on_item_complete` fires).
 - A Loop turn in flight is aborted, and its call returns the result
@@ -321,6 +322,27 @@ fast-forward:
 What is already running is neither stopped nor run again: it finishes
 with what it has. A step can check `ctx.fast_forward` and return early;
 it has completed. The step after the region then runs as usual.
+
+`.conclude(step)` appends a step like `.then` that a cut does not skip:
+while its chain fast-forwards, the other steps are skipped and the
+`.conclude` steps still run, in order, each with the last completed
+result (the chain's input when none completed). Without a cut it is
+`.then`. It is not a `finally`: a step that raises, or the halt, stops
+the chain as usual.
+
+```python
+item = (
+    ff.create()
+    .call(acquire)  # opens what the item holds
+    .then(work)  # a cut aborts its turn; it returns what it has
+    .then(record)  # skipped on a cut
+    .conclude(release)  # runs either way
+)
+loop = ff.create().map(item, items=...).with_shortcut("cut")
+```
+
+A cut while items are in `work` ends each of them with `release`; items
+that had not started are `Skipped` and run nothing.
 
 A signal set outside the region waits for it: a cut during `prepare`
 does not touch `prepare`, and `loop` then ends as soon as it starts.
