@@ -211,10 +211,25 @@ class ShortcutRun:
         self.stop.clear()
         return True
 
+    @property
+    def pending(self) -> bool:
+        """True when the signal is set and the run has neither taken it over nor landed.
+
+        Boundaries check this directly (:func:`~._halt_observer.is_halt_signaled`):
+        :attr:`stop` follows the signal one loop tick later, and a step
+        that sets the signal without awaiting reaches its boundary first.
+        """
+        return self.event.is_set() and not self.active and not self.landed
+
     async def _watch(self) -> None:
-        """Stop the run once the signal is set, unless the chain has landed by then."""
+        """Stop the run once the signal is set, unless it has landed or taken it over by then.
+
+        A boundary can see the signal first and the run take it over
+        (:meth:`take_over` clears :attr:`stop`) before this task runs;
+        setting :attr:`stop` then would stop the continuation.
+        """
         await self.event.wait()
-        if not self.landed:
+        if not self.landed and not self.active:
             self.stop.set()
 
 
