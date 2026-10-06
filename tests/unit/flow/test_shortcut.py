@@ -821,6 +821,133 @@ class TestSubtreeCover:
         assert await flow.run("") == "acd"
         assert ran == ["a", "c", "d"]
 
+    @staticmethod
+    def _research_steps(ran: list[str], cut: asyncio.Event) -> dict[str, Any]:
+        """Verbs recording ``name:item``; ``research`` of item 1 cuts while item 0 is in it."""
+        gate = asyncio.Event()
+
+        def make(name: str) -> Any:
+            @verb
+            async def step(ctx: Context[Any], n: Any) -> Any:
+                ran.append(f"{name}:{n}")
+                if name == "research" and n == 1:
+                    cut.set()
+                    await asyncio.sleep(0)  # the stop follows the signal
+                    gate.set()
+                elif name == "research":
+                    await gate.wait()
+                return n
+
+            step.__qualname__ = f"step_{name}"
+            return step
+
+        names = ("research", "extract", "digest", "more", "close", "finish")
+        return {name: make(name) for name in names}
+
+    async def test_what_runs_under_a_landed_flow_runs_normally(self) -> None:
+        """Items land on ``extract``; the branch arm after it runs while the batch is still cut."""
+        ran: list[str] = []
+        cut = asyncio.Event()
+        s = self._research_steps(ran, cut)
+        digest = _ff().create().call(s["digest"]).then(s["more"])
+        item = (
+            _ff()
+            .create()
+            .with_shortcut("cut", to="extract")
+            .call(s["research"])
+            .then(s["extract"], name="extract")
+            .branch(when=lambda _n, _c: True, then=digest)
+            .then(s["close"])
+        )
+        batch = (
+            _top(cut)
+            .with_shortcut("cut", to="finish")
+            .map(item, items=lambda _p, _c: [0, 1, 2], max_concurrency=2)
+            .then(s["finish"], name="finish")
+        )
+        results = await batch.run()
+        assert results[:2] == [0, 1] and isinstance(results[2], Skipped)
+        names = ("research", "extract", "digest", "more", "close")
+        assert sorted(ran[:-1]) == sorted(f"{name}:{n}" for name in names for n in (0, 1))
+        assert ran[-1].startswith("finish:")
+
+    async def test_a_subflow_and_an_iterate_under_a_landed_flow_run_fully(self) -> None:
+        ran: list[str] = []
+        cut = asyncio.Event()
+        s = _steps(ran, cut, cut_in="a")
+        passes: list[int] = []
+
+        @verb
+        async def count(ctx: Context[Any], x: str) -> str:
+            passes.append(len(passes))
+            return x
+
+        tail = _ff().create().call(s["c"]).iterate(lambda b: b.call(count), max_iters=3)
+        inner = (
+            _ff()
+            .create()
+            .with_shortcut("cut", to="b")
+            .call(s["a"])
+            .then(s["b"], name="b")
+            .then(tail)
+        )
+        flow = _top(cut).with_shortcut("cut", to="d").call(inner).then(s["d"], name="d")
+        assert await flow.run("") == "abcd"
+        assert ran == ["a", "b", "c", "d"]
+        assert passes == [0, 1, 2]
+
+    async def test_a_halt_under_a_landed_flow_resumes_normally(self) -> None:
+        """Halted in the arm after the item landed: resume finishes the arm."""
+        store = InMemoryCheckpointStore()
+
+        def build(halt: asyncio.Event, cut: asyncio.Event, ran: list[str], arm: bool) -> Any:
+            s = self._research_steps(ran, cut)
+
+            @verb
+            async def research(ctx: Context[Any], n: int) -> int:
+                ran.append(f"research:{n}")
+                cut.set()  # completes; item 1 does not start
+                await asyncio.sleep(0)  # the stop follows the signal
+                return n
+
+            @verb
+            async def digest(ctx: Context[Any], n: int) -> int:
+                ran.append(f"digest:{n}")
+                if arm:
+                    halt.set()
+                    raise Interrupted()
+                return n
+
+            item = (
+                _ff()
+                .create()
+                .with_shortcut("cut", to="extract")
+                .call(research)
+                .then(s["extract"], name="extract")
+                .branch(when=lambda _n, _c: True, then=_ff().create().call(digest).then(s["more"]))
+                .then(s["close"])
+            )
+            return (
+                _ff()
+                .create(state={})
+                .with_checkpoint_store(store, "landed-halt")
+                .with_halt(halt)
+                .with_signal("cut", cut)
+                .with_shortcut("cut", to="finish")
+                .map(item, items=lambda _p, _c: [0, 1], max_concurrency=1)
+                .then(s["finish"], name="finish")
+            )
+
+        ran: list[str] = []
+        assert await build(asyncio.Event(), asyncio.Event(), ran, arm=True).run() is HALTED
+        assert ran == ["research:0", "extract:0", "digest:0"]
+
+        ran.clear()
+        flow = build(asyncio.Event(), asyncio.Event(), ran, arm=False)
+        await flow.run(resume="latest")
+        assert ran[:3] == ["digest:0", "more:0", "close:0"]
+        assert ran[3].startswith("finish:") and len(ran) == 4
+
     async def test_resume_keeps_the_cover(self) -> None:
         """Halted while covered: resume ends the covered chain after the interrupted step."""
         store = InMemoryCheckpointStore()
