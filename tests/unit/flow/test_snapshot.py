@@ -306,12 +306,12 @@ class TestFlowSnapshots:
         flow = (
             Factory(LG)
             .create(state={})
-            .with_checkpoint_store(InMemoryCheckpointStore(), "tuple")
+            .with_checkpoint_store(InMemoryCheckpointStore(), "unstorable")
             .with_checkpointer()
             .call(save)
         )
-        with pytest.raises(TypeError, match=r"cursor at 'chain': a value of type tuple cannot be"):
-            await flow.run((1, 2))
+        with pytest.raises(TypeError, match=r"cursor at 'chain': a value of type set cannot be"):
+            await flow.run({1, 2})
 
     async def test_a_blob_and_a_tree_with_the_same_bytes_are_both_stored(self) -> None:
         """The blob ``[]`` and the empty tree share a hash; neither put may skip the other."""
