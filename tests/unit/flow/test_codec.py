@@ -9,8 +9,9 @@ classmethod ``from_dict()``. Everything else fails naming the value's path.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -19,7 +20,12 @@ from llm_saia.core.trace import GuardOutcome, LLMCall, Step, ToolOutcome, VerbTr
 from llm_saia.core.types import LoopScore, TaskResult
 from pydantic import BaseModel
 
+from llm_gent.flow import HALTED, Context, Factory, Interrupted, verb
+from llm_gent.flow.state import StateDataclass
 from llm_gent.flow.state.codec import decode, encode
+from llm_gent.flow.stores import InMemoryCheckpointStore
+
+from .conftest import make_test_logger
 
 
 pytestmark = pytest.mark.unit
@@ -45,6 +51,14 @@ class Point:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Point:
         return cls(**data)
+
+
+@dataclass
+class Pairs(StateDataclass):
+    """A state dataclass with tuple fields: nested in a list, and top-level."""
+
+    pairs: list[tuple[str, str]] = field(default_factory=list)
+    fixed: tuple[str, ...] = ()
 
 
 @dataclass
@@ -80,9 +94,37 @@ class TestRoundTrip:
         back = _round_trip({"p": Point(1, 2), "ps": [Point(3, 4)]})
         assert back == {"p": Point(1, 2), "ps": [Point(3, 4)]}
 
-    def test_a_dict_with_its_own_type_key_is_not_mistaken_for_a_typed_value(self) -> None:
-        value = {"$type": "tests.unit.flow.test_codec:Point", "$data": {"x": 1, "y": 2}}
-        assert _round_trip(value) == value
+    @pytest.mark.parametrize(
+        "value",
+        [(1, "a"), (), ((1, 2), [3, (4,)]), {"t": (1, 2)}, [(1, "a"), ("b", 2)]],
+    )
+    def test_a_tuple_comes_back_a_tuple(self, value: Any) -> None:
+        back = _round_trip(value)
+        assert back == value
+        assert repr(back) == repr(value)  # tuples stay tuples, lists stay lists, at every depth
+
+    def test_a_tuple_is_stored_tagged(self) -> None:
+        assert encode((1, "a"), "v") == {"$type": "tuple", "$data": [1, "a"]}
+
+    def test_a_state_dataclass_with_tuples_inside_lists(self) -> None:
+        """``to_dict`` keeps a tuple nested in a list; ``from_dict`` gets it back as emitted."""
+        value = Pairs(pairs=[("n1", "a"), ("n2", "b")], fixed=("x", "y"))
+        back = _round_trip(value)
+        assert type(back) is Pairs and back == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"$type": "tests.unit.flow.test_codec:Point", "$data": {"x": 1, "y": 2}},
+            {"$type": "tuple", "$data": [1, 2]},
+            {"$type": "dict", "$data": {}},
+        ],
+    )
+    def test_a_dict_with_its_own_type_key_is_not_mistaken_for_a_typed_value(
+        self, value: dict[str, Any]
+    ) -> None:
+        back = _round_trip(value)
+        assert type(back) is dict and back == value
 
     def test_saia_task_result(self) -> None:
         """A paused Loop result with tool calls, score and trace comes back equal."""
@@ -125,7 +167,6 @@ class TestRejected:
     @pytest.mark.parametrize(
         ("value", "message"),
         [
-            ((1, 2), "a value of type tuple cannot be checkpointed"),
             ({1: "a"}, "a dict with non-str keys"),
             (float("nan"), "nan has no JSON form"),
             (OnlyToDict(1), "a value of type OnlyToDict cannot be checkpointed"),
@@ -163,3 +204,36 @@ class TestRejected:
         stored = {"$type": "tests.unit.flow.test_codec:Note", "$data": {"title": 1}}
         with pytest.raises(TypeError, match=r"^v: stored .*Note cannot be rebuilt"):
             decode(stored, "v")
+
+
+@pytest.mark.asyncio
+class TestInAFlow:
+    async def test_an_iterate_carrying_tuples_halts_and_resumes(self) -> None:
+        """The carry holds tuples nested in a list: the halt checkpoint stores it, resume gets it back."""
+        store = InMemoryCheckpointStore()
+
+        def build(halt: asyncio.Event, arm: bool, seen: list[Pairs]) -> Any:
+            @verb
+            async def grow(ctx: Context[Any], carry: Pairs) -> Pairs:
+                n = len(carry.pairs)
+                if arm and n == 1:
+                    halt.set()
+                    raise Interrupted()
+                seen.append(carry)
+                return Pairs(pairs=[*carry.pairs, (f"n{n}", "a")], fixed=carry.fixed)
+
+            return (
+                Factory(make_test_logger())
+                .create(state={})
+                .with_checkpoint_store(store, "tuples")
+                .with_halt(halt)
+                .iterate(lambda b: b.call(grow), max_iters=3)
+            )
+
+        start = Pairs(fixed=("x",))
+        assert await build(asyncio.Event(), True, []).run(start) is HALTED
+
+        seen: list[Pairs] = []
+        result = await build(asyncio.Event(), False, seen).run(start, resume="latest")
+        assert seen[0] == Pairs(pairs=[("n0", "a")], fixed=("x",))
+        assert result == Pairs(pairs=[("n0", "a"), ("n1", "a"), ("n2", "a")], fixed=("x",))

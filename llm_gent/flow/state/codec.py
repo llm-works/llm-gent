@@ -7,7 +7,9 @@ Such a value must come back on resume as the value it was, so three forms
 are accepted:
 
 - plain JSON: ``dict`` with ``str`` keys, ``list``, ``str``, ``int``,
-  ``float``, ``bool``, ``None`` — stored as is;
+  ``float``, ``bool``, ``None`` — stored as is; a ``tuple`` of such
+  values, stored tagged as ``{"$type": "tuple", "$data": [...]}`` so it
+  comes back a tuple;
 - a pydantic model — stored as ``model_dump(mode="json")``, rebuilt with
   ``model_validate``;
 - an object with ``to_dict()`` and a classmethod ``from_dict()`` (the
@@ -16,7 +18,8 @@ are accepted:
 
 A typed value is stored as ``{"$type": "<module>:<qualname>", "$data": ...}``;
 a plain dict that has a ``"$type"`` key of its own is wrapped the same way
-with type ``"dict"`` so it is never mistaken for one. Anything else raises
+with type ``"dict"`` so it is never mistaken for one, and a tuple with type
+``"tuple"``. Anything else raises
 :class:`TypeError` naming the value's path. On decode a class is found only
 in modules already imported, and used only when it is a pydantic model or
 has ``from_dict``: a stored type name cannot make the codec import or call
@@ -35,6 +38,7 @@ from pydantic import BaseModel
 TYPE = "$type"
 DATA = "$data"
 _DICT = "dict"
+_TUPLE = "tuple"
 
 
 def encode(value: Any, where: str) -> Any:
@@ -52,6 +56,8 @@ def encode(value: Any, where: str) -> Any:
         return value
     if isinstance(value, list):
         return [encode(item, where) for item in value]
+    if isinstance(value, tuple):
+        return {TYPE: _TUPLE, DATA: [encode(item, where) for item in value]}
     if isinstance(value, dict):
         return _encode_dict(value, where)
     if isinstance(value, BaseModel):
@@ -81,6 +87,8 @@ def decode(data: Any, where: str) -> Any:
         return {k: decode(v, where) for k, v in data.items()}
     if data[TYPE] == _DICT:
         return {k: decode(v, where) for k, v in data[DATA].items()}
+    if data[TYPE] == _TUPLE:
+        return tuple(decode(item, where) for item in data[DATA])
     cls = _load(data[TYPE], where)
     try:
         if isinstance(cls, type) and issubclass(cls, BaseModel):
