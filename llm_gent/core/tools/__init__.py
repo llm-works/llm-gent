@@ -8,6 +8,7 @@ from enum import StrEnum
 from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult
 from .builtin import (
     CompleteTaskTool,
+    FetchResult,
     FileReadTool,
     FileWriteTool,
     HTTPFetchTool,
@@ -73,6 +74,7 @@ __all__ = [
     "ToolExecutionResult",
     # Built-in tools
     "CompleteTaskTool",
+    "FetchResult",
     "FileReadTool",
     "FileWriteTool",
     "HTTPFetchTool",

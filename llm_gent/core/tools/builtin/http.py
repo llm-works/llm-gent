@@ -10,13 +10,26 @@ import socket
 import ssl
 from collections.abc import Iterable
 from typing import Any
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import ParseResult, urljoin, urlparse
 
 import httpcore
 import httpx
 from httpcore._backends.base import SOCKET_OPTION
 
 from ..base import BaseTool, ToolResult
+
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+# Dropped when a redirect leaves the origin they were sent to, as httpx does.
+_ORIGIN_BOUND_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
+
+
+class FetchResult(ToolResult):
+    """Result of a fetch that got a response: the response's ToolResult plus its URL."""
+
+    url: str
+    """The URL the response came from: the requested one, or where its redirects ended."""
 
 
 class _PinnedIPBackend(httpcore.SyncBackend):
@@ -138,6 +151,11 @@ class HTTPFetchTool(BaseTool):
           (localhost, RFC 1918 ranges, link-local, cloud metadata endpoints).
         - Domain restrictions: Use allowed_domains or blocked_domains to control
           which domains can be accessed.
+        - Redirects are followed up to max_redirects; every hop is checked like
+          the requested URL (scheme, domain, resolved IP) before it is fetched.
+
+    A response comes back as a :class:`FetchResult`, whose ``url`` is where the
+    redirects ended.
 
     Example:
         tool = HTTPFetchTool(allowed_domains=["api.github.com"])
@@ -176,6 +194,7 @@ class HTTPFetchTool(BaseTool):
         blocked_domains: list[str] | None = None,
         default_headers: dict[str, str] | None = None,
         block_private_ips: bool = True,
+        max_redirects: int = 5,
     ) -> None:
         """Initialize HTTP fetch tool.
 
@@ -193,7 +212,15 @@ class HTTPFetchTool(BaseTool):
                               - Private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
                               - Link-local (169.254.0.0/16, fe80::/10) - includes cloud metadata
                               - Other non-routable addresses
+            max_redirects: Redirects followed per fetch. Defaults to 5; 0 returns
+                          a redirect as the response.
+
+        Raises:
+            ValueError: max_redirects is negative.
         """
+        if max_redirects < 0:
+            raise ValueError(f"max_redirects must be >= 0, got {max_redirects}")
+        self._max_redirects = max_redirects
         self._timeout = timeout
         self._max_response_size = max_response_size
         self._allowed_domains = set(allowed_domains) if allowed_domains else None
@@ -215,7 +242,23 @@ class HTTPFetchTool(BaseTool):
         if not isinstance(url, str) or not url:
             return ToolResult(success=False, output="", error="Missing or invalid 'url' argument")
 
-        # Parse and validate URL
+        pinned_ip = self._check_target(url)
+        if isinstance(pinned_ip, ToolResult):
+            return pinned_ip
+
+        # Validate headers
+        headers = self._build_headers(kwargs.get("headers"))
+        if isinstance(headers, ToolResult):
+            return headers
+
+        # Make the request using the pre-validated IP
+        return self._fetch(url, headers, pinned_ip)
+
+    def _check_target(self, url: str) -> str | ToolResult:
+        """Validate ``url`` and resolve its host. Returns the IP to connect to, or an error.
+
+        Runs for the requested URL and again for every redirect hop.
+        """
         parsed = self._parse_url(url)
         if isinstance(parsed, ToolResult):
             return parsed
@@ -226,18 +269,7 @@ class HTTPFetchTool(BaseTool):
 
         # Resolve and validate IPs (SSRF protection)
         # Returns the validated IP to pin the connection to, preventing DNS rebinding
-        ip_result = self._resolve_and_validate_ip(parsed.netloc)
-        if isinstance(ip_result, ToolResult):
-            return ip_result
-        pinned_ip = ip_result  # IP to use for the actual connection
-
-        # Validate headers
-        headers = self._build_headers(kwargs.get("headers"))
-        if isinstance(headers, ToolResult):
-            return headers
-
-        # Make the request using the pre-validated IP
-        return self._fetch(url, headers, pinned_ip)
+        return self._resolve_and_validate_ip(parsed.netloc)
 
     def _parse_url(self, url: str) -> ParseResult | ToolResult:
         """Parse and validate URL. Returns ParseResult or error."""
@@ -397,8 +429,7 @@ class HTTPFetchTool(BaseTool):
     def _fetch(self, url: str, headers: dict[str, str], pinned_ip: str | None) -> ToolResult:
         """Perform HTTP request using a pre-validated IP to prevent DNS rebinding."""
         try:
-            response = self._execute_request(url, headers, pinned_ip)
-            return self._build_response(response)
+            return self._follow(url, headers, pinned_ip)
         except (httpx.TimeoutException, httpcore.TimeoutException):
             return ToolResult(
                 success=False, output="", error=f"Request timed out after {self._timeout} seconds"
@@ -408,15 +439,60 @@ class HTTPFetchTool(BaseTool):
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Request failed: {e}")
 
+    def _follow(self, url: str, headers: dict[str, str], pinned_ip: str | None) -> ToolResult:
+        """GET ``url``, following redirects; each hop is checked like the requested URL.
+
+        Every hop gets its own client pinned to that hop's validated IP. Cookies
+        set along the way are sent on later hops (a redirect may be a cookie round trip).
+        """
+        cookies = httpx.Cookies()
+        for _ in range(self._max_redirects + 1):
+            response = self._execute_request(url, headers, pinned_ip, cookies)
+            location = self._redirect_location(response)
+            if location is None or self._max_redirects == 0:
+                result = self._build_response(response)
+                return FetchResult(url=url, **result.model_dump())
+            cookies.extract_cookies(response)
+            next_url = urljoin(url, location)
+            target = self._check_target(next_url)
+            if isinstance(target, ToolResult):
+                return ToolResult(
+                    success=False, output="", error=f"Redirect to {next_url}: {target.error}"
+                )
+            headers = self._headers_for_hop(url, next_url, headers)
+            url, pinned_ip = next_url, target
+        return ToolResult(
+            success=False, output="", error=f"Too many redirects (more than {self._max_redirects})"
+        )
+
+    @staticmethod
+    def _redirect_location(response: httpx.Response) -> str | None:
+        """The ``Location`` of a redirect to follow; None when ``response`` is not one."""
+        if response.status_code not in _REDIRECT_STATUSES:
+            return None
+        return response.headers.get("location") or None
+
+    @staticmethod
+    def _headers_for_hop(url: str, next_url: str, headers: dict[str, str]) -> dict[str, str]:
+        """``headers`` for the hop from ``url`` to ``next_url``.
+
+        Credentials stay with the origin they were sent to: a hop to another
+        scheme, host or port drops them.
+        """
+        here, there = urlparse(url), urlparse(next_url)
+        if (here.scheme, here.netloc.lower()) == (there.scheme, there.netloc.lower()):
+            return headers
+        return {k: v for k, v in headers.items() if k.lower() not in _ORIGIN_BOUND_HEADERS}
+
     def _execute_request(
-        self, url: str, headers: dict[str, str], pinned_ip: str | None
+        self, url: str, headers: dict[str, str], pinned_ip: str | None, cookies: httpx.Cookies
     ) -> httpx.Response:
-        """Execute the HTTP GET request with optional IP pinning."""
+        """Execute one HTTP GET, without following redirects, with optional IP pinning."""
         if pinned_ip:
             transport = _PinnedIPTransport(pinned_ip, self._timeout)
-            with httpx.Client(transport=transport) as client:
+            with httpx.Client(transport=transport, cookies=cookies) as client:
                 return client.get(url, headers=headers)
-        with httpx.Client(timeout=self._timeout) as client:
+        with httpx.Client(timeout=self._timeout, cookies=cookies) as client:
             return client.get(url, headers=headers)
 
     def _build_response(self, response: httpx.Response) -> ToolResult:
