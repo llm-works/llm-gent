@@ -10,6 +10,7 @@ import pytest
 
 from llm_gent import (
     BaseTool,
+    FetchResult,
     FileReadTool,
     FileWriteTool,
     HTTPFetchTool,
@@ -1269,6 +1270,185 @@ class TestHTTPFetchTool:
 
         assert result.success is False
         assert "dns" in result.error.lower() or "resolution" in result.error.lower()
+
+
+_DNS = {
+    "site.example": "93.184.216.10",
+    "other.example": "93.184.216.20",
+    "www.example": "93.184.216.30",
+    "intranet.example": "10.0.0.5",
+}
+
+
+def _resolve(host: str, *_: object) -> list[tuple[object, ...]]:
+    """socket.getaddrinfo over the _DNS table."""
+    import socket
+
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_DNS[host], 0))]
+
+
+class _Site:
+    """Stands in for httpx.Client: answers GETs from a URL -> (status, headers, body)
+    table and records every request it was sent, with the Cookie header the
+    client's jar would add."""
+
+    def __init__(self, routes: dict[str, tuple[int, dict[str, str], str]]) -> None:
+        self.routes = routes
+        self.sent: list[httpx.Request] = []
+
+    def client(self, **kwargs: object) -> MagicMock:
+        cookies = kwargs.get("cookies")
+        client = MagicMock()
+        client.__enter__.return_value.get.side_effect = lambda url, headers: self._get(
+            url, headers, cookies
+        )
+        return client
+
+    def _get(self, url: str, headers: dict[str, str], cookies: object) -> httpx.Response:
+        request = httpx.Request("GET", url, headers=headers)
+        if isinstance(cookies, httpx.Cookies):
+            cookies.set_cookie_header(request)
+        self.sent.append(request)
+        status, response_headers, body = self.routes[url]
+        return httpx.Response(status, headers=response_headers, text=body, request=request)
+
+
+class TestHTTPFetchRedirects:
+    """HTTPFetchTool follows redirects; every hop is checked like the requested URL."""
+
+    def _fetch(
+        self, site: _Site, url: str, tool: HTTPFetchTool | None = None, **kwargs: object
+    ) -> ToolResult:
+        with (
+            patch("llm_gent.core.tools.builtin.http.socket.getaddrinfo", side_effect=_resolve),
+            patch("llm_gent.core.tools.builtin.http.httpx.Client", side_effect=site.client),
+        ):
+            return (tool or HTTPFetchTool()).execute(url=url, **kwargs)
+
+    def test_a_303_to_a_public_page_returns_that_page_and_its_url(self):
+        site = _Site(
+            {
+                "https://site.example/a": (303, {"location": "https://www.example/a"}, ""),
+                "https://www.example/a": (200, {}, "the page"),
+            }
+        )
+        result = self._fetch(site, "https://site.example/a")
+        assert isinstance(result, FetchResult)
+        assert (result.success, result.output, result.url) == (
+            True,
+            "the page",
+            "https://www.example/a",
+        )
+
+    def test_a_response_without_redirects_carries_the_requested_url(self):
+        site = _Site({"https://site.example/a": (200, {}, "body")})
+        result = self._fetch(site, "https://site.example/a")
+        assert isinstance(result, FetchResult)
+        assert result.url == "https://site.example/a"
+
+    def test_a_cookie_set_by_a_redirect_is_sent_on_the_next_hop(self):
+        """A cookie round trip: the redirect sets a cookie and points back."""
+        site = _Site(
+            {
+                "https://site.example/a": (
+                    303,
+                    {"location": "/a?check", "set-cookie": "session=s1; Path=/"},
+                    "",
+                ),
+                "https://site.example/a?check": (200, {}, "the page"),
+            }
+        )
+        result = self._fetch(site, "https://site.example/a")
+        assert result.output == "the page"
+        assert site.sent[1].headers.get("cookie") == "session=s1"
+
+    def test_a_relative_location_resolves_against_the_current_url(self):
+        site = _Site(
+            {
+                "https://site.example/x/a": (302, {"location": "../b"}, ""),
+                "https://site.example/b": (200, {}, "b"),
+            }
+        )
+        assert self._fetch(site, "https://site.example/x/a").output == "b"
+
+    def test_a_redirect_to_a_private_ip_is_refused_before_any_request(self):
+        site = _Site(
+            {"https://site.example/a": (302, {"location": "http://intranet.example/page"}, "")}
+        )
+        result = self._fetch(site, "https://site.example/a")
+        assert result.success is False
+        assert "http://intranet.example/page" in result.error
+        assert "private" in result.error
+        assert [str(r.url) for r in site.sent] == ["https://site.example/a"]
+
+    def test_a_redirect_to_a_blocked_domain_is_refused(self):
+        site = _Site({"https://site.example/a": (302, {"location": "https://www.example/"}, "")})
+        tool = HTTPFetchTool(blocked_domains=["www.example"])
+        result = self._fetch(site, "https://site.example/a", tool)
+        assert result.success is False
+        assert "blocked" in result.error
+        assert len(site.sent) == 1
+
+    def test_a_redirect_outside_the_allowed_domains_is_refused(self):
+        site = _Site({"https://site.example/a": (302, {"location": "https://www.example/"}, "")})
+        tool = HTTPFetchTool(allowed_domains=["site.example"])
+        result = self._fetch(site, "https://site.example/a", tool)
+        assert result.success is False
+        assert "not in allowed list" in result.error
+        assert len(site.sent) == 1
+
+    def test_a_redirect_to_a_non_http_scheme_is_refused(self):
+        site = _Site({"https://site.example/a": (302, {"location": "ftp://files.example/a"}, "")})
+        result = self._fetch(site, "https://site.example/a")
+        assert result.success is False
+        assert "scheme" in result.error
+        assert len(site.sent) == 1
+
+    def test_more_redirects_than_the_limit_is_an_error(self):
+        site = _Site(
+            {f"https://site.example/{i}": (302, {"location": f"/{i + 1}"}, "") for i in range(4)}
+        )
+        result = self._fetch(site, "https://site.example/0", HTTPFetchTool(max_redirects=2))
+        assert result.success is False
+        assert result.error == "Too many redirects (more than 2)"
+        assert len(site.sent) == 3
+
+    def test_max_redirects_zero_returns_the_redirect_as_the_response(self):
+        site = _Site({"https://site.example/a": (303, {"location": "/b"}, "see other")})
+        result = self._fetch(site, "https://site.example/a", HTTPFetchTool(max_redirects=0))
+        assert isinstance(result, FetchResult)
+        assert result.success is False
+        assert result.error == "HTTP 303: See Other"
+        assert result.url == "https://site.example/a"
+
+    def test_a_negative_max_redirects_is_rejected(self):
+        with pytest.raises(ValueError, match="max_redirects"):
+            HTTPFetchTool(max_redirects=-1)
+
+    def test_a_redirect_without_location_is_the_response(self):
+        site = _Site({"https://site.example/a": (302, {}, "nowhere")})
+        result = self._fetch(site, "https://site.example/a")
+        assert result.success is False
+        assert result.error == "HTTP 302: Found"
+        assert len(site.sent) == 1
+
+    def test_credentials_stay_with_their_origin(self):
+        """Same-origin hops keep Authorization; a hop to another host drops it."""
+        site = _Site(
+            {
+                "https://site.example/a": (302, {"location": "/b"}, ""),
+                "https://site.example/b": (302, {"location": "https://other.example/c"}, ""),
+                "https://other.example/c": (200, {}, "done"),
+            }
+        )
+        tool = HTTPFetchTool(default_headers={"User-Agent": "TestBot/1.0"})
+        result = self._fetch(
+            site, "https://site.example/a", tool, headers={"Authorization": "Bearer t"}
+        )
+        assert result.output == "done"
+        auth = [r.headers.get("authorization") for r in site.sent]
+        assert auth == ["Bearer t", "Bearer t", None]
+        assert site.sent[2].headers["user-agent"] == "TestBot/1.0"
 
 
 # Note: Tool execution loop tests have been moved to llm-saia.

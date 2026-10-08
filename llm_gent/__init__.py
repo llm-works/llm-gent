@@ -24,6 +24,7 @@ from .core.task import Task, TaskCompletion, TaskResult, TaskStatus
 from .core.tools import (
     BaseTool,
     CompleteTaskTool,
+    FetchResult,
     FileReadTool,
     FileWriteTool,
     HTTPFetchTool,
@@ -91,6 +92,7 @@ __all__ = [
     # Tools
     "BaseTool",
     "CompleteTaskTool",
+    "FetchResult",
     "FileReadTool",
     "FileWriteTool",
     "HTTPFetchTool",

@@ -5,7 +5,7 @@
 
 from .complete import CompleteTaskTool
 from .file import FileReadTool, FileWriteTool
-from .http import HTTPFetchTool
+from .http import FetchResult, HTTPFetchTool
 from .memory import RecallTool, RememberTool
 from .shell import ShellTool
 from .web import (
@@ -18,6 +18,7 @@ from .web import (
 
 __all__ = [
     "CompleteTaskTool",
+    "FetchResult",
     "FileReadTool",
     "FileWriteTool",
     "HTTPFetchTool",

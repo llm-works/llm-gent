@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from llm_gent import (
+    FetchResult,
     ToolResult,
     WebFetchTool,
     WebSearchTool,
@@ -224,6 +225,21 @@ class TestWebFetchTool:
 
         assert result.success is True
         assert result.output == html  # No extraction, raw HTML preserved
+
+    def test_final_url_survives_extraction_and_truncation(self, mock_lg):
+        """The page's final URL stays on the result; the output is the page text alone."""
+        tool = WebFetchTool(mock_lg, max_text_length=100)
+        fetched = FetchResult(success=True, output="word " * 200, url="https://www.example/a")
+
+        with patch.object(tool._http, "execute", return_value=fetched):
+            result = tool.execute(url="https://site.example/a")
+
+        assert isinstance(result, FetchResult)
+        assert result.url == "https://www.example/a"
+        assert result.output.startswith("word word")
+
+    def test_max_redirects_passed_to_http_fetch(self, mock_lg):
+        assert WebFetchTool(mock_lg, max_redirects=2)._http._max_redirects == 2
 
 
 # ---------------------------------------------------------------------------
