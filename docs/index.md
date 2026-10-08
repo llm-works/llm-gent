@@ -111,6 +111,11 @@ assert await flow.run("ship it") == 3
 `ctx.state.data`. Adding a third downstream verb that also needs `target` is
 free — the state is already there.
 
+A `Role` can also be just a name, `Role(name="planner")`, when the app's
+`SAIAFactory` resolves the backend, model, temperature and max tokens itself
+(from its config, by name). Gent reads none of those fields; any left unset
+is `None`, for the factory to fill in.
+
 ### Return values vs state
 
 A verb has two output channels — its return value and `ctx.state.data`.

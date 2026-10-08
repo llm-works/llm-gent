@@ -10,7 +10,7 @@ object — saia knows verbs, llm-infer knows routing strings. The flow layer
 on top of both needs a small explicit shape.
 
 ``Role`` carries two kinds of information: statically-typed persona config
-(name, backend, model, temperature, max_tokens, style) and an open
+(name, and optionally backend, model, temperature, max_tokens, style) and an open
 ``params`` mapping for per-run parameters the enclosing consumer's
 :class:`SAIAFactory` interprets at build time (max_iterations, cost
 trackers, session identifiers, task state — anything gent itself doesn't
@@ -31,22 +31,28 @@ class Role:
     :class:`SAIAFactory` reads a ``Role`` and constructs the actual saia
     instance. The ``Role`` name is also the identifier used for llm-infer's
     routing param.
+
+    Only ``name`` is required: ``Role(name="planning")`` binds a step to a
+    role whose backend, model, temperature and max_tokens the app's
+    :class:`SAIAFactory` fills in (e.g. from its config, by name). Gent
+    itself reads none of them; a field left ``None`` is the factory's to
+    decide.
     """
 
     name: str
     """Role identifier — used as llm-infer's routing key."""
 
-    backend: str
-    """llm-infer backend id (e.g. ``"openai"``, ``"anthropic"``, ``"gemini"``)."""
+    backend: str | None = None
+    """llm-infer backend id (e.g. ``"openai"``, ``"anthropic"``); ``None``: the factory's."""
 
-    model: str
-    """Model identifier within the backend."""
+    model: str | None = None
+    """Model identifier within the backend; ``None``: the factory's."""
 
-    temperature: float = 0.7
-    """Sampling temperature."""
+    temperature: float | None = None
+    """Sampling temperature; ``None``: the factory's."""
 
-    max_tokens: int = 4096
-    """Maximum completion tokens per call."""
+    max_tokens: int | None = None
+    """Maximum completion tokens per call; ``None``: the factory's."""
 
     style: str | None = None
     """Optional prompt preamble injected by the flow into system prompts."""

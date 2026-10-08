@@ -6,28 +6,28 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+from typing import Any
 
 import pytest
 
-from llm_gent.flow import Role
+from llm_gent.flow import Context, Flow, Role, verb
+
+from .conftest import make_test_logger
 
 
 class TestRole:
     """Role dataclass shape and semantics."""
 
-    def test_required_fields(self) -> None:
-        """Role requires name, backend, model."""
-        r = Role(name="judge", backend="openai", model="gpt-4o-mini")
-        assert r.name == "judge"
-        assert r.backend == "openai"
-        assert r.model == "gpt-4o-mini"
+    def test_fields(self) -> None:
+        r = Role(name="judge", backend="openai", model="gpt-4o-mini", temperature=0.2)
+        assert (r.name, r.backend, r.model) == ("judge", "openai", "gpt-4o-mini")
+        assert r.temperature == 0.2
 
-    def test_defaults(self) -> None:
-        """Optional fields have conservative defaults."""
-        r = Role(name="x", backend="y", model="z")
-        assert r.temperature == 0.7
-        assert r.max_tokens == 4096
-        assert r.style is None
+    def test_a_name_alone_is_a_role(self) -> None:
+        """Every config field left unset is None: the SAIAFactory fills it in."""
+        r = Role(name="planning")
+        assert (r.backend, r.model, r.temperature, r.max_tokens, r.style) == (None,) * 5
+        assert r.params == {}
 
     def test_frozen(self) -> None:
         """Role is immutable — attempting to mutate raises."""
@@ -117,3 +117,37 @@ class TestRoleParams:
         r = Role(name="x", backend="y", model="z").with_params(a=1)
         with pytest.raises(FrozenInstanceError):
             r.params = {"b": 2}  # type: ignore[misc]
+
+
+class _NamedConfigFactory:
+    """A SAIAFactory that fills in what a role leaves unset, from config by name."""
+
+    def __init__(self) -> None:
+        self.built: list[Role] = []
+
+    def build(self, role: Role) -> Any:
+        self.built.append(role)
+        return {"model": role.model or {"planning": "m-plan"}[role.name]}
+
+
+@pytest.mark.asyncio
+class TestRoleByName:
+    async def test_a_step_bound_by_name_reaches_the_factory_once(self) -> None:
+        planning = Role(name="planning")
+        seen: list[Any] = []
+
+        @verb(role=planning)
+        async def first(ctx: Context[Any], x: Any = None) -> Any:
+            seen.append(ctx.saia)
+            return x
+
+        @verb(role=Role(name="planning"))
+        async def second(ctx: Context[Any], x: Any = None) -> Any:
+            seen.append(ctx.saia)
+            return x
+
+        factory = _NamedConfigFactory()
+        await Flow(make_test_logger(), saia_factory=factory).call(first).then(second).run()
+        assert factory.built == [planning]  # equal name-only roles share one saia
+        assert seen == [{"model": "m-plan"}, {"model": "m-plan"}]
+        assert seen[0] is seen[1]
