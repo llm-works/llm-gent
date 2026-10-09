@@ -1215,7 +1215,7 @@ class Flow:
                 run that fails before its first commit leaves ``HEAD``
                 where it was.
                 Resuming requires
-                :meth:`with_checkpointer`. Bound parameter: not forwarded
+                :meth:`with_checkpoint_store`. Bound parameter: not forwarded
                 to the first node.
             restart: Start over from a checkpointed commit's data:
                 ``"latest"`` (the commit ``resume="latest"`` would check
@@ -1232,7 +1232,7 @@ class Flow:
                 brings its resources back as they were then: spend recorded
                 after it is not counted. On an empty history ``"latest"``
                 runs from ``state`` as given. Not together with ``resume``;
-                needs :meth:`with_checkpointer`. Bound parameter: not
+                needs :meth:`with_checkpoint_store`. Bound parameter: not
                 forwarded to the first node.
             **kwargs: Keyword inputs to the first node.
 
@@ -1252,7 +1252,7 @@ class Flow:
 
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode or
-                a restart was requested without :meth:`with_checkpointer` wired, OR
+                a restart was requested without :meth:`with_checkpoint_store` wired, OR
                 a nested flow sets a halt other than this flow's or declares
                 a signal, OR a shortcut's signal is not declared or a flow
                 under it declares a shortcut on the same signal, OR
