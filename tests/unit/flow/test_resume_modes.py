@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""``Flow.run(resume="latest")``, and what a run that raises leaves behind.
+"""``Flow.run(resume="latest")``, ``Flow.run(restart=...)``, and what a run that raises leaves behind.
 
 ``"latest"`` checks out the newest commit that has state, skipping
 stateless commits, and continues every running chain, iterate and branch
-at its saved cursor. A run that raises writes no commit: its history's
-head is its last save.
+at its saved cursor. ``restart`` checks out a commit the same way but
+takes its root state and declared resources alone, so the run starts at
+its first step. A run that raises writes no commit: its history's head is
+its last save.
 """
 
 from __future__ import annotations
@@ -18,6 +20,15 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, verb
+from llm_gent.flow._resume import _restart_snapshot
+from llm_gent.flow.state.snapshot import (
+    CHAIN,
+    RESOURCES,
+    RUN_RESOURCES,
+    SIGNALS,
+    TURN,
+    Snapshot,
+)
 from llm_gent.flow.stores import JsonFileCheckpointStore
 from llm_gent.flow.testing.checkpoint import (
     CanonicalCounter,
@@ -565,6 +576,152 @@ class TestScopesFromSnapshot:
         assert [v for p, v in scopes.items() if "/p/2/" in p] == [{"x": 2}]
 
 
+def _counting_chain(
+    store: JsonFileCheckpointStore, halt: asyncio.Event | None, seen: list[Any]
+) -> Any:
+    """Four steps, each adding 10 to its input and 1 to state ``n``; the 2nd sets ``halt`` and stops."""
+
+    @verb
+    async def step(ctx: Context[dict[str, Any]], prev: Any = None) -> Any:
+        seen.append(prev)
+        ctx.state.data["n"] = ctx.state.data.get("n", 0) + 1
+        if halt is not None and len(seen) == 2:
+            halt.set()
+            raise Interrupted()
+        return prev + 10
+
+    flow = Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "session")
+    flow = flow.with_checkpointer()
+    if halt is not None:
+        flow = flow.with_halt(halt)
+    return flow.call(step).call(step).call(step).call(step)
+
+
+@verb
+async def _record_state(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+    """Append the state the step started with to state ``seen``."""
+    before = dict(ctx.state.data)
+    ctx.state.data["seen"] = [*ctx.state.data.get("seen", []), before]
+    return x
+
+
+class TestRestart:
+    async def test_a_removed_step_does_not_stop_it(self, store: JsonFileCheckpointStore) -> None:
+        """Where resume fails on the step the chain was at, a restart starts at the top."""
+        with pytest.raises(_Crash):
+            await _scoped_step_flow(store, "deploy", make_test_logger()).run()
+
+        lg, warnings = _capturing_logger()
+        await _plain_step_flow(store, "deploy", lg).run(restart="latest")
+        _, snapshot = await _head(store, "deploy")
+        assert await History(store, "deploy").is_complete()
+        assert snapshot.root == {"plain": True}
+        assert warnings == []  # the crashed run's scope and cursors were never handed out
+
+    async def test_starts_at_the_top_on_the_saved_state(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        assert await _counting_chain(store, asyncio.Event(), []).run(0) is HALTED
+        _, halted = await _head(store, "session")
+        assert halted.root == {"n": 2}
+
+        seen: list[Any] = []
+        assert await _counting_chain(store, None, seen).run(0, restart="latest") == 40
+        assert seen == [0, 10, 20, 30]  # resume would run the 2nd step on: [10, 20, 30]
+        _, done = await _head(store, "session")
+        assert done.root == {"n": 6}
+
+    async def test_set_signals_stay_behind(self, store: JsonFileCheckpointStore) -> None:
+        """The halted run had its signal set; the restarted run does not get it set again."""
+
+        def build(cut: asyncio.Event, halt: asyncio.Event | None, seen: list[bool]) -> Any:
+            @verb
+            async def step(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+                seen.append(cut.is_set())
+                if halt is not None:
+                    cut.set()
+                    halt.set()
+                    raise Interrupted()
+                return x
+
+            flow = Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "sig")
+            flow = flow.with_checkpointer().with_signal("cut", cut)
+            if halt is not None:
+                flow = flow.with_halt(halt)
+            return flow.call(step)
+
+        assert await build(asyncio.Event(), asyncio.Event(), []).run() is HALTED
+        _, halted = await _head(store, "sig")
+        assert halted.cursors[""][SIGNALS] == ["cut"]
+
+        seen: list[bool] = []
+        await build(asyncio.Event(), None, seen).run(restart="latest")
+        assert seen == [False]
+
+    @pytest.mark.parametrize("by", ["name", "hash"])
+    async def test_a_chosen_commit_seeds_it_and_parents_its_commits(
+        self, store: JsonFileCheckpointStore, by: str
+    ) -> None:
+        marks: list[str | None] = []
+
+        @verb
+        async def mark(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+            ctx.state.data["at"] = "mark"
+            marks.append(await ctx.checkpoint("mark"))
+            return x
+
+        @verb
+        async def later(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
+            ctx.state.data["at"] = "later"
+            return x
+
+        def build() -> Any:
+            return Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "pick")
+
+        await build().with_checkpointer().call(mark).then(later).run()
+        assert marks[0] is not None
+        target = "mark" if by == "name" else marks[0]
+
+        await build().with_checkpointer().call(_record_state).run(restart=target)
+        head, snapshot = await _head(store, "pick")
+        assert snapshot.root["seen"] == [{"at": "mark"}]
+        assert head.parent_hashes == (marks[0],)
+
+    async def test_an_empty_history_runs_from_the_given_state(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        flow = Factory(make_test_logger()).create().with_checkpoint_store(store, "empty")
+        flow = flow.with_checkpointer().call(_record_state)
+        await flow.run(state={"given": 1}, restart="latest")
+        _, snapshot = await _head(store, "empty")
+        assert snapshot.root["seen"] == [{"given": 1}]
+
+    async def test_takes_the_root_state_and_top_level_declared_resources_only(self) -> None:
+        snapshot = Snapshot(
+            has_state=True,
+            root={"n": 1},
+            scopes={"n/a": {"x": 1}},
+            cursors={
+                "": {
+                    CHAIN: {"step": "a", "args": [], "kwargs": {}},
+                    SIGNALS: ["cut"],
+                    RESOURCES: {"tracker": {"spent": 2.0}},
+                    RUN_RESOURCES: {"cost": {"spent": 1.0}},
+                },
+                "n/a": {TURN: {"task": "t"}, RESOURCES: {"inner": {}}},
+            },
+        )
+        assert _restart_snapshot(snapshot) == Snapshot(
+            has_state=True,
+            root={"n": 1},
+            cursors={"": {RESOURCES: {"tracker": {"spent": 2.0}}}},
+        )
+
+    async def test_without_declared_resources_no_cursor_is_left(self) -> None:
+        snapshot = Snapshot(has_state=True, root={}, cursors={"": {SIGNALS: ["cut"]}})
+        assert _restart_snapshot(snapshot) == Snapshot(has_state=True, root={})
+
+
 class TestFailure:
     async def test_failure_writes_no_commit_and_reraises(
         self, store: JsonFileCheckpointStore
@@ -635,6 +792,21 @@ class TestResumeModeValidation:
         flow = Factory(make_test_logger()).create(state={}).call(noop)
         with pytest.raises(RuntimeError, match="resume='latest'"):
             await flow.run(resume="latest")
+        with pytest.raises(RuntimeError, match="restart='latest'"):
+            await flow.run(restart="latest")
+
+    async def test_resume_and_restart_are_not_taken_together(
+        self, store: JsonFileCheckpointStore
+    ) -> None:
+        with pytest.raises(ValueError, match="resume or restart, not both"):
+            await _counting_flow(store, "both", max_iters=1).run(resume="latest", restart="latest")
+
+    @pytest.mark.parametrize("target", ["off", "", "complete"])
+    async def test_restart_needs_latest_a_hash_or_a_checkpoint_name(
+        self, store: JsonFileCheckpointStore, target: str
+    ) -> None:
+        with pytest.raises(ValueError, match="restart must be 'latest'"):
+            await _counting_flow(store, "bad-target", max_iters=1).run(restart=target)
 
 
 class TestResumeInSubprocess:

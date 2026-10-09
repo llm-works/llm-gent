@@ -283,10 +283,41 @@ these identities), and records its hash as `flow_root_hash`:
 `Structure.diff(Structure.of(flow))` says which steps a flow
 today kept, added (and where) and removed.
 
+`run(restart=...)` starts over from a commit's data instead of
+continuing it. `"latest"`, a commit hash or a checkpoint name selects
+the commit as `resume` does, and the run's commits are parented on it.
+The run takes the commit's root state and the accounting of the
+resources the top-level flow declares (its cost tracker's spend), and
+nothing else: every chain starts at its first step, no scope, paused
+turn or set signal comes back, and per-run resources start fresh. A flow
+whose structure changed since the commit was written runs normally, so
+an app can compare `History.structure(head)` with `Structure.of(flow)`
+and restart when they differ. The steps ahead of the work
+left to do run again, and decide from state whether they have anything
+to do. A commit older than the head brings its resources back as they
+were then: spend recorded after it is not counted.
+
+`resume` continues the run where it stopped: the same code picks up
+after a halt or a crash, and only the interrupted step runs again.
+`restart` runs it again from the top on the data it had: after a deploy
+changed the flow, or to take a finished run further.
+
+| From the commit | `resume=` | `restart=` |
+|---|---|---|
+| Root state | restored | restored |
+| Declared resources (a cost tracker's spend) | restored | restored |
+| Positions: chain step, iterate pass, map items, branch arm | continued | dropped: every chain starts at its first step |
+| Child scopes, paused Loop turns | restored | dropped |
+| Set signals | set again | not set |
+| Per-run resources (`with_budget` children) | restored | fresh |
+| Completed steps | not run again | run again, deciding from state what is left |
+| A step the flow no longer has | raises | not looked for |
+
 Current limits:
 
 - A deploy that inserts steps keeps positions valid; resuming into a
-  flow that no longer has the saved step raises, naming its path.
+  flow that no longer has the saved step raises, naming its path
+  (`restart` starts such a history over from its data).
   Reordering steps can make a step run again.
 - Adding `name=` to a step changes its node id (and its descendants').
   A checkpoint at that step fails to resume until the run completes.

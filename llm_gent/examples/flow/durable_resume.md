@@ -294,6 +294,11 @@ await flow.run(resume=halted)  # the run continues from the halted commit
 A commit left off the line stays resumable by hash, and a named one by its name, until
 `collect_unreachable` deletes what no ref reaches.
 
+`run(restart=...)` takes the same `"latest"`, hash or name but starts over from the commit instead
+of continuing it: only its root state and the run's declared resources (the cost tracker's spend)
+come back, and the run starts at its first step. It runs even when the flow no longer has the step
+a checkpoint was taken at.
+
 `"off"`, `"latest"` and `"complete"` cannot name a checkpoint, nor can a string of 64 lowercase hex
 characters, the form of a commit hash. `run(resume=...)` with a hash or a name the history does
 not have raises `ValueError`; for a name, the error lists the checkpoint names the history has

@@ -13,7 +13,10 @@ root scope hydrates the top-level
 :class:`State`; each
 child scope goes back to the block that owns it, and each cursor to the
 chain, iterate, branch or Loop call that registered it, when the run
-reaches their paths.
+reaches their paths. :meth:`Resume.restart` (``restart=...``)
+checks out a commit the same way for a run that starts again from its
+first step, taking the commit's root state and the top-level flow's
+resources alone.
 
 Write side — :func:`apply_clean_exit_retention` and
 :func:`commit_completion` commit the final state on clean exit and move
@@ -30,7 +33,7 @@ from .checkpoint import COMPLETE_TAG, is_commit_hash
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
 from .state.cas import Commit, Tree, canonical_json
-from .state.snapshot import Snapshot, path_str
+from .state.snapshot import RESOURCES, Snapshot, path_str
 
 
 if TYPE_CHECKING:
@@ -126,6 +129,29 @@ class Resume:
         await ctx.continue_from(commit.content_hash)
         return root, snapshot
 
+    async def restart(
+        self, target: str, fallback: State[Any]
+    ) -> tuple[State[Any], Snapshot | None]:
+        """Check out ``target`` to start over from: its root state and top-level resources alone.
+
+        ``target`` is ``"latest"`` (as :meth:`checkout`, including its
+        fallback on an empty history), a commit hash or a checkpoint name
+        (as :meth:`checkout_at`); the run's commits are parented on the
+        commit. Of its snapshot the run takes the root state and the
+        accounting of the resources the top-level flow declares; positions,
+        child scopes, paused turns, set signals and the top-level run's
+        per-run resources stay behind, so every chain starts at its first
+        step whatever the flow's structure is now.
+
+        Raises:
+            ValueError: As :meth:`checkout_at`, for a hash or a name.
+        """
+        if target == "latest":
+            root, snapshot = await self.checkout(fallback)
+        else:
+            root, snapshot = await self.checkout_at(target)
+        return root, None if snapshot is None else _restart_snapshot(snapshot)
+
     async def _resolve(self, target: str) -> Commit:
         """The commit ``target`` names: a commit hash of this history, else a checkpoint name."""
         history = self._history
@@ -164,6 +190,23 @@ class Resume:
             else restore_state_data(factory, root_raw)
         )
         return State(data=data, _factory=factory)
+
+
+def _restart_snapshot(snapshot: Snapshot) -> Snapshot:
+    """What a restart takes of ``snapshot``: its root state and the top-level declared resources.
+
+    The top-level flow's declared resources are the root path's
+    :data:`~llm_gent.flow.state.snapshot.RESOURCES` cursor entry; every
+    other cursor entry and every child scope is a position of the run that
+    wrote the snapshot.
+    """
+    root_cursors = snapshot.cursors.get(path_str(()), {})
+    kept = {RESOURCES: root_cursors[RESOURCES]} if RESOURCES in root_cursors else {}
+    return Snapshot(
+        has_state=snapshot.has_state,
+        root=snapshot.root,
+        cursors={path_str(()): kept} if kept else {},
+    )
 
 
 async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:

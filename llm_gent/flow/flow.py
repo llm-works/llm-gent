@@ -1157,6 +1157,7 @@ class Flow:
         *args: Any,
         state: Any = UNSET,
         resume: ResumeMode | str = "off",
+        restart: str | None = None,
         extra: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -1214,8 +1215,25 @@ class Flow:
                 run that fails before its first commit leaves ``HEAD``
                 where it was.
                 Resuming requires
-                :meth:`with_checkpointer`. Bound parameter: not forwarded
+                :meth:`with_checkpoint_store`. Bound parameter: not forwarded
                 to the first node.
+            restart: Start over from a checkpointed commit's data:
+                ``"latest"`` (the commit ``resume="latest"`` would check
+                out), a commit hash or a checkpoint name. The run takes the
+                commit's root state in place of ``state`` and the
+                accounting of the resources this flow declares (its cost
+                tracker's spend); nothing else. Every chain starts at its
+                first step, no scope, paused turn or set signal comes back,
+                and per-run resources start fresh, so a flow whose
+                structure changed since the commit was written runs
+                normally — where ``resume`` would fail on a saved step the
+                flow no longer has. The run's commits are parented on the
+                commit, as with ``resume``. A commit older than the head
+                brings its resources back as they were then: spend recorded
+                after it is not counted. On an empty history ``"latest"``
+                runs from ``state`` as given. Not together with ``resume``;
+                needs :meth:`with_checkpoint_store`. Bound parameter: not
+                forwarded to the first node.
             **kwargs: Keyword inputs to the first node.
 
         Returns the last step's result, or :data:`HALTED` when the halt
@@ -1233,8 +1251,8 @@ class Flow:
         head stays its last save, which ``resume="latest"`` continues from.
 
         Raises:
-            RuntimeError: The flow has no nodes to run, OR a resume mode
-                was requested without :meth:`with_checkpointer` wired, OR
+            RuntimeError: The flow has no nodes to run, OR a resume mode or
+                a restart was requested without :meth:`with_checkpoint_store` wired, OR
                 a nested flow sets a halt other than this flow's or declares
                 a signal, OR a shortcut's signal is not declared or a flow
                 under it declares a shortcut on the same signal, OR
@@ -1244,13 +1262,14 @@ class Flow:
                 access instead, so verbs that don't consume ``ctx.saia``
                 can run under a factoryless flow.
             ValueError: ``resume`` is not a :data:`ResumeMode` value, a
-                commit hash or a valid checkpoint name; names a commit or
-                checkpoint the history does not have; or names a commit
-                without state.
+                commit hash or a valid checkpoint name, or ``restart``
+                is not ``"latest"``, a commit hash or a valid checkpoint
+                name; both are given; either names a commit or checkpoint
+                the history does not have, or a commit without state.
         """
-        self._check_run_args(resume)
+        self._check_run_args(resume, restart)
         self._begin_checkpoint_run()
-        active_state, saved = await self._start_state(self._wrap_top_state(state), resume)
+        active_state, saved = await self._start_state(self._wrap_top_state(state), resume, restart)
         self._scopes.begin(active_state, saved)
         self._halt_at = None
         try:
@@ -1269,38 +1288,60 @@ class Flow:
         await apply_clean_exit_retention(self, active_state)
         return result
 
-    def _check_run_args(self, resume: ResumeMode | str) -> None:
-        """Reject an empty flow, a bad ``resume``, misplaced wiring, a bad shortcut, a lone cap.
+    def _check_run_args(self, resume: ResumeMode | str, restart: str | None) -> None:
+        """Reject an empty flow, a bad start, misplaced wiring, a bad shortcut, a lone cap.
 
         Runs before anything is read or written, so a misconfigured run
         leaves no new history behind.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        if resume not in get_args(ResumeMode) and not is_commit_hash(resume):
-            try:
-                checkpoint_tag(resume)
-            except ValueError as e:
-                raise ValueError(
-                    f"resume must be one of {get_args(ResumeMode)}, a commit hash or a "
-                    f"checkpoint name; got {resume!r} ({e})"
-                ) from None
-        if resume != "off" and self._checkpoint_ctx is None:
-            label = self._name or "<anonymous>"
-            raise RuntimeError(
-                f"Flow {label!r} was run with resume={resume!r} but has no checkpoint "
-                f"store — call .with_checkpoint_store(store, client_flow_id) first"
-            )
+        self._check_start(resume, restart)
         check_one_repo(self)
         check_one_halt(self)
         check_shortcuts(self)
         check_budgets_have_a_tracker(self)
         check_resources(self)
 
+    def _check_start(self, resume: ResumeMode | str, restart: str | None) -> None:
+        """Reject a bad ``resume`` or ``restart``, both together, or either without a store."""
+        if resume not in get_args(ResumeMode) and not is_commit_hash(resume):
+            self._require_checkpoint_name(
+                resume,
+                f"resume must be one of {get_args(ResumeMode)}, a commit hash or a checkpoint name",
+            )
+        if restart is not None:
+            if resume != "off":
+                raise ValueError(
+                    f"run() takes resume or restart, not both; got resume={resume!r}, "
+                    f"restart={restart!r}"
+                )
+            if restart != "latest" and not is_commit_hash(restart):
+                self._require_checkpoint_name(
+                    restart, "restart must be 'latest', a commit hash or a checkpoint name"
+                )
+        start = f"resume={resume!r}" if restart is None else f"restart={restart!r}"
+        if (resume != "off" or restart is not None) and self._checkpoint_ctx is None:
+            label = self._name or "<anonymous>"
+            raise RuntimeError(
+                f"Flow {label!r} was run with {start} but has no checkpoint "
+                f"store — call .with_checkpoint_store(store, client_flow_id) first"
+            )
+
+    @staticmethod
+    def _require_checkpoint_name(value: Any, what: str) -> None:
+        """Raise ``ValueError`` led by ``what`` when ``value`` cannot name a checkpoint."""
+        try:
+            checkpoint_tag(value)
+        except ValueError as e:
+            raise ValueError(f"{what}; got {value!r} ({e})") from None
+
     async def _start_state(
-        self, fallback: State[Any], resume: ResumeMode | str
+        self, fallback: State[Any], resume: ResumeMode | str, restart: str | None
     ) -> tuple[State[Any], Snapshot | None]:
-        """The run's initial state and the snapshot it continues from (``None`` for a fresh run)."""
+        """The run's initial state and the snapshot it starts from (``None`` for a fresh run)."""
+        if restart is not None:
+            return await Resume(self).restart(restart, fallback)
         if resume == "off":
             return fallback, None
         if resume == "latest":
