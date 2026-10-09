@@ -200,13 +200,14 @@ class Ckpt:
 
 @dataclass(frozen=True)
 class Cut:
-    """A subflow declaring ``with_shortcut("cut")`` (the run's signal is ``probe.cut``).
+    """A subflow declaring ``with_shortcut("cut", drain=drain)`` (the run's signal is ``probe.cut``).
 
     Only the shortcut section uses it: :func:`model` runs it as a
     :class:`Seq`, :func:`cut_model` as the region it is.
     """
 
     children: tuple[Node, ...]
+    drain: bool = False
 
 
 Node = Leaf | Seq | Iter | Map | Branch | Scope | MapMembers | Ckpt | Cut
@@ -234,7 +235,7 @@ def _label(node: Node, counter: list[int], prefix: str = "l") -> Node:
     if isinstance(node, Ckpt):
         return Ckpt(_label(node.body, counter, "c"))
     if isinstance(node, Cut):
-        return Cut(tuple(_label(child, counter, prefix) for child in node.children))
+        return Cut(tuple(_label(child, counter, prefix) for child in node.children), node.drain)
     return Scope(_label(node.body, counter, prefix))
 
 
@@ -399,7 +400,11 @@ class _CutRun:
     out: dict[str, int] = field(default_factory=dict)
 
 
-def _cut_chain(steps: tuple[Node, ...], x: int, run: _CutRun, region: bool) -> int:
+Region = str
+"""The region a part of :func:`cut_model`'s run is in: ``""`` none, ``"ff"`` or ``"drain"``."""
+
+
+def _cut_chain(steps: tuple[Node, ...], x: int, run: _CutRun, region: Region) -> int:
     """A chain: in a region whose signal is set, it starts only :class:`Conclude` steps."""
     for step in steps:
         if region and run.cut and not isinstance(step, Conclude):
@@ -408,15 +413,17 @@ def _cut_chain(steps: tuple[Node, ...], x: int, run: _CutRun, region: bool) -> i
     return x
 
 
-def _cut_step(node: Node, x: int, run: _CutRun, region: bool) -> int:
+def _cut_step(node: Node, x: int, run: _CutRun, region: Region) -> int:
     """One chain step; every body it runs (pass, item, arm, subflow) is a chain of its own."""
     if isinstance(node, Leaf):
         key = f"{node.name}:{x}"
         run.out[key] = 3 * x + node.c
         run.cut = run.cut or key == run.cut_key
         return run.out[key]
-    if isinstance(node, Cut | Seq):
-        return _cut_chain(node.children, x, run, region or isinstance(node, Cut))
+    if isinstance(node, Cut):
+        return _cut_chain(node.children, x, run, region or ("drain" if node.drain else "ff"))
+    if isinstance(node, Seq):
+        return _cut_chain(node.children, x, run, region)
     if isinstance(node, Iter):
         for _ in range(node.n):
             if region and run.cut:
@@ -432,17 +439,21 @@ def _cut_step(node: Node, x: int, run: _CutRun, region: bool) -> int:
     return _cut_chain((node.body,), x, run, region)
 
 
-def _cut_map(node: Map | MapMembers, x: int, run: _CutRun, region: bool) -> int:
-    """A map: in a region whose signal is set, an item that has not started is skipped."""
+def _cut_map(node: Map | MapMembers, x: int, run: _CutRun, region: Region) -> int:
+    """A map: in a region whose signal is set, an item that has not started is skipped.
+
+    An item that starts in a drain region runs outside it: to its end, cut or not.
+    """
     if isinstance(node, MapMembers):
         bodies = [(m, x) for m in node.members]
     else:
         width = node.width - 1 if node.mode == "lenient" else node.width
         bodies = [(node.body, 10 * x + i) for i in range(width)]
+    inside: Region = "" if region == "drain" else region
     total = 0
     for body, item in bodies:
         if not (region and run.cut):
-            total += _cut_chain((body,), item, run, region)
+            total += _cut_chain((body,), item, run, inside)
     return total
 
 
@@ -452,11 +463,12 @@ def cut_model(shape: Seq, cut_key: str) -> tuple[int, dict[str, int]]:
     Computed from the shape alone: inside a :class:`Cut`, once the signal
     is set, every chain skips its remaining steps but the
     :class:`Conclude` ones, every iterate ends before its next pass, every
-    map before its next item. A step already running finishes. Outside
-    every ``Cut`` the run is unaffected.
+    map before its next item. A step already running finishes. In a drain
+    ``Cut`` a map item that had started runs to its end as if there were
+    no cut. Outside every ``Cut`` the run is unaffected.
     """
     run = _CutRun(cut_key)
-    return _cut_chain(shape.children, RUN_INPUT, run, False), run.out
+    return _cut_chain(shape.children, RUN_INPUT, run, ""), run.out
 
 
 # --- Store and probe --------------------------------------------------------
@@ -747,8 +759,8 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
 
 
 def _cut_flow(node: Cut, probe: Probe, parallel: bool) -> Flow:
-    """The subflow for a :class:`Cut`: its children, and ``with_shortcut("cut")``."""
-    sub = Factory(LG).create().with_shortcut("cut")
+    """The subflow for a :class:`Cut`: its children, and ``with_shortcut("cut", drain=...)``."""
+    sub = Factory(LG).create().with_shortcut("cut", drain=node.drain)
     for child in node.children:
         _add(child, sub, probe, parallel)
     return sub
@@ -1239,6 +1251,14 @@ _CUT_INNER: dict[str, Node] = {
     "cut(map(sub,conclude))": Cut((Map(Seq((_L, _L, _C)), 2),)),
     "sub(leaf,cut(conclude))": Seq((_L, Cut((_L, _C)))),
     "nested(conclude)": Cut((Iter(Seq((_L, Map(Seq((_L, _T, _C)), 2), _C)), 2),)),
+    "drain(seq)": Cut((_L, _L, _L), drain=True),
+    "drain(map)": Cut((Map(_L, 3),), drain=True),
+    "drain(map(sub))": Cut((Map(Seq((_L, _L, _L)), 2), _L), drain=True),
+    "drain(map(sub,turn))": Cut((Map(Seq((_L, _T, _L)), 2), _L), drain=True),
+    "drain(map(sub(map)))": Cut((Map(Seq((_L, Map(Seq((_L, _L)), 2), _L)), 2), _L), drain=True),
+    "drain(iter(sub(map)))": Cut((Iter(Seq((_L, Map(Seq((_L, _L)), 2), _L)), 2),), drain=True),
+    "drain(map(sub,conclude))": Cut((Map(Seq((_L, _L, _C)), 2), _C, _L), drain=True),
+    "map(drain(seq))": Map(Cut((_L, _L, _L), drain=True), 2),
 }
 
 CUT_SHAPES: dict[str, Seq] = {

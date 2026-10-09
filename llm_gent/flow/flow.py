@@ -74,6 +74,7 @@ from ._shortcut import (
     check_shortcut,
     check_shortcuts,
     check_signal,
+    innermost_stop,
     run_shortcut,
     run_signals,
 )
@@ -876,7 +877,7 @@ class Flow:
         self._signals[name] = event
         return self
 
-    def with_shortcut(self, signal: str) -> Self:
+    def with_shortcut(self, signal: str, *, drain: bool = False) -> Self:
         """Let the run's ``signal`` cut this flow short: it fast-forwards to its end.
 
         ``signal`` names a signal the top-level flow declares with
@@ -898,18 +899,33 @@ class Flow:
         the flow then ends at once — and a signal set after it ended does
         nothing here.
 
+        With ``drain=True`` the region drains instead: it starts nothing
+        new in the same way, but a map item that had started runs to its
+        end as if the region were not cut — its chain, the flows under it
+        and their maps, which may start their own items. A Loop turn in
+        such an item is not aborted by the signal (the run's halt still
+        pauses it), and ``ctx.draining`` tells its steps to wrap up. The
+        map item is the unit of work: a chain step or an iterate pass in
+        flight outside started items is cut short as above, so a region
+        without a map drains like it fast-forwards. A region on another
+        signal around the item still cuts it short.
+
         A cut is not a halt: it writes no checkpoint, and ``ctx.halt``
         stays unset. The run's halt still stops everything; a halt while
-        this flow fast-forwards is recorded with the signal, and resume
-        goes on fast-forwarding.
+        this flow fast-forwards or drains is recorded with the signal, and
+        resume goes on as before: items saved as running count as started.
 
         Checked at run start: ``signal`` is declared, and no flow under
         this one declares a shortcut on it too (regions on different
         signals may nest).
 
+        Raises:
+            ValueError: ``signal`` is not a non-empty str.
+            TypeError: ``drain`` is not a bool.
+
         Returns ``self`` for chaining.
         """
-        self._shortcut = check_shortcut(signal)
+        self._shortcut = check_shortcut(signal, drain)
         return self
 
     def with_cost_tracker(self, tracker: CostTracker) -> Self:
@@ -1400,7 +1416,7 @@ class Flow:
         scopes = runtime._scopes
         # The run's halt is on the top-level flow (check_one_halt).
         halt = self._halt_event if parent_halt is None else parent_halt
-        parent_stop = parent_shortcuts[-1].stop if parent_shortcuts else halt
+        parent_stop = innermost_stop(parent_shortcuts, halt)
         async with run_shortcut(self, parent_stop, runtime._signals) as shortcut:
             with run_resources(self, parent_path, scopes, parent_resources) as resources:
                 env = self._make_run_env(

@@ -16,11 +16,19 @@ finishes with what it has. The step after F then runs as usual. A signal
 set while the run is outside every region it cuts short does nothing
 until such a region starts; the region then ends at once.
 
+A region that drains (``with_shortcut(signal, drain=True)``) stops
+admitting work the same way, but a map item that had started is left out
+of it: the item, its chain and everything under it run to their end as
+if the region were not cut (:func:`leave_drains`), and its steps see the
+drain (:func:`is_draining`). The map item is the unit of work; a chain
+step or an iterate pass in flight is not one.
+
 A cut is not a halt: it writes no checkpoint and runs nothing again.
 Which signals are set is part of where the run is, though: every
 checkpoint the run takes records them (:func:`run_signals`), and resume
 sets them again before the first step, so a run halted while it
-fast-forwards goes on fast-forwarding.
+fast-forwards goes on fast-forwarding, and one halted while it drains goes
+on draining: the items the map's cursor holds as running are started.
 
 A region may not contain another region on the same signal
 (:func:`check_shortcuts`); regions on different signals may nest.
@@ -31,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from .state.snapshot import SIGNALS
@@ -44,9 +52,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Shortcut:
-    """What :meth:`Flow.with_shortcut` declares: the signal that cuts the flow short."""
+    """What :meth:`Flow.with_shortcut` declares: the signal that cuts the flow short, and how."""
 
     signal: str
+    drain: bool
+    """Started map items run to their end instead of fast-forwarding."""
 
 
 def check_signal(name: object, event: object) -> tuple[str, asyncio.Event]:
@@ -62,14 +72,17 @@ def check_signal(name: object, event: object) -> tuple[str, asyncio.Event]:
     return name, event  # type: ignore[return-value]
 
 
-def check_shortcut(signal: object) -> Shortcut:
-    """The :class:`Shortcut` :meth:`Flow.with_shortcut` declares, when ``signal`` is valid.
+def check_shortcut(signal: object, drain: object) -> Shortcut:
+    """The :class:`Shortcut` :meth:`Flow.with_shortcut` declares, when its arguments are valid.
 
     Raises:
         ValueError: ``signal`` is not a non-empty str.
+        TypeError: ``drain`` is not a bool.
     """
     _check_name(signal, ".with_shortcut(signal)")
-    return Shortcut(signal)  # type: ignore[arg-type]
+    if not isinstance(drain, bool):
+        raise TypeError(f"with_shortcut(drain=) takes a bool; got {type(drain).__name__}")
+    return Shortcut(signal, drain)  # type: ignore[arg-type]
 
 
 def _check_name(name: object, what: str) -> None:
@@ -169,7 +182,7 @@ def run_signals(flow: Flow) -> Iterator[None]:
     scopes.close_cursor((), runner)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ShortcutRun:
     """One run of a region: its signal, and the event a Loop turn in it aborts on.
 
@@ -177,20 +190,50 @@ class ShortcutRun:
     aborts on — the run's halt or the enclosing region's ``stop``
     (:func:`run_shortcut`). SAIA observes it as ``abort_signal``; a
     boundary reads ``signal`` itself (:func:`is_fast_forward`).
+
+    ``drain`` is the region's mode. ``left`` marks the region as one a
+    started map item under it has left (:func:`leave_drains`): it no
+    longer cuts that item short.
     """
 
     signal: asyncio.Event
     stop: asyncio.Event
+    drain: bool
+    left: bool
 
 
 def is_fast_forward(env: _RunEnv) -> bool:
     """True when the flow running under ``env`` is in a region whose signal is set."""
-    return any(shortcut.signal.is_set() for shortcut in env.shortcuts)
+    return any(s.signal.is_set() for s in env.shortcuts if not s.left)
+
+
+def is_draining(env: _RunEnv) -> bool:
+    """True when ``env`` runs in a started map item of a drain region whose signal is set."""
+    return any(s.signal.is_set() for s in env.shortcuts if s.left)
 
 
 def abort_event(env: _RunEnv) -> asyncio.Event | None:
-    """What a Loop turn under ``env`` aborts on: the innermost region's stop, else the run's halt."""
-    return env.shortcuts[-1].stop if env.shortcuts else env.halt
+    """What a Loop turn under ``env`` aborts on (:func:`innermost_stop`)."""
+    return innermost_stop(env.shortcuts, env.halt)
+
+
+def innermost_stop(
+    shortcuts: tuple[ShortcutRun, ...], halt: asyncio.Event | None
+) -> asyncio.Event | None:
+    """The innermost region's stop among ``shortcuts`` not left behind, else ``halt``."""
+    for shortcut in reversed(shortcuts):
+        if not shortcut.left:
+            return shortcut.stop
+    return halt
+
+
+def leave_drains(shortcuts: tuple[ShortcutRun, ...]) -> tuple[ShortcutRun, ...]:
+    """The regions a map item that starts runs under: every drain region is left behind.
+
+    A started item runs to its end however its drain regions are cut;
+    fast-forward regions still cut it short.
+    """
+    return tuple(replace(s, left=True) if s.drain else s for s in shortcuts)
 
 
 def follow(
@@ -224,7 +267,7 @@ async def run_shortcut(
         yield None
         return
     signal = signals[shortcut.signal]
-    run = ShortcutRun(signal, asyncio.Event())
+    run = ShortcutRun(signal, asyncio.Event(), drain=shortcut.drain, left=False)
     tasks = [follow(parent, run.stop), follow(signal, run.stop)]
     try:
         yield run
