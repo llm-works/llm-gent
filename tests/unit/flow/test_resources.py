@@ -30,7 +30,7 @@ from llm_gent.flow import (
     resource_method,
     verb,
 )
-from llm_gent.flow.state.snapshot import RESOURCES
+from llm_gent.flow.state.snapshot import RESOURCES, RUN_RESOURCES
 from llm_gent.flow.stores import InMemoryCheckpointStore
 
 from .conftest import make_test_logger
@@ -382,6 +382,54 @@ class TestAcrossResume:
         fresh = Counter()
         assert await build(other, fresh).run(1, resume="latest") == 1
         assert fresh.restored == []
+
+
+class TestRestart:
+    async def test_declared_resources_come_back_and_every_step_runs(self) -> None:
+        store = InMemoryCheckpointStore()
+        build = TestAcrossResume._flow
+        assert await build(store, Counter(), asyncio.Event(), True).run(1) is HALTED
+
+        fresh = Counter()
+        assert await build(store, fresh, asyncio.Event(), False).run(1, restart="latest") == 1
+        assert fresh.restored == [{"count": 3}]
+        assert fresh.count == 3 + 1 + 2 + 4  # a, b and c run again; resume would run c alone
+
+    async def test_the_top_level_run_s_per_run_child_starts_fresh(self) -> None:
+        store, halt = InMemoryCheckpointStore(), asyncio.Event()
+
+        def build(root: Counter, arm: bool, seen: list[int]) -> Any:
+            @verb
+            async def step(ctx: Context[Any], x: int) -> int:
+                counter = ctx.resource(COUNTER)
+                seen.append(counter.count)
+                counter.add(5)
+                if arm:
+                    halt.set()
+                    raise Interrupted()
+                return x
+
+            return (
+                _ff()
+                .create(state={})
+                .with_checkpoint_store(store, NAME)
+                .with_checkpointer()
+                .with_halt(halt)
+                .with_resource(COUNTER, root)
+                .with_resource(COUNTER, per="run")
+                .call(step)
+            )
+
+        assert await build(Counter(), arm=True, seen=[]).run(1) is HALTED
+        history = History(store, NAME)
+        halted = await history.snapshot(await history.head())
+        assert halted.cursors[""][RUN_RESOURCES] == {"counter": {"count": 5}}
+
+        root, seen = Counter(), []
+        halt.clear()
+        assert await build(root, arm=False, seen=seen).run(1, restart="latest") == 1
+        assert seen == [0]  # the per-run child was not restored; resume would hand it 5
+        assert root.restored == [{"count": 5}]
 
 
 class TestAcrossShortcut:

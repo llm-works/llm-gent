@@ -51,6 +51,7 @@ def _validate_target(target: Any) -> None:
     _reject_reserved_kwarg(target, "state")
     _reject_reserved_kwarg(target, "runtime")
     _reject_reserved_kwarg(target, "resume")
+    _reject_reserved_kwarg(target, "restart")
 
 
 def _reject_reserved_kwarg(verb: Any, name: str) -> None:
