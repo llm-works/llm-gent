@@ -174,11 +174,11 @@ class TestPubSub:
         received: list[Message] = []
         event = threading.Event()
 
-        coord.subscribe("intel.news", lambda msg: (received.append(msg), event.set()))
+        coord.subscribe("status.updates", lambda msg: (received.append(msg), event.set()))
         _wait_for_zmq_connect(0.1)
 
-        msg = HeartbeatRequest(agent_id="news-agent", stats=AgentStats(ticks=1))
-        worker.publish("intel.news", msg)
+        msg = HeartbeatRequest(agent_id="agent-1", stats=AgentStats(ticks=1))
+        worker.publish("status.updates", msg)
         event.wait(timeout=5.0)
 
         assert len(received) == 1
