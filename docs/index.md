@@ -398,6 +398,37 @@ every checkpoint, and resume sets them again, so the region goes on
 fast-forwarding. A finished run records no signal: the next session
 starts with none set.
 
+#### Draining
+
+`with_shortcut(name, drain=True)` makes a region that drains instead:
+on the signal it starts nothing new, but work already started runs to
+its end. The unit of work is the map item.
+
+- Admission stops as above: no new map item (those are `Skipped`), no
+  new iterate pass, no new chain step outside started items;
+  `.conclude` steps still run.
+- A map item that had started runs as if the region were not cut: its
+  chain, the flows under it and their maps, which may start their own
+  items.
+- In such an item `ctx.draining` is true and `ctx.fast_forward` false: a
+  long step (an LLM turn, a search) can wrap up what it has and let the
+  item's remaining steps run. A Loop turn in it is not aborted by the
+  signal; the run's halt still pauses it.
+- A chain step or an iterate pass in flight outside started items is
+  not a unit and is cut short, so a region without a map drains like it
+  fast-forwards. A region on another signal around a started item still
+  cuts it short.
+
+```python
+item = ff.create().call(fetch).then(parse).then(store)
+work = ff.create().map(item, items=...).with_shortcut("cut", drain=True)
+```
+
+A cut while items are in `fetch` lets each of them finish `fetch`,
+`parse` and `store`; items that had not started are `Skipped`. A halt
+during the drain pauses the started items; resume sets the signal again,
+continues them, and still skips the rest.
+
 ### Resources
 
 A resource is a run-scoped object with behaviour — a counter, a stats

@@ -37,7 +37,7 @@ from ._executor import (
 )
 from ._halt_observer import is_halt_signaled
 from ._node_id import _descend_context
-from ._shortcut import is_fast_forward
+from ._shortcut import is_fast_forward, leave_drains
 from ._validation import check_concurrency
 from .context import Context
 from .nodes import Failure, Interrupted, ItemsFn, RestoredError, Skipped
@@ -420,7 +420,8 @@ class MapItemRunner:
             parent_extra=env.extra,
             parent_policy=env.policy,
             parent_path=self.path,
-            parent_shortcuts=env.shortcuts,
+            # A started item runs to its end however its drain regions are cut.
+            parent_shortcuts=leave_drains(env.shortcuts),
         )
 
     async def _on_success(

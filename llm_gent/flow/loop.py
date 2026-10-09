@@ -36,7 +36,9 @@ shared halt event threads uniformly across a mixed Loop-and-Flow tree.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 from appinfra.log import Logger
@@ -44,7 +46,7 @@ from llm_saia import SAIA
 from llm_saia.core.conversation import ConversationFactory
 
 from ._halt_observer import is_run_halted
-from ._shortcut import abort_event, is_fast_forward
+from ._shortcut import is_fast_forward, turn_abort
 from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
@@ -358,12 +360,16 @@ class Loop:
             )
         return saia
 
-    def _resolve_halt(self, ctx: Context[Any]) -> asyncio.Event | None:
-        """Explicit ``Loop(halt=X)`` wins over the ambient abort (:func:`~._shortcut.abort_event`)."""
+    def _abort(self, ctx: Context[Any]) -> AbstractAsyncContextManager[asyncio.Event | None]:
+        """What SAIA aborts the turn on, for its duration.
+
+        Explicit ``Loop(halt=X)`` wins over the ambient abort
+        (:func:`~._shortcut.turn_abort`).
+        """
         if self._halt is not None:
-            return self._halt
+            return contextlib.nullcontext(self._halt)
         env = ctx._env
-        return ctx.halt if env is None else abort_event(env)
+        return contextlib.nullcontext(ctx.halt) if env is None else turn_abort(env)
 
     def _make_iter_bridge(self, ctx: Context[Any]) -> Callable[[int, Any], Awaitable[None]] | None:
         """Return a SAIA-compatible per-turn bridge, or ``None`` when unwired."""
@@ -388,7 +394,8 @@ class Loop:
         invoke them.
         """
         try:
-            return await saia.complete(task, **complete_kwargs)
+            async with self._abort(ctx) as abort:
+                return await saia.complete(task, **complete_kwargs, abort_signal=abort)
         except asyncio.CancelledError:
             if self._on_cancelled is not None:
                 await maybe_await(self._on_cancelled(ctx))
@@ -463,7 +470,6 @@ class Loop:
         complete_kwargs: dict[str, Any] = {
             "on_iteration": self._make_iter_bridge(ctx),
             "conversation": conversation,
-            "abort_signal": self._resolve_halt(ctx),
         }
         if is_resume:
             complete_kwargs["resume"] = True

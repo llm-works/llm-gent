@@ -1046,6 +1046,250 @@ class TestSubtreeEndedEarly:
         assert ran == ["last"]
 
 
+def _drained_items(ran: list[str], seen: list[tuple[str, bool, bool]], cut: asyncio.Event) -> Any:
+    """An item body: ``first`` → a flow running ``mid`` → a map of two ``leaf`` items → ``last``.
+
+    Item 1's ``first`` sets ``cut`` while item 0 waits for it; ``last``
+    records ``(item, ctx.draining, ctx.fast_forward)``.
+    """
+    gate = asyncio.Event()
+
+    @verb
+    async def first(ctx: Context[Any], n: int) -> int:
+        ran.append(f"first:{n}")
+        if n == 1:
+            cut.set()
+            await asyncio.sleep(0)
+            gate.set()
+        else:
+            await gate.wait()
+        return n
+
+    @verb
+    async def mid(ctx: Context[Any], n: int) -> int:
+        ran.append(f"mid:{n}")
+        return n
+
+    @verb
+    async def leaf(ctx: Context[Any], key: str) -> str:
+        ran.append(f"leaf:{key}")
+        return key
+
+    @verb
+    async def last(ctx: Context[Any], keys: list[str]) -> str:
+        item = keys[0][0]
+        ran.append(f"last:{item}")
+        seen.append((item, ctx.draining, ctx.fast_forward))
+        return item
+
+    sub = _ff().create().call(mid)
+    leaves = _ff().create().map(lambda b: b.call(leaf), items=lambda n, _c: [f"{n}a", f"{n}b"])
+    return lambda b: b.call(first).then(sub).then(leaves).then(last)
+
+
+class TestDrain:
+    """``with_shortcut(signal, drain=True)``: started map items run to their end."""
+
+    def _flow(
+        self, cut: asyncio.Event, ran: list[str], seen: list[tuple[str, bool, bool]], drain: bool
+    ) -> Any:
+        @verb
+        async def post(ctx: Context[Any], x: Any) -> Any:
+            ran.append("post")
+            return x
+
+        @verb
+        async def fin(ctx: Context[Any], x: Any) -> Any:
+            ran.append("fin")
+            seen.append(("fin", ctx.draining, ctx.fast_forward))
+            return x
+
+        region = (
+            _ff()
+            .create()
+            .with_shortcut("cut", drain=drain)
+            .map(_drained_items(ran, seen, cut), items=lambda *_: [0, 1, 2], max_concurrency=2)
+            .then(post)
+            .conclude(fin)
+        )
+        return _top(cut).call(region)
+
+    async def test_started_items_run_to_their_end_and_the_rest_is_cut(self) -> None:
+        cut = asyncio.Event()
+        ran: list[str] = []
+        seen: list[tuple[str, bool, bool]] = []
+        results = await self._flow(cut, ran, seen, drain=True).run()
+
+        assert results[:2] == ["0", "1"] and isinstance(results[2], Skipped)
+        for n in "01":  # the whole chain, the nested flow and both items of the nested map
+            assert {f"first:{n}", f"mid:{n}", f"leaf:{n}a", f"leaf:{n}b", f"last:{n}"} <= set(ran)
+        assert "first:2" not in ran
+        assert "post" not in ran and ran[-1] == "fin"  # outside the items it fast-forwards
+        assert sorted(seen) == [("0", True, False), ("1", True, False), ("fin", False, True)]
+
+    async def test_without_drain_started_items_end_after_their_running_step(self) -> None:
+        cut = asyncio.Event()
+        ran: list[str] = []
+        results = await self._flow(cut, ran, [], drain=False).run()
+
+        assert results[:2] == [0, 1] and isinstance(results[2], Skipped)
+        assert sorted(ran) == ["fin", "first:0", "first:1"]
+
+    async def test_an_outer_fast_forward_region_still_cuts_a_started_item(self) -> None:
+        cut, stop = asyncio.Event(), asyncio.Event()
+        ran: list[str] = []
+
+        @verb
+        async def first(ctx: Context[Any], n: int) -> int:
+            ran.append("first")
+            stop.set()
+            await asyncio.sleep(0)
+            return n
+
+        @verb
+        async def second(ctx: Context[Any], n: int) -> int:
+            ran.append("second")
+            return n
+
+        drain = (
+            _ff()
+            .create()
+            .with_shortcut("cut", drain=True)
+            .map(lambda b: b.call(first).then(second), items=lambda *_: [0])
+        )
+        outer = _ff().create().with_shortcut("stop").call(drain)
+        flow = _top(cut).with_signal("stop", stop).call(outer)
+        assert await flow.run() == [0]
+        assert ran == ["first"]
+
+    async def test_drain_takes_a_bool(self) -> None:
+        with pytest.raises(TypeError, match="drain"):
+            _ff().create().with_shortcut("cut", drain="yes")  # type: ignore[arg-type]
+
+
+def _drained_turns(
+    saia: Any,
+    cut: asyncio.Event,
+    halt: asyncio.Event,
+    out: dict[str, list[Any]],
+    store: InMemoryCheckpointStore,
+) -> Any:
+    """A drain region over a map of two items, one at a time: a Loop ``turn``, then ``after``."""
+    loop = Loop(ROLE, saia=saia, conversation_factory=_ConvFactory())
+
+    @verb(role=ROLE)
+    async def turn(ctx: Context[Any], n: int) -> Any:
+        out["turn"].append(n)
+        return await loop(ctx, f"t{n}")
+
+    @verb
+    async def after(ctx: Context[Any], result: Any) -> Any:
+        out["after"].append(result)
+        return result
+
+    region = (
+        _ff()
+        .create()
+        .with_shortcut("cut", drain=True)
+        .map(lambda b: b.call(turn).then(after), items=lambda *_: [0, 1], max_concurrency=1)
+    )
+    flow = _ff().create(state={}).with_checkpoint_store(store, "drain-turn")
+    return flow.with_checkpointer().with_halt(halt).with_signal("cut", cut).call(region)
+
+
+class TestDrainLoop:
+    async def test_the_signal_does_not_abort_a_turn_in_a_started_item(self) -> None:
+        cut, halt = asyncio.Event(), asyncio.Event()
+        out = _out()
+        saia = _CuttingSAIA(cut)
+        flow = _drained_turns(saia, cut, halt, out, InMemoryCheckpointStore())
+        results = await flow.run()
+
+        assert out["after"] == [_Result(paused=False, text="partial:t0")]  # not aborted
+        assert isinstance(results[1], Skipped) and out["turn"] == [0]
+
+    async def test_a_halt_pauses_the_turn_and_resume_goes_on_draining(self) -> None:
+        store = InMemoryCheckpointStore()
+        cut, halt = asyncio.Event(), asyncio.Event()
+        out = _out()
+        saia = _CuttingSAIA(cut, halt)
+        assert await _drained_turns(saia, cut, halt, out, store).run() is HALTED
+        assert out["after"] == []
+
+        cut = asyncio.Event()
+        resumed = _out()
+        saia = _CuttingSAIA(cut)
+        flow = _drained_turns(saia, cut, asyncio.Event(), resumed, store)
+        results = await flow.run(resume="latest")
+
+        assert cut.is_set()  # the drain goes on
+        assert saia.calls == 1  # the held turn continued
+        assert resumed["after"] == [_Result(paused=False, text="partial:t0")]
+        assert isinstance(results[1], Skipped)  # item 1 never started
+
+
+class _SlowTurn:
+    """A turn that sets ``event``, takes a while, then reports whether its abort was set."""
+
+    def __init__(self, event: asyncio.Event) -> None:
+        self.role = ROLE
+        self._event = event
+
+    async def complete(self, task: str, **kwargs: Any) -> Any:
+        self._event.set()
+        await asyncio.sleep(0.01)  # long enough for any forwarding between events
+        return _Result(paused=kwargs["abort_signal"].is_set(), text=task)
+
+
+def _nested_turn(outer: Any, inner: Any, signal: asyncio.Event, out: list[Any]) -> Any:
+    """``outer`` around ``inner`` around a map of one item, a Loop turn; the turn sets ``signal``."""
+    loop = Loop(ROLE, saia=_SlowTurn(signal), conversation_factory=_ConvFactory())
+
+    @verb(role=ROLE)
+    async def turn(ctx: Context[Any], n: int) -> Any:
+        result = await loop(ctx, f"t{n}")
+        out.append(result.paused)
+        return result
+
+    inner = inner.map(lambda b: b.call(turn), items=lambda *_: [0])
+    return outer.call(inner)
+
+
+class TestNestedRegionsAndTurns:
+    """A turn aborts on the signal of every region it is in, and on no region it left."""
+
+    def _run(self, outer: tuple[str, bool], inner: tuple[str, bool], fire: str) -> Any:
+        cut, stop = asyncio.Event(), asyncio.Event()
+        events = {"cut": cut, "stop": stop}
+        out: list[Any] = []
+        flow = _nested_turn(
+            _ff().create().with_shortcut(outer[0], drain=outer[1]),
+            _ff().create().with_shortcut(inner[0], drain=inner[1]),
+            events[fire],
+            out,
+        )
+        top = _ff().create().with_halt(asyncio.Event()).with_signal("cut", cut)
+        return top.with_signal("stop", stop).call(flow), out
+
+    @pytest.mark.parametrize(
+        ("outer", "inner", "fire", "aborted"),
+        [
+            (("cut", True), ("stop", False), "cut", False),  # left the outer drain region
+            (("cut", True), ("stop", False), "stop", True),  # still in the inner one
+            (("stop", False), ("cut", True), "cut", False),  # left the inner drain region
+            (("stop", False), ("cut", True), "stop", True),  # still in the outer one
+            (("cut", False), ("stop", False), "cut", True),  # an outer region's signal reaches it
+        ],
+        ids=["drain>ff:drain", "drain>ff:ff", "ff>drain:drain", "ff>drain:ff", "ff>ff:outer"],
+    )
+    async def test_which_signal_aborts_the_turn(
+        self, outer: tuple[str, bool], inner: tuple[str, bool], fire: str, aborted: bool
+    ) -> None:
+        flow, out = self._run(outer, inner, fire)
+        await flow.run()
+        assert out == [aborted]
+
+
 class TestStepNames:
     async def test_call_and_then_take_a_name(self) -> None:
         with pytest.raises(ValueError, match=r"\.call\(name=\)"):

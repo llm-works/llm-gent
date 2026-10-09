@@ -44,7 +44,7 @@ from appinfra.log import Logger
 
 from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
-from ._shortcut import is_fast_forward
+from ._shortcut import is_draining, is_fast_forward
 from .checkpoint import checkpoint_tag
 from .resource import COST, NO_RESOURCES, R, ResourceKey
 from .role import Role
@@ -280,6 +280,17 @@ class Context(Generic[T]):
         :class:`Interrupted` instead.) ``False`` outside a run.
         """
         return self._env is not None and is_fast_forward(self._env)
+
+    @property
+    def draining(self) -> bool:
+        """True when this step runs in a started map item of a draining region whose signal is set.
+
+        The region (``with_shortcut(signal, drain=True)``) starts nothing
+        new, but this item runs to its end: a step that can wrap up — a
+        long LLM turn, a search — finishes what it has now and lets the
+        item's remaining steps run. ``False`` outside a run.
+        """
+        return self._env is not None and is_draining(self._env)
 
     @property
     def cost(self) -> CostTracker | None:
