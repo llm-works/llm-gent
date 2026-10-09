@@ -184,12 +184,10 @@ def run_signals(flow: Flow) -> Iterator[None]:
 
 @dataclass(frozen=True)
 class ShortcutRun:
-    """One run of a region: its signal, and the event a Loop turn in it aborts on.
+    """One run of a region: the signal that cuts it short, and how.
 
-    ``stop`` is set by ``signal`` and by what a turn around the region
-    aborts on — the run's halt or the enclosing region's ``stop``
-    (:func:`run_shortcut`). SAIA observes it as ``abort_signal``; a
-    boundary reads ``signal`` itself (:func:`is_fast_forward`).
+    A boundary reads ``signal`` (:func:`is_fast_forward`); a Loop turn
+    aborts on it while the turn is in the region (:func:`turn_abort`).
 
     ``drain`` is the region's mode. ``left`` marks the region as one a
     started map item under it has left (:func:`leave_drains`): it no
@@ -197,7 +195,6 @@ class ShortcutRun:
     """
 
     signal: asyncio.Event
-    stop: asyncio.Event
     drain: bool
     left: bool
 
@@ -212,19 +209,31 @@ def is_draining(env: _RunEnv) -> bool:
     return any(s.signal.is_set() for s in env.shortcuts if s.left)
 
 
-def abort_event(env: _RunEnv) -> asyncio.Event | None:
-    """What a Loop turn under ``env`` aborts on (:func:`innermost_stop`)."""
-    return innermost_stop(env.shortcuts, env.halt)
+@contextlib.asynccontextmanager
+async def turn_abort(env: _RunEnv) -> AsyncIterator[asyncio.Event | None]:
+    """What a Loop turn under ``env`` aborts on, for the duration of the turn.
 
-
-def innermost_stop(
-    shortcuts: tuple[ShortcutRun, ...], halt: asyncio.Event | None
-) -> asyncio.Event | None:
-    """The innermost region's stop among ``shortcuts`` not left behind, else ``halt``."""
-    for shortcut in reversed(shortcuts):
-        if not shortcut.left:
-            return shortcut.stop
-    return halt
+    The run's halt, or the signal of any region the turn is in and has not
+    left (:func:`leave_drains`). Built per turn from ``env``, so a region a
+    started map item left never reaches a turn in it, however the regions
+    nest. One source is used as is; ``None`` when there is none.
+    """
+    sources = [s.signal for s in env.shortcuts if not s.left]
+    if env.halt is not None:
+        sources.append(env.halt)
+    if len(sources) <= 1:
+        yield sources[0] if sources else None
+        return
+    abort = asyncio.Event()
+    tasks = [task for source in sources if (task := follow(source, abort)) is not None]
+    try:
+        yield abort
+    finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 def leave_drains(shortcuts: tuple[ShortcutRun, ...]) -> tuple[ShortcutRun, ...]:
@@ -236,46 +245,25 @@ def leave_drains(shortcuts: tuple[ShortcutRun, ...]) -> tuple[ShortcutRun, ...]:
     return tuple(replace(s, left=True) if s.drain else s for s in shortcuts)
 
 
-def follow(
-    enclosing: asyncio.Event | None, stop: asyncio.Event | None
-) -> asyncio.Task[None] | None:
-    """Set ``stop`` once ``enclosing`` is set; the task doing it, ``None`` when nothing to do."""
-    if enclosing is None or stop is None:
-        return None
-    if enclosing.is_set():
-        stop.set()
+def follow(source: asyncio.Event, target: asyncio.Event) -> asyncio.Task[None] | None:
+    """Set ``target`` once ``source`` is set; the task doing it, ``None`` when already set."""
+    if source.is_set():
+        target.set()
         return None
 
     async def follow() -> None:
-        await enclosing.wait()
-        stop.set()
+        await source.wait()
+        target.set()
 
     return asyncio.create_task(follow())
 
 
-@contextlib.asynccontextmanager
-async def run_shortcut(
-    flow: Flow, parent: asyncio.Event | None, signals: dict[str, asyncio.Event]
-) -> AsyncIterator[ShortcutRun | None]:
+def region_run(flow: Flow, signals: dict[str, asyncio.Event]) -> ShortcutRun | None:
     """The region one run of ``flow`` makes; ``None`` when it declares no shortcut.
 
-    ``parent`` is what a Loop turn around it aborts on (:func:`abort_event`);
     ``signals`` are the run's.
     """
     shortcut = flow._shortcut
     if shortcut is None:
-        yield None
-        return
-    signal = signals[shortcut.signal]
-    run = ShortcutRun(signal, asyncio.Event(), drain=shortcut.drain, left=False)
-    tasks = [follow(parent, run.stop), follow(signal, run.stop)]
-    try:
-        yield run
-    finally:
-        for task in tasks:
-            if task is not None:
-                task.cancel()
-        for task in tasks:
-            if task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+        return None
+    return ShortcutRun(signals[shortcut.signal], drain=shortcut.drain, left=False)

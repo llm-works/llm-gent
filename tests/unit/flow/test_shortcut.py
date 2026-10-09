@@ -1228,6 +1228,68 @@ class TestDrainLoop:
         assert isinstance(results[1], Skipped)  # item 1 never started
 
 
+class _SlowTurn:
+    """A turn that sets ``event``, takes a while, then reports whether its abort was set."""
+
+    def __init__(self, event: asyncio.Event) -> None:
+        self.role = ROLE
+        self._event = event
+
+    async def complete(self, task: str, **kwargs: Any) -> Any:
+        self._event.set()
+        await asyncio.sleep(0.01)  # long enough for any forwarding between events
+        return _Result(paused=kwargs["abort_signal"].is_set(), text=task)
+
+
+def _nested_turn(outer: Any, inner: Any, signal: asyncio.Event, out: list[Any]) -> Any:
+    """``outer`` around ``inner`` around a map of one item, a Loop turn; the turn sets ``signal``."""
+    loop = Loop(ROLE, saia=_SlowTurn(signal), conversation_factory=_ConvFactory())
+
+    @verb(role=ROLE)
+    async def turn(ctx: Context[Any], n: int) -> Any:
+        result = await loop(ctx, f"t{n}")
+        out.append(result.paused)
+        return result
+
+    inner = inner.map(lambda b: b.call(turn), items=lambda *_: [0])
+    return outer.call(inner)
+
+
+class TestNestedRegionsAndTurns:
+    """A turn aborts on the signal of every region it is in, and on no region it left."""
+
+    def _run(self, outer: tuple[str, bool], inner: tuple[str, bool], fire: str) -> Any:
+        cut, stop = asyncio.Event(), asyncio.Event()
+        events = {"cut": cut, "stop": stop}
+        out: list[Any] = []
+        flow = _nested_turn(
+            _ff().create().with_shortcut(outer[0], drain=outer[1]),
+            _ff().create().with_shortcut(inner[0], drain=inner[1]),
+            events[fire],
+            out,
+        )
+        top = _ff().create().with_halt(asyncio.Event()).with_signal("cut", cut)
+        return top.with_signal("stop", stop).call(flow), out
+
+    @pytest.mark.parametrize(
+        ("outer", "inner", "fire", "aborted"),
+        [
+            (("cut", True), ("stop", False), "cut", False),  # left the outer drain region
+            (("cut", True), ("stop", False), "stop", True),  # still in the inner one
+            (("stop", False), ("cut", True), "cut", False),  # left the inner drain region
+            (("stop", False), ("cut", True), "stop", True),  # still in the outer one
+            (("cut", False), ("stop", False), "cut", True),  # an outer region's signal reaches it
+        ],
+        ids=["drain>ff:drain", "drain>ff:ff", "ff>drain:drain", "ff>drain:ff", "ff>ff:outer"],
+    )
+    async def test_which_signal_aborts_the_turn(
+        self, outer: tuple[str, bool], inner: tuple[str, bool], fire: str, aborted: bool
+    ) -> None:
+        flow, out = self._run(outer, inner, fire)
+        await flow.run()
+        assert out == [aborted]
+
+
 class TestStepNames:
     async def test_call_and_then_take_a_name(self) -> None:
         with pytest.raises(ValueError, match=r"\.call\(name=\)"):

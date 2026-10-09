@@ -74,8 +74,7 @@ from ._shortcut import (
     check_shortcut,
     check_shortcuts,
     check_signal,
-    innermost_stop,
-    run_shortcut,
+    region_run,
     run_signals,
 )
 from ._validation import (
@@ -1398,7 +1397,7 @@ class Flow:
         halt are set on the top-level flow only, so a nested run observes
         its parent's halt. ``parent_shortcuts`` are the regions the calling
         scope is in; a shortcut this flow declares adds its own
-        (:func:`~llm_gent.flow._shortcut.run_shortcut`).
+        (:func:`~llm_gent.flow._shortcut.region_run`).
         ``parent_resources`` are the calling scope's resources — the cost
         tracker among them; the run's own come from
         :func:`~llm_gent.flow.resource._runtime.run_resources`.
@@ -1416,24 +1415,23 @@ class Flow:
         scopes = runtime._scopes
         # The run's halt is on the top-level flow (check_one_halt).
         halt = self._halt_event if parent_halt is None else parent_halt
-        parent_stop = innermost_stop(parent_shortcuts, halt)
-        async with run_shortcut(self, parent_stop, runtime._signals) as shortcut:
-            with run_resources(self, parent_path, scopes, parent_resources) as resources:
-                env = self._make_run_env(
-                    runtime=runtime,
-                    state=state,
-                    halt=halt,
-                    resources=resources,
-                    parent_checkpoint_ctx=parent_checkpoint_ctx,
-                    parent_checkpointer=parent_checkpointer,
-                    parent_chain_context=parent_chain_context,
-                    parent_ancestor_chain=parent_ancestor_chain,
-                    parent_extra=parent_extra,
-                    parent_policy=parent_policy,
-                    parent_path=parent_path,
-                    shortcuts=parent_shortcuts + ((shortcut,) if shortcut is not None else ()),
-                )
-                return await self._run_in(env, args, kwargs)
+        shortcut = region_run(self, runtime._signals)
+        with run_resources(self, parent_path, scopes, parent_resources) as resources:
+            env = self._make_run_env(
+                runtime=runtime,
+                state=state,
+                halt=halt,
+                resources=resources,
+                parent_checkpoint_ctx=parent_checkpoint_ctx,
+                parent_checkpointer=parent_checkpointer,
+                parent_chain_context=parent_chain_context,
+                parent_ancestor_chain=parent_ancestor_chain,
+                parent_extra=parent_extra,
+                parent_policy=parent_policy,
+                parent_path=parent_path,
+                shortcuts=parent_shortcuts + ((shortcut,) if shortcut is not None else ()),
+            )
+            return await self._run_in(env, args, kwargs)
 
     async def _run_in(self, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Walk this Flow under ``env``."""
