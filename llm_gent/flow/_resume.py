@@ -87,10 +87,10 @@ class Resume:
             if snapshot.has_state:
                 if skipped:
                     self._warn_skipped(skipped, commit)
-                # Capture HEAD now so a concurrent writer is detected at first commit.
+                # Pass expect_head so a concurrent writer is detected at first commit.
                 ctx = self.flow._checkpoint_ctx
                 if ctx is not None and head is not None:
-                    await ctx.continue_from(head)
+                    await ctx.continue_from(head, expect_head=head)
                 return self._root_state(snapshot.root), snapshot
             skipped.append(commit.meta.node_path)
         if skipped:

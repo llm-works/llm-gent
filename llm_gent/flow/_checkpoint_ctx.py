@@ -211,14 +211,21 @@ class CheckpointContext:
             self._parent = self._head = commit.id
             return commit
 
-    async def continue_from(self, commit_hash: str) -> None:
+    async def continue_from(self, commit_hash: str, *, expect_head: str | None = None) -> None:
         """Parent the run's commits on ``commit_hash``; ``HEAD`` moves from where it points now.
 
         Until the run commits, ``HEAD`` stays where it is: a run that
         fails first leaves the history as it was.
+
+        Args:
+            commit_hash: The commit the run's commits will be parented on.
+            expect_head: Expected current HEAD for the compare-and-set on
+                the first commit. Pass the value captured when choosing
+                ``commit_hash`` to detect concurrent writers; omit to read
+                HEAD fresh (for intentional forks).
         """
         self._parent = commit_hash
-        self._head = await self.get_ref(HEAD_REF)
+        self._head = expect_head if expect_head is not None else await self.get_ref(HEAD_REF)
         self._head_loaded = True
 
     async def _load_head(self) -> str | None:
