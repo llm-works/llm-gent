@@ -8,18 +8,17 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from appinfra.log import quick_console_logger
 
 from llm_gent.core.cost import CostTracker, PricingConfig
 from llm_gent.core.traits import CostTrait
+from tests.helpers import make_test_logger
 
 
 pytestmark = pytest.mark.unit
 
 
 def _tracker() -> CostTracker:
-    lg = quick_console_logger("test", config={"level": "error"})
-    return CostTracker(lg, PricingConfig(), budget=1.0)
+    return CostTracker(make_test_logger(), PricingConfig(), budget=1.0)
 
 
 def _agent() -> MagicMock:

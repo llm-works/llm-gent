@@ -9,16 +9,16 @@ import asyncio
 from typing import Any
 
 import pytest
-from appinfra.log import quick_console_logger
 
 from llm_gent.core.cost import CostTracker, FixedOp, LLMOp, PricingConfig, PricingProvider
+from tests.helpers import make_test_logger
 
 
 pytestmark = pytest.mark.unit
 
 
 def _lg() -> Any:
-    return quick_console_logger("test", config={"level": "error"})
+    return make_test_logger()
 
 
 def _pricing() -> PricingConfig:
