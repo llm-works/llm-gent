@@ -9,25 +9,25 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from appinfra.cas import FileStore
 
-from llm_gent.flow import History, HistoryCorrupt, TypeStateFactory
-from llm_gent.flow.state.cas import Commit
-from llm_gent.flow.stores import JsonFileCheckpointStore
+from llm_gent.flow import FlowCommit, History, HistoryCorrupt, TypeStateFactory
 from llm_gent.flow.testing.checkpoint import CanonicalCounter, build_canonical_flow
+from tests.helpers import file_store
 
-from .conftest import make_test_logger
+from .conftest import commit_ids, make_test_logger
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> JsonFileCheckpointStore:
+def store(tmp_path: Path) -> FileStore:
     """A fresh store under an isolated temp root."""
-    return JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+    return file_store(tmp_path / "cp")
 
 
-async def _run(store: JsonFileCheckpointStore, name: str, *, halt_at: int | None = None) -> None:
+async def _run(store: FileStore, name: str, *, halt_at: int | None = None) -> None:
     """Run the canonical flow (4 iterations) under ``name``; halt after ``halt_at`` if given."""
     halt = asyncio.Event() if halt_at is not None else None
     await build_canonical_flow(
@@ -40,14 +40,13 @@ async def _run(store: JsonFileCheckpointStore, name: str, *, halt_at: int | None
     ).run(resume="latest")
 
 
-async def _all(history: History) -> list[Commit]:
+async def _all(history: History) -> list[FlowCommit]:
     return [c async for c in history.commits()]
 
 
 class TestEmptyHistory:
-    async def test_unknown_name_reads_as_empty(self, store: JsonFileCheckpointStore) -> None:
+    async def test_unknown_name_reads_as_empty(self, store: FileStore) -> None:
         history = History(store, "nothing-here")
-        assert await history.flow_id() is None
         assert await history.head() is None
         assert await history.last_complete() is None
         assert not await history.is_complete()
@@ -55,7 +54,7 @@ class TestEmptyHistory:
 
 
 class TestCompletedHistory:
-    async def test_head_is_the_tagged_final_state(self, store: JsonFileCheckpointStore) -> None:
+    async def test_head_is_the_tagged_final_state(self, store: FileStore) -> None:
         await _run(store, "done")
         history = History(store, "done")
 
@@ -64,11 +63,8 @@ class TestCompletedHistory:
         assert History.is_final_state(head)
         assert await history.is_complete()
         assert await history.last_complete() == head
-        assert head.meta.flow_id == await history.flow_id()
 
-    async def test_root_state_restores_through_the_factory(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_root_state_restores_through_the_factory(self, store: FileStore) -> None:
         await _run(store, "state")
         history = History(store, "state")
         head = await history.head()
@@ -84,48 +80,48 @@ class TestCompletedHistory:
 class TestCorruptHistory:
     """A hash pointing at a missing object raises instead of reading as a shorter history."""
 
-    def _objects(self, store: JsonFileCheckpointStore, flow_id: str, kind: str) -> Path:
-        return store._history_dir(flow_id) / "objects" / kind
-
-    async def test_missing_parent_raises_in_walk(self, store: JsonFileCheckpointStore) -> None:
+    async def test_missing_parent_raises_in_walk(self, store: FileStore) -> None:
         await _run(store, "torn-chain")
         history = History(store, "torn-chain")
         head = await history.head()
-        assert head is not None and head.parent_hashes
-        flow_id = head.meta.flow_id
-        (self._objects(store, flow_id, "commit") / head.parent_hashes[0]).unlink()
+        assert head is not None and head.parents
+        store.delete_objects("torn-chain", [head.parents[0]])
 
         with pytest.raises(HistoryCorrupt) as err:
             await _all(history)
-        assert (err.value.kind, err.value.content_hash) == ("commit", head.parent_hashes[0])
+        assert (err.value.kind, err.value.object_id) == ("commit", head.parents[0])
 
-    async def test_missing_blob_raises_in_snapshot(self, store: JsonFileCheckpointStore) -> None:
+    async def test_missing_blob_raises_in_snapshot(self, store: FileStore) -> None:
         await _run(store, "torn-state")
         history = History(store, "torn-state")
         head = await history.head()
         assert head is not None
-        for blob in self._objects(store, head.meta.flow_id, "blob").iterdir():
-            blob.unlink()
+        blobs = [
+            i
+            for i in store.list_objects("torn-state")
+            if store.object_type("torn-state", i) == "blob"
+        ]
+        store.delete_objects("torn-state", blobs)
 
         with pytest.raises(HistoryCorrupt, match="blob"):
             await history.snapshot(head)
 
-    async def test_ref_to_missing_commit_raises(self, store: JsonFileCheckpointStore) -> None:
+    async def test_ref_to_missing_commit_raises(self, store: FileStore) -> None:
         await _run(store, "torn-head")
         history = History(store, "torn-head")
         head = await history.head()
         assert head is not None
-        (self._objects(store, head.meta.flow_id, "commit") / head.content_hash).unlink()
+        store.delete_objects("torn-head", [head.id])
 
         with pytest.raises(HistoryCorrupt):
             await history.head()
 
-    async def test_replay_on_corrupt_history_raises(self, store: JsonFileCheckpointStore) -> None:
+    async def test_replay_on_corrupt_history_raises(self, store: FileStore) -> None:
         """Replay stops on store damage instead of starting over from ``state=``."""
         await _run(store, "torn-resume", halt_at=2)
         head = await History(store, "torn-resume").head()
         assert head is not None
-        (self._objects(store, head.meta.flow_id, "commit") / head.content_hash).unlink()
+        store.delete_objects("torn-resume", [head.id])
 
         flow = build_canonical_flow(
             make_test_logger(),
@@ -142,7 +138,7 @@ class TestCorruptHistory:
 
 
 class TestHistoryAcrossRuns:
-    async def test_halt_after_completion(self, store: JsonFileCheckpointStore) -> None:
+    async def test_halt_after_completion(self, store: FileStore) -> None:
         """A halted follow-up run: head moves on, last_complete stays, the chain links both."""
         await _run(store, "sessions")
         first_end = await History(store, "sessions").head()
@@ -156,14 +152,10 @@ class TestHistoryAcrossRuns:
         chain = await _all(history)
         assert chain[0] == head
         assert first_end in chain
-        assert chain[-1].parent_hashes == ()
+        assert chain[-1].parents == ()
 
-    async def test_commits_walk_every_stored_commit(self, store: JsonFileCheckpointStore) -> None:
+    async def test_commits_walk_every_stored_commit(self, store: FileStore) -> None:
         await _run(store, "walk", halt_at=2)
         await _run(store, "walk")
         history = History(store, "walk")
-        flow_id = await history.flow_id()
-        assert flow_id is not None
-
-        stored = {f.name for f in (store._history_dir(flow_id) / "objects" / "commit").iterdir()}
-        assert {c.content_hash for c in await _all(history)} == stored
+        assert {c.id for c in await _all(history)} == commit_ids(store, "walk")

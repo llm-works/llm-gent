@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Generator
 
 import pytest
+from alembic import command
 from appinfra.db.pg import PG
 from appinfra.log import Logger
 from sqlalchemy import text
@@ -105,3 +106,35 @@ class TestKeltCoexistence:
         names = [r[0] for r in rows]
         assert "alembic_version_kelt" in names
         assert _VERSION_TABLE_NAME in names
+
+
+def _tables(pg: PG) -> set[str]:
+    with pg.session() as session:
+        rows = session.execute(
+            text("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = :s"),
+            {"s": pg._schema_mgr.schema},
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
+class TestUpgrade:
+    def test_upgrade_from_001_replaces_the_history_tables(
+        self, pg_isolated: PG, pg_test_logger: Logger
+    ) -> None:
+        """A database at revision 001 upgrades in-process to the appinfra.cas tables."""
+        mgr = SchemaManager(pg_test_logger, pg_isolated)
+        mgr.ensure_schema()
+        schema = pg_isolated._schema_mgr.schema
+        with pg_isolated.session() as session:
+            for table in ("gent_cas_ref", "gent_cas_object", _VERSION_TABLE_NAME):
+                session.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table}"'))
+        config = mgr._get_alembic_config()
+        config.attributes["lg"] = pg_test_logger
+        command.upgrade(config, "001")
+        assert {"gent_flow_name", "gent_flow_object", "gent_flow_ref"} <= _tables(pg_isolated)
+        assert mgr.get_status().state == SchemaState.NEEDS_UPGRADE
+
+        assert mgr.ensure_schema().state == SchemaState.CURRENT
+        tables = _tables(pg_isolated)
+        assert {"gent_cas_object", "gent_cas_ref"} <= tables
+        assert not tables & {"gent_flow_name", "gent_flow_object", "gent_flow_ref"}

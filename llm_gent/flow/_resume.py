@@ -29,10 +29,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from appinfra.cas import Tree, canonical_json
+
 from .checkpoint import COMPLETE_TAG, is_commit_hash
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
-from .state.cas import Commit, Tree, canonical_json
+from .state.cas import FlowCommit
 from .state.snapshot import RESOURCES, Snapshot, path_str
 
 
@@ -80,7 +82,7 @@ class Resume:
         head: str | None = None
         async for commit in self._history.commits():
             if head is None:
-                head = commit.content_hash  # first in the walk is HEAD
+                head = commit.id  # first in the walk is HEAD
             snapshot = await self._history.snapshot(commit)
             if snapshot.has_state:
                 if skipped:
@@ -106,9 +108,9 @@ class Resume:
         from the newest one. Its first commit moves ``HEAD`` from where it
         points now (compare-and-set), and the commits written after
         ``target`` leave the history's line: ``latest`` no longer sees
-        them. They stay resumable by hash until
-        :func:`~llm_gent.flow.collect_unreachable` deletes them. A run that
-        fails before its first commit leaves ``HEAD`` where it was.
+        them. They stay resumable by hash until a prune of the repository
+        deletes them. A run that fails before its first commit leaves
+        ``HEAD`` where it was.
 
         Raises:
             ValueError: The history holds no commit ``target`` (a hash) or
@@ -120,13 +122,13 @@ class Resume:
         snapshot = await self._history.snapshot(commit)
         if not snapshot.has_state:
             raise ValueError(
-                f"history {self._history.client_flow_id!r}: commit {commit.content_hash} "
+                f"history {self._history.client_flow_id!r}: commit {commit.id} "
                 "holds no state to resume from"
             )
         root = self._root_state(snapshot.root)
         ctx = self.flow._checkpoint_ctx
         assert ctx is not None
-        await ctx.continue_from(commit.content_hash)
+        await ctx.continue_from(commit.id)
         return root, snapshot
 
     async def restart(
@@ -152,7 +154,7 @@ class Resume:
             root, snapshot = await self.checkout_at(target)
         return root, None if snapshot is None else _restart_snapshot(snapshot)
 
-    async def _resolve(self, target: str) -> Commit:
+    async def _resolve(self, target: str) -> FlowCommit:
         """The commit ``target`` names: a commit hash of this history, else a checkpoint name."""
         history = self._history
         if is_commit_hash(target):
@@ -169,14 +171,14 @@ class Resume:
             )
         return commit
 
-    def _warn_skipped(self, skipped: list[str], restored: Commit) -> None:
+    def _warn_skipped(self, skipped: list[str], restored: FlowCommit) -> None:
         """Log the stateless commits the checkout walked past, and where it landed."""
         self.flow._lg.warning(
             "resume skipped commits without state",
             extra={
                 "client_flow_id": self._history.client_flow_id,
                 "skipped": skipped,
-                "restored_commit": restored.content_hash,
+                "restored_commit": restored.id,
                 "restored_node_path": restored.meta.node_path,
             },
         )
@@ -210,13 +212,13 @@ def _restart_snapshot(snapshot: Snapshot) -> Snapshot:
 
 
 async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:
-    """Apply the store's retention policy on the clean-exit path.
+    """Apply the history's retention policy on the clean-exit path.
 
     Only a run that finished every step gets here: a halted run ends in its
     halt commit (:func:`commit_halt`), kept regardless of policy. A run is
     clean even when the halt was set during its last step — the step
     completed, so there is nothing left to resume. On a clean exit:
-    ``gc_on_success`` prunes; ``retain`` keeps the record and commits
+    ``gc_on_success`` deletes the history; ``retain`` keeps the record and commits
     ``final_state`` tagged ``complete``, so a later ``run(resume="latest")``
     continues from the finished run's final state.
 
@@ -230,7 +232,7 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
     ctx = flow._checkpoint_ctx
     _drop_unreached_scopes(flow, ctx.client_flow_id)
     if ctx.retention == "gc_on_success":
-        await ctx.gc_history()
+        await ctx.delete_history()
     else:
         await commit_completion(flow, final_state)
 
@@ -252,7 +254,7 @@ def _drop_unreached_scopes(flow: Flow, client_flow_id: str) -> None:
         )
 
 
-async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
+async def commit_completion(flow: Flow, final_state: State[Any]) -> FlowCommit:
     """Commit the run's final state at ``$end`` and move the ``complete`` tag to it.
 
     The commit holds the top-level state, so the history's head always
@@ -267,9 +269,9 @@ async def commit_completion(flow: Flow, final_state: State[Any]) -> Commit:
     """
     ctx = flow._checkpoint_ctx
     assert ctx is not None
-    tree = await _put_root_tree(flow, final_state)
+    tree = _put_root_tree(flow, final_state)
     commit = await ctx.save_completion_commit(tree)
-    await ctx.put_tag(COMPLETE_TAG, commit.content_hash)
+    await ctx.put_tag(COMPLETE_TAG, commit.id)
     return commit
 
 
@@ -300,7 +302,7 @@ async def commit_halt(flow: Flow) -> None:
         raise
 
 
-async def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
+def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
     """Put the run's snapshot, or an empty tree when its root ``state`` cannot be serialized.
 
     At the end of a run every child scope has closed, so the snapshot
@@ -311,9 +313,9 @@ async def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
     ctx = flow._checkpoint_ctx
     assert ctx is not None
     if _serializable(flow, state):
-        return await ctx.put_snapshot(flow._scopes)
-    tree = Tree.from_entries([])
-    await ctx.put_tree(tree)
+        return ctx.put_snapshot(flow._scopes)
+    tree = Tree()
+    ctx.put(tree)
     return tree
 
 

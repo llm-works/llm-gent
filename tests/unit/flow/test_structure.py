@@ -18,12 +18,11 @@ from llm_gent.flow import (
     History,
     Interrupted,
     Structure,
-    collect_unreachable,
     verb,
 )
 from llm_gent.flow.state.snapshot import FLOW
-from llm_gent.flow.stores import InMemoryCheckpointStore
 from llm_gent.flow.structure import Cycle, StepKey, StepPath, path_label
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -188,7 +187,7 @@ def _checkpointed(store: Any, halt: asyncio.Event, *, stop: bool) -> Any:
 @pytest.mark.asyncio
 class TestStoredStructure:
     async def test_every_commit_holds_the_structure_it_records(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         flow = _checkpointed(store, asyncio.Event(), stop=True)
         assert await flow.run(1) is HALTED
         await _checkpointed(store, asyncio.Event(), stop=False).run(resume="latest")
@@ -202,7 +201,7 @@ class TestStoredStructure:
             assert structure is not None and structure.hash == commit.meta.flow_root_hash
 
     async def test_the_snapshot_does_not_read_it(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _checkpointed(store, asyncio.Event(), stop=True).run(1)
         history = History(store, "structure")
         head = await history.head()
@@ -213,10 +212,10 @@ class TestStoredStructure:
 
     async def test_collecting_unreachable_objects_keeps_it(self) -> None:
         """A resume to an earlier checkpoint leaves objects behind; the structure is reachable."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _checkpointed(store, asyncio.Event(), stop=True).run(1)
         await _checkpointed(store, asyncio.Event(), stop=False).run(resume="saved")
-        assert await collect_unreachable(store, "structure") > 0
+        assert store.repo("structure").prune(0) > 0
 
         history = History(store, "structure")
         async for commit in history.commits():
@@ -224,7 +223,7 @@ class TestStoredStructure:
 
     async def test_a_commit_without_state_has_no_structure(self) -> None:
         """A final state that cannot be serialized commits an empty tree."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         flow = (
             Factory(make_test_logger())
             .create(state={"handle": object()})

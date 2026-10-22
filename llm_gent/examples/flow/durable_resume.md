@@ -55,7 +55,7 @@ flow that no longer has the saved step raises, naming the path.
   paused mid-turn on 'content-addressed storage'
   pending: ['content-addressed storage', 'async cancellation']
   summaries: []
-  ref files: ['histories/61815f06-…/refs/HEAD']
+  ref files: ['durable-resume-demo/refs/%48%45%41%44']
   halted mid-turn (paused turn saved) — invoke again to resume
 ```
 
@@ -102,32 +102,31 @@ run 2 is the one run 1 never got to make. Sequence:
 
 ## The on-disk store
 
-After both runs (`JsonFileCheckpointStore`):
+The history is one repository of an `appinfra.cas.FileStore`, named by `client_flow_id`. After
+both runs:
 
 ```
-names/
-└── durable-resume-demo                  # client_flow_id -> flow_id
-histories/
-└── 61815f06-…/                          # flow_id: UUID generated on the first save
-    ├── _client_flow_id                  # "durable-resume-demo"
-    ├── refs/
-    │   ├── HEAD                         # -> final-state commit
-    │   └── tags%2Fcomplete              # "tags/complete" -> final-state commit
-    └── objects/                         # content-addressed, file name = blake2b hash
-        ├── commit/7e55f868…             # halt commit
-        ├── commit/0be5929d…             # final-state commit
-        ├── tree/…                       # snapshot trees
-        └── blob/…                       # values
+durable-resume-demo/                     # the repository: client_flow_id
+├── refs/
+│   ├── %48%45%41%44                     # "HEAD" -> final-state commit
+│   └── tags%2Fcomplete                  # "tags/complete" -> final-state commit
+├── objects/                             # content-addressed: path = sha256 id
+│   ├── 7e/55f868…                       # halt commit
+│   ├── 0b/e5929d…                       # final-state commit
+│   └── …                                # snapshot trees and blobs
+├── repo.lock, refs.lock                 # flock locks: writers, refs, prune
+└── tmp/                                 # files being written, renamed into place
 ```
 
-`client_flow_id` is the agent's name for the history; the store keys everything by the internal
-`flow_id` it maps to. The UUID and every hash differ from one history to the next, so the ones
-shown here will not match a local run.
+Repository and ref names are URL-quoted into one path segment, capital letters included. Every
+hash differs from one run to the next (commits record a timestamp), so the ones shown here will not
+match a local run.
 
 Only `refs/` is mutable. Everything under `objects/` is immutable and named by the hash of its
-bytes; identical content is stored once, so a value that did not change between commits is not
-written again. If resume finds an object missing, it raises `HistoryCorrupt`. Objects no ref
-reaches any more are deleted only by an explicit `collect_unreachable(store, client_flow_id)`.
+type and bytes; identical content is stored once, so a value that did not change between commits
+is not written again. If resume finds an object missing, it raises `HistoryCorrupt`. Objects no ref
+reaches any more are deleted only by an explicit prune of the repository,
+`store.repo(client_flow_id).prune(expire)`.
 
 ### Refs
 
@@ -148,24 +147,19 @@ The script reads the history through `History(store, CLIENT_FLOW_ID)` rather tha
 
 ### Halt commit
 
-```json
-{
-  "meta": {
-    "flow_id": "61815f06-…",
-    "node_path": "e62e0596ecc27e3c/88299db1fcb56568",
-    "iteration": 0,
-    "outcome": "halted",
-    "produced_by": {"node_id": "88299db1fcb56568", "...": null},
-    "trace_ref": []
-  },
-  "parent_hashes": [],
-  "root_tree_hash": "208196f5…"
-}
+A commit is a `tree` line, a `parent` line per parent, a blank line, and the flow's metadata
+(`CommitMeta`) as JSON:
+
+```
+tree 208196f5…
+
+{"iteration":0,"node_path":"e62e0596ecc27e3c/88299db1fcb56568","outcome":"halted",
+ "produced_by":{"node_id":"88299db1fcb56568",…},"scope_path":"","trace_ref":[],…}
 ```
 
-- `flow_id` — the history's internal id. Commits never carry the agent's `client_flow_id`.
-- `parent_hashes: []` — the first commit of the history has no parent. Every later commit's
-  parent is the commit that was `HEAD` when it was written.
+- No `parent` line — the first commit of the history has no parent. Every later commit's parent
+  is the commit that was `HEAD` when it was written. `History` reads a commit back as a
+  `FlowCommit`: `id`, `tree`, `parents` and the parsed `meta`.
 - `node_path` — where the halt was observed: the `summarize` step inside the iterate. Metadata
   only; where the run continues is in the snapshot's cursors.
 - `outcome: "halted"` — written when the halt stopped the run. `resume="latest"` does not branch on it:
@@ -213,22 +207,23 @@ hash from one commit to the next.
 
 ### Final-state commit and the `complete` tag
 
-```json
-{"meta": {"node_path": "$end", "iteration": 0, "outcome": "ok", "trace_ref": []},
- "parent_hashes": ["7e55f868…"],   // the halt commit
- "root_tree_hash": "fa7c8a49…"}    // state/ only: Digest with pending [] and both summaries
+```
+tree fa7c8a49…          # state/ only: Digest with pending [] and both summaries
+parent 7e55f868…        # the halt commit
+
+{"iteration":0,"node_path":"$end","outcome":"ok","trace_ref":[],…}
 ```
 
 The history is the chain final-state commit → halt commit, written by two different processes:
 run 2 read `HEAD` before its first commit and parented on it.
 
-Written on clean exit when the store's retention is `retain` (the default). A finished run has no
+Written on clean exit when the history's retention is `retain` (the default). A finished run has no
 running structure, so the snapshot holds the root scope (and the run's cost tracker, when it has
 one). `HEAD` always holds the state the
 last run ended with, and `resume="latest"` on a finished history starts from its first step with
 that state. If the final state cannot be serialized, the commit is written with an empty tree and
 a warning is logged: the history is still complete, but carries no final state. With
-`retention="gc_on_success"` the history is deleted instead.
+`with_checkpoint_store(..., retention="gc_on_success")` the history is deleted instead.
 
 ## Where a run stops and continues
 
@@ -284,15 +279,15 @@ Every commit can be checked out the same way by its hash. `ctx.checkpoint()` ret
 the commit it wrote, named or not, and `History.head()` gives the newest one:
 
 ```python
-halted = (await History(store, "history-42").head()).content_hash
+halted = (await History(store, "history-42").head()).id
 await flow.run(
     resume="before-review"
 )  # the run continues there; once it commits, the halted commit leaves the line
 await flow.run(resume=halted)  # the run continues from the halted commit
 ```
 
-A commit left off the line stays resumable by hash, and a named one by its name, until
-`collect_unreachable` deletes what no ref reaches.
+A commit left off the line stays resumable by hash, and a named one by its name, until a prune
+of the repository deletes what no ref reaches.
 
 `run(restart=...)` takes the same `"latest"`, hash or name but starts over from the commit instead
 of continuing it: only its root state and the run's declared resources (the cost tracker's spend)

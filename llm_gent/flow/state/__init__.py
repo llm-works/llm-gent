@@ -9,9 +9,9 @@ Submodule layout:
   :class:`StateFactory`, :class:`TypeStateFactory`.
 - :mod:`.serialization` — module-level :data:`state_converter` and its
   build hooks.
-- :mod:`.cas` — content-addressed :class:`Blob`, :class:`Tree`,
-  :class:`Commit` object model. Not re-exported here — CAS-facing
-  consumers import from ``llm_gent.flow.state.cas`` explicitly.
+- :mod:`.cas` — :class:`CommitMeta` and :class:`FlowCommit`, the flow's
+  metadata on :mod:`appinfra.cas` commits. Not re-exported here;
+  ``llm_gent.flow`` exports both.
 
 Public re-exports below preserve the pre-split import surface:
 ``from llm_gent.flow.state import <name>`` resolves for every ``<name>``

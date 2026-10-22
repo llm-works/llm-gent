@@ -21,9 +21,9 @@ import pytest
 
 from llm_gent.flow import HALTED, Context, Factory, History, verb
 from llm_gent.flow.checkpoint import HEAD_REF
-from llm_gent.flow.stores import InMemoryCheckpointStore
+from tests.helpers import memory_store
 
-from .conftest import flow_id_for, make_test_logger
+from .conftest import make_test_logger
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -77,7 +77,7 @@ def _flow(store: Any, calls: list[str], tag: str | None = "mid", fail: bool = Fa
 
 class TestNamedCheckpoint:
     async def test_checkpoint_name_tags_its_commit(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
 
         commit = await History(store, NAME).checkpoint("mid")
@@ -87,7 +87,7 @@ class TestNamedCheckpoint:
         assert snapshot.cursors[""]["chain"]["args"] == [2]
 
     async def test_resume_by_name_continues_at_the_checkpointed_step(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
 
         calls: list[str] = []
@@ -101,7 +101,7 @@ class TestNamedCheckpoint:
 
     async def test_resume_by_name_resets_head_to_the_checkpoint(self) -> None:
         """The run's commits parent the checkpoint; later commits leave the history's line."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
         history = History(store, NAME)
         tagged = await history.checkpoint("mid")
@@ -111,15 +111,15 @@ class TestNamedCheckpoint:
         # The checkpoint step does not tag again, so the tag stays on run 1's commit.
         await _flow(store, [], tag=None).run(resume="mid")
 
-        line = [commit.content_hash async for commit in history.commits()]
-        assert tagged.content_hash in line
-        assert first_end.content_hash not in line
+        line = [commit.id async for commit in history.commits()]
+        assert tagged.id in line
+        assert first_end.id not in line
         head = await history.head()
-        assert head is not None and head.parent_hashes == (tagged.content_hash,)
+        assert head is not None and head.parents == (tagged.id,)
 
     async def test_a_run_failing_before_its_first_commit_leaves_head(self) -> None:
         """Nothing was committed, so the history is as it was: ``latest`` still sees run 1's end."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
         history = History(store, NAME)
         first_end = await history.head()
@@ -129,11 +129,11 @@ class TestNamedCheckpoint:
             await _flow(store, [], tag=None, fail=True).run(resume="mid")
 
         head = await history.head()
-        assert head is not None and head.content_hash == first_end.content_hash
+        assert head is not None and head.id == first_end.id
 
     async def test_a_removed_step_leaves_head(self) -> None:
         """The flow no longer has the checkpointed step: the resume fails and HEAD stays."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
         history = History(store, NAME)
         first_end = await history.head()
@@ -154,11 +154,11 @@ class TestNamedCheckpoint:
             await changed.run(resume="mid")
 
         head = await history.head()
-        assert head is not None and head.content_hash == first_end.content_hash
+        assert head is not None and head.id == first_end.id
 
     async def test_a_run_failing_after_a_commit_has_moved_head(self) -> None:
         """Its commit is parented on the checkpoint and is the head; the old line is left."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
         history = History(store, NAME)
         tagged = await history.checkpoint("mid")
@@ -169,12 +169,12 @@ class TestNamedCheckpoint:
             await _flow(store, [], fail=True).run(resume="mid")
 
         head = await history.head()
-        assert head is not None and head.parent_hashes == (tagged.content_hash,)
-        line = [commit.content_hash async for commit in history.commits()]
-        assert first_end.content_hash not in line
+        assert head is not None and head.parents == (tagged.id,)
+        line = [commit.id async for commit in history.commits()]
+        assert first_end.id not in line
 
     async def test_taking_the_checkpoint_again_moves_the_tag(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
         history = History(store, NAME)
         before = await history.checkpoint("mid")
@@ -183,28 +183,28 @@ class TestNamedCheckpoint:
 
         after = await history.checkpoint("mid")
         assert before is not None and after is not None
-        assert after.content_hash != before.content_hash
-        assert after.parent_hashes == (before.content_hash,)
+        assert after.id != before.id
+        assert after.parents == (before.id,)
 
 
 class TestNamedCheckpointErrors:
     async def test_unknown_name_raises_and_writes_nothing(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
-        head = store.get_ref(flow_id_for(store, NAME), HEAD_REF)
+        head = store.repo(NAME).get_ref(HEAD_REF)
 
         with pytest.raises(ValueError, match=r"no checkpoint named 'nope'; checkpoints: \['mid'\]"):
             await _flow(store, []).run(resume="nope")
-        assert store.get_ref(flow_id_for(store, NAME), HEAD_REF) == head
+        assert store.repo(NAME).get_ref(HEAD_REF) == head
 
     @pytest.mark.parametrize("name", ["off", "latest", "complete", "", "a" * 64])
     async def test_reserved_names_cannot_be_taken(self, name: str) -> None:
         with pytest.raises(ValueError, match="checkpoint"):
-            await _flow(InMemoryCheckpointStore(), [], tag=name).run(1)
+            await _flow(memory_store(), [], tag=name).run(1)
 
     async def test_resume_complete_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="reserved"):
-            await _flow(InMemoryCheckpointStore(), []).run(resume="complete")
+            await _flow(memory_store(), []).run(resume="complete")
 
     async def test_resume_by_name_requires_a_checkpoint_store(self) -> None:
         @verb
@@ -219,7 +219,7 @@ class TestNamedCheckpointErrors:
 class TestNamedCheckpointInIterate:
     async def test_resume_continues_in_the_checkpointed_pass(self) -> None:
         """A checkpoint in pass 2 resumes in pass 2 with its carried value, not from pass 0."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         passes: list[int] = []
 
         def build() -> Any:
@@ -301,14 +301,14 @@ def _hash_flow(
 
 class TestResumeByHash:
     async def test_checkpoint_returns_the_hash_it_wrote(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         seen: list[tuple[str | None, str | None]] = []
 
         @verb
         async def a(ctx: Context[dict[str, Any]], x: int) -> int:
             written = await ctx.checkpoint()
             head = await History(store, NAME).head()
-            seen.append((written, None if head is None else head.content_hash))
+            seen.append((written, None if head is None else head.id))
             return x
 
         flow = (
@@ -333,7 +333,7 @@ class TestResumeByHash:
 
     async def test_any_commit_stays_resumable_after_a_reset(self) -> None:
         """Unnamed checkpoint, then the halted head off the line, then a name: each resumes."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         history = History(store, NAME)
         calls: list[str] = []
         hashes: list[str | None] = []
@@ -347,19 +347,14 @@ class TestResumeByHash:
         calls.clear()
         assert await _hash_flow(store, calls, [], take=False, halt=None).run(resume=h1) == 22
         assert calls == ["a", "b", "c", "d"]
-        line = [commit.content_hash async for commit in history.commits()]
-        assert halted.content_hash not in line
+        line = [commit.id async for commit in history.commits()]
+        assert halted.id not in line
 
         calls.clear()
-        assert (
-            await _hash_flow(store, calls, [], take=False, halt=None).run(
-                resume=halted.content_hash
-            )
-            == 22
-        )
+        assert await _hash_flow(store, calls, [], take=False, halt=None).run(resume=halted.id) == 22
         assert calls == ["d"]
         head = await history.head()
-        assert head is not None and head.parent_hashes == (halted.content_hash,)
+        assert head is not None and head.parents == (halted.id,)
         assert (await history.snapshot(head)).root == {"a": 1, "b": 2, "c": 20, "d": 23}
 
         calls.clear()
@@ -367,17 +362,17 @@ class TestResumeByHash:
         assert calls == ["b", "c", "d"]
 
     async def test_unknown_hash_raises_and_writes_nothing(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
-        head = store.get_ref(flow_id_for(store, NAME), HEAD_REF)
+        head = store.repo(NAME).get_ref(HEAD_REF)
 
         with pytest.raises(ValueError, match=f"has no commit {'0' * 64}"):
             await _flow(store, []).run(resume="0" * 64)
-        assert store.get_ref(flow_id_for(store, NAME), HEAD_REF) == head
+        assert store.repo(NAME).get_ref(HEAD_REF) == head
 
     async def test_commit_without_state_is_refused(self) -> None:
         """A final state that could not be serialized left a stateless commit: nothing to resume."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def a(ctx: Context[dict[str, Any]], x: int) -> int:
@@ -395,29 +390,29 @@ class TestResumeByHash:
         assert head is not None
 
         with pytest.raises(ValueError, match="holds no state"):
-            await _flow(store, []).run(resume=head.content_hash)
+            await _flow(store, []).run(resume=head.id)
 
 
 class TestHistoryReads:
     async def test_checkpoint_names_are_sorted_without_complete(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, [], tag="zeta").run(1)
         await _flow(store, [], tag="alpha").run(1)
         assert await History(store, NAME).checkpoint_names() == ["alpha", "zeta"]
 
     async def test_reads_on_a_missing_history(self) -> None:
-        history = History(InMemoryCheckpointStore(), "never-existed")
+        history = History(memory_store(), "never-existed")
         assert await history.checkpoint_names() == []
         assert await history.commit("0" * 64) is None
 
     async def test_commit_reads_a_commit_off_the_line(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await _flow(store, []).run(1)
         history = History(store, NAME)
         first_end = await history.head()
         assert first_end is not None
         await _flow(store, [], tag=None).run(resume="mid")
 
-        found = await history.commit(first_end.content_hash)
-        assert found is not None and found.content_hash == first_end.content_hash
+        found = await history.commit(first_end.id)
+        assert found is not None and found.id == first_end.id
         assert await history.commit("0" * 64) is None

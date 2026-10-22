@@ -10,7 +10,7 @@ to call. This process performs the resume and prints the flow's final
 result to stdout as JSON — one line, so the parent can parse it back.
 
 Runs under whatever Python interpreter the parent launched (``sys.executable``);
-inherits environment variables (matters for :class:`PgCheckpointStore` and
+inherits environment variables (matters for :class:`~llm_gent.flow.stores.PgStore` and
 its ``APPINFRA_TEST_PG_URL``).
 """
 

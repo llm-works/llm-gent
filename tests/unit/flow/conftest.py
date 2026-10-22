@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-import uuid
-from typing import Any
+from appinfra.cas import Commit, Store
 
-from llm_gent.flow import Factory, Role, SAIAFactory
+from llm_gent.flow import Factory, FlowCommit, Role, SAIAFactory
+from llm_gent.flow.checkpoint import HEAD_REF
 from tests.helpers import make_test_logger
 
 
@@ -16,15 +16,27 @@ ROLE_A = Role(name="a", backend="openai", model="gpt-4o-mini")
 ROLE_B = Role(name="b", backend="anthropic", model="claude-3-5")
 
 
-def flow_id_for(store: Any, client_flow_id: str) -> str:
-    """Return the ``flow_id`` bound to ``client_flow_id`` in a sync store.
+def read_commit(store: Store, client_flow_id: str, commit_id: str) -> FlowCommit:
+    """The history's commit ``commit_id``, with its metadata parsed; it must exist."""
+    commit = store.repo(client_flow_id).get(commit_id, Commit)
+    assert commit is not None, f"{client_flow_id}: no commit {commit_id}"
+    return FlowCommit.from_commit(commit)
 
-    Binds a fresh one when the name is unbound, so tests can also seed
-    objects / refs under a name before any flow ran. Stores key every
-    object and ref by ``flow_id``; tests address histories by name.
-    """
-    flow_id: str = store.bind_flow_id(client_flow_id, str(uuid.uuid4()))
-    return flow_id
+
+def head_commit(store: Store, client_flow_id: str) -> FlowCommit:
+    """The commit the history's ``HEAD`` points at; the history must have one."""
+    head = store.repo(client_flow_id).get_ref(HEAD_REF)
+    assert head is not None, f"{client_flow_id}: no HEAD"
+    return read_commit(store, client_flow_id, head)
+
+
+def commit_ids(store: Store, client_flow_id: str) -> set[str]:
+    """Ids of every commit the history's repository holds, on its line or off it."""
+    return {
+        oid
+        for oid in store.list_objects(client_flow_id)
+        if store.object_type(client_flow_id, oid) == "commit"
+    }
 
 
 class StubSAIA:

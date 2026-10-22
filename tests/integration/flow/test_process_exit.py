@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from appinfra.cas import FileStore
 
 from llm_gent.flow import Context, Factory, History, verb
 from llm_gent.flow.checkpoint import HEAD_REF
-from llm_gent.flow.stores import JsonFileCheckpointStore
+from tests.helpers import file_store
 
 from ...unit.flow.conftest import make_test_logger
 
@@ -75,17 +76,17 @@ def _map_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
     )
 
 
-class _DiesBeforeSecondHeadMove(JsonFileCheckpointStore):
+class _DiesBeforeSecondHeadMove(FileStore):
     """Dies after writing the second commit object, before ``HEAD`` moves to it."""
 
     moves = 0
 
-    def set_ref(self, flow_id: str, name: str, commit_hash: str, expected: str | None) -> bool:
+    def write_ref(self, repo: str, name: str, new: str | None, old: str | None) -> bool:
         if name == HEAD_REF:
             self.moves += 1
             if self.moves == 2:
                 os._exit(EXIT_CODE)
-        return super().set_ref(flow_id, name, commit_hash, expected)
+        return super().write_ref(repo, name, new, old)
 
 
 _SCENARIOS = {"iterate": (_iterate_flow, 2), "map": (_map_flow, 2), "torn": (_iterate_flow, None)}
@@ -94,7 +95,7 @@ _SCENARIOS = {"iterate": (_iterate_flow, 2), "map": (_map_flow, 2), "torn": (_it
 def child(store_dir: str, scenario: str) -> None:
     """Child process entry: run ``scenario`` until it dies."""
     build, die_at = _SCENARIOS[scenario]
-    store_cls = _DiesBeforeSecondHeadMove if scenario == "torn" else JsonFileCheckpointStore
+    store_cls = _DiesBeforeSecondHeadMove if scenario == "torn" else FileStore
     store = store_cls(make_test_logger(), Path(store_dir))
     asyncio.run(build(store, [], die_at).run(0))
 
@@ -117,7 +118,7 @@ def _run_child(tmp_path: Path, scenario: str) -> Path:
 async def test_death_after_a_checkpoint_resumes_at_its_step(tmp_path: Path) -> None:
     """The process dies right after pass 2's checkpoint: only that step runs again."""
     store_dir = _run_child(tmp_path, "iterate")
-    store = JsonFileCheckpointStore(make_test_logger(), store_dir)
+    store = file_store(store_dir)
     ran: list[int] = []
 
     assert await _iterate_flow(store, ran, None).run(0, resume="latest") == 4
@@ -128,7 +129,7 @@ async def test_death_after_a_checkpoint_resumes_at_its_step(tmp_path: Path) -> N
 async def test_death_inside_a_parallel_map_reruns_no_saved_item(tmp_path: Path) -> None:
     """Items saved before the death do not run again; the result is the uninterrupted one."""
     store_dir = _run_child(tmp_path, "map")
-    store = JsonFileCheckpointStore(make_test_logger(), store_dir)
+    store = file_store(store_dir)
     history = History(store, NAME)
     head = await history.head()
     assert head is not None
@@ -147,7 +148,7 @@ async def test_death_between_commit_and_head_move_resumes_from_the_previous_head
 ) -> None:
     """A commit object written without HEAD moving to it is not part of the history."""
     store_dir = _run_child(tmp_path, "torn")
-    store = JsonFileCheckpointStore(make_test_logger(), store_dir)
+    store = file_store(store_dir)
     history = History(store, NAME)
     commits = [c async for c in history.commits()]
     assert len(commits) == 1  # pass 0's checkpoint; pass 1's commit never became HEAD

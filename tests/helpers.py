@@ -4,8 +4,10 @@
 """Shared test utilities."""
 
 import functools
+import os
 from unittest.mock import MagicMock
 
+from appinfra.cas import FileStore, MemoryStore
 from appinfra.log import Logger, quick_console_logger
 
 
@@ -16,6 +18,16 @@ def make_test_logger() -> Logger:
     appinfra lets a process create a logger name once, so every test shares one instance.
     """
     return quick_console_logger("test", config={"level": "error"})
+
+
+def memory_store() -> MemoryStore:
+    """Return an empty in-memory checkpoint store."""
+    return MemoryStore(make_test_logger())
+
+
+def file_store(root: str | os.PathLike[str]) -> FileStore:
+    """Return a checkpoint store under ``root``, without fsync: tests don't cut the power."""
+    return FileStore(make_test_logger(), root, fsync=False)
 
 
 def create_mock_trait(trait_class, **mock_attrs):

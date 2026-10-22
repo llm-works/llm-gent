@@ -20,9 +20,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from appinfra.cas import FileStore
 
 from llm_gent.flow import Context, Factory, History, Interrupted, verb
-from llm_gent.flow.stores import JsonFileCheckpointStore
+from tests.helpers import file_store
 
 from .conftest import make_test_logger
 
@@ -31,9 +32,9 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> JsonFileCheckpointStore:
+def store(tmp_path: Path) -> FileStore:
     """A fresh store under an isolated temp root."""
-    return JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+    return file_store(tmp_path / "cp")
 
 
 def _with_halt(flow: Any, halt: asyncio.Event | None) -> Any:
@@ -71,9 +72,7 @@ def _two_steps(
 
 
 class TestHaltInLastStep:
-    async def test_completed_last_step_finishes_the_run(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_completed_last_step_finishes_the_run(self, store: FileStore) -> None:
         calls: list[str] = []
         assert await _two_steps(store, "finish", asyncio.Event(), calls, "finish").run() is None
         history = History(store, "finish")
@@ -82,9 +81,7 @@ class TestHaltInLastStep:
         assert head is not None
         assert (await history.snapshot(head)).root == {"s1": 1, "s2": 1}
 
-    async def test_interrupted_last_step_runs_again_on_resume(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_interrupted_last_step_runs_again_on_resume(self, store: FileStore) -> None:
         calls: list[str] = []
         await _two_steps(store, "bail", asyncio.Event(), calls, "bail").run()
         history = History(store, "bail")
@@ -102,11 +99,8 @@ class TestHaltInLastStep:
         assert (await history.snapshot(head)).root == {"s1": 1, "s2": 1}
 
     async def test_interrupted_run_is_never_deleted_under_gc_on_success(
-        self, tmp_path: Path
+        self, store: FileStore
     ) -> None:
-        store = JsonFileCheckpointStore(
-            make_test_logger(), tmp_path / "cp", retention="gc_on_success"
-        )
         halt = asyncio.Event()
 
         @verb
@@ -118,7 +112,7 @@ class TestHaltInLastStep:
         flow = (
             Factory(make_test_logger())
             .create(state={})
-            .with_checkpoint_store(store, "gc-late-halt")
+            .with_checkpoint_store(store, "gc-late-halt", retention="gc_on_success")
             .with_checkpointer()
             .with_halt(halt)
             .call(s1)
@@ -132,7 +126,7 @@ class TestHaltInLastStep:
         assert (snapshot.root, snapshot.scopes) == ({"s1": 1}, {})
         assert not await history.is_complete()
 
-    async def test_map_as_last_step_is_not_complete(self, store: JsonFileCheckpointStore) -> None:
+    async def test_map_as_last_step_is_not_complete(self, store: FileStore) -> None:
         """Items the halt skipped leave the run halted, not complete."""
         halt = asyncio.Event()
         ran: list[int] = []

@@ -14,18 +14,18 @@ import asyncio
 from typing import Any
 
 import pytest
+from appinfra.cas import Blob, Object, Tree
 
 from llm_gent.flow import Context, Factory, History, verb
 from llm_gent.flow.state import State
-from llm_gent.flow.state.cas import Blob, Tree
 from llm_gent.flow.state.snapshot import (
     ScopeRegistry,
     Snapshot,
     build_snapshot_tree,
     read_snapshot,
 )
-from llm_gent.flow.stores import InMemoryCheckpointStore
 from llm_gent.flow.structure import Structure
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -41,20 +41,19 @@ _STRUCTURE = Structure(()).blob()
 async def _round_trip(scopes: ScopeRegistry) -> tuple[Snapshot, dict[str, Blob | Tree]]:
     """Build the snapshot tree for ``scopes`` and read it back from the objects it made."""
     tree, objects = build_snapshot_tree(scopes.capture(), _STRUCTURE)
-    by_hash = {obj.content_hash: obj for obj in objects}
+    by_id: dict[str, Blob | Tree] = {obj.id: obj for obj in objects}
 
-    async def load(kind: Any, content_hash: str) -> bytes:
-        obj = by_hash[content_hash]
-        return obj.payload if isinstance(obj, Blob) else obj.to_bytes()
+    def load(object_id: str, cls: type[Object]) -> Any:
+        obj = by_id[object_id]
+        assert isinstance(obj, cls)
+        return obj
 
-    return await read_snapshot(tree.content_hash, load), by_hash
+    return read_snapshot(tree.id, load), by_id
 
 
 def _blobs(objects: dict[str, Blob | Tree]) -> set[str]:
-    """Hashes of the blobs among ``objects``, the flow structure's aside."""
-    return {
-        h for h, obj in objects.items() if isinstance(obj, Blob) and h != _STRUCTURE.content_hash
-    }
+    """Ids of the blobs among ``objects``, the flow structure's aside."""
+    return {h for h, obj in objects.items() if isinstance(obj, Blob) and h != _STRUCTURE.id}
 
 
 class _FixedCursor:
@@ -180,7 +179,7 @@ class TestRegistry:
 class TestFlowSnapshots:
     async def test_a_checkpoint_in_one_map_item_holds_every_live_item_scope(self) -> None:
         """Siblings' scopes are in the snapshot, not only the saving item's chain."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         started, saved = asyncio.Event(), asyncio.Event()
         seen: list[int] = []
 
@@ -218,7 +217,7 @@ class TestFlowSnapshots:
         assert snapshot.scopes[commit.meta.scope_path] == {"item": 0}
 
     async def test_iterate_cursor_holds_the_pass_and_the_carried_value(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def step(ctx: Context[dict[str, Any]], prev: int) -> int:
@@ -245,7 +244,7 @@ class TestFlowSnapshots:
         assert snapshot.root == {"n": 3}
 
     async def test_chain_cursor_holds_the_step_and_its_input(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def first(ctx: Context[dict[str, Any]], x: int) -> int:
@@ -273,7 +272,7 @@ class TestFlowSnapshots:
         assert step["step"] == commit.meta.node_path.split("/")[-1]
 
     async def test_branch_cursor_holds_the_arm_it_took(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def save(ctx: Context[dict[str, Any]], x: int) -> int:
@@ -306,7 +305,7 @@ class TestFlowSnapshots:
         flow = (
             Factory(LG)
             .create(state={})
-            .with_checkpoint_store(InMemoryCheckpointStore(), "unstorable")
+            .with_checkpoint_store(memory_store(), "unstorable")
             .with_checkpointer()
             .call(save)
         )
@@ -315,7 +314,7 @@ class TestFlowSnapshots:
 
     async def test_a_blob_and_a_tree_with_the_same_bytes_are_both_stored(self) -> None:
         """The blob ``[]`` and the empty tree share a hash; neither put may skip the other."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def save(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
@@ -336,7 +335,7 @@ class TestFlowSnapshots:
         assert list(snapshots[1].scopes.values()) == [{}]
 
     async def test_final_state_commit_holds_only_the_root(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def step(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:

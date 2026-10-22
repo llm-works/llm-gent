@@ -58,12 +58,14 @@ Properties checked per case:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+from appinfra.cas import ObjectType, Store
 
 from llm_gent.flow import (
     HALTED,
@@ -76,8 +78,7 @@ from llm_gent.flow import (
     Role,
     verb,
 )
-from llm_gent.flow.checkpoint import CheckpointStore
-from llm_gent.flow.stores import InMemoryCheckpointStore, JsonFileCheckpointStore
+from tests.helpers import file_store, memory_store
 
 from .conftest import make_test_logger
 
@@ -473,10 +474,8 @@ def cut_model(shape: Seq, cut_key: str) -> tuple[int, dict[str, int]]:
 
 # --- Store and probe --------------------------------------------------------
 
-_WRITES = frozenset({"bind_flow_id", "put_object", "set_ref", "gc_history"})
 
-
-class CrashableStore:
+class CrashableStore(Store):
     """Delegates to a store and counts writes; once dead, every write raises.
 
     A crashed process writes nothing more; raising :class:`SimulatedCrash`
@@ -484,27 +483,53 @@ class CrashableStore:
     scheduled.
     """
 
-    def __init__(self, inner: CheckpointStore) -> None:
+    def __init__(self, inner: Store) -> None:
+        super().__init__(LG)
         self._inner = inner
         self.dead = False
         self.writes = 0
 
-    @property
-    def retention(self) -> Any:
-        return self._inner.retention
+    def _write(self, name: str) -> None:
+        if self.dead:
+            raise SimulatedCrash(f"{name} after the crash")
+        self.writes += 1
 
-    def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._inner, name)
-        if name not in _WRITES:
-            return attr
+    def lock(self, repo: str, exclusive: bool = False) -> AbstractContextManager[None]:
+        return self._inner.lock(repo, exclusive)
 
-        def write(*args: Any, **kwargs: Any) -> Any:
-            if self.dead:
-                raise SimulatedCrash(f"{name} after the crash")
-            self.writes += 1
-            return attr(*args, **kwargs)
+    def delete_repo(self, name: str) -> None:
+        self._write("delete_repo")
+        self._inner.delete_repo(name)
 
-        return write
+    def list_repos(self) -> list[str]:
+        return self._inner.list_repos()
+
+    def read_object(self, repo: str, object_id: str) -> tuple[ObjectType, bytes] | None:
+        return self._inner.read_object(repo, object_id)
+
+    def object_type(self, repo: str, object_id: str) -> ObjectType | None:
+        return self._inner.object_type(repo, object_id)
+
+    def write_object(self, repo: str, object_id: str, object_type: ObjectType, data: bytes) -> None:
+        self._write("write_object")
+        self._inner.write_object(repo, object_id, object_type, data)
+
+    def list_objects(self, repo: str) -> dict[str, float]:
+        return self._inner.list_objects(repo)
+
+    def delete_objects(self, repo: str, object_ids: Iterable[str]) -> None:
+        self._write("delete_objects")
+        self._inner.delete_objects(repo, object_ids)
+
+    def read_ref(self, repo: str, name: str) -> str | None:
+        return self._inner.read_ref(repo, name)
+
+    def write_ref(self, repo: str, name: str, new: str | None, old: str | None) -> bool:
+        self._write("write_ref")
+        return self._inner.write_ref(repo, name, new, old)
+
+    def list_refs(self, repo: str) -> dict[str, str]:
+        return self._inner.list_refs(repo)
 
 
 @dataclass
@@ -1012,10 +1037,10 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 # --- Tests ------------------------------------------------------------------
 
 
-def _store(kind: str, tmp_path: Path) -> CheckpointStore:
+def _store(kind: str, tmp_path: Path) -> Store:
     if kind == "mem":
-        return InMemoryCheckpointStore()
-    return JsonFileCheckpointStore(LG, tmp_path / "cp")
+        return memory_store()
+    return file_store(tmp_path / "cp")
 
 
 @pytest.mark.parametrize("parallel", [False, True], ids=["seq", "par"])
@@ -1023,7 +1048,7 @@ def _store(kind: str, tmp_path: Path) -> CheckpointStore:
 async def test_uninterrupted_run_matches_model(shape_name: str, parallel: bool) -> None:
     shape = SHAPES[shape_name]
     expected_result, baseline, merges = model(shape)
-    store = InMemoryCheckpointStore()
+    store = memory_store()
     probe = Probe()
 
     assert await _flow(shape, probe, store, parallel=parallel).run(RUN_INPUT) == expected_result
@@ -1195,7 +1220,7 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
     """
     shape = SHAPES[shape_name]
     expected_result, baseline, merges = model(shape)
-    store = InMemoryCheckpointStore()
+    store = memory_store()
     first = Probe(policy="named")
     assert await _flow(shape, first, store, parallel=False).run(RUN_INPUT) == expected_result
 
@@ -1301,7 +1326,7 @@ async def test_a_cut_run_matches_the_cut_model(
     shape_name: str, cut_key: str, parallel: bool
 ) -> None:
     shape = CUT_SHAPES[shape_name]
-    store = InMemoryCheckpointStore()
+    store = memory_store()
     probe = Probe(cut_key=cut_key)
     result = await _flow(shape, probe, store, parallel=parallel).run(RUN_INPUT)
     assert len(probe.executed) == len(set(probe.executed)), "a leaf ran twice"
@@ -1341,7 +1366,7 @@ def _cut_params() -> Iterator[Any]:
                         yield pytest.param(case, id=case.id)
 
 
-async def _head_done(store: CheckpointStore) -> dict[str, int]:
+async def _head_done(store: Store) -> dict[str, int]:
     history = History(store, FLOW_NAME)
     head = await history.head()
     assert head is not None
@@ -1352,7 +1377,7 @@ async def _cut_oracle(shape: Seq, case: CutCase) -> tuple[int, dict[str, int]]:
     """The cut run's result and ``done``: :func:`cut_model`'s, or an unhalted parallel run's."""
     if not case.parallel:
         return cut_model(shape, case.cut_key)
-    store = InMemoryCheckpointStore()
+    store = memory_store()
     result = await _flow(shape, Probe(cut_key=case.cut_key), store, parallel=True).run(RUN_INPUT)
     return result, await _head_done(store)
 
@@ -1362,7 +1387,7 @@ async def test_halt_around_a_shortcut_resumes_to_the_cut_run(case: CutCase) -> N
     shape = CUT_SHAPES[case.shape]
     expected, expected_done = await _cut_oracle(shape, case)
 
-    inner = InMemoryCheckpointStore()
+    inner = memory_store()
     store = CrashableStore(inner)
     halt = asyncio.Event()
     probe = Probe(

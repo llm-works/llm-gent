@@ -24,7 +24,7 @@ import pytest
 from llm_gent.core.cost import CostTracker, PricingConfig
 from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, Loop, Role, verb
 from llm_gent.flow.state.snapshot import RESOURCES
-from llm_gent.flow.stores import InMemoryCheckpointStore
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -86,7 +86,7 @@ class TestAppTrackerAcrossResume:
         )
 
     async def test_the_running_cost_comes_back_after_a_halt(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         assert await self._flow(store, _tracker(), asyncio.Event(), []).run(1) is HALTED
 
         fresh = _tracker(10.0)
@@ -98,7 +98,7 @@ class TestAppTrackerAcrossResume:
 
     async def test_a_per_session_budget_is_set_on_the_restored_spend(self) -> None:
         """Spend is cumulative; the app reads it from the history and sets this session's limit."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await self._flow(store, _tracker(), asyncio.Event(), []).run(1)
         history = History(store, NAME)
         head = await history.head()
@@ -112,7 +112,7 @@ class TestAppTrackerAcrossResume:
 
     async def test_a_hard_stop_is_the_app_s_choice(self) -> None:
         """A tracker built with the run's halt pauses the run when its budget is crossed."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         halt = asyncio.Event()
         seen: list[float] = []
 
@@ -142,7 +142,7 @@ class TestAppTrackerAcrossResume:
 
     async def test_a_finished_run_s_spend_carries_into_the_next_session(self) -> None:
         """The completion commit holds the tracker: the next session continues the total."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def a(ctx: Context[Any], x: int) -> int:
@@ -176,7 +176,7 @@ class TestAppTrackerAcrossResume:
         Restoring it again where a nested flow starts would overwrite the
         spend recorded since the run's start.
         """
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         halt = asyncio.Event()
 
         def build(tracker: CostTracker, arm: bool) -> Any:
@@ -295,7 +295,7 @@ class TestTrackerSubclassAcrossResume:
         )
 
     async def test_a_new_session_mid_flow_is_charged_only_its_own_spend(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         first = _SessionTracker("s1", 10.0)
         assert await self._flow(store, first, asyncio.Event(), {}, "b").run(1) is HALTED
         assert first.session_spent == 2.0
@@ -307,7 +307,7 @@ class TestTrackerSubclassAcrossResume:
         assert second.spent == 4.0 and second.session_spent == 2.0
 
     async def test_a_resume_in_the_same_session_keeps_its_baseline(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await self._flow(store, _SessionTracker("s1", 10.0), asyncio.Event(), {}, "a").run(1)
         s2 = _SessionTracker("s2", 10.0)
         assert await self._flow(store, s2, asyncio.Event(), {}, "c").run(resume="latest") is HALTED
@@ -319,7 +319,7 @@ class TestTrackerSubclassAcrossResume:
         assert again.spent == 4.0 and again.session_spent == 3.0
 
     async def test_the_session_after_a_finished_run_is_rebased_on_its_total(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await self._flow(store, _SessionTracker("s1", 10.0), asyncio.Event(), {}).run(1)
 
         second = _SessionTracker("s2", 10.0)
@@ -328,7 +328,7 @@ class TestTrackerSubclassAcrossResume:
 
     async def test_a_cap_raised_before_the_base_restore_does_not_fire_the_halt(self) -> None:
         """Restored spend over the session's allowance: the rebased cap keeps the run going."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await self._flow(store, _SessionTracker("s1", 10.0), asyncio.Event(), {}, "c").run(1)
 
         halt = asyncio.Event()
@@ -344,7 +344,7 @@ class TestTrackerSubclassAcrossResume:
             def restore(self, data: dict[str, Any]) -> None:
                 pass
 
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         flow = TestAppTrackerAcrossResume._flow
         assert await flow(store, _tracker(), asyncio.Event(), []).run(1) is HALTED
 
@@ -400,7 +400,7 @@ class TestTrackerSubclassAcrossResume:
         def root() -> Recording:
             return Recording(make_test_logger(), PricingConfig())
 
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         costs = {0: [0.3, 0.2], 1: [0.4, 0.1]}
         flow1 = _item_flow(root(), asyncio.Event(), costs, {}, arm=True)
         assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is HALTED
@@ -507,7 +507,7 @@ class TestItemBudgets:
 class TestItemBudgetsAcrossHalt:
     async def test_budgeted_item_stops_on_the_run_halt_and_resumes_with_its_spend(self) -> None:
         """Each item resumes on a child with its spend; the run's tracker continues its total."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         costs = {0: [0.3, 0.2], 1: [0.4, 0.1]}
 
         root1 = _tracker()
@@ -529,7 +529,7 @@ class TestItemBudgetsAcrossHalt:
 
     async def test_an_item_resumed_over_its_budget_runs_with_exceeded_latched(self) -> None:
         """Item 0 halted at 0.9; resumed under a budget of 0.5 it carries on, exceeded."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         costs = {0: [0.9, 0.1], 1: [0.1, 0.1]}
         flow1 = _item_flow(_tracker(), asyncio.Event(), costs, {}, arm=True)
         assert await flow1.with_checkpoint_store(store, NAME).with_checkpointer().run() is HALTED
@@ -786,7 +786,7 @@ class TestCostAcrossShortcut:
 class TestCostAcrossCrash:
     async def test_a_budgeted_run_resumes_at_its_last_save(self) -> None:
         """Spend after the last save is not in any checkpoint: the redone step records it again."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         seen: list[float] = []
 
         def build(root: CostTracker, fail: bool) -> Any:

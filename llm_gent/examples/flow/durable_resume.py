@@ -10,7 +10,7 @@
 Verifies Flow's checkpoint + mid-SAIA-turn pause + resume story
 end-to-end. Structurally exercises every save site: iterate
 boundary, halt-observation mid-turn, the paused turn in the CAS
-commit's snapshot, :class:`JsonFileCheckpointStore` persistence, and
+commit's snapshot, :class:`appinfra.cas.FileStore` persistence, and
 :meth:`Flow.run(resume="latest")` checkout on a subsequent process.
 
 Backend modes:
@@ -100,6 +100,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from appinfra.cas import FileStore
 from appinfra.log import Logger, quick_console_logger
 from llm_infer.client import Factory as LLMInferFactory
 from llm_infer.client.saia import SAIAAdapter
@@ -120,7 +121,6 @@ from llm_gent.flow import (
     TypeStateFactory,
     verb,
 )
-from llm_gent.flow.stores import JsonFileCheckpointStore
 
 
 TOPICS: tuple[str, ...] = ("content-addressed storage", "async cancellation")
@@ -474,7 +474,7 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     fresh (``resume="off"``) on an empty or finished history. The halt is
     armed only on a fresh run so the resumed turn completes.
     """
-    store = JsonFileCheckpointStore(lg, store_dir)
+    store = FileStore(lg, store_dir)
     history = History(store, CLIENT_FLOW_ID)
     resuming = await _resume_pending(history)
     halt = asyncio.Event()
@@ -503,11 +503,7 @@ async def _halted_state(history: History) -> Digest:
 
 async def _report(history: History, store_dir: Path, final: Digest, halted: bool) -> None:
     """Print the post-run state and the ref files the store holds."""
-    refs = sorted(
-        str(p.relative_to(store_dir))
-        for p in store_dir.glob("histories/*/refs/*")
-        if p.name != ".lock"
-    )
+    refs = sorted(str(p.relative_to(store_dir)) for p in store_dir.glob("*/refs/*"))
     print(f"  pending: {final.pending}")
     print(f"  summaries: {final.summaries}")
     print(f"  ref files: {refs}")
@@ -533,9 +529,7 @@ async def _run_smoke(lg: Logger) -> int:
     resumed_backend = _FakeBackend()
     try:
         first, halted = await _invoke(lg, store_dir, _FakeBackend(), "smoke")
-        turn_saved = await _paused_turn_saved(
-            History(JsonFileCheckpointStore(lg, store_dir), CLIENT_FLOW_ID)
-        )
+        turn_saved = await _paused_turn_saved(History(FileStore(lg, store_dir), CLIENT_FLOW_ID))
         print()
         final, still_halted = await _invoke(lg, store_dir, resumed_backend, "smoke")
     finally:

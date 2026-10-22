@@ -40,8 +40,8 @@ from .nodes import (
 )
 from .state import State, StateFactory
 from .state.cas import (
-    Commit,
     CommitOutcome,
+    FlowCommit,
     TraceRef,
 )
 from .state.snapshot import ARM, Cursor, ScopePath
@@ -538,7 +538,7 @@ async def _save_scope_commit(
     current_state: State[Any],
     outcome: CommitOutcome,
     trace_ref: tuple[TraceRef, ...] = (),
-) -> Commit | None:
+) -> FlowCommit | None:
     """Save the whole run as a commit in its repo and return it; ``None`` when nothing saves here.
 
     The save point of :class:`IterateRunner`, :class:`MapItemRunner` and
@@ -555,7 +555,7 @@ async def _save_scope_commit(
         env.ancestor_chain, iteration, node_id, env.scopes, current_state, outcome, trace_ref
     )
     if checkpointer.name is not None:
-        await ctx.put_tag(checkpoint_tag(checkpointer.name), commit.content_hash)
+        await ctx.put_tag(checkpoint_tag(checkpointer.name), commit.id)
     return commit
 
 
