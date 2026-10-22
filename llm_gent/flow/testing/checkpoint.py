@@ -32,9 +32,10 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
+from appinfra.cas import Store
 from appinfra.log import Logger
 
-from ..checkpoint import CheckpointStore, ResumeMode
+from ..checkpoint import ResumeMode, Retention
 from ..context import Context
 from ..factory import Factory
 from ..flow import Flow
@@ -142,8 +143,9 @@ def build_canonical_flow(
     max_iters: int = 5,
     halt: asyncio.Event | None = None,
     halt_after_iteration: int | None = None,
-    store: CheckpointStore | None = None,
+    store: Store | None = None,
     client_flow_id: str = "canonical-multi-stage",
+    retention: Retention = "retain",
 ) -> Flow:
     """Build the canonical multi-stage Flow.
 
@@ -171,9 +173,11 @@ def build_canonical_flow(
             passes its input through, so it can run again on resume.
         halt_after_iteration: Iteration count at which to fire ``halt``.
             Requires ``halt``.
-        store: Optional :class:`CheckpointStore`. Wires
+        store: Optional :class:`appinfra.cas.Store`. Wires
             ``.with_checkpoint_store(store, client_flow_id).with_checkpointer()`` when present.
         client_flow_id: Checkpoint history identifier.
+        retention: What a fully successful run leaves of the history
+            (:data:`~llm_gent.flow.checkpoint.Retention`).
 
     Raises:
         ValueError: When exactly one of ``halt`` / ``halt_after_iteration``
@@ -185,7 +189,7 @@ def build_canonical_flow(
     ff = Factory(lg, state_factory=TypeStateFactory(CanonicalCounter))
     flow = ff.create(state=state if state is not None else CanonicalCounter())
     if store is not None:
-        flow.with_checkpoint_store(store, client_flow_id).with_checkpointer()
+        flow.with_checkpoint_store(store, client_flow_id, retention=retention).with_checkpointer()
         # Canonical fixture opts into per-iteration saves: the determinism
         # assertions and resume tests need each boundary as a resumable anchor.
         flow.with_checkpoint_policy(on_iterate=True)
@@ -207,7 +211,7 @@ def build_canonical_flow(
 
 async def assert_resume_determinism(
     lg: Logger,
-    store: CheckpointStore,
+    store: Store,
     *,
     halt_after_iteration: int = 2,
     max_iters: int = 5,
@@ -238,7 +242,7 @@ async def assert_resume_determinism(
         ValueError: If a checkpoint already exists for the client_flow_id,
             or if halt_after_iteration is not in [1, max_iters].
     """
-    if await History(store, client_flow_id).flow_id() is not None:
+    if await History(store, client_flow_id).head() is not None:
         raise ValueError(f"checkpoint already exists for client_flow_id={client_flow_id!r}")
     if not (1 <= halt_after_iteration <= max_iters):
         raise ValueError(
@@ -276,9 +280,9 @@ async def assert_resume_determinism(
 
 
 def pg_checkpoint_store_from_config(lg: Logger, *, url: str, schema: str) -> Any:
-    """Subprocess-friendly :class:`PgCheckpointStore` factory.
+    """Subprocess-friendly :class:`~llm_gent.flow.stores.PgStore` factory.
 
-    :class:`PgCheckpointStore` takes a live :class:`~appinfra.db.pg.PG`
+    :class:`~llm_gent.flow.stores.PgStore` takes a live :class:`~appinfra.db.pg.PG`
     handle — not JSON-serializable, so it can't cross the subprocess
     boundary directly. This factory takes the connection URL and schema
     name as strings (both trivially serializable), builds the PG handle
@@ -288,10 +292,10 @@ def pg_checkpoint_store_from_config(lg: Logger, *, url: str, schema: str) -> Any
     """
     from appinfra.db.pg import PG
 
-    from ..stores.postgres import PgCheckpointStore
+    from ..stores.postgres import PgStore
 
     pg = PG(lg, {"url": url}, schema=schema)
-    return PgCheckpointStore(lg, pg)
+    return PgStore(lg, pg)
 
 
 def resume_in_subprocess(
@@ -324,11 +328,11 @@ def resume_in_subprocess(
 
     Args:
         store_module: Dotted module path exposing the store factory
-            (e.g. ``"llm_gent.flow.stores.json_file"`` for the class
-            directly, or ``"llm_gent.flow.testing.checkpoint"`` for a
-            wrapper function like :func:`pg_checkpoint_store_from_config`).
+            (e.g. ``"appinfra.cas"`` for ``FileStore`` directly, or
+            ``"llm_gent.flow.testing.checkpoint"`` for a wrapper function
+            like :func:`pg_checkpoint_store_from_config`).
         store_factory: Class or function name inside that module. Must
-            be callable as ``store_factory(lg, **store_kwargs) -> CheckpointStore``.
+            be callable as ``store_factory(lg, **store_kwargs) -> Store``.
         store_kwargs: JSON-serializable kwargs for the store factory.
         flow_module: Dotted module path exposing the flow builder.
         flow_builder: Builder function name inside that module. Must

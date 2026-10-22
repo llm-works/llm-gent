@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from llm_gent.flow import HALTED, Context, Factory, Interrupted, verb
 from llm_gent.flow.state import StateDataclass
 from llm_gent.flow.state.codec import decode, encode
-from llm_gent.flow.stores import InMemoryCheckpointStore
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -210,7 +210,7 @@ class TestRejected:
 class TestInAFlow:
     async def test_an_iterate_carrying_tuples_halts_and_resumes(self) -> None:
         """The carry holds tuples nested in a list: the halt checkpoint stores it, resume gets it back."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         def build(halt: asyncio.Event, arm: bool, seen: list[Pairs]) -> Any:
             @verb

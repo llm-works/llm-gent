@@ -1,24 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Postgres-backed :class:`CheckpointStore` — content-addressed object + ref store.
+"""Postgres-backed :class:`appinfra.cas.Store` — repositories of objects and refs in two tables.
 
-Three tables:
+- :class:`CasObject` — ``(repo, id)`` PK, the object's ``type``, its
+  serialized ``data`` and ``written_at``. A re-put refreshes
+  ``written_at`` (``ON CONFLICT DO UPDATE``), so a prune treats the object
+  as recent again.
+- :class:`CasRef` — ``(repo, name)`` PK → ``target``. Created with
+  ``INSERT ... ON CONFLICT DO NOTHING``, moved with ``UPDATE ... WHERE
+  target = <old>`` and deleted with ``DELETE ... WHERE target = <old>``:
+  each is one statement, so of concurrent compare-and-set writers at most
+  one lands.
 
-- :class:`FlowName` — ``client_flow_id`` PK → ``flow_id`` (unique): the
-  agent's name for a history mapped to gent's internal id.
-- :class:`FlowObject` — ``(flow_id, kind, content_hash)`` PK,
-  ``BYTEA payload``. Idempotent puts via ``ON CONFLICT DO NOTHING``:
-  content-hashing guarantees same-hash → same bytes, so a re-put is a
-  no-op.
-- :class:`FlowRef` — ``(flow_id, name)`` PK → ``commit_hash``. Created
-  with ``INSERT ... ON CONFLICT DO NOTHING`` and moved with ``UPDATE ...
-  WHERE commit_hash = <expected>``: each is one atomic statement, so of
-  concurrent compare-and-set writers at most one lands.
+Write times come from the database server's clock (``clock_timestamp()``),
+and :meth:`PgStore.now` reads the same clock, so prune's grace window does
+not shift with clock skew between hosts.
 
-Object and ref tables scope everything by ``flow_id`` — history-scoped
-storage; blobs are deliberately not shared across histories.
-:meth:`gc_history` is three DELETE statements.
+:meth:`PgStore.lock` takes a session-level advisory lock (shared or
+exclusive) keyed by the current schema and the repository name, on a
+dedicated autocommit connection that never sits idle in a transaction;
+a process that dies releases it with its connection.
 
 Schema is not managed by the store. Consumers call
 :func:`llm_gent.ensure_schema` (or :class:`llm_gent.schema.SchemaManager`
@@ -28,258 +30,205 @@ the store just uses the tables.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, cast
 
+from appinfra.cas import ObjectType, Store
 from appinfra.db.pg import PG
 from appinfra.log import Logger
-from sqlalchemy import DateTime, LargeBinary, String, delete, select, tuple_, update
+from sqlalchemy import (
+    DateTime,
+    LargeBinary,
+    String,
+    delete,
+    extract,
+    func,
+    select,
+    text,
+    union,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from llm_gent.schema import Base
 
-from ..checkpoint import Kind, Retention
-
-
-_FLOW_ID_LEN = 36
-"""Length of a ``flow_id`` column — a canonical UUID string."""
 
 _DELETE_BATCH = 500
-"""Object keys per DELETE statement in :meth:`PgCheckpointStore.delete_objects`."""
+"""Object ids per DELETE statement in :meth:`PgStore.delete_objects`."""
+
+_LOCK_KEY = "hashtextextended(current_schema() || '/' || :repo, 0)"
+"""Advisory lock key of a repository: the schema in use and the repository name.
+
+A schema name has no ``/``, so the first one separates the two.
+"""
 
 
-class FlowName(Base):
-    """One row = one agent-chosen ``client_flow_id`` bound to its history's ``flow_id``.
+class CasObject(Base):
+    """One row = one object of a repository.
 
-    Kept in sync with :mod:`llm_gent.migrations.versions.001_initial_flow_cas`
-    (which owns the DDL), like the other models below.
+    Kept in sync with :mod:`llm_gent.migrations.versions.002_appinfra_cas`
+    (which owns the DDL), like :class:`CasRef`.
     """
 
-    __tablename__ = "gent_flow_name"
+    __tablename__ = "gent_cas_object"
 
-    client_flow_id: Mapped[str] = mapped_column(String(255), primary_key=True)
-    flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), nullable=False, unique=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    repo: Mapped[str] = mapped_column(String(255), primary_key=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    type: Mapped[str] = mapped_column(String(8), nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    written_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
     )
 
 
-class FlowObject(Base):
-    """One row = one content-addressed object under a history.
+class CasRef(Base):
+    """One row = one ref ``(repo, name)`` pointing at an object id (``HEAD``, ``tags/...``)."""
 
-    Kept in sync with :mod:`llm_gent.migrations.versions.001_initial_flow_cas`
-    (which owns the DDL). Any schema change lands as both a new alembic
-    revision and a matching model edit.
-    """
+    __tablename__ = "gent_cas_ref"
 
-    __tablename__ = "gent_flow_object"
-
-    flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
-    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
-    content_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
-    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-
-
-class FlowRef(Base):
-    """One row = one named ref ``(flow_id, name)`` → commit_hash (``HEAD``, ``tags/...``)."""
-
-    __tablename__ = "gent_flow_ref"
-
-    flow_id: Mapped[str] = mapped_column(String(_FLOW_ID_LEN), primary_key=True)
+    repo: Mapped[str] = mapped_column(String(255), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), primary_key=True)
-    commit_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[str] = mapped_column(String(64), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
     )
 
 
-class PgCheckpointStore:
-    """Postgres-backed :class:`CheckpointStore` sharing one PG handle."""
+class PgStore(Store):
+    """Repositories of objects and refs in Postgres, through one :class:`~appinfra.db.pg.PG`."""
 
-    retention: Retention
-
-    def __init__(
-        self,
-        lg: Logger,
-        pg: PG,
-        *,
-        retention: Retention = "retain",
-    ) -> None:
-        """Bind a PG handle + retention policy.
-
-        Args:
-            lg: Logger for diagnostics.
-            pg: :class:`appinfra.db.pg.PG` handle. The store issues all
-                statements against this handle's bound schema.
-            retention: ``"retain"`` (default) keeps successful
-                histories in place; ``"gc_on_success"`` calls
-                :meth:`gc_history` on clean run completion.
-        """
-        self._lg = lg
+    def __init__(self, lg: Logger, pg: PG) -> None:
+        """Bind a PG handle; every statement runs against its schema."""
+        super().__init__(lg)
         self._pg = pg
-        self.retention = retention
 
-    # ------------------------------------------------------------------
-    # Name map
-    # ------------------------------------------------------------------
+    # --- locks and repositories ---
 
-    def get_flow_id(self, client_flow_id: str) -> str | None:
-        """Return the ``flow_id`` bound to ``client_flow_id``, or ``None``."""
-        stmt = select(FlowName.flow_id).where(FlowName.client_flow_id == client_flow_id)
+    @contextmanager
+    def lock(self, repo: str, exclusive: bool = False) -> Iterator[None]:
+        """Hold the repository's advisory lock, shared or exclusive, for the block."""
+        mode = "" if exclusive else "_shared"
+        with self._pg.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(f"SELECT pg_advisory_lock{mode}({_LOCK_KEY})"), {"repo": repo})
+            try:
+                yield
+            finally:
+                conn.execute(text(f"SELECT pg_advisory_unlock{mode}({_LOCK_KEY})"), {"repo": repo})
+
+    def delete_repo(self, name: str) -> None:
+        """Delete the repository ``name`` under its exclusive lock; no-op if absent."""
+        with self.lock(name, exclusive=True), self._pg.session() as session:
+            refs = session.execute(delete(CasRef).where(CasRef.repo == name))
+            objects = session.execute(delete(CasObject).where(CasObject.repo == name))
+        if _rowcount(refs) or _rowcount(objects):
+            self._lg.debug("deleted repository", extra={"repo": name})
+
+    def list_repos(self) -> list[str]:
+        """Return the names of the repositories holding an object or a ref, sorted."""
+        stmt = union(select(CasObject.repo), select(CasRef.repo))
+        with self._pg.session() as session:
+            return sorted(str(row[0]) for row in session.execute(stmt))
+
+    def now(self) -> float:
+        """The database server's clock (epoch secs): the one ``written_at`` uses."""
+        with self._pg.session() as session:
+            return float(
+                session.execute(select(extract("epoch", func.clock_timestamp()))).scalar_one()
+            )
+
+    # --- objects ---
+
+    def read_object(self, repo: str, object_id: str) -> tuple[ObjectType, bytes] | None:
+        """Return the type and serialized bytes of an object, or ``None``."""
+        stmt = select(CasObject.type, CasObject.data).where(
+            CasObject.repo == repo, CasObject.id == object_id
+        )
         with self._pg.session() as session:
             row = session.execute(stmt).first()
-        return None if row is None else str(row[0])
+        return None if row is None else (cast(ObjectType, row[0]), bytes(row[1]))
 
-    def bind_flow_id(self, client_flow_id: str, flow_id: str) -> str:
-        """Bind ``client_flow_id`` → ``flow_id`` unless already bound; return the bound id.
+    def object_type(self, repo: str, object_id: str) -> ObjectType | None:
+        """Return the type of an object, or ``None``."""
+        stmt = select(CasObject.type).where(CasObject.repo == repo, CasObject.id == object_id)
+        with self._pg.session() as session:
+            found = session.execute(stmt).scalar_one_or_none()
+        return None if found is None else cast(ObjectType, found)
 
-        ``ON CONFLICT (client_flow_id) DO NOTHING`` waits for a concurrent
-        binder to commit, so the follow-up read returns the winner. A
-        ``flow_id`` already naming another history violates its unique
-        constraint and raises :class:`ValueError`.
-        """
+    def write_object(self, repo: str, object_id: str, object_type: ObjectType, data: bytes) -> None:
+        """Store an object; rewriting an existing one refreshes its write time."""
         stmt = (
-            insert(FlowName)
-            .values(client_flow_id=client_flow_id, flow_id=flow_id)
-            .on_conflict_do_nothing(index_elements=["client_flow_id"])
+            insert(CasObject)
+            .values(repo=repo, id=object_id, type=object_type, data=data)
+            .on_conflict_do_update(
+                index_elements=["repo", "id"], set_={"written_at": func.clock_timestamp()}
+            )
         )
-        query = select(FlowName.flow_id).where(FlowName.client_flow_id == client_flow_id)
-        try:
-            with self._pg.session() as session:
-                session.execute(stmt)
-                bound = session.execute(query).scalar_one()
-        except IntegrityError as e:
-            raise ValueError(f"flow_id {flow_id!r} already names another history") from e
-        return str(bound)
-
-    # ------------------------------------------------------------------
-    # Object store
-    # ------------------------------------------------------------------
-
-    def put_object(
-        self,
-        flow_id: str,
-        kind: Kind,
-        content_hash: str,
-        payload: bytes,
-    ) -> None:
-        """Idempotent insert — ``ON CONFLICT DO NOTHING`` on the PK."""
-        stmt = insert(FlowObject).values(
-            flow_id=flow_id,
-            kind=kind,
-            content_hash=content_hash,
-            payload=payload,
-        )
-        stmt = stmt.on_conflict_do_nothing(index_elements=["flow_id", "kind", "content_hash"])
         with self._pg.session() as session:
             session.execute(stmt)
 
-    def get_object(
-        self,
-        flow_id: str,
-        kind: Kind,
-        content_hash: str,
-    ) -> bytes | None:
-        """Return the payload bytes for the object, or ``None`` on miss."""
-        stmt = select(FlowObject.payload).where(
-            FlowObject.flow_id == flow_id,
-            FlowObject.kind == kind,
-            FlowObject.content_hash == content_hash,
+    def list_objects(self, repo: str) -> dict[str, float]:
+        """Return every object id of the repository with its last write time (epoch secs)."""
+        stmt = select(CasObject.id, extract("epoch", CasObject.written_at)).where(
+            CasObject.repo == repo
         )
         with self._pg.session() as session:
-            row = session.execute(stmt).first()
-        return None if row is None else bytes(row[0])
+            return {str(oid): float(at) for oid, at in session.execute(stmt)}
 
-    def has_object(
-        self,
-        flow_id: str,
-        kind: Kind,
-        content_hash: str,
-    ) -> bool:
-        """Return ``True`` when the object row exists."""
-        stmt = select(FlowObject.content_hash).where(
-            FlowObject.flow_id == flow_id,
-            FlowObject.kind == kind,
-            FlowObject.content_hash == content_hash,
-        )
+    def delete_objects(self, repo: str, object_ids: Iterable[str]) -> None:
+        """Delete the given objects in one transaction; missing ids are skipped."""
+        ids = list(object_ids)
         with self._pg.session() as session:
-            return session.execute(stmt).first() is not None
-
-    def list_objects(self, flow_id: str) -> list[tuple[Kind, str]]:
-        """Return the ``(kind, content_hash)`` of every object row under ``flow_id``."""
-        stmt = select(FlowObject.kind, FlowObject.content_hash).where(FlowObject.flow_id == flow_id)
-        with self._pg.session() as session:
-            rows = session.execute(stmt).all()
-        return [(cast(Kind, kind), str(content_hash)) for kind, content_hash in rows]
-
-    def delete_objects(self, flow_id: str, keys: list[tuple[Kind, str]]) -> None:
-        """Delete the object rows ``keys``, in batches; missing rows are skipped."""
-        with self._pg.session() as session:
-            for start in range(0, len(keys), _DELETE_BATCH):
-                batch = keys[start : start + _DELETE_BATCH]
+            for start in range(0, len(ids), _DELETE_BATCH):
+                batch = ids[start : start + _DELETE_BATCH]
                 session.execute(
-                    delete(FlowObject).where(
-                        FlowObject.flow_id == flow_id,
-                        tuple_(FlowObject.kind, FlowObject.content_hash).in_(batch),
-                    )
+                    delete(CasObject).where(CasObject.repo == repo, CasObject.id.in_(batch))
                 )
 
-    # ------------------------------------------------------------------
-    # Refs
-    # ------------------------------------------------------------------
+    # --- refs ---
 
-    def get_ref(self, flow_id: str, name: str) -> str | None:
-        """Return the commit hash ref ``name`` points at, or ``None``."""
-        stmt = select(FlowRef.commit_hash).where(FlowRef.flow_id == flow_id, FlowRef.name == name)
+    def read_ref(self, repo: str, name: str) -> str | None:
+        """Return the object id ref ``name`` points at, or ``None``."""
+        stmt = select(CasRef.target).where(CasRef.repo == repo, CasRef.name == name)
         with self._pg.session() as session:
-            row = session.execute(stmt).first()
-        return None if row is None else str(row[0])
+            found = session.execute(stmt).scalar_one_or_none()
+        return None if found is None else str(found)
 
-    def set_ref(self, flow_id: str, name: str, commit_hash: str, expected: str | None) -> bool:
-        """Point ref ``name`` at ``commit_hash`` if it points at ``expected`` (``None``: absent).
+    def write_ref(self, repo: str, name: str, new: str | None, old: str | None) -> bool:
+        """Point ref ``name`` at ``new`` (``None``: delete) if it points at ``old`` (``None``: absent).
 
-        One statement either way — ``INSERT ... ON CONFLICT DO NOTHING`` to
-        create, ``UPDATE ... WHERE commit_hash = expected`` to move — so
-        the row count says whether this writer won.
+        One statement either way, so the row count says whether this writer won.
         """
-        stmt: Any
-        if expected is None:
-            stmt = (
-                insert(FlowRef)
-                .values(flow_id=flow_id, name=name, commit_hash=commit_hash)
-                .on_conflict_do_nothing(index_elements=["flow_id", "name"])
-            )
-        else:
-            stmt = (
-                update(FlowRef)
-                .where(
-                    FlowRef.flow_id == flow_id,
-                    FlowRef.name == name,
-                    FlowRef.commit_hash == expected,
-                )
-                .values(commit_hash=commit_hash, updated_at=datetime.now(UTC))
-            )
+        if new is None and old is None:
+            return self.read_ref(repo, name) is None
         with self._pg.session() as session:
-            result = cast(CursorResult[Any], session.execute(stmt))
-        return bool(result.rowcount == 1)
+            result = session.execute(_ref_statement(repo, name, new, old))
+        return _rowcount(result) == 1
 
-    def list_refs(self, flow_id: str) -> dict[str, str]:
-        """Return every ref under ``flow_id``: name → commit hash."""
-        stmt = select(FlowRef.name, FlowRef.commit_hash).where(FlowRef.flow_id == flow_id)
+    def list_refs(self, repo: str) -> dict[str, str]:
+        """Return every ref of the repository: name to object id."""
+        stmt = select(CasRef.name, CasRef.target).where(CasRef.repo == repo)
         with self._pg.session() as session:
-            rows = session.execute(stmt).all()
-        return {str(name): str(commit_hash) for name, commit_hash in rows}
+            return {str(name): str(target) for name, target in session.execute(stmt)}
 
-    # ------------------------------------------------------------------
-    # History cleanup
-    # ------------------------------------------------------------------
 
-    def gc_history(self, flow_id: str) -> None:
-        """Delete every object and ref under ``flow_id`` and its name binding. Idempotent."""
-        with self._pg.session() as session:
-            session.execute(delete(FlowRef).where(FlowRef.flow_id == flow_id))
-            session.execute(delete(FlowObject).where(FlowObject.flow_id == flow_id))
-            session.execute(delete(FlowName).where(FlowName.flow_id == flow_id))
+def _ref_statement(repo: str, name: str, new: str | None, old: str | None) -> Any:
+    """The compare-and-set statement for one ref write: create, move or delete."""
+    if old is None:
+        return (
+            insert(CasRef)
+            .values(repo=repo, name=name, target=new)
+            .on_conflict_do_nothing(index_elements=["repo", "name"])
+        )
+    where = (CasRef.repo == repo, CasRef.name == name, CasRef.target == old)
+    if new is None:
+        return delete(CasRef).where(*where)
+    return update(CasRef).where(*where).values(target=new, updated_at=func.clock_timestamp())
+
+
+def _rowcount(result: Any) -> int:
+    """Rows a write statement touched."""
+    return int(cast(CursorResult[Any], result).rowcount)

@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import Context, Flow, State, verb
-from llm_gent.flow.stores import JsonFileCheckpointStore
+from tests.helpers import file_store
 
 from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
 
@@ -304,7 +304,7 @@ class TestCtxExtraResume:
         supplies a new Lock; the body verb observes the fresh instance,
         proving the caller's re-supplied dict wins on the resume path.
         """
-        store = JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+        store = file_store(tmp_path / "cp")
         seen: list[object] = []
         halt = asyncio.Event()
 

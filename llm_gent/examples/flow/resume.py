@@ -22,8 +22,9 @@ Exercises the Flow-level checkpointer end-to-end without touching an LLM:
 ``max_iters=5`` is the cumulative bound across resumes — run 1 does 3
 iterations, run 2 does 2, total 5. The history is kept: run 1 ends it with
 a halt commit, run 2 with the final-state commit tagged ``complete`` (the
-store's default ``retain`` retention; ``gc_on_success`` deletes the
-history on a natural completion instead).
+default ``retain`` retention; ``gc_on_success`` deletes the history on a
+natural completion instead). The history lives in an
+:class:`appinfra.cas.FileStore` under a temporary directory.
 
 Run standalone::
 
@@ -43,6 +44,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 
+from appinfra.cas import FileStore
 from appinfra.log import quick_console_logger
 
 from llm_gent.flow import (
@@ -55,7 +57,6 @@ from llm_gent.flow import (
     TypeStateFactory,
     verb,
 )
-from llm_gent.flow.stores import JsonFileCheckpointStore
 
 
 HALT_AFTER = 3
@@ -117,7 +118,7 @@ async def stop_at_limit(ctx: Context[Counter], count: int) -> int:
 
 def _build_flow(
     ff: Factory[Flow],
-    store: JsonFileCheckpointStore,
+    store: FileStore,
     client_flow_id: str,
     *,
     halt: bool,
@@ -156,7 +157,7 @@ async def main() -> int:
     lg = quick_console_logger("resume-example", config={"level": "warning"})
     tmp_root = Path(tempfile.mkdtemp(prefix="gent-example-resume-"))
     try:
-        store = JsonFileCheckpointStore(lg, tmp_root)
+        store = FileStore(lg, tmp_root)
         client_flow_id = "resume-demo"
         ff = Factory(lg, state_factory=TypeStateFactory(Counter))
 

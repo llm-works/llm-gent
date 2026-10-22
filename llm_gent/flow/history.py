@@ -1,21 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""History — read API over one flow history in a :class:`CheckpointStore`.
+"""History — read API over one flow history in an :class:`appinfra.cas.Store`.
 
-A history is the chain of commits one flow instance writes, addressed by
-the agent's ``client_flow_id``. :class:`History` resolves the name to the
-internal ``flow_id`` and exposes the history as data: its head, the last
-completed run, the commit chain, and the state and flow structure each
-commit holds. It never writes; the framework owns every write.
+A history is the chain of commits one flow instance writes, held in the
+store's repository named by the agent's ``client_flow_id``.
+:class:`History` exposes it as data: its head, the last completed run,
+the commit chain, and the state and flow structure each commit holds. It
+never writes; the framework owns every write.
 
 ``None`` means absent — no history under the name, no commit yet, no
 completed run. A hash the history holds (ref, tag, parent, tree entry)
 that points at an object missing from the store raises
 :class:`HistoryCorrupt` instead, so a damaged history never reads as a
 shorter or empty one.
-
-Every method works with sync and async stores alike.
 """
 
 from __future__ import annotations
@@ -24,33 +22,30 @@ import json
 from collections.abc import AsyncIterator
 from typing import TypeVar
 
-from .checkpoint import (
-    COMPLETE_TAG,
-    END_NODE_PATH,
-    HEAD_REF,
-    TAG_PREFIX,
-    CheckpointStore,
-    Kind,
-    checkpoint_tag,
-    maybe_await,
-)
+from appinfra.cas import Blob, Commit, Object, ObjectTypeError, Store, Tree
+
+from .checkpoint import COMPLETE_TAG, END_NODE_PATH, HEAD_REF, TAG_PREFIX, checkpoint_tag
 from .state import StateFactory, restore_state_data
-from .state.cas import Commit, Tree
+from .state.cas import FlowCommit
 from .state.snapshot import FLOW, Snapshot, read_snapshot
 from .structure import Structure
 
 
 T = TypeVar("T")
+ObjT = TypeVar("ObjT", bound=Object)
 
 
 class HistoryCorrupt(ValueError):
     """A hash in the history points at an object the store does not hold."""
 
-    def __init__(self, flow_id: str, kind: Kind, content_hash: str) -> None:
-        super().__init__(f"history {flow_id}: {kind} {content_hash} is missing from the store")
-        self.flow_id = flow_id
+    def __init__(self, client_flow_id: str, kind: str, object_id: str) -> None:
+        """Name the history and the ``kind`` of object ``object_id`` it is missing."""
+        super().__init__(
+            f"history {client_flow_id!r}: {kind} {object_id} is missing from the store"
+        )
+        self.client_flow_id = client_flow_id
         self.kind = kind
-        self.content_hash = content_hash
+        self.object_id = object_id
 
 
 class History:
@@ -60,22 +55,15 @@ class History:
     observes later writes.
     """
 
-    def __init__(self, store: CheckpointStore, client_flow_id: str) -> None:
+    def __init__(self, store: Store, client_flow_id: str) -> None:
+        """View the store's repository ``client_flow_id``; nothing is read until a call."""
         self.store = store
         self.client_flow_id = client_flow_id
+        self._repo = store.repo(client_flow_id)
 
-    async def flow_id(self) -> str | None:
-        """Internal id of the history, or ``None`` when none exists under the name."""
-        result: str | None = await maybe_await(self.store.get_flow_id(self.client_flow_id))
-        return result
-
-    async def head(self) -> Commit | None:
+    async def head(self) -> FlowCommit | None:
         """Latest commit, or ``None`` for an empty history."""
-        flow_id = await self.flow_id()
-        if flow_id is None:
-            return None
-        commit_hash = await maybe_await(self.store.get_ref(flow_id, HEAD_REF))
-        return None if commit_hash is None else await self._commit(flow_id, commit_hash)
+        return self._at_ref(HEAD_REF)
 
     async def is_complete(self) -> bool:
         """True when the head is a final-state commit: the last run that wrote one finished.
@@ -87,107 +75,82 @@ class History:
         return head is not None and self.is_final_state(head)
 
     @staticmethod
-    def is_final_state(commit: Commit) -> bool:
+    def is_final_state(commit: FlowCommit) -> bool:
         """True for a final-state commit — written when a run finished cleanly."""
         return commit.meta.node_path == END_NODE_PATH
 
-    async def last_complete(self) -> Commit | None:
+    async def last_complete(self) -> FlowCommit | None:
         """Final-state commit of the most recent run that finished, or ``None``.
 
         Unlike :meth:`head`, stays on that commit while a later run appends
         past it — e.g. the state a halted follow-up session started from.
         """
-        flow_id = await self.flow_id()
-        if flow_id is None:
-            return None
-        commit_hash = await maybe_await(self.store.get_ref(flow_id, COMPLETE_TAG))
-        return None if commit_hash is None else await self._commit(flow_id, commit_hash)
+        return self._at_ref(COMPLETE_TAG)
 
-    async def checkpoint(self, name: str) -> Commit | None:
+    async def checkpoint(self, name: str) -> FlowCommit | None:
         """Commit of the named checkpoint ``name`` (``ctx.checkpoint(name)``), or ``None``.
 
         Raises:
             ValueError: ``name`` cannot name a checkpoint (see
                 :func:`~llm_gent.flow.checkpoint.checkpoint_tag`).
         """
-        tag = checkpoint_tag(name)
-        flow_id = await self.flow_id()
-        if flow_id is None:
-            return None
-        commit_hash = await maybe_await(self.store.get_ref(flow_id, tag))
-        return None if commit_hash is None else await self._commit(flow_id, commit_hash)
+        return self._at_ref(checkpoint_tag(name))
 
     async def checkpoint_names(self) -> list[str]:
         """Names of the history's named checkpoints, sorted; empty when there is no history."""
-        flow_id = await self.flow_id()
-        if flow_id is None:
-            return []
-        refs: dict[str, str] = await maybe_await(self.store.list_refs(flow_id))
         return sorted(
             ref.removeprefix(TAG_PREFIX)
-            for ref in refs
-            if ref.startswith(TAG_PREFIX) and ref != COMPLETE_TAG
+            for ref in self._repo.refs(TAG_PREFIX)
+            if ref != COMPLETE_TAG
         )
 
-    async def commit(self, commit_hash: str) -> Commit | None:
+    async def commit(self, commit_hash: str) -> FlowCommit | None:
         """The history's commit ``commit_hash``, or ``None`` when the history holds no such commit.
 
         Any commit the history holds, on its line or off it — e.g. one
         left off the line when a run resumed from an earlier checkpoint,
-        until :func:`~llm_gent.flow.collect_unreachable` deletes it.
+        until a prune of the repository deletes it.
         """
-        flow_id = await self.flow_id()
-        if flow_id is None:
+        try:
+            commit = self._repo.get(commit_hash, Commit)
+        except ObjectTypeError:
             return None
-        payload: bytes | None = await maybe_await(
-            self.store.get_object(flow_id, "commit", commit_hash)
-        )
-        return None if payload is None else Commit.from_bytes(payload)
+        return None if commit is None else FlowCommit.from_commit(commit)
 
-    async def commits(self) -> AsyncIterator[Commit]:
-        """Walk the chain from the head through parent links, newest first.
+    async def commits(self) -> AsyncIterator[FlowCommit]:
+        """Walk the chain from the head through first parents, newest first.
 
         Parents are in write order across runs; a run's commits end at a
         ``halted`` or ``$end`` commit, or at its last save when it raised.
+        Reads one commit per step.
         """
         commit = await self.head()
         while commit is not None:
             yield commit
-            if not commit.parent_hashes:
-                return
-            commit = await self._commit(commit.meta.flow_id, commit.parent_hashes[0])
+            commit = self._commit(commit.parents[0]) if commit.parents else None
 
-    async def snapshot(self, commit: Commit) -> Snapshot:
+    async def snapshot(self, commit: FlowCommit) -> Snapshot:
         """The run state ``commit`` holds, as stored (JSON-compatible values).
 
         The root scope, every child scope live at the save point keyed by
         its path, and each running iterate's pass counter. ``has_state`` is
         ``False`` for a commit that carries no state.
         """
-        flow_id = commit.meta.flow_id
+        return read_snapshot(commit.tree, self._object)
 
-        async def load(kind: Kind, content_hash: str) -> bytes:
-            return await self._object(flow_id, kind, content_hash)
-
-        return await read_snapshot(commit.root_tree_hash, load)
-
-    async def structure(self, commit: Commit) -> Structure | None:
+    async def structure(self, commit: FlowCommit) -> Structure | None:
         """The structure of the flow that wrote ``commit``.
 
         Compare it with a flow today through
         :meth:`~llm_gent.flow.structure.Structure.diff`. ``None`` for a
-        commit that carries no state, or one written before commits held
-        their structure.
+        commit that carries no state.
         """
-        flow_id = commit.meta.flow_id
-        tree = Tree.from_bytes(await self._object(flow_id, "tree", commit.root_tree_hash))
-        entry = next((e for e in tree.entries if e.scope_id == FLOW), None)
+        entry = self._object(commit.tree, Tree).get(FLOW)
         if entry is None:
             return None
-        raw = json.loads(await self._object(flow_id, "blob", entry.child_hash))
-        return Structure.from_json(raw)
+        return Structure.from_json(json.loads(self._object(entry.id, Blob).data))
 
-    async def root_state(self, commit: Commit, factory: StateFactory[T]) -> T | None:
+    async def root_state(self, commit: FlowCommit, factory: StateFactory[T]) -> T | None:
         """Top-level state ``commit`` holds, restored through ``factory``.
 
         ``None`` for a commit that carries no state. For dict-state flows,
@@ -198,15 +161,18 @@ class History:
             return None
         return restore_state_data(factory, snapshot.root)
 
-    async def _commit(self, flow_id: str, commit_hash: str) -> Commit:
-        """Load and parse one commit object."""
-        return Commit.from_bytes(await self._object(flow_id, "commit", commit_hash))
+    def _at_ref(self, name: str) -> FlowCommit | None:
+        """The commit ref ``name`` points at, or ``None`` when the ref does not exist."""
+        commit_hash = self._repo.get_ref(name)
+        return None if commit_hash is None else self._commit(commit_hash)
 
-    async def _object(self, flow_id: str, kind: Kind, content_hash: str) -> bytes:
-        """Load one object the history references; :class:`HistoryCorrupt` if absent."""
-        payload: bytes | None = await maybe_await(
-            self.store.get_object(flow_id, kind, content_hash)
-        )
-        if payload is None:
-            raise HistoryCorrupt(flow_id, kind, content_hash)
-        return payload
+    def _commit(self, commit_hash: str) -> FlowCommit:
+        """Load one commit the history references, with its metadata parsed."""
+        return FlowCommit.from_commit(self._object(commit_hash, Commit))
+
+    def _object(self, object_id: str, cls: type[ObjT]) -> ObjT:
+        """Load one object the history references as ``cls``; :class:`HistoryCorrupt` if absent."""
+        obj = self._repo.get(object_id, cls)
+        if obj is None:
+            raise HistoryCorrupt(self.client_flow_id, cls.type, object_id)
+        return obj

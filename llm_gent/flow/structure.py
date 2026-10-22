@@ -29,8 +29,9 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
 
+from appinfra.cas import Blob, canonical_json
+
 from ._node_id import _child_flows, _node_kind, _step_target
-from .state.cas import Blob, canonical_json
 
 
 @dataclass(frozen=True)
@@ -122,13 +123,13 @@ class Structure:
         ]
 
     def blob(self) -> Blob:
-        """The structure as the blob a commit's tree holds; its hash is :attr:`hash`."""
-        return Blob.from_bytes(canonical_json(self.to_json()))
+        """The structure as the blob a commit's tree holds; its id is :attr:`hash`."""
+        return Blob(canonical_json(self.to_json()))
 
     @cached_property
     def hash(self) -> str:
         """The structure hash, recorded on every commit as ``flow_root_hash``."""
-        return self.blob().content_hash
+        return self.blob().id
 
     def steps_by_path(self) -> dict[StepPath, Step]:
         """Every step by its path, parents before children (not into cycles)."""

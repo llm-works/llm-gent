@@ -42,16 +42,17 @@ Public surface:
 - :class:`LoopFactory` — app-scoped :class:`Loop` builder (mirrors the
   flow :class:`Factory` for ``with_halt``); pair on the same halt event to
   thread it across a mixed Loop-and-Flow tree
-- :class:`CheckpointStore` — Flow-level pause/resume Protocol; persists
-  snapshots of a run — every scope and running structure's position,
+- Checkpoints — ``Flow.with_checkpoint_store(store, client_flow_id)`` keeps
+  a run's history in one repository of an :class:`appinfra.cas.Store`
+  (``MemoryStore``, ``FileStore``, :class:`~llm_gent.flow.stores.PgStore`):
+  snapshots of the run — every scope and running structure's position,
   paused SAIA turns included — at save points and when the halt stops it
 - :class:`History` — read API over one checkpointed history: head, last
-  completed run, commit chain, per-commit state and flow structure;
-  :class:`HistoryCorrupt` when a referenced object is missing from the store
+  completed run, commit chain, per-commit state and flow structure, as
+  :class:`FlowCommit`; :class:`HistoryCorrupt` when a referenced object is
+  missing from the store
 - :class:`Structure` — a flow's composition tree by step identity;
   :class:`StructureDiff` — how two structures differ (``Structure.diff``)
-- :func:`collect_unreachable` — delete the objects of a history no ref
-  reaches (left by ``resume=<name>`` or a process that died mid-commit)
 - :class:`Failure` — sentinel returned for a failed item in ``Flow.map(strict=False)``;
   :class:`RestoredError` — its exception when the failure was restored from a checkpoint
 - :class:`Skipped` — sentinel returned for an item gated out by
@@ -77,17 +78,17 @@ mount them via the existing trait system.
 
 from .aggregate import majority, mean, unanimous, weighted
 from .archetypes import extractor, grader, planner, synthesizer
-from .checkpoint import CheckpointPolicy, CheckpointStore, ConcurrentWriteError, ResumeMode
+from .checkpoint import CheckpointPolicy, ConcurrentWriteError, ResumeMode, Retention
 from .context import Context
 from .factory import Factory, SAIAFactory
 from .flow import Flow
-from .gc import collect_unreachable
 from .history import History, HistoryCorrupt
 from .loop import Loop, LoopFactory
 from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, Skipped, Unset
 from .resource import COST, Resource, ResourceKey, resource_method
 from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
+from .state.cas import CommitMeta, FlowCommit
 from .structure import StepPath, Structure, StructureDiff, path_label
 from .verb import VerbCallable, verb
 
@@ -97,12 +98,13 @@ __all__ = [
     "HALTED",
     "UNSET",
     "CheckpointPolicy",
-    "CheckpointStore",
+    "CommitMeta",
     "ConcurrentWriteError",
     "Context",
     "Factory",
     "Failure",
     "Flow",
+    "FlowCommit",
     "Halted",
     "History",
     "HistoryCorrupt",
@@ -113,6 +115,7 @@ __all__ = [
     "ResourceKey",
     "RestoredError",
     "ResumeMode",
+    "Retention",
     "Role",
     "SAIAFactory",
     "Skipped",
@@ -126,7 +129,6 @@ __all__ = [
     "TypeStateFactory",
     "Unset",
     "VerbCallable",
-    "collect_unreachable",
     "extractor",
     "grader",
     "majority",

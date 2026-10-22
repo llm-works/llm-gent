@@ -27,24 +27,23 @@ that tell repeated executions apart::
     flow                              the structure of the flow that wrote it
 
 A dict payload is stored as a tree with one blob per top-level key, so
-keys that did not change keep their hash from one commit to the next.
+keys that did not change keep their id from one commit to the next.
 
 :class:`ScopeRegistry` tracks the live scopes and cursors during a run;
-:func:`build_snapshot_tree` turns them into CAS objects; :func:`read_snapshot`
-turns a stored tree back into a :class:`Snapshot`.
+:func:`build_snapshot_tree` turns them into :mod:`appinfra.cas` objects;
+:func:`read_snapshot` turns a stored tree back into a :class:`Snapshot`.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
-from ..checkpoint import Kind
+from appinfra.cas import Blob, Object, Tree, TreeEntry, canonical_json
+
 from . import codec, serialize_state_data
 from .base import State
-from .cas import Blob, Tree, TreeEntry, TreeEntryKind, canonical_json
 
 
 ScopePath = tuple[str, ...]
@@ -89,10 +88,10 @@ RUN_RESOURCES = "run_resources"
 FLOW = "flow"
 """Root tree entry: the structure of the flow that wrote the snapshot, as a blob.
 
-Its hash is the commit's ``flow_root_hash``
+Its id is the commit's ``flow_root_hash``
 (:class:`~llm_gent.flow.structure.Structure`). Reachable from the
-commit like every entry, so :func:`~llm_gent.flow.collect_unreachable`
-keeps it; :func:`read_snapshot` does not read it.
+commit like every entry, so pruning the repository keeps it;
+:func:`read_snapshot` does not read it.
 """
 
 CURSOR_ENTRIES = frozenset(
@@ -325,7 +324,8 @@ def build_snapshot_tree(
     ``structure`` is the structure of the flow writing the snapshot
     (:meth:`~llm_gent.flow.structure.Structure.blob`), held at the
     root as :data:`FLOW`. Pure and synchronous: hashing only, no store
-    access.
+    access. The objects come children first, the order a repository
+    accepts them in.
     """
     nested: dict[str, Any] = {}
     for path, value in flat.items():
@@ -357,25 +357,27 @@ def _build_tree(node: dict[str, Any], objects: list[Blob | Tree]) -> Tree:
             obj = child
         else:
             obj = _build_tree(child, objects)
-        kind: TreeEntryKind = "blob" if isinstance(obj, Blob) else "tree"
-        entries.append(TreeEntry(scope_id=name, kind=kind, child_hash=obj.content_hash))
-    tree = Tree.from_entries(entries)
+        entries.append(TreeEntry(name, "blob" if isinstance(obj, Blob) else "tree", obj.id))
+    tree = Tree(tuple(entries))
     objects.append(tree)
     return tree
 
 
 def _leaf_object(value: Any, objects: list[Blob | Tree]) -> Blob | Tree:
-    """A dict payload becomes a tree with one blob per key; anything else is one blob."""
-    if not isinstance(value, dict):
-        blob = Blob.from_bytes(canonical_json(value))
+    """A dict payload becomes a tree with one blob per key; anything else is one blob.
+
+    A dict with an empty key is one blob too: a tree entry needs a name.
+    """
+    if not isinstance(value, dict) or "" in value:
+        blob = Blob(canonical_json(value))
         objects.append(blob)
         return blob
     entries: list[TreeEntry] = []
     for key, item in value.items():
-        blob = Blob.from_bytes(canonical_json(item))
+        blob = Blob(canonical_json(item))
         objects.append(blob)
-        entries.append(TreeEntry(scope_id=key, kind="blob", child_hash=blob.content_hash))
-    tree = Tree.from_entries(entries)
+        entries.append(TreeEntry(key, "blob", blob.id))
+    tree = Tree(tuple(entries))
     objects.append(tree)
     return tree
 
@@ -396,14 +398,21 @@ class Snapshot:
     cursors: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-Loader = Callable[[Kind, str], Awaitable[bytes]]
-"""Fetches one stored object by kind and hash; raises when it is missing."""
+ObjT = TypeVar("ObjT", bound=Object)
 
 
-async def read_snapshot(root_tree_hash: str, load: Loader) -> Snapshot:
-    """Read the snapshot tree at ``root_tree_hash`` back into a :class:`Snapshot`."""
+class Loader(Protocol):
+    """Fetches one stored object by id as ``cls``; raises when it is missing."""
+
+    def __call__(self, object_id: str, cls: type[ObjT]) -> ObjT:
+        """Return the object ``object_id`` as ``cls``."""
+        ...
+
+
+def read_snapshot(root_tree: str, load: Loader) -> Snapshot:
+    """Read the snapshot tree ``root_tree`` back into a :class:`Snapshot`."""
     flat: dict[ScopePath, Any] = {}
-    await _read_level(root_tree_hash, (), load, flat)
+    _read_level(root_tree, (), load, flat)
     if (STATE,) not in flat:
         return Snapshot(has_state=False)
     cursors: dict[str, dict[str, Any]] = {}
@@ -418,22 +427,19 @@ async def read_snapshot(root_tree_hash: str, load: Loader) -> Snapshot:
     )
 
 
-async def _read_level(
-    tree_hash: str, path: ScopePath, load: Loader, flat: dict[ScopePath, Any]
-) -> None:
+def _read_level(tree_id: str, path: ScopePath, load: Loader, flat: dict[ScopePath, Any]) -> None:
     """Collect the :data:`STATE` and cursor leaves under the tree at ``path``."""
-    tree = Tree.from_bytes(await load("tree", tree_hash))
-    for entry in tree.entries:
-        here = (*path, entry.scope_id)
-        if entry.scope_id == STATE or entry.scope_id in CURSOR_ENTRIES:
-            flat[here] = await _read_leaf(entry, load)
-        elif entry.kind == "tree":
-            await _read_level(entry.child_hash, here, load, flat)
+    for entry in load(tree_id, Tree).entries:
+        here = (*path, entry.name)
+        if entry.name == STATE or entry.name in CURSOR_ENTRIES:
+            flat[here] = _read_leaf(entry, load)
+        elif entry.type == "tree":
+            _read_level(entry.id, here, load, flat)
 
 
-async def _read_leaf(entry: TreeEntry, load: Loader) -> Any:
+def _read_leaf(entry: TreeEntry, load: Loader) -> Any:
     """A leaf's value: a blob's JSON, or a key tree rebuilt into a dict."""
-    if entry.kind == "blob":
-        return json.loads(await load("blob", entry.child_hash))
-    keys = Tree.from_bytes(await load("tree", entry.child_hash))
-    return {e.scope_id: json.loads(await load("blob", e.child_hash)) for e in keys.entries}
+    if entry.type == "blob":
+        return json.loads(load(entry.id, Blob).data)
+    keys = load(entry.id, Tree)
+    return {e.name: json.loads(load(e.id, Blob).data) for e in keys.entries}

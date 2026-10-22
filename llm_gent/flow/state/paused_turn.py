@@ -20,8 +20,9 @@ import contextlib
 from dataclasses import dataclass
 from typing import Any
 
+from appinfra.cas import canonical_json
+
 from . import codec
-from .cas import canonical_json
 from .snapshot import TURN
 
 

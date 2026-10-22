@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from appinfra.cas import FileStore
 
 from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, verb
 from llm_gent.flow._resume import _restart_snapshot
@@ -29,12 +30,12 @@ from llm_gent.flow.state.snapshot import (
     TURN,
     Snapshot,
 )
-from llm_gent.flow.stores import JsonFileCheckpointStore
 from llm_gent.flow.testing.checkpoint import (
     CanonicalCounter,
     build_canonical_flow,
     resume_in_subprocess,
 )
+from tests.helpers import file_store
 
 from .conftest import make_test_logger
 
@@ -43,13 +44,13 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> JsonFileCheckpointStore:
+def store(tmp_path: Path) -> FileStore:
     """A fresh store under an isolated temp root."""
-    return JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+    return file_store(tmp_path / "cp")
 
 
 def _counting_flow(
-    store: JsonFileCheckpointStore,
+    store: FileStore,
     name: str,
     *,
     max_iters: int,
@@ -84,7 +85,7 @@ def _capturing_logger() -> tuple[Any, list[tuple[str, dict[str, Any]]]]:
     return lg, warnings
 
 
-async def _head(store: JsonFileCheckpointStore, name: str) -> Any:
+async def _head(store: FileStore, name: str) -> Any:
     history = History(store, name)
     head = await history.head()
     assert head is not None
@@ -96,9 +97,7 @@ class _Crash(BaseException):
 
 
 class TestLatest:
-    async def test_after_completion_continues_from_final_state(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_after_completion_continues_from_final_state(self, store: FileStore) -> None:
         """Terminal-extend: a finished run's final state is the next run's start."""
         await build_canonical_flow(
             make_test_logger(), max_iters=2, store=store, client_flow_id="extend"
@@ -116,9 +115,7 @@ class TestLatest:
         assert result["iterations_completed"] == 4
         assert result["log"][0] == 1
 
-    async def test_after_halt_matches_the_uninterrupted_run(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_after_halt_matches_the_uninterrupted_run(self, store: FileStore) -> None:
         """The halted pass continues; max_iters is a bound across runs."""
         baseline = await build_canonical_flow(make_test_logger(), max_iters=5).run()
         await build_canonical_flow(
@@ -135,9 +132,7 @@ class TestLatest:
         ).run(resume="latest")
         assert result == baseline
 
-    async def test_after_failure_continues_from_last_save_point(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_after_failure_continues_from_last_save_point(self, store: FileStore) -> None:
         """A run that raises writes nothing: the head is its last save, where resume continues."""
         with pytest.raises(RuntimeError, match="boom at 3"):
             await _counting_flow(store, "failed", max_iters=5, fail_at=3, on_iterate=True).run()
@@ -149,9 +144,7 @@ class TestLatest:
         assert result == 5  # the save point after pass 2 (n=2), then passes 2-4
         assert not warnings
 
-    async def test_failure_before_any_save_point_uses_given_state(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_failure_before_any_save_point_uses_given_state(self, store: FileStore) -> None:
         with pytest.raises(RuntimeError):
             await _counting_flow(store, "failed-early", max_iters=5, fail_at=2).run()
         assert await History(store, "failed-early").head() is None
@@ -162,7 +155,7 @@ class TestLatest:
         assert result == 11
 
     async def test_failure_after_completion_continues_from_the_final_state(
-        self, store: JsonFileCheckpointStore
+        self, store: FileStore
     ) -> None:
         """A run that raised after a finished one leaves the finished run's final state as head."""
         await _counting_flow(store, "end-then-fail", max_iters=2).run()
@@ -173,14 +166,14 @@ class TestLatest:
 
         head = await history.head()
         assert head is not None and finished is not None
-        assert head.content_hash == finished.content_hash
+        assert head.id == finished.id
 
         result = await _counting_flow(store, "end-then-fail", max_iters=1).run(
             state={"n": 10}, resume="latest"
         )
         assert result == 3  # n=2 from the first run's $end, then one pass
 
-    async def test_skips_stateless_final_commit(self, store: JsonFileCheckpointStore) -> None:
+    async def test_skips_stateless_final_commit(self, store: FileStore) -> None:
         """A final commit without state (unserializable) is walked past, not a reason to reset."""
         ran: list[str] = []
 
@@ -222,26 +215,23 @@ class TestLatest:
         assert skipped[0]["skipped"] == ["$end"]
         assert skipped[0]["restored_node_path"] != "$end"
 
-    async def test_newest_commit_restores_without_warning(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_newest_commit_restores_without_warning(self, store: FileStore) -> None:
         await _counting_flow(store, "quiet", max_iters=2).run()
         lg, warnings = _capturing_logger()
         await _counting_flow(store, "quiet", max_iters=1, lg=lg).run(resume="latest")
         assert warnings == []
 
-    async def test_corrupt_history_raises(self, store: JsonFileCheckpointStore) -> None:
+    async def test_corrupt_history_raises(self, store: FileStore) -> None:
         from llm_gent.flow import HistoryCorrupt
 
         await _counting_flow(store, "corrupt", max_iters=2).run()
         head, _ = await _head(store, "corrupt")
-        commits_dir = store._history_dir(head.meta.flow_id) / "objects" / "commit"
-        (commits_dir / head.content_hash).unlink()
+        store.delete_objects("corrupt", [head.id])
 
         with pytest.raises(HistoryCorrupt):
             await _counting_flow(store, "corrupt", max_iters=1).run(resume="latest")
 
-    async def test_empty_history_uses_given_state(self, store: JsonFileCheckpointStore) -> None:
+    async def test_empty_history_uses_given_state(self, store: FileStore) -> None:
         result = await _counting_flow(store, "empty", max_iters=1).run(
             state={"n": 10}, resume="latest"
         )
@@ -278,9 +268,7 @@ def _adding_flow(
 
 
 class TestCursors:
-    async def test_iterate_stopped_by_until_does_not_run_again(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_iterate_stopped_by_until_does_not_run_again(self, store: FileStore) -> None:
         """``until`` stopped the loop after pass 1; resume from its ``on_iterate`` commit ends it."""
         passes: list[int] = []
 
@@ -316,7 +304,7 @@ class TestCursors:
 
     @pytest.mark.parametrize("wrap", ["top", "call", "outer-iterate"])
     async def test_iterate_continues_with_its_carried_value(
-        self, store: JsonFileCheckpointStore, wrap: str
+        self, store: FileStore, wrap: str
     ) -> None:
         """Each pass builds on the last; a crash in pass 3 resumes it with pass 2's result."""
         with pytest.raises(_Crash):
@@ -333,7 +321,7 @@ class TestCursors:
     )
     @pytest.mark.parametrize("shape", ["chain", "iterate"])
     async def test_step_during_which_the_halt_arrived(
-        self, store: JsonFileCheckpointStore, shape: str, mode: str, resumed: list[int]
+        self, store: FileStore, shape: str, mode: str, resumed: list[int]
     ) -> None:
         """The 2nd step sets the halt, then raises ``Interrupted`` or finishes its work."""
 
@@ -366,9 +354,7 @@ class TestCursors:
         assert await build(None, seen).run(0, resume="latest") == 40
         assert seen == resumed
 
-    async def test_interrupted_without_a_halt_is_an_error(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_interrupted_without_a_halt_is_an_error(self, store: FileStore) -> None:
         @verb
         async def step(ctx: Context[dict[str, Any]], prev: Any = None) -> Any:
             raise Interrupted()
@@ -382,7 +368,7 @@ class TestCursors:
         with pytest.raises(RuntimeError, match="raised Interrupted while no halt is set"):
             await flow.call(step).run(0)
 
-    async def test_branch_takes_its_saved_arm(self, store: JsonFileCheckpointStore) -> None:
+    async def test_branch_takes_its_saved_arm(self, store: FileStore) -> None:
         """``when`` is not evaluated again: the state it read has changed since."""
         calls: list[str] = []
 
@@ -419,7 +405,7 @@ class TestCursors:
         await build(crash=False).run(0, resume="latest")
         assert calls == ["then"]
 
-    async def test_a_removed_step_fails_the_resume(self, store: JsonFileCheckpointStore) -> None:
+    async def test_a_removed_step_fails_the_resume(self, store: FileStore) -> None:
         """A deploy removed the step the chain was at: there is nowhere to continue."""
         with pytest.raises(_Crash):
             await _scoped_step_flow(store, "deploy", make_test_logger()).run()
@@ -428,7 +414,7 @@ class TestCursors:
 
 
 def _scoped_map_flow(
-    store: JsonFileCheckpointStore, name: str, seen: list[dict[str, Any]], *, crash: bool
+    store: FileStore, name: str, seen: list[dict[str, Any]], *, crash: bool
 ) -> Any:
     """``.map(state=)`` item → ``.call(state=)`` → a leaf recording the scope it runs under.
 
@@ -479,14 +465,14 @@ async def _plain(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
     return x
 
 
-def _scoped_step_flow(store: JsonFileCheckpointStore, name: str, lg: Any) -> Any:
+def _scoped_step_flow(store: FileStore, name: str, lg: Any) -> Any:
     """``.call(sub, state=)`` whose leaf checkpoints its scope and crashes."""
     flow = Factory(lg).create(state={}).with_checkpoint_store(store, name).with_checkpointer()
     sub = Factory(lg).create().call(_work_then_crash)
     return flow.call(sub, state=lambda _p: {}, merge=lambda p, c: p.update(c))
 
 
-def _plain_step_flow(store: JsonFileCheckpointStore, name: str, lg: Any) -> Any:
+def _plain_step_flow(store: FileStore, name: str, lg: Any) -> Any:
     """The same history after a deploy that replaced the scoped step with a plain one."""
     return (
         Factory(lg)
@@ -498,7 +484,7 @@ def _plain_step_flow(store: JsonFileCheckpointStore, name: str, lg: Any) -> Any:
 
 
 def _bounded_iterate_flow(
-    store: JsonFileCheckpointStore, name: str, lg: Any, max_iters: int, halt: Any = None
+    store: FileStore, name: str, lg: Any, max_iters: int, halt: Any = None
 ) -> Any:
     """``.iterate`` over a ``.call(state=)`` pass; the pass that gets 2 checkpoints and crashes.
 
@@ -526,9 +512,7 @@ def _bounded_iterate_flow(
 
 
 class TestScopesFromSnapshot:
-    async def test_scope_under_map_item_gets_its_own_payload(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_scope_under_map_item_gets_its_own_payload(self, store: FileStore) -> None:
         """Each saved scope comes back to the block that owns it, not to the one above it."""
         with pytest.raises(_Crash):
             await _scoped_map_flow(store, "nested", [], crash=True).run()
@@ -537,9 +521,7 @@ class TestScopesFromSnapshot:
         await _scoped_map_flow(store, "nested", seen, crash=False).run(resume="latest")
         assert seen == [{"tag": "call", "hit": True}]
 
-    async def test_finished_run_drops_entries_it_never_reached(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_finished_run_drops_entries_it_never_reached(self, store: FileStore) -> None:
         """The iterate's bound dropped below the saved pass: its scope and cursors go, with a warning."""
         with pytest.raises(_Crash):
             await _bounded_iterate_flow(store, "shrink", make_test_logger(), 5).run(0)
@@ -557,9 +539,7 @@ class TestScopesFromSnapshot:
             "resumed run finished without reaching saved entries; dropped them"
         ]
 
-    async def test_halted_run_keeps_entries_it_has_not_reached(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_halted_run_keeps_entries_it_has_not_reached(self, store: FileStore) -> None:
         """A run that halts before reaching a saved scope keeps it for the next resume."""
         with pytest.raises(_Crash):
             await _bounded_iterate_flow(store, "halt-early", make_test_logger(), 5).run(0)
@@ -576,9 +556,7 @@ class TestScopesFromSnapshot:
         assert [v for p, v in scopes.items() if "/p/2/" in p] == [{"x": 2}]
 
 
-def _counting_chain(
-    store: JsonFileCheckpointStore, halt: asyncio.Event | None, seen: list[Any]
-) -> Any:
+def _counting_chain(store: FileStore, halt: asyncio.Event | None, seen: list[Any]) -> Any:
     """Four steps, each adding 10 to its input and 1 to state ``n``; the 2nd sets ``halt`` and stops."""
 
     @verb
@@ -606,7 +584,7 @@ async def _record_state(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
 
 
 class TestRestart:
-    async def test_a_removed_step_does_not_stop_it(self, store: JsonFileCheckpointStore) -> None:
+    async def test_a_removed_step_does_not_stop_it(self, store: FileStore) -> None:
         """Where resume fails on the step the chain was at, a restart starts at the top."""
         with pytest.raises(_Crash):
             await _scoped_step_flow(store, "deploy", make_test_logger()).run()
@@ -618,9 +596,7 @@ class TestRestart:
         assert snapshot.root == {"plain": True}
         assert warnings == []  # the crashed run's scope and cursors were never handed out
 
-    async def test_starts_at_the_top_on_the_saved_state(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_starts_at_the_top_on_the_saved_state(self, store: FileStore) -> None:
         assert await _counting_chain(store, asyncio.Event(), []).run(0) is HALTED
         _, halted = await _head(store, "session")
         assert halted.root == {"n": 2}
@@ -631,7 +607,7 @@ class TestRestart:
         _, done = await _head(store, "session")
         assert done.root == {"n": 6}
 
-    async def test_set_signals_stay_behind(self, store: JsonFileCheckpointStore) -> None:
+    async def test_set_signals_stay_behind(self, store: FileStore) -> None:
         """The halted run had its signal set; the restarted run does not get it set again."""
 
         def build(cut: asyncio.Event, halt: asyncio.Event | None, seen: list[bool]) -> Any:
@@ -660,7 +636,7 @@ class TestRestart:
 
     @pytest.mark.parametrize("by", ["name", "hash"])
     async def test_a_chosen_commit_seeds_it_and_parents_its_commits(
-        self, store: JsonFileCheckpointStore, by: str
+        self, store: FileStore, by: str
     ) -> None:
         marks: list[str | None] = []
 
@@ -685,11 +661,9 @@ class TestRestart:
         await build().with_checkpointer().call(_record_state).run(restart=target)
         head, snapshot = await _head(store, "pick")
         assert snapshot.root["seen"] == [{"at": "mark"}]
-        assert head.parent_hashes == (marks[0],)
+        assert head.parents == (marks[0],)
 
-    async def test_an_empty_history_runs_from_the_given_state(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_an_empty_history_runs_from_the_given_state(self, store: FileStore) -> None:
         flow = Factory(make_test_logger()).create().with_checkpoint_store(store, "empty")
         flow = flow.with_checkpointer().call(_record_state)
         await flow.run(state={"given": 1}, restart="latest")
@@ -723,16 +697,12 @@ class TestRestart:
 
 
 class TestFailure:
-    async def test_failure_writes_no_commit_and_reraises(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_failure_writes_no_commit_and_reraises(self, store: FileStore) -> None:
         with pytest.raises(RuntimeError, match="boom at 2"):
             await _counting_flow(store, "fail", max_iters=5, fail_at=2).run()
         assert await History(store, "fail").head() is None
 
-    async def test_failure_leaves_the_last_save_as_head(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_failure_leaves_the_last_save_as_head(self, store: FileStore) -> None:
         with pytest.raises(RuntimeError, match="boom at 2"):
             await _counting_flow(store, "fail-saved", max_iters=5, fail_at=2, on_iterate=True).run()
 
@@ -741,7 +711,7 @@ class TestFailure:
         assert snapshot.root == {"n": 1}  # the save after pass 0, not the half-done pass 1
         assert not await History(store, "fail-saved").is_complete()
 
-    async def test_cancellation_writes_no_commit(self, store: JsonFileCheckpointStore) -> None:
+    async def test_cancellation_writes_no_commit(self, store: FileStore) -> None:
         @verb
         async def cancel(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
             raise asyncio.CancelledError()
@@ -757,7 +727,7 @@ class TestFailure:
             await flow.run()
         assert await History(store, "cancelled").head() is None
 
-    async def test_empty_flow_leaves_no_history(self, store: JsonFileCheckpointStore) -> None:
+    async def test_empty_flow_leaves_no_history(self, store: FileStore) -> None:
         flow = (
             Factory(make_test_logger())
             .create(state={})
@@ -766,20 +736,20 @@ class TestFailure:
         )
         with pytest.raises(RuntimeError, match="no nodes to run"):
             await flow.run()
-        assert await History(store, "empty").flow_id() is None
+        assert "empty" not in store.list_repos()
 
 
 class TestResumeModeValidation:
     @pytest.mark.parametrize("mode", [True, "", "complete"])
     async def test_values_that_are_neither_mode_nor_checkpoint_name_are_rejected(
-        self, store: JsonFileCheckpointStore, mode: Any
+        self, store: FileStore, mode: Any
     ) -> None:
         with pytest.raises(ValueError, match="resume must be one of"):
             await _counting_flow(store, "bad-mode", max_iters=1).run(resume=mode)
 
     @pytest.mark.parametrize("mode", ["replay", "restart"])
     async def test_removed_modes_name_missing_checkpoints(
-        self, store: JsonFileCheckpointStore, mode: str
+        self, store: FileStore, mode: str
     ) -> None:
         with pytest.raises(ValueError, match=f"no checkpoint named {mode!r}"):
             await _counting_flow(store, "bad-mode", max_iters=1).run(resume=mode)
@@ -795,15 +765,13 @@ class TestResumeModeValidation:
         with pytest.raises(RuntimeError, match="restart='latest'"):
             await flow.run(restart="latest")
 
-    async def test_resume_and_restart_are_not_taken_together(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_resume_and_restart_are_not_taken_together(self, store: FileStore) -> None:
         with pytest.raises(ValueError, match="resume or restart, not both"):
             await _counting_flow(store, "both", max_iters=1).run(resume="latest", restart="latest")
 
     @pytest.mark.parametrize("target", ["off", "", "complete"])
     async def test_restart_needs_latest_a_hash_or_a_checkpoint_name(
-        self, store: JsonFileCheckpointStore, target: str
+        self, store: FileStore, target: str
     ) -> None:
         with pytest.raises(ValueError, match="restart must be 'latest'"):
             await _counting_flow(store, "bad-target", max_iters=1).run(restart=target)
@@ -812,7 +780,7 @@ class TestResumeModeValidation:
 class TestResumeInSubprocess:
     """A resume in a fresh process matches the same resume run in-process."""
 
-    async def _halt_at_two(self, store: JsonFileCheckpointStore) -> None:
+    async def _halt_at_two(self, store: FileStore) -> None:
         await build_canonical_flow(
             make_test_logger(),
             max_iters=4,
@@ -823,17 +791,17 @@ class TestResumeInSubprocess:
         ).run()
 
     async def test_matches_in_process_resume(self, tmp_path: Path) -> None:
-        in_proc = JsonFileCheckpointStore(make_test_logger(), tmp_path / "in-proc")
+        in_proc = file_store(tmp_path / "in-proc")
         await self._halt_at_two(in_proc)
-        await self._halt_at_two(JsonFileCheckpointStore(make_test_logger(), tmp_path / "xproc"))
+        await self._halt_at_two(file_store(tmp_path / "xproc"))
 
         expected = await build_canonical_flow(
             make_test_logger(), max_iters=4, store=in_proc, client_flow_id="xproc"
         ).run(resume="latest")
         result = resume_in_subprocess(
-            store_module="llm_gent.flow.stores",
-            store_factory="JsonFileCheckpointStore",
-            store_kwargs={"root": str(tmp_path / "xproc")},
+            store_module="appinfra.cas",
+            store_factory="FileStore",
+            store_kwargs={"root": str(tmp_path / "xproc"), "fsync": False},
             flow_builder_kwargs={"max_iters": 4},
             client_flow_id="xproc",
             resume="latest",
@@ -843,8 +811,8 @@ class TestResumeInSubprocess:
     async def test_off_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="needs a resume mode"):
             resume_in_subprocess(
-                store_module="llm_gent.flow.stores",
-                store_factory="JsonFileCheckpointStore",
+                store_module="appinfra.cas",
+                store_factory="FileStore",
                 store_kwargs={"root": "unused"},
                 resume="off",
             )

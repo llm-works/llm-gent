@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from appinfra.cas import MemoryStore
 
 from llm_gent.flow import (
     HALTED,
@@ -35,7 +36,7 @@ from llm_gent.flow import (
 )
 from llm_gent.flow._node_id import _compute_node_ids
 from llm_gent.flow.state.snapshot import SIGNALS
-from llm_gent.flow.stores import InMemoryCheckpointStore
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -341,7 +342,7 @@ class TestConclude:
         assert sorted(ran) == ["close:0", "close:1", "first:0", "first:1"]
 
     async def test_a_halt_during_it_resumes_and_finishes_the_chain(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         def build(halt: asyncio.Event, cut: asyncio.Event, ran: list[str], arm: bool) -> Any:
             s = _steps(ran, cut, cut_in="a" if arm else "")
@@ -388,7 +389,7 @@ class TestConclude:
         that step will be skipped anyway. This prevents project from throwing before
         the halt checkpoint can be written.
         """
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         project_calls: list[str] = []
 
         def build(halt: asyncio.Event, cut: asyncio.Event, ran: list[str], arm: bool) -> Any:
@@ -645,7 +646,7 @@ class TestLoop:
 
     async def test_with_the_halt_set_too_the_turn_is_held_and_not_continued(self) -> None:
         """Halted mid-turn while cut: resume goes on fast-forwarding, returning the paused result."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         cut, halt = asyncio.Event(), asyncio.Event()
         saia = _CuttingSAIA(cut, halt)
         out = _out()
@@ -662,7 +663,7 @@ class TestLoop:
 
 class TestPauseDuringFastForward:
     async def test_resume_goes_on_fast_forwarding_and_sets_the_signal(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         def build(halt: asyncio.Event, cut: asyncio.Event, ran: list[str], arm: bool) -> Any:
             @verb
@@ -701,7 +702,7 @@ class TestPauseDuringFastForward:
         assert cut.is_set()
 
     async def test_a_signal_set_before_its_region_starts_survives_the_pause(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         def build(halt: asyncio.Event, cut: asyncio.Event, ran: list[str], arm: bool) -> Any:
             @verb
@@ -737,7 +738,7 @@ class TestPauseDuringFastForward:
         assert ran == ["d"]
 
     async def test_a_cut_writes_no_checkpoint_and_a_finished_run_records_no_signal(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         cut = asyncio.Event()
         ran: list[str] = []
         s = _steps(ran, cut, cut_in="a")
@@ -972,7 +973,7 @@ class TestSubtreeEndedEarly:
     """A region the cut ended leaves nothing of it behind for later checkpoints."""
 
     async def test_a_map_the_cut_ended_leaves_the_run_complete(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         cut = asyncio.Event()
         ran: list[int] = []
 
@@ -1000,7 +1001,7 @@ class TestSubtreeEndedEarly:
         assert await History(store, "cut-map").is_complete()
 
     async def test_a_later_halt_checkpoint_holds_none_of_the_ended_region(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         ran: list[str] = []
 
         def build(halt: asyncio.Event, arm: bool) -> Any:
@@ -1172,7 +1173,7 @@ def _drained_turns(
     cut: asyncio.Event,
     halt: asyncio.Event,
     out: dict[str, list[Any]],
-    store: InMemoryCheckpointStore,
+    store: MemoryStore,
 ) -> Any:
     """A drain region over a map of two items, one at a time: a Loop ``turn``, then ``after``."""
     loop = Loop(ROLE, saia=saia, conversation_factory=_ConvFactory())
@@ -1202,14 +1203,14 @@ class TestDrainLoop:
         cut, halt = asyncio.Event(), asyncio.Event()
         out = _out()
         saia = _CuttingSAIA(cut)
-        flow = _drained_turns(saia, cut, halt, out, InMemoryCheckpointStore())
+        flow = _drained_turns(saia, cut, halt, out, memory_store())
         results = await flow.run()
 
         assert out["after"] == [_Result(paused=False, text="partial:t0")]  # not aborted
         assert isinstance(results[1], Skipped) and out["turn"] == [0]
 
     async def test_a_halt_pauses_the_turn_and_resume_goes_on_draining(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         cut, halt = asyncio.Event(), asyncio.Event()
         out = _out()
         saia = _CuttingSAIA(cut, halt)

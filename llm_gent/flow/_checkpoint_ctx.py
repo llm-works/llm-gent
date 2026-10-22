@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""CheckpointContext — CAS-store wiring bundled with save operations.
+"""CheckpointContext — the run's history repository bundled with save operations.
 
-Introduced to replace the ``(checkpointer, client_flow_id)`` pair
-that used to travel together on ``_RunEnv`` and Flow. Every save
-site had the same guard shape — ``if env.checkpointer is None or
-env.client_flow_id is None: return`` — and every store call re-
-plumbed the client_flow_id argument. :class:`CheckpointContext`
-holds the pair as one unambiguously-bound object and exposes the
-save operations the framework needs.
+Every save site would otherwise guard on the store and the history name
+travelling separately (``if env.checkpointer is None or
+env.client_flow_id is None: return``) and re-plumb the name into every
+store call. :class:`CheckpointContext` holds the history's
+:class:`appinfra.cas.Repo` and exposes the save operations the framework
+needs.
 
 A run has one context: its repo, set on the top-level flow with
 ``.with_checkpoint_store(store, client_flow_id)``. Without one,
@@ -18,32 +17,28 @@ inside the run also need a ``with_checkpointer()`` on the saving flow or
 above it (``env.checkpointer``). :func:`check_one_repo` rejects a store on
 a nested flow and a checkpointer in a run without a store.
 
-The context is also the translation layer between the agent's name
-(``client_flow_id``) and gent's internal history identity
-(``flow_id``): reads look the ``flow_id`` up; the first save creates it.
-Every store call below the context is keyed by ``flow_id``.
+The repository is named by ``client_flow_id``; store calls are
+synchronous, as :class:`appinfra.cas.Store` is.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+from appinfra.cas import Blob, Repo, Store, Tree
 
 from .checkpoint import (
     COMPLETION_PRODUCER,
     END_NODE_PATH,
     HEAD_REF,
-    CheckpointStore,
     ConcurrentWriteError,
-    Kind,
     Retention,
-    maybe_await,
 )
-from .state.cas import Blob, Commit, CommitMeta, ProducedBy, Tree
+from .state.cas import CommitMeta, FlowCommit, ProducedBy
 from .state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
 from .structure import Structure
 
@@ -87,41 +82,45 @@ def _label(flow: Flow) -> str:
 
 
 class CheckpointContext:
-    """CAS-store wiring bundled with the save operations that consume it.
+    """The run's history repository bundled with the save operations that consume it.
 
     Constructed by ``.with_checkpoint_store(store, client_flow_id)`` on a
     run's top-level flow. Absent when the run has no store — save sites
     check ``env.checkpoint_ctx is None`` and skip.
 
-    Owns the ``(store, client_flow_id)`` pair unambiguously (both
-    fields are always populated once the context exists — the
-    Optional lives at the context level, not per-field) and caches
-    the history's ``flow_id`` and head within one run
-    (:meth:`begin_run` drops them). Exposes the put-object triad,
-    get_ref / move_ref, get_object, put_tag, gc_history,
-    :meth:`append_commit`, and the compound :meth:`save_scope_commit`
-    that assembles a Blob→Tree→Commit chain and moves ``HEAD`` to it.
+    Caches the history's head within one run (:meth:`begin_run` drops it).
+    Exposes get_ref / move_ref, put_tag, delete_history,
+    :meth:`append_commit`, and the compound :meth:`save_scope_commit` that
+    puts a snapshot, commits it and moves ``HEAD`` to it.
     """
 
     def __init__(
         self,
-        store: CheckpointStore,
+        store: Store,
         client_flow_id: str,
         structure: Callable[[], Structure],
+        retention: Retention,
     ) -> None:
-        """Bind the store and name; ``structure`` yields the owning flow's structure.
+        """Bind the store's repository ``client_flow_id``; ``structure`` yields the flow's structure.
 
         ``structure`` is evaluated once per run, at the run's first commit,
         so nodes added to the flow after ``with_checkpoint_store`` are
         reflected and every commit of a run holds the same structure and
         records its hash.
+
+        Raises:
+            appinfra.cas.InvalidNameError: ``client_flow_id`` cannot name a
+                repository (empty, ``.``/``..``, NUL, over 255 UTF-8 bytes).
+            ValueError: ``retention`` is not ``"retain"`` or ``"gc_on_success"``.
         """
         self.store = store
         self.client_flow_id = client_flow_id
+        self.repo: Repo = store.repo(client_flow_id)
+        if retention not in ("retain", "gc_on_success"):
+            raise ValueError(f"retention must be 'retain' or 'gc_on_success'; got {retention!r}")
+        self.retention = retention
         self._structure = structure
         self._run_structure: Blob | None = None
-        self._flow_id: str | None = None
-        self._flow_id_lock = asyncio.Lock()
         # _parent: parent of the next commit (normally HEAD, but an earlier
         # commit after continue_from). _head: where HEAD points, used as the
         # expected value for compare-and-set. The two are the same except
@@ -133,90 +132,36 @@ class CheckpointContext:
         self._head: str | None = None
         self._head_loaded: bool = False
         self._commit_lock = asyncio.Lock()
-        # (kind, hash) of the blobs / trees this context already put during
-        # the run. Scopes that did not change since the last commit are
+        # Ids of the blobs / trees this context already put during the run.
+        # Scopes that did not change since the last commit are
         # content-identical, so their puts are skipped instead of repeated.
-        # The kind is part of the key: a blob and a tree can have the same
-        # bytes (the blob "[]" and the empty tree) and so the same hash.
-        self._written: set[tuple[Kind, str]] = set()
+        self._written: set[str] = set()
 
     def begin_run(self) -> None:
-        """Drop the cached ``flow_id``, head and structure, and create fresh locks.
+        """Drop the cached head and structure, and create a fresh lock.
 
         Called at the start of every top-level run so each run re-reads
-        the store: a history collected (or advanced) by someone else between
-        runs is observed instead of written into under a stale id or head.
-        Fresh locks keep a Flow reusable across event loops.
+        the store: a history deleted (or advanced) by someone else between
+        runs is observed instead of written into under a stale head. A
+        fresh lock keeps a Flow reusable across event loops.
         """
         self._run_structure = None
-        self._flow_id = None
-        self._flow_id_lock = asyncio.Lock()
         self._forget_head()
         self._commit_lock = asyncio.Lock()
         self._written = set()
 
-    @property
-    def retention(self) -> Retention:
-        """The store's retention mode (``"retain"`` or ``"gc_on_success"``)."""
-        return self.store.retention
+    # --- objects and refs ---
 
-    # --- flow_id resolution (client_flow_id → flow_id) ---
-
-    async def lookup_flow_id(self) -> str | None:
-        """Return this history's ``flow_id``, or ``None`` when none exists yet."""
-        if self._flow_id is None:
-            self._flow_id = await maybe_await(self.store.get_flow_id(self.client_flow_id))
-        return self._flow_id
-
-    async def ensure_flow_id(self) -> str:
-        """Return this history's ``flow_id``, creating the history on first call.
-
-        The lock keeps parallel map items in this process to one bind; the
-        store's atomic bind-if-absent settles races with other processes.
-        """
-        async with self._flow_id_lock:
-            flow_id = await self.lookup_flow_id()
-            if flow_id is None:
-                bound: str = await maybe_await(
-                    self.store.bind_flow_id(self.client_flow_id, str(uuid.uuid4()))
-                )
-                self._flow_id = flow_id = bound
-            return flow_id
-
-    # --- store passthrough (kind-specific put_object variants) ---
-
-    async def put_blob(self, content_hash: str, payload: bytes) -> None:
-        """Put a blob under this history; a no-op when this run already put it."""
-        if ("blob", content_hash) in self._written:
+    def put(self, obj: Blob | Tree) -> None:
+        """Put a blob or tree into the history; a no-op when this run already put it."""
+        if obj.id in self._written:
             return
-        flow_id = await self.ensure_flow_id()
-        await maybe_await(self.store.put_object(flow_id, "blob", content_hash, payload))
-        self._written.add(("blob", content_hash))
-
-    async def put_tree(self, tree: Tree) -> None:
-        """Serialize + put a Tree under this history; a no-op when this run already put it."""
-        if ("tree", tree.content_hash) in self._written:
-            return
-        flow_id = await self.ensure_flow_id()
-        await maybe_await(
-            self.store.put_object(flow_id, "tree", tree.content_hash, tree.to_bytes())
-        )
-        self._written.add(("tree", tree.content_hash))
-
-    async def put_commit(self, commit: Commit) -> None:
-        """Serialize + put a Commit under this history."""
-        flow_id = await self.ensure_flow_id()
-        await maybe_await(
-            self.store.put_object(flow_id, "commit", commit.content_hash, commit.to_bytes())
-        )
+        self.repo.put(obj)
+        self._written.add(obj.id)
 
     async def get_ref(self, name: str) -> str | None:
         """Commit hash ref ``name`` points at, or ``None`` (incl. no history)."""
-        flow_id = await self.lookup_flow_id()
-        if flow_id is None:
-            return None
-        result: str | None = await maybe_await(self.store.get_ref(flow_id, name))
-        return result
+        return self.repo.get_ref(name)
 
     async def move_ref(self, name: str, commit_hash: str, expected: str | None) -> None:
         """Move ref ``name`` from ``expected`` to ``commit_hash``.
@@ -225,18 +170,8 @@ class CheckpointContext:
             ConcurrentWriteError: The ref no longer points at ``expected``
                 — another writer moved it.
         """
-        flow_id = await self.ensure_flow_id()
-        moved = await maybe_await(self.store.set_ref(flow_id, name, commit_hash, expected))
-        if not moved:
+        if not self.repo.set_ref(name, commit_hash, expected):
             raise ConcurrentWriteError(self.client_flow_id, name, expected)
-
-    async def get_object(self, kind: Kind, content_hash: str) -> bytes | None:
-        """Fetch an object under this history by kind + hash."""
-        flow_id = await self.lookup_flow_id()
-        if flow_id is None:
-            return None
-        result: bytes | None = await maybe_await(self.store.get_object(flow_id, kind, content_hash))
-        return result
 
     async def put_tag(self, name: str, commit_hash: str) -> None:
         """Point tag ref ``name`` at ``commit_hash``, moving it from wherever it points now.
@@ -248,23 +183,19 @@ class CheckpointContext:
         """
         await self.move_ref(name, commit_hash, await self.get_ref(name))
 
-    async def gc_history(self) -> None:
-        """Remove this history (objects, refs, tags, name mapping); the next save starts a new one."""
-        flow_id = await self.lookup_flow_id()
-        if flow_id is None:
-            return
+    async def delete_history(self) -> None:
+        """Delete the history's repository (objects, refs, tags); the next save starts a new one."""
         try:
-            await maybe_await(self.store.gc_history(flow_id))
+            self.store.delete_repo(self.client_flow_id)
         finally:
-            # Also on a failed gc: the next access re-reads the name binding
-            # instead of trusting a flow_id the store may have half-removed.
-            self._flow_id = None
+            # Also on a failed delete: the next access re-reads the store
+            # instead of trusting a head the store may have half-removed.
             self._forget_head()
             self._written.clear()
 
     # --- history: append a commit on top of the head ---
 
-    async def append_commit(self, root_tree_hash: str, meta: CommitMeta) -> Commit:
+    async def append_commit(self, tree: str, meta: CommitMeta) -> FlowCommit:
         """Build a commit whose parent is the current head, store it, and move ``HEAD`` to it.
 
         ``HEAD`` moves by compare-and-set, so a concurrent writer raises
@@ -277,24 +208,27 @@ class CheckpointContext:
         """
         async with self._commit_lock:
             parent = await self._load_head()
-            commit = Commit.build(
-                root_tree_hash=root_tree_hash,
-                parent_hashes=() if parent is None else (parent,),
-                meta=meta,
-            )
-            await self.put_commit(commit)
-            await self.move_ref(HEAD_REF, commit.content_hash, self._head)
-            self._parent = self._head = commit.content_hash
+            commit, obj = FlowCommit.build(tree, () if parent is None else (parent,), meta)
+            self.repo.put(obj)
+            await self.move_ref(HEAD_REF, commit.id, self._head)
+            self._parent = self._head = commit.id
             return commit
 
-    async def continue_from(self, commit_hash: str) -> None:
+    async def continue_from(self, commit_hash: str, *, expect_head: str | None = None) -> None:
         """Parent the run's commits on ``commit_hash``; ``HEAD`` moves from where it points now.
 
         Until the run commits, ``HEAD`` stays where it is: a run that
         fails first leaves the history as it was.
+
+        Args:
+            commit_hash: The commit the run's commits will be parented on.
+            expect_head: Expected current HEAD for the compare-and-set on
+                the first commit. Pass the value captured when choosing
+                ``commit_hash`` to detect concurrent writers; omit to read
+                HEAD fresh (for intentional forks).
         """
         self._parent = commit_hash
-        self._head = await self.get_ref(HEAD_REF)
+        self._head = expect_head if expect_head is not None else await self.get_ref(HEAD_REF)
         self._head_loaded = True
 
     async def _load_head(self) -> str | None:
@@ -321,66 +255,51 @@ class CheckpointContext:
         current_state: State[Any],
         outcome: CommitOutcome,
         trace_ref: tuple[TraceRef, ...] = (),
-    ) -> Commit:
+    ) -> FlowCommit:
         """Persist a full snapshot of the run as a commit at ``node_id``; return it.
 
         The snapshot holds every live scope of the run (see
         :func:`put_snapshot`), not only the ones above ``current_state``.
-        :class:`CommitMeta` pins ``(flow_id, node_path, iteration)``, the
-        path of the scope ``current_state`` is, and the provenance triple
+        :class:`CommitMeta` pins ``(node_path, iteration)``, the path of the
+        scope ``current_state`` is, and the provenance triple
         (``produced_by``, ``trace_ref``, ``outcome``). :meth:`append_commit`
         then chains the commit onto ``HEAD``.
 
         ``node_path`` is the ``"/"``-joined ancestor chain (from run
-        root to this node, inclusive). blake2b hex has no ``"/"``,
+        root to this node, inclusive). Node ids are hex, with no ``"/"``,
         so split round-trips on resume.
 
         ``outcome`` records why the commit fired — ``"ok"`` for a
         policy save or ``ctx.checkpoint()``, ``"halted"`` for the run's
         halt checkpoint.
         """
-        tree = await self.put_snapshot(scopes)
+        tree = self.put_snapshot(scopes)
         node_path = "/".join(ancestor_chain + (node_id,))
-        flow_id = await self.ensure_flow_id()
-        meta = self._build_commit_meta(flow_id, node_path, iteration, node_id, outcome, trace_ref)
+        meta = self._build_commit_meta(node_path, iteration, node_id, outcome, trace_ref)
         meta = dataclasses.replace(meta, scope_path=path_str(scopes.path_of(current_state)))
-        return await self.append_commit(tree.content_hash, meta)
+        return await self.append_commit(tree.id, meta)
 
-    async def put_snapshot(self, scopes: ScopeRegistry) -> Tree:
+    def put_snapshot(self, scopes: ScopeRegistry) -> Tree:
         """Put the snapshot tree of every live scope in ``scopes``; return its root tree.
 
-        Every scope is serialized before the first write
-        (:meth:`ScopeRegistry.capture` is synchronous): the writes await
-        the store, and other tasks (concurrent map items) change the
-        scopes meanwhile, so serializing between writes could commit
-        scopes from different moments.
+        Every scope is serialized in one synchronous pass
+        (:meth:`ScopeRegistry.capture`) and the objects are put without
+        yielding to other tasks, so the snapshot holds the scopes as they
+        were at one moment even while concurrent map items run.
 
         The root tree also holds the run's flow structure
         (:data:`~llm_gent.flow.state.snapshot.FLOW`), whose
-        hash every commit of the run records as ``flow_root_hash``.
+        id every commit of the run records as ``flow_root_hash``.
         """
         tree, objects = build_snapshot_tree(scopes.capture(), self._run_structure_blob())
         for obj in objects:
-            if isinstance(obj, Blob):
-                await self.put_blob(obj.content_hash, obj.payload)
-            else:
-                await self.put_tree(obj)
+            self.put(obj)
         return tree
 
-    async def save_completion_commit(self, tree: Tree) -> Commit:
+    async def save_completion_commit(self, tree: Tree) -> FlowCommit:
         """Commit an already-put ``tree`` as the final-state commit (``$end``, outcome ``ok``)."""
-        return await self._save_framework_commit(END_NODE_PATH, COMPLETION_PRODUCER, "ok", tree)
-
-    async def _save_framework_commit(
-        self, node_path: str, producer: str, outcome: CommitOutcome, tree: Tree
-    ) -> Commit:
-        """Commit ``tree`` at a reserved ``node_path`` the framework owns.
-
-        No node produced it: ``producer`` is a ``$framework/*`` pseudo node id.
-        """
-        flow_id = await self.ensure_flow_id()
-        meta = self._build_commit_meta(flow_id, node_path, 0, producer, outcome, ())
-        return await self.append_commit(tree.content_hash, meta)
+        meta = self._build_commit_meta(END_NODE_PATH, 0, COMPLETION_PRODUCER, "ok", ())
+        return await self.append_commit(tree.id, meta)
 
     # --- private helpers used by save_scope_commit ---
 
@@ -392,30 +311,28 @@ class CheckpointContext:
 
     def _build_commit_meta(
         self,
-        flow_id: str,
         node_path: str,
         iteration: int,
         node_id: str,
         outcome: CommitOutcome,
         trace_ref: tuple[TraceRef, ...],
     ) -> CommitMeta:
-        """Assemble :class:`CommitMeta` for one scope-commit save.
+        """Assemble :class:`CommitMeta` for one commit.
 
         ``produced_by`` records the node's ``node_id`` — verb-level
         attribution (``verb_name`` / ``role`` / ``result_hash``)
         lands with the SAIA-verb-wrapper wiring. ``flow_root_hash`` is
-        the hash of the owning flow's structure, taken once per run.
+        the id of the owning flow's structure, taken once per run.
         """
         from llm_gent import __version__
 
         return CommitMeta(
-            flow_id=flow_id,
             node_path=node_path,
             iteration=iteration,
             produced_by=ProducedBy(node_id=node_id, verb_name=None, role=None, result_hash=None),
             trace_ref=trace_ref,
             outcome=outcome,
-            flow_root_hash=self._run_structure_blob().content_hash,
+            flow_root_hash=self._run_structure_blob().id,
             timestamp_iso=datetime.now(UTC).isoformat(),
             framework_version=__version__,
         )

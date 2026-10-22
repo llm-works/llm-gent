@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from appinfra.cas import FileStore
 from llm_saia import SAIA
 from llm_saia.core.backend import Backend
 from llm_saia.core.config import CallOptions, Config
@@ -27,7 +28,7 @@ from llm_saia.core.types import ChatResponse, Message, ToolCall, ToolDef
 
 from llm_gent.flow import Context, Factory, History, Loop, Role, verb
 from llm_gent.flow.state.snapshot import TURN
-from llm_gent.flow.stores import JsonFileCheckpointStore
+from tests.helpers import file_store
 
 from ...unit.flow.conftest import make_test_logger
 
@@ -184,11 +185,11 @@ class _HaltingSaiaFactory:
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> JsonFileCheckpointStore:
-    return JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+def store(tmp_path: Path) -> FileStore:
+    return file_store(tmp_path / "cp")
 
 
-async def _saved_turns(store: JsonFileCheckpointStore, name: str) -> dict[str, Any]:
+async def _saved_turns(store: FileStore, name: str) -> dict[str, Any]:
     """Paused turns in the halt commit at the history's head, by path."""
     history = History(store, name)
     head = await history.head()
@@ -197,7 +198,7 @@ async def _saved_turns(store: JsonFileCheckpointStore, name: str) -> dict[str, A
     return {p: c[TURN] for p, c in snapshot.cursors.items() if TURN in c}
 
 
-async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore) -> None:
+async def test_real_saia_pause_resume_round_trip(store: FileStore) -> None:
     """Real SAIA halts mid-turn on run 1; run 2 with resume="latest" completes the turn."""
     role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -287,7 +288,7 @@ async def test_real_saia_pause_resume_round_trip(store: JsonFileCheckpointStore)
 
 
 async def test_loop_without_caller_conversation_persists_paused_turn(
-    store: JsonFileCheckpointStore,
+    store: FileStore,
 ) -> None:
     """``loop(ctx, task)`` with no conversation still lands the paused turn in the halt commit.
 

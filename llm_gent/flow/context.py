@@ -364,5 +364,5 @@ class Context(Generic[T]):
             return None
         if tag is not None:
             assert env.checkpoint_ctx is not None  # a commit was written to it
-            await env.checkpoint_ctx.put_tag(tag, commit.content_hash)
-        return commit.content_hash
+            await env.checkpoint_ctx.put_tag(tag, commit.id)
+        return commit.id

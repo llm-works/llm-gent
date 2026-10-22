@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from appinfra.cas import FileStore
 from pydantic import BaseModel
 
 from llm_gent.flow import (
@@ -32,7 +33,7 @@ from llm_gent.flow import (
     TypeStateFactory,
     verb,
 )
-from llm_gent.flow.stores import JsonFileCheckpointStore
+from tests.helpers import file_store
 
 from .conftest import make_test_logger
 
@@ -41,11 +42,11 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> JsonFileCheckpointStore:
-    return JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+def store(tmp_path: Path) -> FileStore:
+    return file_store(tmp_path / "cp")
 
 
-async def _paths(store: JsonFileCheckpointStore, name: str) -> list[str]:
+async def _paths(store: FileStore, name: str) -> list[str]:
     """Paths of every cursor and child scope in the head commit's snapshot."""
     history = History(store, name)
     head = await history.head()
@@ -69,9 +70,7 @@ def _stop_then_halt(halt: asyncio.Event, ran: list[str], arm: bool) -> Any:
 
 
 class TestRescue:
-    async def test_rescued_step_leaves_no_position_behind(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_rescued_step_leaves_no_position_behind(self, store: FileStore) -> None:
         """An iterate that raised in pass 1 is rescued; the later halt checkpoint has none of it."""
         ran: list[str] = []
 
@@ -180,9 +179,7 @@ _TYPED_STEPS = ["seed", "bump:1", "bump:2", "double:3", "double:13", "total"]
 
 class TestTypedValues:
     @pytest.mark.parametrize("stop_at", range(1, len(_TYPED_STEPS) + 1))
-    async def test_halt_and_resume_keep_the_types(
-        self, store: JsonFileCheckpointStore, stop_at: int
-    ) -> None:
+    async def test_halt_and_resume_keep_the_types(self, store: FileStore, stop_at: int) -> None:
         """Halted at each step in turn, resume runs that step and the rest, over typed values."""
         ran: list[str] = []
         assert await _typed_flow(store, asyncio.Event(), ran, stop_at).run(1) is HALTED

@@ -601,6 +601,18 @@ Every commit the run writes holds the whole run and goes there, wherever
 in the flow tree it was taken — committing in a subdirectory commits the
 repo. A flow inside a run cannot set a store of its own; `run()` raises.
 
+The store is an `appinfra.cas.Store`, and the history is its repository
+named `client_flow_id`:
+
+| Store | For |
+|---|---|
+| `appinfra.cas.MemoryStore(lg)` | tests and short-lived local runs |
+| `appinfra.cas.FileStore(lg, root)` | a directory on local disk |
+| `llm_gent.flow.stores.PgStore(lg, pg)` | Postgres; run `llm_gent.ensure_schema(lg, pg)` once at process start |
+
+Store calls are synchronous: a checkpoint writes from the event loop's
+thread.
+
 Saves are declared with `with_checkpointer()`, on any flow: the top
 level, a subflow, a map or iterate body. Inside a flow with a
 checkpointer on it or above it, `ctx.checkpoint()` and the checkpoint
@@ -664,7 +676,9 @@ Halt-save and `ctx.checkpoint()` are unaffected by the policy — the
 policy governs only implicit auto-saves.
 
 On a clean exit under the default `retain` retention, the framework also
-commits the run's final state and moves the `complete` tag to it. A
+commits the run's final state and moves the `complete` tag to it
+(`with_checkpoint_store(..., retention="gc_on_success")` deletes the
+history instead). A
 history whose head is that commit is complete; the tag stays on the last
 finished run's final state when a later run halts past it. A final state
 that cannot be serialized is committed without state (and a warning is
@@ -699,7 +713,7 @@ running then run again.
 - `"<commit hash>"` — the same for any commit of the history.
   `ctx.checkpoint()` returns the hash of the commit it wrote, named or
   not. A commit off the history's line after a reset stays resumable by
-  hash until `collect_unreachable` deletes it.
+  hash until a prune of the repository deletes it.
 
 A corrupt history (a commit, tree or blob missing from the store) raises
 `HistoryCorrupt` rather than starting over.
@@ -725,17 +739,18 @@ if await history.is_complete():  # last run finished
 done = await history.last_complete()  # final state of the last finished run
 mark = await history.checkpoint("before-review")  # a named checkpoint, or None
 names = await history.checkpoint_names()  # every checkpoint name, sorted
-commit = await history.commit(head.content_hash)  # any commit by hash, or None
+commit = await history.commit(head.id)  # any commit by hash, or None
 snapshot = await history.snapshot(head)  # root scope, child scopes, cursors
 async for commit in history.commits():  # newest first, via parent links
     print(commit.meta.node_path, commit.meta.outcome, commit.meta.timestamp_iso)
 ```
 
-Every commit's meta carries the internal `flow_id` (a UUID the store maps
-`client_flow_id` to), the `node_path` of its save point, and
-`flow_root_hash` — the structure hash of the flow that wrote it
-(`Flow.root_hash()`). Equal root hashes mean identical node ids, so a
-history written by one flow can be resumed by the other.
+Each commit is a `FlowCommit`: its `id`, snapshot `tree`, `parents`, and
+`meta` — the `CommitMeta` the commit stores as its payload. The meta
+carries the `node_path` of its save point and `flow_root_hash` — the
+structure hash of the flow that wrote it (`Flow.root_hash()`). Equal root
+hashes mean identical node ids, so a history written by one flow can be
+resumed by the other.
 
 `llm_gent/examples/flow/durable_resume.md` walks through a halted and
 resumed run and the store it leaves on disk: refs, commits, and the
@@ -747,19 +762,19 @@ Objects stay in the store when nothing reaches them any more: the commits
 written after a checkpoint once a run resumed from it with `resume=<name>`
 or `resume=<hash>` commits (resumable by hash until collected), and the objects of
 a commit whose process died before moving `HEAD` to it. The framework never deletes them on its own;
-`collect_unreachable` does, keeping every ref and everything a ref
-reaches:
+a prune of the history's repository does, keeping every ref and
+everything a ref reaches:
 
 ```python
-from llm_gent.flow import collect_unreachable
-
-removed = await collect_unreachable(store, "history-42")  # objects deleted
+removed = store.repo("history-42").prune(expire=3600)  # objects deleted
 ```
 
-Call it while no run writes the history: a run puts a commit's objects
-before `HEAD` moves to it, so they would count as unreachable. A history
-with a missing object raises `HistoryCorrupt` and nothing is deleted.
-`retention="gc_on_success"` still removes a whole history on success.
+Objects written within the last `expire` seconds are kept with everything
+they reach, so a prune is safe while a run writes the history: a run puts
+a commit's objects before `HEAD` moves to it. A history with a missing
+object raises `appinfra.cas.ObjectNotFoundError` and nothing is deleted.
+`store.delete_repo("history-42")` removes a whole history, as
+`retention="gc_on_success"` does on success.
 
 ## Related Projects
 

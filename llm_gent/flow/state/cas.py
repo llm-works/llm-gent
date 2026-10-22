@@ -1,30 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Content-addressed state model — the CAS substrate.
+"""Flow commits on :mod:`appinfra.cas` — the metadata a flow stamps into each commit.
 
-Blob / Tree / Commit form a Git-shaped provenance store for gent
-histories. At every save point the run's live state becomes a tree of
-:class:`Tree` / :class:`Blob` objects keyed by content hash — the layout
-is :mod:`llm_gent.flow.state.snapshot`'s; a :class:`Commit` stamps the
-root tree with its position in the history (``flow_id``, ``node_path``,
-``iteration``, ``scope_path``) and provenance metadata (``produced_by``,
-``trace_ref``, ``outcome``, ``flow_root_hash``).
-
-This module ships only the object model and the hash discipline.
-Persistence (the :class:`CheckpointStore` Protocol redesign) and the
-executor save/resume plumbing are separate concerns.
-
-Hash discipline
----------------
-- All content hashes are :func:`blake2b` with ``digest_size=32``.
-- Content-only — no ``flow_id`` / ``node_path`` / ``iteration``
-  salt in the blob hash. Two identical byte payloads across histories
-  produce the same blob hash; cross-history diff depends on this.
-- Canonical serialization is versioned via
-  :attr:`CommitMeta.framework_version` so a canonicalization change in a
-  later gent version does not invalidate prior blobs — old commits stay
-  valid within their own version.
+A history lives in one repository of an :class:`appinfra.cas.Store`. At
+every save point the run's live state becomes a tree of
+:class:`~appinfra.cas.Tree` / :class:`~appinfra.cas.Blob` objects (the
+layout is :mod:`llm_gent.flow.state.snapshot`'s), and an
+:class:`~appinfra.cas.Commit` points at that tree. The commit's payload is
+the :class:`CommitMeta` below as canonical JSON: the commit's position in
+the history (``node_path``, ``iteration``, ``scope_path``) and its
+provenance (``produced_by``, ``trace_ref``, ``outcome``,
+``flow_root_hash``). :class:`FlowCommit` is a commit read back with its
+metadata parsed.
 
 Direct-save commits (consumer sites that save state outside a Flow
 iterate boundary — e.g. an initial-plan write) use a ``$external/*``
@@ -35,138 +23,10 @@ can filter without a schema-aware parser.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
 from dataclasses import dataclass
-from hashlib import blake2b
 from typing import Any, Literal
 
-
-_DIGEST_SIZE = 32
-"""Byte length of every :func:`content_hash` output — blake2b truncated
-to 256 bits. Matches the existing content-addressed node-id hash length
-used throughout :mod:`llm_gent.flow`.
-"""
-
-
-def content_hash(data: bytes) -> str:
-    """Return the blake2b hex digest of ``data`` at :data:`_DIGEST_SIZE`.
-
-    Deterministic on ``data`` alone; no salt, no keying. Same bytes → same
-    hash across histories, which is the invariant cross-history
-    diff depends on.
-    """
-    return blake2b(data, digest_size=_DIGEST_SIZE).hexdigest()
-
-
-def canonical_json(obj: Any) -> bytes:
-    """Serialize ``obj`` to canonical UTF-8 JSON bytes.
-
-    Deterministic ordering via ``sort_keys=True`` and compact separators;
-    the resulting bytes hash stably for any dict / list / primitive shape
-    that survives :func:`json.dumps`. Used by :meth:`Tree.from_entries`
-    and :meth:`Commit.build` for content-addressed hashing of their
-    structural bodies.
-
-    Not for :class:`Blob` payloads: Blobs are hashed over the caller's
-    already-serialized state bytes (produced upstream via
-    :func:`state_converter.unstructure` → :func:`json.dumps`), not by
-    round-tripping through this helper. The layering keeps state-payload
-    canonicalization owned by the state module.
-    """
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
-
-
-@dataclass(frozen=True)
-class Blob:
-    """A content-addressed payload — one scope's serialized data.
-
-    :attr:`content_hash` MUST equal ``content_hash(payload)``; build only
-    via :meth:`from_bytes` so the invariant holds.
-    """
-
-    content_hash: str
-    payload: bytes
-
-    @classmethod
-    def from_bytes(cls, payload: bytes) -> Blob:
-        """Build a Blob whose hash is derived from ``payload``."""
-        return cls(content_hash=content_hash(payload), payload=payload)
-
-
-TreeEntryKind = Literal["blob", "tree"]
-"""Kind slot on :class:`TreeEntry` — an entry points at either a blob or a
-subtree. Closed enum: the recursion has two shapes, no third.
-"""
-
-
-@dataclass(frozen=True)
-class TreeEntry:
-    """One ``(scope_id, kind, child_hash)`` triple inside a :class:`Tree`.
-
-    :attr:`scope_id` is the entry's name within its tree, like a file name
-    in git: a path segment of the snapshot layout, or a key of a scope's
-    payload. :attr:`kind` discriminates between a blob and a subtree,
-    mirroring git's tree-entry model.
-    """
-
-    scope_id: str
-    kind: TreeEntryKind
-    child_hash: str
-
-
-@dataclass(frozen=True)
-class Tree:
-    """A content-addressed ordered map from ``scope_id`` to child hash.
-
-    Entries are always sorted by :attr:`TreeEntry.scope_id` — canonical
-    ordering is what lets two structurally identical trees produced by
-    different runs hash the same. Build only via :meth:`from_entries` so
-    the invariant holds.
-    """
-
-    content_hash: str
-    entries: tuple[TreeEntry, ...]
-
-    @classmethod
-    def from_entries(cls, entries: Iterable[TreeEntry]) -> Tree:
-        """Build a Tree from an unordered ``entries`` iterable.
-
-        Sorts by :attr:`TreeEntry.scope_id` before hashing so the same
-        entry set produced in any order hashes the same.
-        """
-        sorted_entries = tuple(sorted(entries, key=lambda e: e.scope_id))
-        if any(
-            prev.scope_id == curr.scope_id
-            for prev, curr in zip(sorted_entries, sorted_entries[1:], strict=False)
-        ):
-            raise ValueError("Tree entries must have unique scope_id values")
-        return cls(
-            content_hash=content_hash(canonical_json(_tree_body(sorted_entries))),
-            entries=sorted_entries,
-        )
-
-    def to_bytes(self) -> bytes:
-        """Return the canonical byte payload — what a :class:`CheckpointStore`
-        stores at ``kind="tree"``. Round-trips through :meth:`from_bytes`.
-        """
-        return canonical_json(_tree_body(self.entries))
-
-    @classmethod
-    def from_bytes(cls, payload: bytes) -> Tree:
-        """Reconstruct a Tree from its canonical byte payload.
-
-        Parses the JSON body, rebuilds :class:`TreeEntry` triples, and
-        computes content_hash from the re-canonicalized body — same
-        bytes in → same content_hash out as the writer produced.
-        """
-        body = json.loads(payload.decode("utf-8"))
-        entries = tuple(TreeEntry(scope_id=e[0], kind=e[1], child_hash=e[2]) for e in body)
-        return cls(
-            content_hash=content_hash(canonical_json(_tree_body(entries))),
-            entries=entries,
-        )
+from appinfra.cas import Commit, canonical_json
 
 
 @dataclass(frozen=True)
@@ -186,7 +46,7 @@ class ProducedBy:
     history) — a run that dispatches multiple verbs under different
     roles attributes each commit to the role that owned that verb.
 
-    :attr:`result_hash` is :func:`content_hash` of the verb's serialized
+    :attr:`result_hash` is the content hash of the verb's serialized
     return value (used by iterate bodies threading ``prev_result``).
     ``None`` when there is no result — direct saves, setup commits, verbs
     that return ``None``.
@@ -227,25 +87,22 @@ A run that raises writes no commit: resume continues from the last save.
 
 @dataclass(frozen=True)
 class CommitMeta:
-    """Framework-owned metadata stamped into every :class:`Commit`.
+    """Framework-owned metadata stamped into every commit's payload.
 
-    See the module docstring for the hash-discipline rules that apply to
-    every field participating in the commit's identity hash.
+    Serialized with :meth:`to_payload` as canonical JSON, so it takes part
+    in the commit's id.
     """
 
-    flow_id: str
-    """Internal identity of the history this commit belongs to (a UUID).
-    The agent's ``client_flow_id`` is never stored in commits."""
     node_path: str
     iteration: int
     produced_by: ProducedBy
     trace_ref: tuple[TraceRef, ...]
     outcome: CommitOutcome
     flow_root_hash: str
-    """Structure hash of the flow definition (the composition tree) —
-    identical for every history running the same flow code. Equal
-    hashes guarantee identical node ids, so a ``node_path`` saved under
-    one resolves under the other. Computed by the framework on every
+    """Id of the blob holding the structure of the flow definition (the
+    composition tree) — identical for every history running the same flow
+    code. Equal ids guarantee identical node ids, so a ``node_path`` saved
+    under one resolves under the other. Computed by the framework on every
     commit; empty only in hand-built commits."""
     timestamp_iso: str
     framework_version: str
@@ -253,137 +110,84 @@ class CommitMeta:
     """Snapshot path of the scope the saving node ran in (``""`` for the root
     scope); see :mod:`llm_gent.flow.state.snapshot`."""
 
+    def to_payload(self) -> bytes:
+        """Canonical JSON of the metadata: the payload of the commit it describes."""
+        return canonical_json(
+            {
+                "node_path": self.node_path,
+                "iteration": self.iteration,
+                "produced_by": {
+                    "node_id": self.produced_by.node_id,
+                    "verb_name": self.produced_by.verb_name,
+                    "role": self.produced_by.role,
+                    "result_hash": self.produced_by.result_hash,
+                },
+                "trace_ref": [{"kind": r.kind, "id": r.id} for r in self.trace_ref],
+                "outcome": self.outcome,
+                "flow_root_hash": self.flow_root_hash,
+                "timestamp_iso": self.timestamp_iso,
+                "framework_version": self.framework_version,
+                "scope_path": self.scope_path,
+            }
+        )
+
+    @classmethod
+    def from_payload(cls, payload: bytes) -> CommitMeta:
+        """Rebuild the metadata from a commit's payload (:meth:`to_payload`'s output)."""
+        body: dict[str, Any] = json.loads(payload.decode("utf-8"))
+        produced = body["produced_by"]
+        return cls(
+            node_path=body["node_path"],
+            iteration=body["iteration"],
+            produced_by=ProducedBy(
+                node_id=produced["node_id"],
+                verb_name=produced.get("verb_name"),
+                role=produced.get("role"),
+                result_hash=produced.get("result_hash"),
+            ),
+            trace_ref=tuple(TraceRef(kind=r["kind"], id=r["id"]) for r in body["trace_ref"]),
+            outcome=body["outcome"],
+            flow_root_hash=body["flow_root_hash"],
+            timestamp_iso=body["timestamp_iso"],
+            framework_version=body["framework_version"],
+            scope_path=body["scope_path"],
+        )
+
 
 @dataclass(frozen=True)
-class Commit:
-    """One point in a flow's history — root tree, parent chain, provenance meta.
+class FlowCommit:
+    """One point in a flow's history: a commit with its :class:`CommitMeta` parsed.
 
-    :attr:`parent_hashes` holds the history's previous head — the commit
-    written immediately before this one, in time order — or is empty for
-    a history's first commit. It records sequence, not derivation: a run
-    started with ``resume="off"`` still parents on the previous head.
-    A run that finishes or halts ends in an ``$end`` or ``halted`` commit;
-    one that raises ends at its last save. A multi-parent tuple is reserved for a future
-    fork/merge surface and unused today.
-
-    Build only via :meth:`build` so :attr:`content_hash` stays consistent
-    with the canonical serialization of the body.
+    :attr:`parents` holds the history's previous head — the commit written
+    immediately before this one, in time order — or is empty for a
+    history's first commit. It records sequence, not derivation: a run
+    started with ``resume="off"`` still parents on the previous head. A run
+    that finishes or halts ends in an ``$end`` or ``halted`` commit; one
+    that raises ends at its last save. A multi-parent tuple is reserved for
+    a future fork/merge surface and unused today.
     """
 
-    content_hash: str
-    root_tree_hash: str
-    parent_hashes: tuple[str, ...]
+    id: str
+    """The commit's content hash: what ``ctx.checkpoint()`` returns and ``resume=`` takes."""
+    tree: str
+    """Id of the commit's snapshot tree."""
+    parents: tuple[str, ...]
     meta: CommitMeta
 
     @classmethod
     def build(
-        cls,
-        *,
-        root_tree_hash: str,
-        parent_hashes: tuple[str, ...],
-        meta: CommitMeta,
-    ) -> Commit:
-        """Build a Commit whose hash is derived from the canonical body."""
-        body = _commit_body(root_tree_hash, parent_hashes, meta)
-        return cls(
-            content_hash=content_hash(canonical_json(body)),
-            root_tree_hash=root_tree_hash,
-            parent_hashes=parent_hashes,
-            meta=meta,
-        )
-
-    def to_bytes(self) -> bytes:
-        """Return the canonical byte payload — what a :class:`CheckpointStore`
-        stores at ``kind="commit"``. Round-trips through :meth:`from_bytes`.
-        """
-        return canonical_json(_commit_body(self.root_tree_hash, self.parent_hashes, self.meta))
+        cls, tree: str, parents: tuple[str, ...], meta: CommitMeta
+    ) -> tuple[FlowCommit, Commit]:
+        """Return the flow commit of ``tree`` on ``parents`` and the store object that holds it."""
+        commit = Commit(tree, parents, meta.to_payload())
+        return cls(id=commit.id, tree=tree, parents=parents, meta=meta), commit
 
     @classmethod
-    def from_bytes(cls, payload: bytes) -> Commit:
-        """Reconstruct a Commit from its canonical byte payload.
-
-        Parses the JSON body, rebuilds :class:`CommitMeta` +
-        :class:`ProducedBy` + :class:`TraceRef`, and computes
-        content_hash from the re-canonicalized body — same bytes in →
-        same content_hash out as the writer produced.
-        """
-        body = json.loads(payload.decode("utf-8"))
-        meta = _parse_commit_meta(body["meta"])
-        root_tree_hash = body["root_tree_hash"]
-        parent_hashes = tuple(body["parent_hashes"])
+    def from_commit(cls, commit: Commit) -> FlowCommit:
+        """Read a stored commit back with its metadata parsed."""
         return cls(
-            content_hash=content_hash(
-                canonical_json(_commit_body(root_tree_hash, parent_hashes, meta))
-            ),
-            root_tree_hash=root_tree_hash,
-            parent_hashes=parent_hashes,
-            meta=meta,
+            id=commit.id,
+            tree=commit.tree,
+            parents=commit.parents,
+            meta=CommitMeta.from_payload(commit.payload),
         )
-
-
-def _parse_commit_meta(meta_body: dict[str, Any]) -> CommitMeta:
-    """Rebuild :class:`CommitMeta` from its canonical JSON body."""
-    produced = meta_body["produced_by"]
-    return CommitMeta(
-        flow_id=meta_body["flow_id"],
-        node_path=meta_body["node_path"],
-        iteration=meta_body["iteration"],
-        produced_by=ProducedBy(
-            node_id=produced["node_id"],
-            verb_name=produced.get("verb_name"),
-            role=produced.get("role"),
-            result_hash=produced.get("result_hash"),
-        ),
-        trace_ref=tuple(
-            TraceRef(kind=r["kind"], id=r["id"]) for r in meta_body.get("trace_ref", [])
-        ),
-        outcome=meta_body["outcome"],
-        flow_root_hash=meta_body["flow_root_hash"],
-        timestamp_iso=meta_body["timestamp_iso"],
-        framework_version=meta_body["framework_version"],
-        scope_path=meta_body.get("scope_path", ""),
-    )
-
-
-def _tree_body(entries: tuple[TreeEntry, ...]) -> list[list[str]]:
-    """Canonicalize the entries list for hashing / serialization."""
-    return [[e.scope_id, e.kind, e.child_hash] for e in entries]
-
-
-def _commit_body(
-    root_tree_hash: str,
-    parent_hashes: tuple[str, ...],
-    meta: CommitMeta,
-) -> dict[str, Any]:
-    """Canonicalize a commit's identity-determining fields for hashing.
-
-    The body is ``(root_tree_hash, parent_hashes, meta)`` — every field on
-    the commit that participates in identity. :attr:`Commit.content_hash`
-    itself is derived from this body, so it is not in the body.
-    """
-    return {
-        "root_tree_hash": root_tree_hash,
-        "parent_hashes": list(parent_hashes),
-        "meta": _meta_body(meta),
-    }
-
-
-def _meta_body(meta: CommitMeta) -> dict[str, Any]:
-    """Flatten :class:`CommitMeta` to a canonical dict."""
-    return {
-        "flow_id": meta.flow_id,
-        "node_path": meta.node_path,
-        "iteration": meta.iteration,
-        "produced_by": {
-            "node_id": meta.produced_by.node_id,
-            "verb_name": meta.produced_by.verb_name,
-            "role": meta.produced_by.role,
-            "result_hash": meta.produced_by.result_hash,
-        },
-        "trace_ref": [{"kind": r.kind, "id": r.id} for r in meta.trace_ref],
-        "outcome": meta.outcome,
-        "flow_root_hash": meta.flow_root_hash,
-        "timestamp_iso": meta.timestamp_iso,
-        "framework_version": meta.framework_version,
-        "scope_path": meta.scope_path,
-    }

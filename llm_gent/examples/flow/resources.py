@@ -40,6 +40,7 @@ import asyncio
 from collections import Counter
 from typing import Any
 
+from appinfra.cas import MemoryStore
 from appinfra.log import quick_console_logger
 
 from llm_gent.flow import (
@@ -53,7 +54,6 @@ from llm_gent.flow import (
     resource_method,
     verb,
 )
-from llm_gent.flow.stores import InMemoryCheckpointStore
 
 
 DOCS = ["alpha", "beta", "gamma"]
@@ -129,7 +129,7 @@ def build(ff: Factory[MyFlow], stats: Stats, halt: asyncio.Event, arm: bool) -> 
 async def main() -> int:
     """Run 1 halts mid-map; run 2 resumes it."""
     lg = quick_console_logger("resources-example", config={"level": "warning"})
-    store = InMemoryCheckpointStore()
+    store = MemoryStore(lg)
     ff = Factory(lg, flow_class=MyFlow, checkpoint_store=store)
 
     print("--- Run 1: halts once every document is fetched ---")

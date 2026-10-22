@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Self, get_args
 
+from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ..core.cost import CostTracker
@@ -87,8 +88,8 @@ from ._validation import (
 )
 from .checkpoint import (
     CheckpointPolicy,
-    CheckpointStore,
     ResumeMode,
+    Retention,
     checkpoint_tag,
     is_commit_hash,
 )
@@ -1019,8 +1020,10 @@ class Flow:
             self._resource_children[key] = dict(child_args)
         return self
 
-    def with_checkpoint_store(self, store: CheckpointStore, client_flow_id: str) -> Self:
-        """Set the run's repo: a :class:`CheckpointStore` and the agent-owned ``client_flow_id``.
+    def with_checkpoint_store(
+        self, store: Store, client_flow_id: str, *, retention: Retention = "retain"
+    ) -> Self:
+        """Set the run's repo: the repository ``client_flow_id`` of an :class:`appinfra.cas.Store`.
 
         A run has one repo, set on its top-level flow: every commit the run
         writes — wherever in the flow tree it is taken — holds the whole
@@ -1031,16 +1034,18 @@ class Flow:
         :meth:`with_checkpointer` on the saving flow or above it. On
         :meth:`run` ``resume=...`` the repo is checked out at start,
         restoring the run's scopes and cursors. On fully successful
-        :meth:`run` completion the framework calls
-        :meth:`CheckpointStore.gc_history` when the store's ``retention``
-        is ``"gc_on_success"``; the default ``"retain"`` keeps the history
-        for audit. Cancellation, halt exits, and unhandled exceptions
-        preserve the history regardless of retention so a subsequent
-        resume can pick up.
+        :meth:`run` completion ``retention="gc_on_success"`` deletes the
+        repository; the default ``"retain"`` keeps the history for audit.
+        Cancellation, halt exits, and unhandled exceptions preserve the
+        history regardless of retention so a subsequent resume can pick up.
 
-        Both arguments bind together — the ``client_flow_id`` scopes every
-        save/load/delete call and identifies the resumable history. It
-        is agent-owned: the framework never assigns one automatically.
+        The ``client_flow_id`` names the repository and so identifies the
+        resumable history. It is agent-owned: the framework never assigns
+        one automatically.
+
+        Raises:
+            appinfra.cas.InvalidNameError: ``client_flow_id`` cannot name a
+                repository.
 
         Resume semantics:
 
@@ -1062,7 +1067,9 @@ class Flow:
 
         Returns ``self`` for chaining.
         """
-        self._checkpoint_ctx = CheckpointContext(store, client_flow_id, lambda: Structure.of(self))
+        self._checkpoint_ctx = CheckpointContext(
+            store, client_flow_id, lambda: Structure.of(self), retention
+        )
         return self
 
     def with_checkpointer(self, name: str | None = None) -> Self:
@@ -1225,10 +1232,9 @@ class Flow:
                 ``ctx.checkpoint(name)`` took) selects one commit: the run
                 checks it out the same way and its commits continue from
                 there. Once the run commits, the commits after it leave
-                the history's line and stay resumable by hash until
-                :func:`~llm_gent.flow.collect_unreachable` deletes them; a
-                run that fails before its first commit leaves ``HEAD``
-                where it was.
+                the history's line and stay resumable by hash until a prune
+                of the repository deletes them; a run that fails before
+                its first commit leaves ``HEAD`` where it was.
                 Resuming requires
                 :meth:`with_checkpoint_store`. Bound parameter: not forwarded
                 to the first node.

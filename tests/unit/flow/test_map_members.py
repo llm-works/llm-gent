@@ -33,7 +33,7 @@ from llm_gent.flow import (
     majority,
     verb,
 )
-from llm_gent.flow.stores import InMemoryCheckpointStore
+from tests.helpers import memory_store
 
 from .conftest import ROLE_A, ROLE_B, make_ff, make_test_logger
 
@@ -274,7 +274,7 @@ def _judges(store: Any, halt: asyncio.Event | None, saia: _SAIA, ran: list[str])
 @pytest.mark.asyncio
 class TestResume:
     async def test_a_finished_member_stays_done_and_a_paused_turn_resumes(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         halt = asyncio.Event()
         ran: list[str] = []
         assert await _judges(store, halt, _SAIA(halt), ran).run("x") is HALTED
@@ -288,7 +288,7 @@ class TestResume:
         assert result == "quick:x + answer:x"
 
     async def test_inside_an_iterate_pass_only_its_unfinished_members_run(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         halt = asyncio.Event()
         runs: list[tuple[int, str]] = []
 
@@ -320,7 +320,7 @@ class TestResume:
 
     async def test_members_are_matched_by_what_they_run_not_their_position(self) -> None:
         """Halted after a and b; resumed reordered, b removed, one added: a stays done, the rest run."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         halt = asyncio.Event()
         ran: list[str] = []
 
@@ -346,7 +346,7 @@ class TestResume:
         assert ran == ["c", "new"]
 
     async def test_a_checkpoint_inside_a_member_writes_a_commit(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def saves(ctx: Context[Any], x: int) -> int:
@@ -360,7 +360,7 @@ class TestResume:
         assert any("/i/" in path for path in snapshot.cursors)
 
     async def test_a_result_that_cannot_be_checkpointed_raises_naming_the_map(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         halt = asyncio.Event()
 
         @verb

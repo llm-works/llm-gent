@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from appinfra.cas import FileStore
 
 from llm_gent.flow import (
     HALTED,
@@ -30,7 +31,7 @@ from llm_gent.flow import (
     Skipped,
     verb,
 )
-from llm_gent.flow.stores import JsonFileCheckpointStore
+from tests.helpers import file_store
 
 from .conftest import make_test_logger
 
@@ -99,14 +100,12 @@ def _map_flow(
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> JsonFileCheckpointStore:
-    return JsonFileCheckpointStore(make_test_logger(), tmp_path / "cp")
+def store(tmp_path: Path) -> FileStore:
+    return file_store(tmp_path / "cp")
 
 
 class TestMapCursor:
-    async def test_completed_items_do_not_run_or_merge_again(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_completed_items_do_not_run_or_merge_again(self, store: FileStore) -> None:
         first = _Counts()
         assert await _map_flow(store, first, asyncio.Event(), halt_at=2).run() is HALTED
         assert (first.bodies, first.merges, first.completed) == ([1, 2], [10, 20], [1, 2])
@@ -118,7 +117,7 @@ class TestMapCursor:
         assert head is not None
         assert (await History(store, "map").snapshot(head)).root["merged"] == [10, 20, 30]
 
-    async def test_items_are_not_evaluated_again(self, store: JsonFileCheckpointStore) -> None:
+    async def test_items_are_not_evaluated_again(self, store: FileStore) -> None:
         await _map_flow(store, _Counts(), asyncio.Event(), halt_at=1).run()
 
         resumed = _Counts()
@@ -128,7 +127,7 @@ class TestMapCursor:
         assert result == 60
 
     async def test_halt_checkpoint_holds_items_and_completed_results(
-        self, store: JsonFileCheckpointStore
+        self, store: FileStore
     ) -> None:
         await _map_flow(store, _Counts(), asyncio.Event(), halt_at=2).run()
 
@@ -142,7 +141,7 @@ class TestMapCursor:
             "1": {"result": 20, "merged": True},
         }
 
-    async def test_next_run_of_the_map_runs_all_items(self, store: JsonFileCheckpointStore) -> None:
+    async def test_next_run_of_the_map_runs_all_items(self, store: FileStore) -> None:
         """Once the map completed, its cursor is gone: running it again runs every item."""
         await _map_flow(store, _Counts(), asyncio.Event(), halt_at=2).run()
         await _map_flow(store, _Counts(), asyncio.Event()).run(resume="latest")
@@ -154,7 +153,7 @@ class TestMapCursor:
 
 class TestUnmergedItem:
     async def test_item_saved_before_its_merge_merges_without_running(
-        self, store: JsonFileCheckpointStore
+        self, store: FileStore
     ) -> None:
         """A checkpoint between an item's body and its merge: resume merges it, once.
 
@@ -212,7 +211,7 @@ class TestUnmergedItem:
 
 class TestLenientParallelMap:
     async def test_halt_mid_map_resumes_without_rerunning_finished_items(
-        self, store: JsonFileCheckpointStore
+        self, store: FileStore
     ) -> None:
         """``.map(strict=False).guard(...)`` in parallel: halt mid-map, then resume."""
         ran: list[int] = []
@@ -317,9 +316,7 @@ def _mixed_flow(
 class TestFailedAndSkippedItemsStayDone:
     """A failed (``strict=False``) or skipped item is done: a resumed map does not run it again."""
 
-    async def test_they_do_not_run_again_and_keep_their_outcome(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_they_do_not_run_again_and_keep_their_outcome(self, store: FileStore) -> None:
         first = _Seen()
         assert await _mixed_flow(store, first, asyncio.Event(), halt_at=3).run() is HALTED
         assert (first.bodies, first.guards) == ([1, 3], [1, 2, 3])
@@ -341,7 +338,7 @@ class TestFailedAndSkippedItemsStayDone:
         assert skipped == Skipped(item=2)
         assert rest == [30, 40]
 
-    async def test_the_halt_checkpoint_records_them(self, store: JsonFileCheckpointStore) -> None:
+    async def test_the_halt_checkpoint_records_them(self, store: FileStore) -> None:
         await _mixed_flow(store, _Seen(), asyncio.Event(), halt_at=3).run()
 
         history = History(store, "mixed")
@@ -354,9 +351,7 @@ class TestFailedAndSkippedItemsStayDone:
             "2": {"result": 30, "merged": True},
         }
 
-    async def test_a_restored_failure_is_stored_again_unchanged(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_a_restored_failure_is_stored_again_unchanged(self, store: FileStore) -> None:
         """A checkpoint the resumed run takes holds the first run's failure as it was."""
         await _mixed_flow(store, _Seen(), asyncio.Event(), halt_at=3).run()
         await _mixed_flow(store, _Seen(), asyncio.Event(), halt_at=None, save_at=4).run(
@@ -369,16 +364,14 @@ class TestFailedAndSkippedItemsStayDone:
         [cursor] = [c for c in (await history.snapshot(saved)).cursors.values() if "items" in c]
         assert cursor["done"]["0"] == {"failure": {"type": "ValueError", "message": "bad item 1"}}
 
-    async def test_the_computed_cap_is_computed_again_on_resume(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_the_computed_cap_is_computed_again_on_resume(self, store: FileStore) -> None:
         first = _Seen()
         await _mixed_flow(store, first, asyncio.Event(), halt_at=3).run()
         resumed = _Seen()
         await _mixed_flow(store, resumed, asyncio.Event(), halt_at=None).run(resume="latest")
         assert first.caps == resumed.caps == [[1, 2, 3, 4]]
 
-    async def test_a_strict_failure_runs_again(self, store: JsonFileCheckpointStore) -> None:
+    async def test_a_strict_failure_runs_again(self, store: FileStore) -> None:
         """Strict: the failure raises out of the run; resume runs the item again.
 
         Item 3 completes after item 1 failed and saves its commit; that
@@ -398,7 +391,7 @@ class TestFailedAndSkippedItemsStayDone:
         assert resumed.bodies == [1]
         assert resumed.guards == [1]  # the skip of item 2 is recorded in strict maps too
 
-    async def test_a_failed_merge_is_recorded(self, store: JsonFileCheckpointStore) -> None:
+    async def test_a_failed_merge_is_recorded(self, store: FileStore) -> None:
         """A merge that raises in a ``strict=False`` map: the item failed, and stays failed."""
         bodies: list[int] = []
 
@@ -443,9 +436,7 @@ class TestFailedAndSkippedItemsStayDone:
 
 
 class TestSerialization:
-    async def test_items_that_cannot_be_stored_raise_naming_the_map(
-        self, store: JsonFileCheckpointStore
-    ) -> None:
+    async def test_items_that_cannot_be_stored_raise_naming_the_map(self, store: FileStore) -> None:
         class _Opaque:
             pass
 

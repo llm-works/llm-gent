@@ -1,76 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""CheckpointStore — content-addressed persistence for Flow histories.
+"""Checkpoint histories — the refs, names and policies of a flow's history.
 
-A *history* is the line of commits one flow instance writes. Two ids name
-it:
+A *history* is the line of commits one flow instance writes. It lives in
+one repository of an :class:`appinfra.cas.Store` (``MemoryStore``,
+``FileStore``, or gent's :class:`~llm_gent.flow.stores.PgStore`), named by
+the agent's ``client_flow_id`` (``with_checkpoint_store(store,
+client_flow_id)``). The repository holds the history's objects — snapshot
+blobs and trees, and commits whose payload is
+:class:`~llm_gent.flow.state.cas.CommitMeta` — and its refs:
 
-- ``client_flow_id`` — the agent's name for the history, supplied through
-  the public API (``with_checkpointer`` / ``Factory.create``). Used only
-  to look the history up.
-- ``flow_id`` — gent's internal identity for the history: an opaque UUID
-  generated on the first save. Every object, ref and commit is keyed by
-  ``flow_id``; the agent's name never enters stored objects.
-
-The store is a Protocol with four surfaces:
-
-- **Name map** — :meth:`get_flow_id` / :meth:`bind_flow_id` map a
-  ``client_flow_id`` to its ``flow_id``. At most one history per name;
-  binding is atomic bind-if-absent, so concurrent first saves agree.
-
-- **Object store** — content-addressed put / get / has for opaque bytes,
-  keyed by ``(flow_id, kind, content_hash)``. ``kind`` is one of
-  ``"blob"`` / ``"tree"`` / ``"commit"``, the object triad from
-  :mod:`llm_gent.flow.state.cas`. Objects are history-scoped: each
-  ``flow_id`` owns its objects, so gc at history boundaries is
-  self-contained. Content-addressing still holds within a history —
-  identical byte payloads produce identical blob hashes, so a resume's
-  reconstruction is byte-exact.
-
-- **Refs** — named pointers to commits, as in git. :meth:`get_ref` reads
-  one; :meth:`set_ref` moves it with compare-and-set: the write lands only
-  while the ref still points where the writer expects, so a second writer
-  on the same history is detected instead of silently forking it.
-  :data:`HEAD_REF` is the newest commit on the history's line.
-  Tags are refs under ``tags/``: on a clean exit the
-  framework commits the final state at :data:`END_NODE_PATH` and moves
-  :data:`COMPLETE_TAG` to it. The history is complete while ``HEAD`` is
-  that final-state commit; the tag keeps pointing at the last finished
-  run's final state after later runs append past it. A named checkpoint
+- :data:`HEAD_REF` is the newest commit on the history's line. Each
+  commit moves it by compare-and-set, so a second writer on the same
+  history is detected instead of silently forking it.
+- Tags are refs under ``tags/``: on a clean exit the framework commits
+  the final state at :data:`END_NODE_PATH` and moves :data:`COMPLETE_TAG`
+  to it. The history is complete while ``HEAD`` is that final-state
+  commit; the tag keeps pointing at the last finished run's final state
+  after later runs append past it. A named checkpoint
   (``ctx.checkpoint(name)``) is the tag ``tags/<name>``.
 
-- **History cleanup** — :meth:`gc_history` removes every object, ref
-  and the name mapping of one ``flow_id``. :meth:`list_refs`,
-  :meth:`list_objects` and :meth:`delete_objects` let
-  :func:`~llm_gent.flow.collect_unreachable` remove only the objects no
-  ref reaches — commits off the history's line after a run resumed with
-  ``resume=<name>`` or ``resume=<hash>`` committed, or written by a process that died
-  before moving it. The framework calls :meth:`gc_history` on a
-  fully successful :meth:`Flow.run` when the store's retention policy is
-  ``"gc_on_success"``; the default ``"retain"`` keeps successful
-  histories on disk for audit, cross-run diff, and downstream
-  provenance exporters. Consumers who need explicit cleanup call
-  :meth:`gc_history` themselves. A name whose history was collected
-  starts a new history (new ``flow_id``) on its next save.
-
-Every method may be declared ``def`` (returning the value directly) or
-``async def`` (returning a coroutine). The framework awaits the return
-value when it is awaitable; a synchronous store keeps working, an
-async-native store gains first-class support without blocking the event
-loop. The :func:`maybe_await` helper below is used at every call site.
+Cleanup is the repository's: ``store.repo(client_flow_id).prune(expire)``
+deletes the objects no ref reaches — commits off the history's line after
+a run resumed with ``resume=<name>`` or ``resume=<hash>`` committed, or
+written by a process that died before moving ``HEAD`` — once they are
+older than ``expire`` seconds. ``store.delete_repo(client_flow_id)``
+removes the whole history; the next save starts a new one.
 
 Retention policy
 ----------------
-The reference stores accept a ``retention`` argument at construction:
+``with_checkpoint_store(..., retention=...)`` decides what a fully
+successful :meth:`Flow.run` leaves behind:
 
-- ``"retain"`` (default): a successful :meth:`Flow.run` does NOT call
-  :meth:`gc_history`. Provenance framing — the successful record is
-  the one most often needed for audit, cross-run diff, and motif
-  extraction across good runs.
-- ``"gc_on_success"``: on a fully successful run the framework calls
-  :meth:`gc_history`, matching the pre-CAS delete-on-clean-exit
-  behavior for consumers who don't want the history to accumulate.
+- ``"retain"`` (default): the history stays, ending in the final-state
+  commit. The successful record is the one most often needed for audit,
+  cross-run diff, and motif extraction across good runs.
+- ``"gc_on_success"``: the framework deletes the history's repository,
+  for consumers who don't want histories to accumulate.
 
 Halt / cancellation / unhandled exceptions preserve the history
 regardless of retention so a later resuming run can pick up.
@@ -79,21 +46,10 @@ regardless of retention so a later resuming run can pick up.
 from __future__ import annotations
 
 import inspect
-import re
-from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
-
-Kind = Literal["blob", "tree", "commit"]
-"""Object kind — one of the three CAS object types.
-
-Values match :mod:`llm_gent.flow.state.cas`:
-- ``"blob"`` — serialized scope-state payload bytes.
-- ``"tree"`` — canonical JSON of ordered ``TreeEntry`` list.
-- ``"commit"`` — canonical JSON of ``(root_tree_hash, parent_hashes,
-  meta)``.
-"""
+from appinfra.cas import is_object_id
 
 
 HEAD_REF = "HEAD"
@@ -135,13 +91,9 @@ RESERVED_CHECKPOINT_NAMES = frozenset({"off", "latest", "complete"})
 framework's own ``complete`` tag."""
 
 
-_COMMIT_HASH = re.compile(r"[0-9a-f]{64}")
-"""Form of a commit hash: the hex of a 32-byte blake2b digest (:mod:`~llm_gent.flow.state.cas`)."""
-
-
 def is_commit_hash(value: object) -> bool:
     """True when ``value`` has the form of a commit hash: 64 lowercase hex characters."""
-    return isinstance(value, str) and _COMMIT_HASH.fullmatch(value) is not None
+    return is_object_id(value)
 
 
 def checkpoint_tag(name: str) -> str:
@@ -167,8 +119,8 @@ END_NODE_PATH = "$end"
 """Reserved ``node_path`` of the final-state commit written on clean exit.
 
 Not a node id: the commit sits after the last top-level node, and the
-``$`` prefix cannot collide with a blake2b hex node id. A history whose
-head is at this path is complete.
+``$`` prefix cannot collide with a hex node id. A history whose head is
+at this path is complete.
 """
 
 
@@ -201,13 +153,13 @@ names a checkpoint taken with ``ctx.checkpoint(name)`` (see
 :func:`checkpoint_tag`). Either way the run checks the commit out the same
 way and its commits continue from there. Once the run commits, the commits
 written after it leave the history's line but stay resumable by hash until
-:func:`~llm_gent.flow.collect_unreachable` deletes them; a run that fails
-before its first commit leaves ``HEAD`` where it was.
+a prune of the repository deletes them; a run that fails before its first
+commit leaves ``HEAD`` where it was.
 """
 
 
 Retention = Literal["retain", "gc_on_success"]
-"""Store retention policy for successful :meth:`Flow.run` completion.
+"""Retention policy for successful :meth:`Flow.run` completion.
 
 See the module docstring's retention section for semantics.
 """
@@ -274,10 +226,9 @@ class CheckpointPolicy:
 async def maybe_await(value: Any) -> Any:
     """Await ``value`` if awaitable; return it as-is otherwise.
 
-    Use this helper at every checkpoint-store call site so sync and
-    async stores are handled uniformly::
+    Lets a hook be declared ``def`` or ``async def``::
 
-        result = await maybe_await(store.get_object(flow_id, "commit", h))
+        await maybe_await(hook(ctx))
 
     Uses :func:`inspect.isawaitable`, which returns ``True`` only for
     coroutines and objects with ``__await__``. Generators and async
@@ -287,182 +238,3 @@ async def maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
-
-
-class CheckpointStore(Protocol):
-    """Content-addressed persistence for Flow histories.
-
-    Name map, object store (put / get / has for opaque bytes keyed by
-    content hash), named refs with compare-and-set, and cleanup on one
-    Protocol. See the module docstring for the
-    object model and retention policy.
-
-    Each method may be declared ``def`` (returning its value directly)
-    or ``async def`` (returning a coroutine). The framework awaits the
-    return value when it is awaitable.
-
-    Consumers implementing this Protocol declare a construction-time
-    ``retention: Retention`` argument (default ``"retain"``) and expose
-    it via :attr:`retention` for the framework to consult on the clean-
-    exit path.
-    """
-
-    retention: Retention
-    """Store's retention policy for successful runs.
-
-    Read by :meth:`Flow.run`'s clean-exit path to decide whether to call
-    :meth:`gc_history`. Set at store construction; the Protocol does
-    not dictate the construction shape but every reference implementation
-    accepts a ``retention=`` keyword argument.
-    """
-
-    # Name map
-
-    def get_flow_id(self, client_flow_id: str) -> str | None | Awaitable[str | None]:
-        """Return the ``flow_id`` of the history named ``client_flow_id``, or ``None``.
-
-        ``None`` means no history exists under that name (never saved, or
-        collected by :meth:`gc_history`).
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def bind_flow_id(self, client_flow_id: str, flow_id: str) -> str | Awaitable[str]:
-        """Bind ``client_flow_id`` to ``flow_id`` unless already bound; return the bound id.
-
-        Called by the framework on a history's first save, with a fresh
-        ``flow_id``. MUST be atomic: of concurrent binds of one name exactly
-        one wins, and every caller gets the winner's ``flow_id`` back (the
-        losers then write into the winner's history). A ``flow_id`` names
-        at most one ``client_flow_id``; binding it to a second name raises
-        :class:`ValueError`.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    # Object store
-
-    def put_object(
-        self,
-        flow_id: str,
-        kind: Kind,
-        content_hash: str,
-        payload: bytes,
-    ) -> None | Awaitable[None]:
-        """Persist ``payload`` under ``(flow_id, kind, content_hash)``.
-
-        Idempotent — the same ``(flow_id, kind, content_hash)`` re-put
-        with the same bytes MUST be a no-op. Because ``content_hash``
-        is derived from ``payload``, differing bytes under the same hash
-        indicate either a hash collision or corruption; implementations
-        MAY raise on that condition.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def get_object(
-        self,
-        flow_id: str,
-        kind: Kind,
-        content_hash: str,
-    ) -> bytes | None | Awaitable[bytes | None]:
-        """Return the payload for ``(flow_id, kind, content_hash)``, or ``None``.
-
-        Absence is not an error — callers routinely probe for objects
-        that may not exist yet (dedup shortcut on save).
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def has_object(
-        self,
-        flow_id: str,
-        kind: Kind,
-        content_hash: str,
-    ) -> bool | Awaitable[bool]:
-        """Return ``True`` when ``(flow_id, kind, content_hash)`` exists.
-
-        Cheaper than :meth:`get_object` when the caller only needs to
-        know whether to skip a put — the dedup shortcut on save.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def list_objects(
-        self, flow_id: str
-    ) -> list[tuple[Kind, str]] | Awaitable[list[tuple[Kind, str]]]:
-        """Return the ``(kind, content_hash)`` of every object under ``flow_id``.
-
-        Empty for an unknown ``flow_id``. Used by
-        :func:`~llm_gent.flow.collect_unreachable`.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    # Refs
-
-    def get_ref(self, flow_id: str, name: str) -> str | None | Awaitable[str | None]:
-        """Return the commit hash ref ``name`` points at, or ``None`` when it does not exist.
-
-        Ref names are non-empty strings such as :data:`HEAD_REF` or
-        ``"tags/complete"``; a ``/`` is part of the name, not a hierarchy.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def set_ref(
-        self,
-        flow_id: str,
-        name: str,
-        commit_hash: str,
-        expected: str | None,
-    ) -> bool | Awaitable[bool]:
-        """Point ref ``name`` at ``commit_hash`` if it currently points at ``expected``.
-
-        ``expected=None`` means the ref must not exist yet. Returns
-        ``True`` when the write landed, ``False`` when the ref points
-        elsewhere — nothing is written then. MUST be atomic: of concurrent
-        writers passing the same ``expected``, at most one succeeds.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def list_refs(self, flow_id: str) -> dict[str, str] | Awaitable[dict[str, str]]:
-        """Return every ref under ``flow_id``: name → commit hash. Empty when there are none.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    # History cleanup
-
-    def gc_history(self, flow_id: str) -> None | Awaitable[None]:
-        """Remove every object and ref under ``flow_id``, and its name mapping.
-
-        Idempotent: absence is not an error. Called by :meth:`Flow.run`'s
-        clean-exit path when :attr:`retention` is ``"gc_on_success"``;
-        also callable directly by consumers who want to prune a
-        history.
-
-        May be declared ``async def``.
-        """
-        ...
-
-    def delete_objects(self, flow_id: str, keys: list[tuple[Kind, str]]) -> None | Awaitable[None]:
-        """Delete the objects ``keys`` (``(kind, content_hash)``) under ``flow_id``.
-
-        Keys that do not exist are skipped. Used by
-        :func:`~llm_gent.flow.collect_unreachable` to remove objects no
-        ref reaches; refs and the name binding are untouched.
-
-        May be declared ``async def``.
-        """
-        ...

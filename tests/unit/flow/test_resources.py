@@ -31,7 +31,7 @@ from llm_gent.flow import (
     verb,
 )
 from llm_gent.flow.state.snapshot import RESOURCES, RUN_RESOURCES
-from llm_gent.flow.stores import InMemoryCheckpointStore
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -256,7 +256,7 @@ class TestAcrossResume:
         )
 
     async def test_the_count_comes_back_after_a_halt(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         assert await self._flow(store, Counter(), asyncio.Event(), True).run(1) is HALTED
 
         fresh = Counter()
@@ -265,7 +265,7 @@ class TestAcrossResume:
         assert fresh.count == 3 + 4
 
     async def test_a_finished_run_s_count_carries_into_the_next_run(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         await self._flow(store, Counter(), asyncio.Event(), False).run(1)
         history = History(store, NAME)
         head = await history.head()
@@ -279,7 +279,7 @@ class TestAcrossResume:
 
     async def test_one_every_flow_inherits_is_kept_once_at_the_top(self) -> None:
         """A Factory.with_resource puts the same object on every flow: one position."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         halt = asyncio.Event()
 
         def build(counter: Counter, arm: bool) -> Any:
@@ -312,7 +312,7 @@ class TestAcrossResume:
         assert fresh.count == 3 + 2  # 3 restored, b again: 2
 
     async def test_items_halted_mid_way_resume_with_their_children_s_counts(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         halt = asyncio.Event()
 
         def build(root: Counter, arm: bool, before: dict[int, int]) -> Any:
@@ -361,7 +361,7 @@ class TestAcrossResume:
 
     async def test_a_saved_resource_nothing_declares_any_more_is_dropped(self) -> None:
         """The run continues; a resource under another name is not handed the old one's data."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         other = ResourceKey[Counter]("other")
 
         @verb
@@ -386,7 +386,7 @@ class TestAcrossResume:
 
 class TestRestart:
     async def test_declared_resources_come_back_and_every_step_runs(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         build = TestAcrossResume._flow
         assert await build(store, Counter(), asyncio.Event(), True).run(1) is HALTED
 
@@ -396,7 +396,7 @@ class TestRestart:
         assert fresh.count == 3 + 1 + 2 + 4  # a, b and c run again; resume would run c alone
 
     async def test_the_top_level_run_s_per_run_child_starts_fresh(self) -> None:
-        store, halt = InMemoryCheckpointStore(), asyncio.Event()
+        store, halt = memory_store(), asyncio.Event()
 
         def build(root: Counter, arm: bool, seen: list[int]) -> Any:
             @verb
@@ -492,7 +492,7 @@ class TestAcrossShortcut:
 class TestProtocol:
     async def test_a_class_with_the_methods_and_no_base_is_a_resource(self) -> None:
         """Structural: checkpointed and restored like a subclass of the protocol."""
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         key = ResourceKey[Structural]("structural")
 
         @verb

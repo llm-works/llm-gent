@@ -386,6 +386,6 @@ def ensure_schema(
 
     Consumers call this once at process start before touching any
     llm-gent persistent table (e.g. before wiring a
-    :class:`~llm_gent.flow.stores.PgCheckpointStore`).
+    :class:`~llm_gent.flow.stores.PgStore`).
     """
     return SchemaManager(lg, pg).ensure_schema(wait=wait, timeout_seconds=timeout_seconds)

@@ -22,11 +22,11 @@ import asyncio
 import copy
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, overload
 
+from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ..core.cost import CostTracker
 from ..core.traits import Registry as TraitRegistry
-from .checkpoint import CheckpointStore
 from .nodes import UNSET
 from .resource import R, ResourceKey, check_resource, resource_method
 from .role import Role
@@ -110,7 +110,7 @@ class Factory(Generic[F]):
         halt: asyncio.Event | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
-        checkpoint_store: CheckpointStore | None = None,
+        checkpoint_store: Store | None = None,
         flow_class: None = None,
     ) -> None: ...
 
@@ -125,7 +125,7 @@ class Factory(Generic[F]):
         halt: asyncio.Event | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
-        checkpoint_store: CheckpointStore | None = None,
+        checkpoint_store: Store | None = None,
         flow_class: type[F],
     ) -> None: ...
 
@@ -139,7 +139,7 @@ class Factory(Generic[F]):
         halt: asyncio.Event | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
-        checkpoint_store: CheckpointStore | None = None,
+        checkpoint_store: Store | None = None,
         flow_class: type[Any] | None = None,
     ) -> None:
         """Capture the ambient environment for subsequent :meth:`create` calls.
@@ -172,7 +172,7 @@ class Factory(Generic[F]):
                 :class:`TypeStateFactory`; implement :class:`StateFactory`
                 directly for state that binds runtime handles. ``None``
                 (default) treats the payload as a plain dict.
-            checkpoint_store: Optional :class:`CheckpointStore` captured for
+            checkpoint_store: Optional :class:`appinfra.cas.Store` captured for
                 subsequent :meth:`create` calls. Only bound to a built
                 :class:`Flow` (:meth:`Flow.with_checkpoint_store`) when
                 :meth:`create` is passed a ``client_flow_id=`` — the id
@@ -203,7 +203,7 @@ class Factory(Generic[F]):
         state: Any = UNSET,
         client_flow_id: str | None = None,
         halt: asyncio.Event | None = None,
-        checkpointer: tuple[CheckpointStore, str] | None = None,
+        checkpointer: tuple[Store, str] | None = None,
     ) -> F:
         """Return a :class:`Flow` (``flow_class``) using this factory's captured environment.
 
@@ -216,7 +216,7 @@ class Factory(Generic[F]):
                 passing ``None`` explicitly is honored as "payload is
                 ``None``"; any other value replaces the factory default.
             client_flow_id: Per-Flow history identifier for the
-                captured :class:`CheckpointStore`. Required to bind the
+                captured checkpoint store. Required to bind the
                 store — the built Flow gets
                 :meth:`Flow.with_checkpoint_store` called with
                 ``(store, client_flow_id)`` only when both this argument
@@ -260,12 +260,12 @@ class Factory(Generic[F]):
         return flow
 
     def _bind_store(
-        self, flow: F, client_flow_id: str | None, checkpointer: tuple[CheckpointStore, str] | None
+        self, flow: F, client_flow_id: str | None, checkpointer: tuple[Store, str] | None
     ) -> None:
         """Bind ``flow``'s repo per :meth:`create`'s ``client_flow_id`` / ``checkpointer``."""
         if checkpointer is not None:
-            store, flow_id = checkpointer
-            flow.with_checkpoint_store(store, flow_id)
+            store, name = checkpointer
+            flow.with_checkpoint_store(store, name)
         elif self._checkpoint_store is not None and client_flow_id is not None:
             flow.with_checkpoint_store(self._checkpoint_store, client_flow_id)
 
@@ -378,7 +378,7 @@ class Factory(Generic[F]):
         """
         return self._replace(cost_tracker=tracker)
 
-    def with_checkpoint_store(self, store: CheckpointStore) -> Factory[F]:
+    def with_checkpoint_store(self, store: Store) -> Factory[F]:
         """Return a new :class:`Factory` whose checkpoint store is swapped.
 
         Every other captured slot carries over. The store binds to each

@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, verb
-from llm_gent.flow.stores import InMemoryCheckpointStore
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -76,7 +76,7 @@ def _nested(store: Any, ran: list[str], *, crash: bool, halt: asyncio.Event | No
 
 class TestNestedCheckpointer:
     async def test_nested_save_goes_to_the_run_repo_and_resume_keeps_its_work(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         ran: list[str] = []
         with pytest.raises(Crash):
             await _nested(store, ran, crash=True).run(1)
@@ -89,7 +89,7 @@ class TestNestedCheckpointer:
         assert ran == ["a2", "b", "c"]  # a1's checkpointed work does not run again
 
     async def test_halt_inside_a_checkpointed_subtree_resumes_as_uninterrupted(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         ran: list[str] = []
         halt = asyncio.Event()
         assert await _nested(store, ran, crash=False, halt=halt).run(1) is HALTED
@@ -101,7 +101,7 @@ class TestNestedCheckpointer:
         assert ran == ["b", "c"]
 
     async def test_without_a_checkpointer_a_save_writes_nothing(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         written: list[str | None] = []
 
         @verb
@@ -116,7 +116,7 @@ class TestNestedCheckpointer:
         assert [c.meta.node_path async for c in history.commits()] == ["$end"]
 
     async def test_a_flow_run_on_its_own_uses_its_own_repo(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def a(ctx: Context[Any], x: int) -> int:
@@ -145,7 +145,7 @@ class TestOneRepoRules:
         assert ran == []
 
     async def test_store_on_a_nested_flow_raises_at_run_start(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def a(ctx: Context[Any], x: int) -> int:
@@ -155,7 +155,7 @@ class TestOneRepoRules:
         flow = _ff().create(state={}).with_checkpoint_store(store, NAME).call(sub)
         with pytest.raises(RuntimeError, match="a run has one repo"):
             await flow.run(1)
-        assert await History(store, NAME).flow_id() is None  # nothing was written
+        assert NAME not in store.list_repos()  # nothing was written
 
     @pytest.mark.parametrize("bad", ["latest", "complete", "a" * 64, ""])
     async def test_checkpointer_name_follows_checkpoint_name_rules(self, bad: str) -> None:
@@ -165,7 +165,7 @@ class TestOneRepoRules:
 
 class TestNamedCheckpointer:
     async def test_named_map_body_resumes_at_its_latest_item_checkpoint(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
         ran: list[int] = []
 
         def flow() -> Any:
@@ -199,7 +199,7 @@ class TestNamedCheckpointer:
         assert ran == [3]
 
     async def test_a_save_moves_only_its_innermost_checkpointer_tag(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def inner_step(ctx: Context[Any], x: int) -> int:
@@ -216,7 +216,7 @@ class TestNamedCheckpointer:
         assert await History(store, NAME).checkpoint_names() == ["inner"]
 
     async def test_one_name_on_two_flows_is_one_tag(self) -> None:
-        store = InMemoryCheckpointStore()
+        store = memory_store()
 
         @verb
         async def save(ctx: Context[Any], x: int) -> int:
@@ -230,6 +230,6 @@ class TestNamedCheckpointer:
         history = History(store, NAME)
         assert await history.checkpoint_names() == ["phase"]
         tagged = await history.checkpoint("phase")
-        line = [c.content_hash async for c in history.commits()]
+        line = [c.id async for c in history.commits()]
         # The tag is on the later save (second's): the newest "ok" commit on the line.
-        assert tagged is not None and tagged.content_hash == line[1]
+        assert tagged is not None and tagged.id == line[1]
