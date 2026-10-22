@@ -111,10 +111,13 @@ class CheckpointContext:
         Raises:
             appinfra.cas.InvalidNameError: ``client_flow_id`` cannot name a
                 repository (empty, ``.``/``..``, NUL, over 255 UTF-8 bytes).
+            ValueError: ``retention`` is not ``"retain"`` or ``"gc_on_success"``.
         """
         self.store = store
         self.client_flow_id = client_flow_id
         self.repo: Repo = store.repo(client_flow_id)
+        if retention not in ("retain", "gc_on_success"):
+            raise ValueError(f"retention must be 'retain' or 'gc_on_success'; got {retention!r}")
         self.retention = retention
         self._structure = structure
         self._run_structure: Blob | None = None
