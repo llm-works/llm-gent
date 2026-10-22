@@ -43,7 +43,7 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from appinfra.log import Logger
+from appinfra.log import Logger, LoggerFactory
 from sqlalchemy import text
 from sqlalchemy.orm import DeclarativeBase
 
@@ -321,6 +321,8 @@ class SchemaManager:
         """Run alembic ``upgrade head`` against the bound engine."""
         self._lg.info("upgrading llm-gent schema to head")
         config = self._get_alembic_config()
+        # env.py logs here instead of creating a root logger this process may already hold.
+        config.attributes["lg"] = LoggerFactory.derive(self._lg, "migration")
         command.upgrade(config, "head")
         self._lg.info("llm-gent schema upgrade complete")
 

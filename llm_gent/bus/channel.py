@@ -14,10 +14,11 @@ Two transports:
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 import zmq
-from appinfra.service import ChannelClosedError, ChannelTimeoutError
+from appinfra.service import ChannelClosedError, ChannelFullError, ChannelTimeoutError
 
 from .protocol import Envelope
 
@@ -52,8 +53,12 @@ class ZMQRouterTransport:
         self._inbound_event = threading.Event()
         self._lock = threading.Lock()
 
-    def send(self, message: Any) -> None:
-        """Send message to the agent via ROUTER socket."""
+    def send(self, message: Any, timeout: float | None = None) -> None:
+        """Send message to the agent via ROUTER socket.
+
+        ROUTER drops a message at its high-water mark instead of blocking, so
+        the send never waits and ``timeout`` has nothing to bound.
+        """
         if self._closed:
             raise ChannelClosedError("transport is closed")
         envelope = message.to_envelope() if hasattr(message, "to_envelope") else message
@@ -131,8 +136,13 @@ class ZMQDealerTransport:
         self._inbound_event = threading.Event()
         self._lock = threading.Lock()
 
-    def send(self, message: Any) -> None:
-        """Send message to coordinator via DEALER socket."""
+    def send(self, message: Any, timeout: float | None = None) -> None:
+        """Send message to coordinator via DEALER socket.
+
+        DEALER blocks once its high-water mark is reached. ``None`` waits for
+        room; otherwise a full socket raises ``ChannelFullError`` after
+        ``timeout`` seconds.
+        """
         if self._closed:
             raise ChannelClosedError("transport is closed")
         envelope = message.to_envelope() if hasattr(message, "to_envelope") else message
@@ -148,7 +158,25 @@ class ZMQDealerTransport:
                 data = env.to_bytes()
             else:
                 raise TypeError(f"cannot send {type(envelope)}")
-        self._dealer.send_multipart([b"", data])
+        if timeout is None:
+            self._dealer.send_multipart([b"", data])
+        else:
+            self._send_within([b"", data], timeout)
+
+    def _send_within(self, frames: list[bytes], timeout: float) -> None:
+        """Send without blocking; on a full socket wait ``timeout`` once, then give up.
+
+        Sleeps rather than polling for POLLOUT: the agent's poll thread already
+        polls this socket.
+        """
+        for attempt in range(2):
+            try:
+                self._dealer.send_multipart(frames, flags=zmq.NOBLOCK)
+                return
+            except zmq.Again:
+                if attempt == 0 and timeout > 0:
+                    time.sleep(timeout)
+        raise ChannelFullError(f"dealer socket full for {timeout}s")
 
     def recv(self, timeout: float | None = None) -> Any:
         """Receive next message from coordinator."""

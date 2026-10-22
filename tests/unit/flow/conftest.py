@@ -8,18 +8,12 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from appinfra.log import Logger, quick_console_logger
-
 from llm_gent.flow import Factory, Role, SAIAFactory
+from tests.helpers import make_test_logger
 
 
 ROLE_A = Role(name="a", backend="openai", model="gpt-4o-mini")
 ROLE_B = Role(name="b", backend="anthropic", model="claude-3-5")
-
-
-def make_test_logger() -> Logger:
-    """Return a logger for tests (suppressed output)."""
-    return quick_console_logger("test", config={"level": "error"})
 
 
 def flow_id_for(store: Any, client_flow_id: str) -> str:

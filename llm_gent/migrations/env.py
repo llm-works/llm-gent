@@ -6,10 +6,12 @@
 Two entry points:
 
 1. Called by :class:`llm_gent.schema.SchemaManager` (normal app usage):
-   the URL and version-table location are pre-set on the alembic config.
+   the URL and version-table location are pre-set on the alembic config,
+   and the logger arrives in ``config.attributes["lg"]``.
 2. Called by the alembic CLI (dev/tooling): loads the URL from the
    config file named in ``LLM_GENT_CONFIG`` (default ``etc/pg.yaml``),
-   picking up ``dbs.<LLM_GENT_DB_KEY>.url`` (default key ``main``).
+   picking up ``dbs.<LLM_GENT_DB_KEY>.url`` (default key ``main``), and
+   creates its own root logger.
 
 Every module that registers a model on :class:`llm_gent.schema.Base` is
 imported here so ``target_metadata`` sees the full table set at
@@ -33,7 +35,7 @@ _import_all_models()
 
 config = context.config
 
-_lg = LoggerFactory.create_root(LogConfig.from_params(level="info"))
+_lg = config.attributes.get("lg") or LoggerFactory.create_root(LogConfig.from_params(level="info"))
 
 
 def _get_database_url() -> str:

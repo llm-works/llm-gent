@@ -3,7 +3,19 @@
 
 """Shared test utilities."""
 
+import functools
 from unittest.mock import MagicMock
+
+from appinfra.log import Logger, quick_console_logger
+
+
+@functools.cache
+def make_test_logger() -> Logger:
+    """Return the process-wide test logger (suppressed output).
+
+    appinfra lets a process create a logger name once, so every test shares one instance.
+    """
+    return quick_console_logger("test", config={"level": "error"})
 
 
 def create_mock_trait(trait_class, **mock_attrs):
