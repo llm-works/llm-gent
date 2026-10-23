@@ -16,6 +16,8 @@ def make_test_logger() -> Logger:
     """Return the process-wide test logger (suppressed output).
 
     appinfra lets a process create a logger name once, so every test shares one instance.
+    The session fixture ``test_logger`` creates it before the first test: appinfra's
+    per-test cleanup destroys loggers a test creates, and keeps those that existed before.
     """
     return quick_console_logger("test", config={"level": "error"})
 

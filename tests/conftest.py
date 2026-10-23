@@ -3,7 +3,7 @@
 
 """Pytest configuration for llm-gent tests.
 
-Two responsibilities live here:
+Three responsibilities live here:
 
 1. **Plugin registration** — enables :mod:`appinfra.testing` (markers,
    expected-skip machinery) and :mod:`appinfra.db.pg.testing` (schema-
@@ -15,6 +15,7 @@ Two responsibilities live here:
    clean when an upstream step (coverage threshold, unrelated failure)
    dumps the log tail — no wall of ``SKIPPED [pg-unavailable]`` lines.
    Mirrors the pattern llm-kelt runs.
+3. **Shared test logger** — creates it once, before any test runs.
 """
 
 from __future__ import annotations
@@ -27,6 +28,9 @@ from urllib.parse import urlparse
 
 import pytest
 from appinfra.config import Config
+from appinfra.log import Logger
+
+from tests.helpers import make_test_logger
 
 
 pytest_plugins = ["appinfra.testing", "appinfra.db.pg.testing"]
@@ -141,6 +145,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             f"deselected {len(dropped)} PG-dependent tests",
             file=sys.stderr,
         )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def test_logger() -> Logger:
+    """Create the shared test logger before any test, so per-test logger cleanup keeps it."""
+    return make_test_logger()
 
 
 @pytest.fixture(scope="session")
