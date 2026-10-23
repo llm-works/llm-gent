@@ -40,7 +40,7 @@ jobs:
           python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ".[dev,http]"
 
       - name: Check formatting
         run: python -m ruff format --check .
@@ -49,7 +49,7 @@ jobs:
         run: python -m ruff check .
 
       - name: Type check
-        run: python -m mypy llm_gent/ --ignore-missing-imports
+        run: python -m mypy llm_gent/
 
       - name: Check SPDX headers
         run: appinfra cq spdx
