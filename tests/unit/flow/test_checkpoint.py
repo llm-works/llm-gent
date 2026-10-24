@@ -662,7 +662,8 @@ class TestPausedTurnInSnapshot:
         turns = {p: c["turn"] for p, c in snapshot.cursors.items() if "turn" in c}
         [(path, turn)] = turns.items()
         assert path.endswith("/t/0")
-        assert turn == {"task": "t", "conversation": conv.to_dict()}
+        nothing_used = {"iterations": 0, "total_tokens": 0}
+        assert turn == {"task": "t", "conversation": conv.to_dict(), "used": nothing_used}
 
     async def test_turn_paused_before_the_run_halt_is_not_saved(self, store: FileStore) -> None:
         """Loop A pauses with the run's halt unset: its step completed, its turn is dropped.
@@ -1035,8 +1036,10 @@ class TestPausedTurnInSnapshot:
         assert task == "saved-task-string"
         assert isinstance(conversation, _Conv)
         assert conversation.messages == ["mid-turn"]
-        # The resuming turn stays in the run's snapshots until SAIA finishes it.
-        assert scopes.capture()[("n", node_id, "t", "0", TURN)] == saved
+        # The resuming turn stays in the run's snapshots until SAIA finishes it;
+        # a saved turn without "used" counts as nothing used.
+        nothing_used = {"iterations": 0, "total_tokens": 0}
+        assert scopes.capture()[("n", node_id, "t", "0", TURN)] == {**saved, "used": nothing_used}
 
 
 class TestSaveOnHaltChain:

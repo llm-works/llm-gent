@@ -210,7 +210,10 @@ interrupted**:
 - A step that stops before finishing its work raises
   `llm_gent.flow.Interrupted` (a `BaseException`, so rescue policies and
   non-strict maps don't treat it as a failure). A Loop call that leaves
-  a paused SAIA turn makes its step interrupted without raising.
+  a paused SAIA turn makes its step interrupted without raising. The
+  turn continues on resume within what is left of its SAIA caps
+  (`max_iterations`, `max_total_tokens`), counted over every call that
+  ran it; `timeout_secs` applies per call.
   `Interrupted` raised while no halt is set is a `RuntimeError`.
 
 When the halt is set, every part of the run stops at the next place the

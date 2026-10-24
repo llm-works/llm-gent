@@ -43,6 +43,7 @@ from typing import Any
 
 from appinfra.log import Logger
 from llm_saia import SAIA
+from llm_saia.core.config import DEFAULT_CALL
 from llm_saia.core.conversation import ConversationFactory
 
 from ._halt_observer import is_run_halted
@@ -51,7 +52,7 @@ from .checkpoint import maybe_await
 from .context import Context
 from .factory import SAIAFactory
 from .role import Role
-from .state.paused_turn import PausedTurn, PausedTurnEnvelope
+from .state.paused_turn import PausedTurn, PausedTurnEnvelope, TurnUsage
 from .state.snapshot import TURN, ScopePath, ScopeRegistry
 
 
@@ -431,7 +432,8 @@ class Loop:
             if _cut_short(ctx):
                 turn.release()
             else:
-                turn.hold(self._capture_paused(task, conversation, result))
+                used = turn.used.plus(result)
+                turn.hold(self._capture_paused(task, conversation, result, used))
             if self._on_paused is not None:
                 return await maybe_await(self._on_paused(result, ctx))
             return None
@@ -448,7 +450,8 @@ class Loop:
         When the checked-out snapshot holds a paused turn at this call's
         path, its saved task AND reconstructed :class:`Conversation`
         replace the caller's AND ``resume=True`` is added to the
-        ``saia.complete`` kwargs. Otherwise, when the caller passed no
+        ``saia.complete`` kwargs, and saia's caps are lowered by what the
+        turn used before (:func:`_within_caps`). Otherwise, when the caller passed no
         conversation and a :class:`ConversationFactory` is wired, a
         fresh :meth:`ConversationFactory.create` conversation is handed
         to SAIA so a pause has turn history to capture.
@@ -463,6 +466,7 @@ class Loop:
         if is_resume:
             task = resumed_task
             conversation = resumed_conversation
+            saia = _within_caps(saia, turn.used)
         elif conversation is None and self._conversation_factory is not None:
             # SAIA appends the turn to the conversation it is handed; without one
             # it keeps history internally and a pause leaves nothing to capture.
@@ -508,12 +512,13 @@ class Loop:
         return envelope.task, conversation, True
 
     def _capture_paused(
-        self, task: str, conversation: Any, result: Any
+        self, task: str, conversation: Any, result: Any, used: TurnUsage
     ) -> PausedTurnEnvelope | None:
         """The paused turn as an envelope; ``None`` when it cannot be captured.
 
         The envelope is ``{"task": <str>, "conversation": <to_dict()>}``
-        plus the ``result`` SAIA paused the turn with; the canonical bytes
+        plus the ``result`` SAIA paused the turn with and what the turn
+        ``used`` of its caps over every call that ran it; the canonical bytes
         of task and conversation also land on :attr:`_paused_bytes`, an
         introspection surface for callers holding this Loop.
 
@@ -528,7 +533,7 @@ class Loop:
         to_dict = getattr(conversation, "to_dict", None)
         if to_dict is None:
             return None
-        envelope = PausedTurnEnvelope(task=task, conversation=to_dict(), result=result)
+        envelope = PausedTurnEnvelope(task=task, conversation=to_dict(), result=result, used=used)
         self._paused_bytes = envelope.to_bytes()
         return envelope
 
@@ -547,6 +552,8 @@ class _LoopTurn:
         self._runner = PausedTurn(None)
         self._scopes: ScopeRegistry | None = None
         self._path: ScopePath = ()
+        self.used = TurnUsage()
+        """What the turn used of its caps before this call: the saved turn's, once taken."""
         if env is not None and node_id is not None:
             self._scopes = env.scopes
             self._path = env.scopes.next_turn(env.owner_path(node_id))
@@ -559,6 +566,7 @@ class _LoopTurn:
         if not found or raw is None:
             return None
         envelope = PausedTurnEnvelope.from_dict(raw)
+        self.used = envelope.used
         self.hold(envelope)
         return envelope
 
@@ -585,6 +593,26 @@ class _LoopTurn:
         if not found:
             return False, None
         return True, None if raw is None else PausedTurnEnvelope.from_dict(raw).result
+
+
+def _within_caps(saia: Any, used: TurnUsage) -> Any:
+    """``saia`` with its iteration and token caps lowered by what a paused turn ``used``.
+
+    SAIA counts a resumed call from zero, so without this a turn paused
+    ``k`` times could use ``k + 1`` times each cap. A cap of 0 is unlimited
+    and stays so; a lowered cap stays at least 1, which 0 would turn into
+    unlimited, so a turn that used its whole budget gets one more
+    iteration or LLM call. ``timeout_secs`` stays a cap per call: a paused
+    result records no elapsed time.
+    """
+    if used == TurnUsage():
+        return saia
+    caps = saia.call_options or DEFAULT_CALL
+    if caps.max_iterations > 0:
+        saia = saia.with_max_iterations(max(caps.max_iterations - used.iterations, 1))
+    if caps.max_total_tokens > 0:
+        saia = saia.with_max_tokens(max(caps.max_total_tokens - used.total_tokens, 1))
+    return saia
 
 
 def _fast_forward(ctx: Context[Any]) -> bool:

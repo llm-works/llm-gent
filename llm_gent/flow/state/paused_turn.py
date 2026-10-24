@@ -27,6 +27,26 @@ from .snapshot import TURN
 
 
 @dataclass(frozen=True)
+class TurnUsage:
+    """What a paused turn used of its SAIA caps, over every call that ran it so far.
+
+    SAIA counts a call's iterations and tokens from zero, a resumed one
+    too; the turn's usage is the sum over its calls.
+    """
+
+    iterations: int = 0
+    total_tokens: int = 0
+
+    def plus(self, result: Any) -> TurnUsage:
+        """This usage plus what ``result`` (SAIA's ``TaskResult``) reports for its call."""
+        score = getattr(result, "score", None)
+        return TurnUsage(
+            self.iterations + getattr(result, "iterations", 0),
+            self.total_tokens + (score.total_tokens if score is not None else 0),
+        )
+
+
+@dataclass(frozen=True)
 class PausedTurnEnvelope:
     """Canonical ``{"task", "conversation"}`` envelope for a paused SAIA turn.
 
@@ -36,16 +56,20 @@ class PausedTurnEnvelope:
     ``result`` is what ``saia.complete`` returned when it paused the turn:
     a call that finishes the turn without continuing it (a shortcut)
     returns it. It is stored when :mod:`.codec` can store it (SAIA's
-    ``TaskResult`` can), else left out (``None``).
+    ``TaskResult`` can), else left out (``None``). ``used`` is what the
+    turn used of its caps up to this pause; the call that resumes it gets
+    what is left.
     """
 
     task: str
     conversation: dict[str, Any]
     result: Any = None
+    used: TurnUsage = TurnUsage()
 
     def to_dict(self) -> dict[str, Any]:
         """The envelope as a JSON-compatible dict; ``result`` encoded, when it can be."""
-        data = {"task": self.task, "conversation": self.conversation}
+        used = {"iterations": self.used.iterations, "total_tokens": self.used.total_tokens}
+        data = {"task": self.task, "conversation": self.conversation, "used": used}
         if self.result is not None:
             with contextlib.suppress(TypeError):
                 data["result"] = codec.encode(self.result, "paused turn result")
@@ -53,10 +77,14 @@ class PausedTurnEnvelope:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PausedTurnEnvelope:
-        """Inverse of :meth:`to_dict`; raises on missing keys."""
+        """Inverse of :meth:`to_dict`; raises on a missing task or conversation.
+
+        No ``used`` counts as nothing used.
+        """
         raw = data.get("result")
         result = None if raw is None else codec.decode(raw, "paused turn result")
-        return cls(task=data["task"], conversation=data["conversation"], result=result)
+        used = TurnUsage(**data.get("used", {}))
+        return cls(task=data["task"], conversation=data["conversation"], result=result, used=used)
 
     def to_bytes(self) -> bytes:
         """Canonical JSON bytes of the task and conversation."""
