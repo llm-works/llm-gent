@@ -242,7 +242,10 @@ restored `Failure` carries a `RestoredError` with the original
 exception's type name and message (an exception is not storable). A
 `strict=True` failure raises out of the run, so its item runs again from
 the last save. Items and their results must be plain JSON, pydantic
-models, or objects with `to_dict()` and a classmethod `from_dict()`.
+models, or objects with `to_dict()` and a classmethod `from_dict()`. The
+map's result list, `Failure` and `Skipped` included, is stored the same way
+wherever it goes next — a step's input, an iterate's carried value — and
+a `Failure` there too comes back with a `RestoredError`.
 
 A map's `max_concurrency` can be computed when the map starts:
 `(items, ctx) -> int` with the resolved items, e.g. from the budget left
