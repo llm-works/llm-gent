@@ -203,6 +203,11 @@ class Failure:
     Exposes the raised exception and the input item that produced it so
     downstream aggregators can partition successes from failures without
     losing either.
+
+    A checkpoint stores it wherever the map's result goes — a step's input,
+    an iterate's carried value — as the exception's type name and message
+    with the item (:meth:`to_dict`); it comes back with a
+    :class:`RestoredError`.
     """
 
     exception: BaseException
@@ -214,6 +219,18 @@ class Failure:
 
     item: Any
     """The input item whose subflow run failed."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """The exception's type name and message, and the item."""
+        exc = self.exception
+        if isinstance(exc, RestoredError):
+            return {"type": exc.type_name, "message": exc.message, "item": self.item}
+        return {"type": type(exc).__name__, "message": str(exc), "item": self.item}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Failure:
+        """The failure :meth:`to_dict` stored, its exception a :class:`RestoredError`."""
+        return cls(RestoredError(data["type"], data["message"]), data["item"])
 
 
 class RestoredError(Exception):
@@ -239,10 +256,20 @@ class Skipped:
     Occupies the same positional slot in :meth:`Flow.map`'s result list
     that a successful or failed item would, so aggregators can partition
     ``list[R | Failure | Skipped]`` by isinstance without losing position.
+    A checkpoint stores it with its item wherever the map's result goes.
     """
 
     item: Any
     """The input item that was gated out before the map body ran."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """The item."""
+        return {"item": self.item}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Skipped:
+        """The skip :meth:`to_dict` stored."""
+        return cls(data["item"])
 
 
 class Interrupted(BaseException):  # noqa: N818 — a signal, like asyncio.CancelledError

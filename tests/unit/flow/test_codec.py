@@ -20,7 +20,16 @@ from llm_saia.core.trace import GuardOutcome, LLMCall, Step, ToolOutcome, VerbTr
 from llm_saia.core.types import LoopScore, TaskResult
 from pydantic import BaseModel
 
-from llm_gent.flow import HALTED, Context, Factory, Interrupted, verb
+from llm_gent.flow import (
+    HALTED,
+    Context,
+    Factory,
+    Failure,
+    Interrupted,
+    RestoredError,
+    Skipped,
+    verb,
+)
 from llm_gent.flow.state import StateDataclass
 from llm_gent.flow.state.codec import decode, encode
 from tests.helpers import memory_store
@@ -162,6 +171,20 @@ class TestRoundTrip:
         back = _round_trip(result)
         assert type(back) is TaskResult and back == result
 
+    def test_map_sentinels_keep_their_type_and_item(self) -> None:
+        """A failure's exception comes back a RestoredError with the original type and message."""
+        stored = [Skipped(Point(1, 2)), Failure(ValueError("no"), Point(3, 4))]
+        skipped, failure = _round_trip(stored)
+        assert skipped == Skipped(Point(1, 2))
+        assert type(failure) is Failure and failure.item == Point(3, 4)
+        exc = failure.exception
+        assert isinstance(exc, RestoredError)
+        assert (exc.type_name, exc.message) == ("ValueError", "no")
+
+    def test_a_restored_failure_is_stored_again_unchanged(self) -> None:
+        failure = Failure(RestoredError("ValueError", "no"), "x")
+        assert _round_trip(failure).to_dict() == failure.to_dict()
+
 
 class TestRejected:
     @pytest.mark.parametrize(
@@ -237,3 +260,54 @@ class TestInAFlow:
         result = await build(asyncio.Event(), False, seen).run(start, resume="latest")
         assert seen[0] == Pairs(pairs=[("n0", "a")], fixed=("x",))
         assert result == Pairs(pairs=[("n0", "a"), ("n1", "a"), ("n2", "a")], fixed=("x",))
+
+    async def test_a_map_result_holding_sentinels_is_stored_and_comes_back(self) -> None:
+        """A map's result with a Skipped and a Failure, as an iterate's carry and a step's input.
+
+        The ``on_iterate`` commit stores the first pass's result as the
+        carry; the halt in the second pass's ``keep`` stores its input;
+        resume hands ``keep`` the restored result.
+        """
+        store = memory_store()
+
+        def build(halt: asyncio.Event, arm: bool, seen: list[Any]) -> Any:
+            @verb
+            async def work(ctx: Context[Any], item: str) -> str:
+                if item == "boom":
+                    raise ValueError("no luck")
+                return item
+
+            @verb
+            async def keep(ctx: Context[Any], results: list[Any]) -> list[Any]:
+                if arm and len(seen) == 1:
+                    halt.set()
+                    raise Interrupted()
+                seen.append(results)
+                return results
+
+            ff = Factory(make_test_logger())
+            batch = (
+                ff.create()
+                .map(lambda b: b.call(work), items=lambda *_: ["a", "skip", "boom"], strict=False)
+                .guard(lambda item, _ctx: item != "skip")
+            )
+            return (
+                ff.create(state={})
+                .with_checkpoint_store(store, "sentinels")
+                .with_checkpointer()
+                .with_checkpoint_policy(on_iterate=True)
+                .with_halt(halt)
+                .iterate(lambda b: b.call(batch).then(keep), max_iters=2)
+            )
+
+        assert await build(asyncio.Event(), True, []).run() is HALTED
+
+        seen: list[Any] = []
+        result = await build(asyncio.Event(), False, seen).run(resume="latest")
+        assert seen == [result]
+        item, skipped, failure = result
+        assert item == "a" and skipped == Skipped("skip")
+        assert type(failure) is Failure and failure.item == "boom"
+        exc = failure.exception
+        assert isinstance(exc, RestoredError)
+        assert (exc.type_name, exc.message) == ("ValueError", "no luck")

@@ -1163,6 +1163,61 @@ class TestDrain:
         assert await flow.run() == [0]
         assert ran == ["first"]
 
+    async def test_a_pass_resumed_while_draining_carries_its_skipped_items(self) -> None:
+        """Cut and halt in item ``a``: resume finishes ``a``, ``b`` is Skipped, and the pass ends.
+
+        The pass's result, ``b``'s Skipped included, is the iterate's carry,
+        which the ``on_iterate`` commit stores.
+        """
+        store = memory_store()
+
+        def build(cut: asyncio.Event, halt: asyncio.Event, arm: bool, ran: list[str]) -> Any:
+            @verb
+            async def first(ctx: Context[Any], item: str) -> str:
+                ran.append(f"first:{item}")
+                if arm and item == "a":
+                    cut.set()
+                    halt.set()
+                return item
+
+            @verb
+            async def second(ctx: Context[Any], item: str) -> str:
+                ran.append(f"second:{item}")
+                return item
+
+            batch = (
+                _ff()
+                .create()
+                .map(
+                    lambda b: b.call(first).then(second),
+                    items=lambda *_: ["a", "b"],
+                    max_concurrency=1,
+                )
+            )
+            region = (
+                _ff()
+                .create()
+                .with_shortcut("cut", drain=True)
+                .iterate(lambda b: b.call(batch).then(_echo), max_iters=3)
+            )
+            return (
+                _top(cut)
+                .with_halt(halt)
+                .with_checkpoint_store(store, "drain-pass")
+                .with_checkpointer()
+                .with_checkpoint_policy(on_iterate=True, on_map_item=True)
+                .call(region)
+            )
+
+        ran: list[str] = []
+        assert await build(asyncio.Event(), asyncio.Event(), True, ran).run() is HALTED
+        assert ran == ["first:a"]
+
+        ran.clear()
+        result = await build(asyncio.Event(), asyncio.Event(), False, ran).run(resume="latest")
+        assert result == ["a", Skipped("b")]
+        assert ran == ["second:a"]
+
     async def test_drain_takes_a_bool(self) -> None:
         with pytest.raises(TypeError, match="drain"):
             _ff().create().with_shortcut("cut", drain="yes")  # type: ignore[arg-type]

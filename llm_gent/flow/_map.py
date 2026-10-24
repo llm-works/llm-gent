@@ -273,7 +273,8 @@ class MapItemRunner:
     Terminal states:
 
     - :class:`Skipped` — the guard predicate returned falsy; recorded as
-      done in the map's cursor, so a resumed map does not ask again.
+      done in the map's cursor, so a resumed map does not ask again. An
+      item the guard admitted is not asked again either.
     - :class:`Failure` — the body (or projection / guard) raised;
       non-strict returns the sentinel and records it as done (a resumed
       map does not run the item again), strict re-raises after firing
@@ -370,8 +371,14 @@ class MapItemRunner:
             self.env.scopes.close(self.path)
 
     async def _run_item(self) -> Any:
-        """Project the item's scope, then guard, body and merge per the map's contract."""
+        """Project the item's scope, then guard, body and merge per the map's contract.
+
+        An item a checkout saved as running (its positions are saved) is
+        not asked the guard again: the guard admitted it before the
+        checkpoint, and it continues where it was.
+        """
         item_ctx = self._ctx(self.env.state)
+        guard = None if self.env.scopes.has_saved_under(self.path) else self.mp.guard
         try:
             child_state = await _enter_scope(
                 self.env, self.path, self.mp.state_fn, self.mp.state_factory
@@ -379,9 +386,7 @@ class MapItemRunner:
             if self.mp.state_fn is not None:
                 self.env.scopes.open(self.path, child_state)
             item_ctx = self._ctx(child_state)
-            if self.mp.guard is not None and not await _run_guard(
-                self.mp.guard, self.item, item_ctx
-            ):
+            if guard is not None and not await _run_guard(guard, self.item, item_ctx):
                 skipped = Skipped(item=self.item)
                 await self._fire_on_item_complete(skipped, item_ctx)
                 return skipped

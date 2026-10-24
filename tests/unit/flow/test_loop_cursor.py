@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from llm_saia.core.config import CallOptions
+from llm_saia.core.types import LoopScore, TaskResult
 
 from llm_gent.flow import Context, Factory, History, Loop, Role, verb
 from tests.helpers import file_store
@@ -213,3 +215,96 @@ class TestTurnPausedAgain:
 
         assert saias[2].calls[0] == ("a", ["turn-of-a", "more-of-a"], True)
         assert await History(store, "two-calls").is_complete()
+
+
+class _CappedSAIA:
+    """Records the caps each call runs under; pauses having used ``used``, or completes.
+
+    ``with_max_iterations`` / ``with_max_tokens`` return a copy with that
+    cap, sharing the record, as SAIA's do.
+    """
+
+    def __init__(
+        self,
+        halt: asyncio.Event,
+        used: tuple[int, int] | None,
+        caps: CallOptions,
+        seen: list[tuple[int, int]] | None = None,
+    ) -> None:
+        self.role = ROLE
+        self.call_options = caps
+        self._halt = halt
+        self._used = used
+        self.seen: list[tuple[int, int]] = [] if seen is None else seen
+
+    def with_max_iterations(self, n: int) -> _CappedSAIA:
+        caps = CallOptions(max_iterations=n, max_total_tokens=self.call_options.max_total_tokens)
+        return _CappedSAIA(self._halt, self._used, caps, self.seen)
+
+    def with_max_tokens(self, n: int) -> _CappedSAIA:
+        caps = CallOptions(max_iterations=self.call_options.max_iterations, max_total_tokens=n)
+        return _CappedSAIA(self._halt, self._used, caps, self.seen)
+
+    async def complete(self, task: str, **kwargs: Any) -> TaskResult:
+        self.seen.append((self.call_options.max_iterations, self.call_options.max_total_tokens))
+        kwargs["conversation"].messages.append("turn")
+        if self._used is None:
+            return TaskResult(completed=True, output="done", iterations=1, history=[])
+        self._halt.set()
+        iterations, tokens = self._used
+        score = LoopScore(
+            iterations=iterations,
+            productive=iterations,
+            nudges=0,
+            skips=0,
+            total_tokens=tokens,
+            wasted_tokens=0,
+        )
+        return TaskResult(
+            completed=False, output="", iterations=iterations, history=[], paused=True, score=score
+        )
+
+
+def _capped_flow(store: Any, halt: asyncio.Event, saia: _CappedSAIA) -> Any:
+    loop = Loop(ROLE, saia=saia, conversation_factory=_ConvFactory())
+
+    @verb(role=ROLE)
+    async def turn(ctx: Context[Any], _p: Any = None) -> Any:
+        return await loop(ctx, "t")
+
+    return (
+        Factory(make_test_logger())
+        .create(state={})
+        .with_checkpoint_store(store, "caps")
+        .with_checkpointer()
+        .with_halt(halt)
+        .call(turn)
+    )
+
+
+async def _run_sessions(
+    store: Any, caps: CallOptions, used: list[tuple[int, int] | None]
+) -> list[tuple[int, int]]:
+    """One run per entry of ``used`` (the first fresh, the rest resumed); the caps each ran under."""
+    seen: list[tuple[int, int]] = []
+    for i, session_used in enumerate(used):
+        halt = asyncio.Event()
+        flow = _capped_flow(store, halt, _CappedSAIA(halt, session_used, caps, seen))
+        await (flow.run() if i == 0 else flow.run(resume="latest"))
+    return seen
+
+
+class TestResumedTurnCaps:
+    """A resumed turn runs under what is left of its caps, over every call that ran it."""
+
+    async def test_each_resume_gets_what_is_left(self, tmp_path: Path) -> None:
+        caps = CallOptions(max_iterations=16, max_total_tokens=1000)
+        seen = await _run_sessions(file_store(tmp_path / "cp"), caps, [(12, 600), (3, 300), None])
+        assert seen == [(16, 1000), (4, 400), (1, 100)]
+
+    async def test_unlimited_stays_unlimited_and_a_spent_cap_leaves_one(
+        self, tmp_path: Path
+    ) -> None:
+        caps = CallOptions(max_iterations=0, max_total_tokens=500)
+        seen = await _run_sessions(file_store(tmp_path / "cp"), caps, [(5, 700), None])
+        assert seen == [(0, 500), (0, 1)]

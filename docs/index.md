@@ -210,7 +210,10 @@ interrupted**:
 - A step that stops before finishing its work raises
   `llm_gent.flow.Interrupted` (a `BaseException`, so rescue policies and
   non-strict maps don't treat it as a failure). A Loop call that leaves
-  a paused SAIA turn makes its step interrupted without raising.
+  a paused SAIA turn makes its step interrupted without raising. The
+  turn continues on resume within what is left of its SAIA caps
+  (`max_iterations`, `max_total_tokens`), counted over every call that
+  ran it; `timeout_secs` applies per call.
   `Interrupted` raised while no halt is set is a `RuntimeError`.
 
 When the halt is set, every part of the run stops at the next place the
@@ -234,15 +237,19 @@ different event.
 A map's cursor is its item list — resolved once, never evaluated again
 on resume — and its done items with their results. On resume a
 completed item does not run again and its merge is not applied again, a
-running item continues where it was, and items that had not started
-run. A failed item of a `strict=False` map and an item the guard skipped
-are done too: they do not run again, the guard is not asked again, and
+running item continues where it was (the guard, which admitted it, is
+not asked again), and items that had not started run. A failed item of
+a `strict=False` map and an item the guard skipped are done too: they
+do not run again, the guard is not asked again, and
 the map's result holds their `Failure` / `Skipped` as before — a
 restored `Failure` carries a `RestoredError` with the original
 exception's type name and message (an exception is not storable). A
 `strict=True` failure raises out of the run, so its item runs again from
 the last save. Items and their results must be plain JSON, pydantic
-models, or objects with `to_dict()` and a classmethod `from_dict()`.
+models, or objects with `to_dict()` and a classmethod `from_dict()`. The
+map's result list, `Failure` and `Skipped` included, is stored the same way
+wherever it goes next — a step's input, an iterate's carried value — and
+a `Failure` there too comes back with a `RestoredError`.
 
 A map's `max_concurrency` can be computed when the map starts:
 `(items, ctx) -> int` with the resolved items, e.g. from the budget left
