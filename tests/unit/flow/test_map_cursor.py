@@ -389,7 +389,9 @@ class TestFailedAndSkippedItemsStayDone:
         with pytest.raises(ValueError, match="bad item 1"):
             await flow.with_checkpoint_policy(on_map_item=True).run(resume="latest")
         assert resumed.bodies == [1]
-        assert resumed.guards == [1]  # the skip of item 2 is recorded in strict maps too
+        # Item 1 continues from its saved positions, admitted already; the skip
+        # of item 2 is recorded in strict maps too.
+        assert resumed.guards == []
 
     async def test_a_failed_merge_is_recorded(self, store: FileStore) -> None:
         """A merge that raises in a ``strict=False`` map: the item failed, and stays failed."""
@@ -433,6 +435,55 @@ class TestFailedAndSkippedItemsStayDone:
         assert isinstance(failure.exception, RestoredError)
         assert failure.exception.type_name == "KeyError"
         assert rest == [2, 3]
+
+
+def _guarded_flow(store: Any, halt: asyncio.Event, admit: bool, seen: _Seen) -> Any:
+    """Items 1-2, one at a time, each ``first`` then ``second``; item 2's ``first`` sets the halt.
+
+    The guard admits an item while ``admit`` holds; item 2's ``first``
+    turns it off, as a budget running out would.
+    """
+    gate = {"admit": admit}
+
+    @verb
+    async def first(ctx: Context[Any], item: int) -> int:
+        seen.bodies.append(item)
+        if item == 2:
+            gate["admit"] = False
+            halt.set()  # completes: the chain stops before second
+        return item
+
+    @verb
+    async def second(ctx: Context[Any], item: int) -> int:
+        seen.completed.append(item)
+        return item * 10
+
+    def guard(item: int, _ctx: Any) -> bool:
+        seen.guards.append(item)
+        return gate["admit"]
+
+    return (
+        Factory(make_test_logger())
+        .create(state={})
+        .with_checkpoint_store(store, "guarded")
+        .with_checkpointer()
+        .with_halt(halt)
+        .map(lambda b: b.call(first).then(second), items=lambda *_: [1, 2], max_concurrency=1)
+        .guard(guard)
+    )
+
+
+class TestAStartedItem:
+    async def test_is_not_asked_the_guard_again(self, store: FileStore) -> None:
+        """The guard admitted it before the halt; on resume it continues though the guard would refuse."""
+        first = _Seen()
+        assert await _guarded_flow(store, asyncio.Event(), True, first).run() is HALTED
+        assert (first.guards, first.bodies, first.completed) == ([1, 2], [1, 2], [1])
+
+        resumed = _Seen()
+        result = await _guarded_flow(store, asyncio.Event(), False, resumed).run(resume="latest")
+        assert (resumed.guards, resumed.bodies, resumed.completed) == ([], [], [2])
+        assert result == [10, 20]
 
 
 class TestSerialization:

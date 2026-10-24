@@ -237,9 +237,10 @@ different event.
 A map's cursor is its item list — resolved once, never evaluated again
 on resume — and its done items with their results. On resume a
 completed item does not run again and its merge is not applied again, a
-running item continues where it was, and items that had not started
-run. A failed item of a `strict=False` map and an item the guard skipped
-are done too: they do not run again, the guard is not asked again, and
+running item continues where it was (the guard, which admitted it, is
+not asked again), and items that had not started run. A failed item of
+a `strict=False` map and an item the guard skipped are done too: they
+do not run again, the guard is not asked again, and
 the map's result holds their `Failure` / `Skipped` as before — a
 restored `Failure` carries a `RestoredError` with the original
 exception's type name and message (an exception is not storable). A
