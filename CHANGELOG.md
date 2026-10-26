@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-26
+
+### Added
+
+- `llm_gent.flow`: compose verbs into flows with `Factory` — `call`, `then`, `conclude`,
+  `branch`, `iterate` and `map` steps with `guard`, `rescue`, `on_error`, `after` and
+  `on_item_complete` hooks. See "Flow composition" in `docs/index.md`.
+- Durable runs: checkpoints are full snapshots of a run, kept as a history in an
+  `appinfra.cas` store (`PgStore` for Postgres). `run(resume=...)` continues a halted or
+  crashed run where it stopped; `run(restart=...)` starts over from a commit's data.
+- One halt per run (`with_halt`; `run()` returns `HALTED`), shortcuts that fast-forward a
+  region on a run signal (`with_shortcut`, `drain=`), checkpoint policy and named
+  checkpoints, and `History` for reading a run's commits.
+- `Loop` / `LoopFactory`: a SAIA turn as a step, with lifecycle hooks. A paused turn is
+  saved in the checkpoint and resumes within what is left of its iteration and token caps.
+- Resources: app-defined run-scoped objects saved and restored with the run
+  (`with_resource`, `Resource`, `resource_method`).
+- Cost tracking: `CostTracker` with pluggable `PricingProvider` (`LLMPricingProvider`
+  included) and `CostTrait`. In a flow the tracker is a resource under `COST`;
+  `with_budget` sets a per-run limit the agent reads through `ctx.cost`.
+- `ensure_schema` / `SchemaManager` migrate gent's own `gent_`-prefixed tables.
+- `AgentFactory(lg)` and `AgentFactory.from_config(dict)` build an agent without a
+  `PlatformContext`.
+- `RunnableAgent` carries the runtime methods; `Agent` is a plain container and an async
+  context manager.
+- Fetch tools follow redirects (`max_redirects`, default 5) and return a `FetchResult`
+  with the final URL.
+- Flow examples under `llm_gent.examples.flow`, and `prompt_agent`; examples run in CI.
+
+### Changed
+
+- **Breaking:** `LearnTrait` / `LearnConfig` split into `MemoryTrait` / `MemoryConfig` and
+  `TrainingTrait` / `TrainingConfig`; `TraitName.LEARN` becomes `MEMORY` and `TRAINING`,
+  so manifests declaring `required_traits: [learn]` use `memory`.
+- **Breaking:** traits receive their clients by injection, built by `TraitFactory`
+  (renamed from `core.traits.factory.Factory`). `AgentFactory` is renamed from
+  `core.agent.factory.Factory`.
+- **Breaking:** `LLMTrait` raises `ValueError` on a system message anywhere but first.
+- Requires appinfra `>= 0.13.0`, llm-kelt `>= 0.5.0` (its `kelt_`-prefixed tables),
+  llm-saia `>= 0.6.3` and llm-infer `>= 0.8.0`; adds alembic, cattrs and SQLAlchemy 2.0.
+
+### Fixed
+
+- `Identity("name")` works with the name alone; `context_key` defaults to the name.
+- An attached `DirectiveTrait` now reaches the model: `LLMTrait.complete()` prepends it
+  as the system message.
+- A bus coordinator whose start fails releases the ports it bound.
+- Bus channels and migrations work with appinfra's logger name ownership and channel
+  send timeout.
+- The `codebase-qna` example loads and runs its scheduled task.
+
+### Removed
+
+- **Breaking:** `llm_gent.Config`; use `AgentFactory.from_config`.
+
 ## [0.3.3] - 2026-09-08
 
 ### Fixed
@@ -135,7 +190,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migrated from llm-learn to llm-kelt for training
 - Refactored training infrastructure to core modules
 
-[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/llm-works/llm-gent/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/llm-works/llm-gent/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/llm-works/llm-gent/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/llm-works/llm-gent/compare/v0.3.0...v0.3.1
