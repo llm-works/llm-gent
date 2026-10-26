@@ -4,7 +4,7 @@
 """Batch rating service for CLI usage.
 
 Provides batch rating without requiring full agent/trait setup.
-Uses direct SQL on atomic_facts tables.
+Uses direct SQL on kelt's atomic facts tables.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from appinfra.db.pg import PG
 from appinfra.log import Logger
+from llm_kelt.memory.atomic import Fact, FeedbackDetails
 from sqlalchemy import text
 
 from ...llm import LLMCaller
@@ -22,6 +23,11 @@ from ...training import StarRatedItem
 from ..schema import validate_schema_name
 from .models import BatchItem, BatchRequest, Result
 from .service import Service as CoreRatingService
+
+
+# kelt owns these tables; their names come from its models.
+_FACTS = Fact.__tablename__
+_FEEDBACK = FeedbackDetails.__tablename__
 
 
 @dataclass
@@ -83,8 +89,8 @@ class BatchRatingService:
         max_chars_clause = "AND length(af.content) < :max_chars" if self._max_chars else ""
         sql = text(f"""
             SELECT af.id, af.content
-            FROM {prefix}atomic_facts af
-            LEFT JOIN {prefix}atomic_feedback_details afd ON af.id = afd.fact_id
+            FROM {prefix}{_FACTS} af
+            LEFT JOIN {prefix}{_FEEDBACK} afd ON af.id = afd.fact_id
             WHERE af.context_key = :context_key
               AND af.type = :fact_type
               AND afd.id IS NULL
@@ -168,7 +174,7 @@ class BatchRatingService:
         """Save a rating to the database."""
         prefix = self._schema_prefix()
         sql = text(f"""
-            INSERT INTO {prefix}atomic_feedback_details
+            INSERT INTO {prefix}{_FEEDBACK}
                 (fact_id, signal, strength, provider_type, context, provider)
             VALUES (:fact_id, :signal, :strength, :provider_type, CAST(:context AS jsonb), :provider)
             ON CONFLICT (fact_id) DO NOTHING

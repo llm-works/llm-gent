@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Generator
 
 import pytest
+import sqlalchemy
 from alembic import command
 from appinfra.db.pg import PG
 from appinfra.log import Logger
@@ -117,20 +118,28 @@ def _tables(pg: PG) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _at_001(pg: PG, lg: Logger) -> SchemaManager:
+    """A schema migrated to revision 001 only; the manager bound to it."""
+    mgr = SchemaManager(lg, pg)
+    mgr.ensure_schema()
+    schema = pg._schema_mgr.schema
+    with pg.session() as session:
+        for table in ("gent_cas_ref", "gent_cas_object", _VERSION_TABLE_NAME):
+            session.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table}"'))
+    config = mgr._get_alembic_config()
+    config.attributes["lg"] = lg
+    with pg.engine.begin() as conn:
+        config.attributes["connection"] = conn
+        command.upgrade(config, "001")
+    return mgr
+
+
 class TestUpgrade:
     def test_upgrade_from_001_replaces_the_history_tables(
         self, pg_isolated: PG, pg_test_logger: Logger
     ) -> None:
         """A database at revision 001 upgrades in-process to the appinfra.cas tables."""
-        mgr = SchemaManager(pg_test_logger, pg_isolated)
-        mgr.ensure_schema()
-        schema = pg_isolated._schema_mgr.schema
-        with pg_isolated.session() as session:
-            for table in ("gent_cas_ref", "gent_cas_object", _VERSION_TABLE_NAME):
-                session.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{table}"'))
-        config = mgr._get_alembic_config()
-        config.attributes["lg"] = pg_test_logger
-        command.upgrade(config, "001")
+        mgr = _at_001(pg_isolated, pg_test_logger)
         assert {"gent_flow_name", "gent_flow_object", "gent_flow_ref"} <= _tables(pg_isolated)
         assert mgr.get_status().state == SchemaState.NEEDS_UPGRADE
 
@@ -138,3 +147,15 @@ class TestUpgrade:
         tables = _tables(pg_isolated)
         assert {"gent_cas_object", "gent_cas_ref"} <= tables
         assert not tables & {"gent_flow_name", "gent_flow_object", "gent_flow_ref"}
+
+    def test_upgrade_runs_on_the_managers_engine(
+        self, pg_isolated: PG, pg_test_logger: Logger, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """env.py builds no engine of its own; the upgrade runs on the manager's connection."""
+        mgr = _at_001(pg_isolated, pg_test_logger)
+
+        def no_engine(*args: object, **kwargs: object) -> None:
+            raise AssertionError("the upgrade built its own engine")
+
+        monkeypatch.setattr(sqlalchemy, "create_engine", no_engine)
+        assert mgr.ensure_schema().state == SchemaState.CURRENT
