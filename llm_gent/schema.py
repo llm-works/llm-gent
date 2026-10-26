@@ -156,9 +156,6 @@ class SchemaManager:
         """Assemble the alembic ``Config`` pointed at this package's migrations."""
         config = AlembicConfig(str(self._migrations_path / "alembic.ini"))
         config.set_main_option("script_location", str(self._migrations_path))
-        # Escape % as %% for ConfigParser interpolation safety (passwords may contain %).
-        url_escaped = str(self._engine.url).replace("%", "%%")
-        config.set_main_option("sqlalchemy.url", url_escaped)
         config.set_main_option("version_table_schema", self._schema_name)
         config.set_main_option("version_table", _VERSION_TABLE_NAME)
         return config
@@ -318,12 +315,19 @@ class SchemaManager:
         )
 
     def _run_upgrade(self) -> None:
-        """Run alembic ``upgrade head`` against the bound engine."""
+        """Run alembic ``upgrade head`` on a connection of the bound engine.
+
+        env.py runs the migrations on that connection, inside one transaction
+        committed here; it builds no engine of its own, so the upgrade connects
+        exactly as the caller's engine does.
+        """
         self._lg.info("upgrading llm-gent schema to head")
         config = self._get_alembic_config()
         # env.py logs here instead of creating a root logger this process may already hold.
         config.attributes["lg"] = LoggerFactory.derive(self._lg, "migration")
-        command.upgrade(config, "head")
+        with self._engine.begin() as conn:
+            config.attributes["connection"] = conn
+            command.upgrade(config, "head")
         self._lg.info("llm-gent schema upgrade complete")
 
     def _check_version_compatible(self, status: SchemaStatus) -> None:

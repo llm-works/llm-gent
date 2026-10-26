@@ -10,6 +10,7 @@ from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
+from llm_kelt.memory.atomic import Fact, FeedbackDetails
 from sqlalchemy import text
 
 from ..schema import validate_schema_name
@@ -20,10 +21,15 @@ if TYPE_CHECKING:
     from llm_kelt.core import Database
 
 
+# kelt owns these tables; their names come from its models.
+_FACTS = Fact.__tablename__
+_FEEDBACK = FeedbackDetails.__tablename__
+
+
 class AtomicFactsBackend:
     """Persistence backend for llm-kelt atomic facts model.
 
-    Saves ratings to atomic_feedback_details table in the llm-kelt schema.
+    Saves ratings to kelt's feedback details table in the llm-kelt schema.
 
     Example:
         from llm_gent.core.memory.rating import AtomicFactsBackend
@@ -57,7 +63,7 @@ class AtomicFactsBackend:
         source: str = "llm_rater",
         schema: str | None = None,
     ) -> None:
-        """Save rating to atomic_feedback_details table.
+        """Save rating to kelt's feedback details table.
 
         Args:
             result: Rating result to save (result.fact must be int fact_id).
@@ -85,7 +91,7 @@ class AtomicFactsBackend:
         self, result: Result, fact_id: int, source: str, schema: str | None = None
     ) -> tuple[str, dict[str, Any]]:
         """Build INSERT query and params for rating."""
-        table = self._table("atomic_feedback_details", schema)
+        table = self._table(_FEEDBACK, schema)
         query = f"""
         INSERT INTO {table} (
             fact_id, signal, strength, provider_type, provider, context
@@ -108,7 +114,7 @@ class AtomicFactsBackend:
     def _log_rating_saved(self, result: Result, fact_id: int) -> None:
         """Log successful rating save."""
         self._lg.debug(
-            "rating saved to atomic_feedback_details",
+            "rating saved",
             extra={
                 "fact_id": fact_id,
                 "stars": result.stars,
@@ -193,8 +199,8 @@ class AtomicFactsBackend:
 
     def _get_base_unrated_query(self) -> str:
         """Get base SQL query for unrated facts."""
-        facts_table = self._table("atomic_facts")
-        feedback_table = self._table("atomic_feedback_details")
+        facts_table = self._table(_FACTS)
+        feedback_table = self._table(_FEEDBACK)
         return f"""
         SELECT af.id, af.type, af.category, af.source, af.content, af.created_at
         FROM {facts_table} af
@@ -290,8 +296,8 @@ class AtomicFactsBackend:
         Uses a lateral subquery to get only the latest feedback row per fact,
         ensuring consistency with mark_facts_paired and get_fact_rating.
         """
-        facts_table = self._table("atomic_facts")
-        feedback_table = self._table("atomic_feedback_details")
+        facts_table = self._table(_FACTS)
+        feedback_table = self._table(_FEEDBACK)
         query = f"""
         SELECT af.id, af.content, (afd_latest.context->>'stars')::int as stars,
                afd_latest.id as feedback_id
@@ -330,7 +336,7 @@ class AtomicFactsBackend:
         Returns:
             Star rating (1-5) if rated, None if unrated.
         """
-        table = self._table("atomic_feedback_details", schema)
+        table = self._table(_FEEDBACK, schema)
         query = text(f"""
             SELECT (context->>'stars')::int as stars
             FROM {table}
@@ -349,7 +355,7 @@ class AtomicFactsBackend:
         Only updates the latest feedback row for each fact to avoid polluting
         stale ratings.
         """
-        table = self._table("atomic_feedback_details")
+        table = self._table(_FEEDBACK)
         query = text(f"""
             UPDATE {table}
             SET context = context || CAST(:pairing_info AS jsonb)

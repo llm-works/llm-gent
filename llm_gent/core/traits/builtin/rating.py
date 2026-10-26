@@ -64,7 +64,7 @@ class RatingTrait(BaseTrait):
     """Automated LLM-based content rating trait.
 
     Provides automated rating capabilities using LLM backends to evaluate
-    agent-generated content. Stores ratings in atomic_feedback_details with
+    agent-generated content. Stores ratings in kelt's feedback details table with
     source tracking for multi-rater scenarios.
 
     **IMPORTANT:** RatingTrait depends on MemoryTrait. MemoryTrait must be attached
