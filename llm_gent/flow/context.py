@@ -1,0 +1,368 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
+"""Context — runtime environment injected into every verb dispatch.
+
+A :class:`Context` is built by the :class:`Flow` at dispatch time and passed
+as the first argument to every verb. It exposes:
+
+- ``saia`` — the role-bound saia instance for this dispatch, resolved lazily
+  on first access
+- ``role`` — the :class:`Role` under which this verb is running
+- ``state`` — the enclosing scope's :class:`State` wrapper (user-owned payload
+  reached via ``ctx.state.data`` or the shorter alias ``ctx.data``; run-wide
+  payload via ``ctx.state.root().data``)
+- ``flow`` — back-reference to the dispatching flow (enables a verb to
+  dispatch sibling verbs)
+- ``lg`` — the dispatching flow's :class:`~appinfra.log.Logger`, so verbs
+  written as module-level ``async def`` (rather than :class:`Verb` classes
+  that capture ``lg`` at ``__init__``) can trace without threading it
+  through state
+- ``extra`` — caller-supplied per-invocation opaque dict, escape hatch
+  for handles the framework does not type (tenant IDs, correlation IDs,
+  per-run callbacks); supplied at :meth:`Flow.run` via ``extra=`` and
+  never checkpointed
+- ``resource(key)`` — a resource the run runs with
+  (:meth:`Flow.with_resource`), typed by its :class:`ResourceKey`
+
+Verbs read from this and (typically) mutate ``state.data`` in place.
+
+Generic in the payload type :data:`T`. Annotating a verb parameter as
+``ctx: Context[MyState]`` narrows ``ctx.state.data`` to ``MyState`` for
+type-checked access; unparameterized ``Context`` remains valid and treats the
+payload as :data:`Any`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any, Generic, TypeVar, overload
+
+from appinfra.log import Logger
+
+from ..core.cost import CostTracker
+from ..core.traits import Registry as TraitRegistry
+from ._shortcut import is_draining, is_fast_forward
+from .checkpoint import checkpoint_tag
+from .resource import COST, NO_RESOURCES, R, ResourceKey
+from .role import Role
+from .state import State
+
+
+T = TypeVar("T")
+"""Payload type — threads to ``ctx.state.data``. See module docstring."""
+
+S = TypeVar("S")
+"""SAIA type — narrows :meth:`Context.saia_as` return."""
+
+D = TypeVar("D")
+"""Default type of :meth:`Context.resource`."""
+
+_NO_DEFAULT: Any = object()
+
+
+@dataclass(frozen=True)
+class Context(Generic[T]):
+    """Runtime environment injected into every verb.
+
+    Constructed by the flow at dispatch time. Verbs receive it as their first
+    positional argument. Generic in the payload type; ``Context[MyState]``
+    narrows ``ctx.state.data`` for type-checked access.
+    """
+
+    role: Role | None
+    """The role the current verb declared, or ``None`` for composition hooks and pure-Python verbs.
+
+    ``None`` appears on composition hook contexts (``rescue`` / ``after``
+    attached to a subflow node) and on pure-Python verb contexts created
+    from ``@verb`` without ``role=``.
+    """
+
+    state: State[T]
+    """The enclosing scope's :class:`State` wrapper.
+
+    ``ctx.state.data`` is the scope's payload (user-owned; the flow does not
+    inspect it), typed as :data:`T`. Shared with the parent by reference by
+    default; the ``state=`` / ``merge=`` kwargs on :meth:`Flow.call`,
+    :meth:`Flow.iterate`, and :meth:`Flow.map` project an isolated child
+    payload for the subflow they contain. Verbs reach run-wide state via
+    ``ctx.state.root().data`` (typed :data:`Any` because a child's payload
+    type has no static relationship to its ancestors').
+    """
+
+    flow: Any
+    """Back-reference to the :class:`Flow` that built this context.
+
+    A verb uses this to dispatch sibling verbs with their own role-bound
+    saia. Typed as ``Any`` to avoid a circular
+    import — ``.dispatch(name, *args, **kwargs)`` is the only method used.
+    Also the resolver for :attr:`saia`.
+    """
+
+    traits: TraitRegistry | None = None
+    """Trait registry the dispatching flow was constructed with, or ``None``.
+
+    Verbs reach mounted platform capabilities (memory, storage, tools,
+    custom traits) via ``ctx.traits.get(SomeTrait)`` or
+    ``ctx.traits.require(SomeTrait)``. ``None`` when the flow was
+    constructed without a registry — verbs that need a trait must handle
+    absence, or the flow must be constructed with one. Imported as
+    ``TraitRegistry`` to disambiguate from other registry types in
+    consumer codebases; the same class is exported as ``Registry`` from
+    :mod:`llm_gent.core.traits`.
+    """
+
+    halt: asyncio.Event | None = None
+    """The run's halt — the top-level flow's :meth:`Flow.with_halt` event — or ``None``.
+
+    Verbs that expose their own inner loop (SAIA turn-by-turn, long-running
+    external calls) can observe ``ctx.halt`` to short-circuit gracefully:
+    a step that stops before finishing raises :class:`Interrupted` and
+    runs again on resume. :meth:`Flow.map` and :meth:`Flow.iterate`
+    observe it at their natural boundaries automatically. Setting it from
+    a step pauses the whole run (:meth:`Flow.run` returns ``HALTED``).
+
+    A cut (:meth:`Flow.with_shortcut`) does not set it; see
+    :attr:`fast_forward`.
+    """
+
+    extra: dict[str, Any] = field(default_factory=dict)
+    """Caller-supplied per-invocation opaque data.
+
+    Escape hatch for handles the framework does not type (tenant IDs,
+    correlation IDs, request-scoped audit hooks, per-run callbacks).
+    Supplied at :meth:`Flow.run` via the ``extra=`` kwarg; propagates
+    unchanged to every dispatch inside the run — subflows, iterate
+    bodies and map items all see the same dict.
+
+    Framework does not inspect the contents, does not type-check the
+    values, and never persists them: ``extra`` never enters a
+    checkpoint Blob, Tree, or node content hash. On resume the caller
+    re-supplies at :meth:`Flow.run`; identity across resume is not
+    preserved. Default is a fresh empty dict.
+    """
+
+    resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
+    """The resources the run runs with, by key; read one with :meth:`resource`."""
+
+    _env: Any = None
+    """Private: the executor's :class:`_RunEnv` for this dispatch.
+
+    Threaded from :func:`_build_ctx` so verbs can invoke framework
+    save primitives (:meth:`checkpoint`). ``None`` on ctx surfaces
+    that do not originate from a live run (e.g. :meth:`Flow.dispatch`
+    used standalone, until predicates before an iterate started).
+    Not part of the verb-facing API — the leading underscore marks it
+    as an executor-only slot.
+    """
+
+    _node_id: str | None = None
+    """Private: the node id under which this ctx was built.
+
+    Threaded from :func:`_build_ctx` so :meth:`checkpoint` can address
+    the currently-executing composition position. ``None`` when the
+    ctx was built outside a chain-walk step (standalone
+    :meth:`Flow.dispatch`, until predicates, on_error hooks).
+    """
+
+    @property
+    def data(self) -> T:
+        """Shortcut for ``ctx.state.data`` typed as :data:`T`.
+
+        Every verb that reads or mutates the scope's payload does so
+        through ``ctx.state.data``; this alias returns the same object at
+        the shorter spelling. Reads (``ctx.data.field``) and mutations
+        (``ctx.data.field = ...``) both work — the alias returns the
+        payload, not a copy.
+
+        Reaches the local scope's payload, not the root. Verbs that need
+        run-wide state stay on ``ctx.state.root().data`` — the alias does
+        not shortcut that traversal.
+        """
+        return self.state.data
+
+    @property
+    def saia(self) -> Any:
+        """The role-bound saia instance for this dispatch.
+
+        Resolved lazily on first access via the dispatching flow's
+        SAIAFactory. The flow caches per role, so repeated reads on the
+        same or sibling contexts hit the same instance.
+
+        Returns ``None`` when :attr:`role` is ``None`` — subflow-node ctx,
+        hook ctx, and pure-Python verbs (``@verb`` with no ``role=``)
+        have no role to bind against, so there is no saia to build.
+
+        Raises :class:`RuntimeError` if the flow was constructed with no
+        SAIAFactory and this ctx has a role. The error surfaces at access,
+        not at construction, so verbs that never touch ``ctx.saia`` (e.g.
+        those routing LLM calls through their own configuration) can run
+        under a factoryless flow.
+        """
+        if self.role is None:
+            return None
+        return self.flow._saia_for(self.role)
+
+    def saia_as(self, cls: type[S]) -> S | None:
+        """Return :attr:`saia` typed as ``cls`` — cast helper for verb authors.
+
+        :attr:`saia` is typed :data:`Any` because the framework has no
+        static knowledge of the concrete class an application's
+        :class:`SAIAFactory` returns. Verbs that know the type write::
+
+            saia = ctx.saia_as(MySAIA)
+            answer = await saia.complete_structured(prompt, schema)
+
+        Runtime returns exactly what :attr:`saia` returns; ``cls`` is
+        used only for type inference, not for a runtime instance check.
+        The framework's ``S`` TypeVar carries the annotation through so
+        IDEs and mypy narrow the return type at the call site.
+
+        Best suited to concrete SAIA classes. mypy's ``type-abstract``
+        check rejects passing a :class:`typing.Protocol` here — for a
+        protocol-typed handle, use the annotation form instead::
+
+            saia: MyProto = ctx.saia
+
+        When several verbs in a file need the same Protocol-typed
+        handle, keep the annotation in one file-scoped helper rather
+        than repeating it per verb::
+
+            def _saia(ctx: Context[MyState]) -> MyProto:
+                saia: MyProto = ctx.saia
+                return saia
+
+            @verb(role=R)
+            async def do_thing(ctx: Context[MyState], prev: X) -> Y:
+                return await _saia(ctx).complete_structured(...)
+
+        The helper assumes the flow was configured with a SAIAFactory;
+        role-bound verbs (``@verb(role=...)``) require one.
+        """
+        return self.saia  # type: ignore[no-any-return]
+
+    @overload
+    def resource(self, key: ResourceKey[R]) -> R: ...
+
+    @overload
+    def resource(self, key: ResourceKey[R], default: D) -> R | D: ...
+
+    def resource(self, key: ResourceKey[Any], default: Any = _NO_DEFAULT) -> Any:
+        """The ``key`` resource the run runs with (:meth:`Flow.with_resource`), typed by ``key``.
+
+        Its own per-run child when the run's flow asks for one, else the
+        resource declared on the run's flow or the nearest flow enclosing
+        it. ``default`` when none is in scope.
+
+        Raises:
+            KeyError: No ``key`` resource is in scope and no ``default``
+                was given.
+        """
+        try:
+            return self.resources[key]
+        except KeyError:
+            if default is _NO_DEFAULT:
+                raise KeyError(
+                    f"no {key.name!r} resource in scope: declare one with "
+                    f"with_resource(key, resource) on this flow or an enclosing one"
+                ) from None
+            return default
+
+    @property
+    def fast_forward(self) -> bool:
+        """True when this step runs in a :meth:`Flow.with_shortcut` region whose signal is set.
+
+        The region is being cut short: a step that can end early returns
+        what it has now — it completed, and nothing runs it again. (A
+        step stopping for the run's :attr:`halt` raises
+        :class:`Interrupted` instead.) ``False`` outside a run.
+        """
+        return self._env is not None and is_fast_forward(self._env)
+
+    @property
+    def draining(self) -> bool:
+        """True when this step runs in a started map item of a draining region whose signal is set.
+
+        The region (``with_shortcut(signal, drain=True)``) starts nothing
+        new, but this item runs to its end: a step that can wrap up — a
+        long LLM turn, a search — finishes what it has now and lets the
+        item's remaining steps run. ``False`` outside a run.
+        """
+        return self._env is not None and is_draining(self._env)
+
+    @property
+    def cost(self) -> CostTracker | None:
+        """The run's cost tracker — ``resource(COST, None)`` — or ``None``.
+
+        Set with :meth:`Flow.with_cost_tracker`; a run of a flow with
+        :meth:`Flow.with_budget` gets a child of it with that budget. Verbs
+        record LLM and operation costs via ``ctx.cost.track(...)``;
+        ``ctx.cost.spent`` is the cost so far and ``ctx.cost.budget`` the
+        limit it is checked against. The tracker enforces its budget and,
+        when configured with a halt event, trips it on the first cross into
+        ``exceeded``; ancestors in the tracker chain do the same on their own
+        budgets. Subflows inherit the outer runtime's tracker.
+        """
+        return self.resource(COST, None)
+
+    @property
+    def lg(self) -> Logger:
+        """The dispatching flow's :class:`~appinfra.log.Logger`.
+
+        Delegates to the flow's construction-time ``lg``. Module-level
+        ``@verb`` functions (which can't capture ``lg`` at ``__init__``
+        the way :class:`Verb` classes can) reach the ambient logger via
+        ``ctx.lg`` instead of threading it through ``state``.
+        """
+        lg: Logger = self.flow._lg
+        return lg
+
+    async def checkpoint(self, name: str | None = None) -> str | None:
+        """Explicit save trigger — writes a snapshot of the whole run as a commit; returns its hash.
+
+        Fires regardless of the flow's :class:`CheckpointPolicy`; the
+        policy governs implicit framework-driven saves only. The commit
+        holds every live scope and every running structure's cursor, like
+        any checkpoint: the chain running this step is at this step, so
+        resuming from it runs this step again (with the input it had),
+        and every enclosing iterate continues in its current pass. The
+        commit's metadata records the current node, iteration ``0`` and
+        ``outcome="ok"``.
+
+        The commit goes to the run's repo (the top-level flow's
+        :meth:`~llm_gent.flow.Flow.with_checkpoint_store`), wherever in the
+        flow tree this step runs. Returns the commit's hash:
+        ``run(resume=<hash>)`` checks it out later, even after a later run
+        leaves it off the history's line. With ``name``, the checkpoint is also
+        tagged ``tags/<name>``: ``run(resume=name)`` checks it out. Taking
+        it again (at this step or elsewhere) moves the tag to the new
+        commit. A named :meth:`~llm_gent.flow.Flow.with_checkpointer` this
+        save belongs to moves its tag too.
+
+        No-op returning ``None`` when:
+        - No ``with_checkpointer()`` is on this step's flow or above it, or
+          the run has no checkpoint store.
+        - The ctx has no live executor env (e.g. built by
+          :meth:`Flow.dispatch` used standalone).
+
+        Raises:
+            ValueError: ``name`` cannot name a checkpoint (empty, one of
+                ``"off"``, ``"latest"``, ``"complete"``, or a commit hash's
+                form) — also without a checkpointer.
+        """
+        tag = None if name is None else checkpoint_tag(name)
+        env = self._env
+        node_id = self._node_id
+        if env is None or node_id is None:
+            return None
+        from ._executor import _save_scope_commit
+
+        commit = await _save_scope_commit(env, 0, node_id, self.state, "ok")
+        if commit is None:
+            return None
+        if tag is not None:
+            assert env.checkpoint_ctx is not None  # a commit was written to it
+            await env.checkpoint_ctx.put_tag(tag, commit.id)
+        return commit.id

@@ -1,7 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Base trait protocol and convenience base class."""
+"""Base trait protocol and convenience base class.
+
+Dependency-inversion pattern for traits that wrap external resources
+--------------------------------------------------------------------
+
+A trait that wraps an external resource (an HTTP client, a DB connection
+pool, a client factory) MUST take that resource through its constructor.
+The trait itself imports no factory; ``TraitFactory`` owns construction
+and passes the live resource in.
+
+The ownership contract has three moving parts:
+
+1. ``__init__(agent, ..., *, resource, owns_resource=False)`` — the
+   resource is a required keyword argument; ``owns_resource`` defaults
+   to False so callers who inject their own resource keep its lifecycle.
+2. ``TraitFactory.create_<trait>_trait`` builds the resource and passes
+   it with ``owns_resource=True``.
+3. ``on_stop`` closes the resource iff ``owns_resource`` is True.
+
+For runtime override, expose an immutable-view fluent
+``.with_<resource>(replacement)`` that returns a new trait bound to
+``replacement`` with ``owns_resource=False``. The new instance is
+detached from the agent's registry; a caller wanting a persistent swap
+calls ``agent.replace_trait(new)``.
+
+Worked examples: ``LLMTrait`` (router), ``MemoryTrait`` (database, chat
+client, embedder), ``TrainingTrait`` (train factory).
+"""
 
 from __future__ import annotations
 

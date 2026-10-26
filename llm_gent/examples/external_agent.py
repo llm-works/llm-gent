@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
+# ci-skip: requires a running llm-gent hub (bus + service) on default ports
+
 """Minimal external agent that connects to a running hub.
 
 Usage:

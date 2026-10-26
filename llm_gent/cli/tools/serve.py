@@ -20,7 +20,7 @@ from appinfra.app.tools import Tool, ToolConfig
 if TYPE_CHECKING:
     from multiprocessing.queues import Queue
 
-    from ...core.traits.builtin.learn import LearnConfig
+    from ...core.traits.builtin.memory import MemoryConfig
     from ...hub import Hub
     from ...runtime.server import AgentServerConfig
     from ...runtime.server.protocol.base import Request, Response
@@ -82,29 +82,33 @@ class ServeTool(Tool):
 
         return 0
 
-    def _create_learn_config(self, config: AgentServerConfig) -> LearnConfig | None:
-        """Create LearnConfig from server configuration.
+    def _create_learn_config(self, config: AgentServerConfig) -> MemoryConfig | None:
+        """Build the platform learn-block dict from server configuration.
 
-        Creates a template config with global settings (llm, db, embedder).
-        Each agent will resolve its own identity from agent YAML.
+        Creates a template config with global settings (llm, db, embedder). Each
+        agent resolves its own identity from agent YAML. The returned dict is
+        the whole ``learn:`` block: MemoryTrait reads memory-side fields
+        (llm, db, embedder_*, training), TrainingTrait reads training-side
+        fields (schema, adapters).
         """
-        from ...core.traits.builtin.learn import LearnConfig
+        from ...core.traits.builtin.memory import MemoryConfig
 
         if config.learn is None:
             return None
 
-        return LearnConfig(
+        return MemoryConfig(
             llm=config.llm,
             db=config.learn.db,
             embedder_url=config.learn.embedder_url,
             embedder_model=config.learn.embedder_model,
             embedder_timeout=config.learn.embedder_timeout,
             training=config.learn.training,
+            schema=config.learn.schema,
             adapters=config.learn.adapters,
             # Note: identity is set per-agent in factory
         )
 
-    def _create_hub(self, config: AgentServerConfig, learn_config: LearnConfig | None) -> Hub:
+    def _create_hub(self, config: AgentServerConfig, learn_config: MemoryConfig | None) -> Hub:
         """Create and configure the swarm hub."""
         from appinfra import DotDict
 
@@ -433,7 +437,7 @@ class ServeTool(Tool):
                 self.lg.debug("skipping disabled agent", extra={"agent": name})
                 continue
 
-            config_dict = self._build_agent_config_dict(name, agent_config)
+            config_dict = agent_config.factory_config(name)
             try:
                 if agent_config.schedule is not None:
                     hub.start_agent(name, config_dict)
@@ -442,66 +446,6 @@ class ServeTool(Tool):
                     hub.start_agent(name, config_dict)
             except Exception as e:
                 self.lg.error("failed to start agent", extra={"agent": name, "exception": e})
-
-    def _build_agent_config_dict(self, name: str, agent_config: Any) -> DotDict:
-        """Build config DotDict for agent registration.
-
-        For programmatic agents, includes module, factory, identity, config.
-        For prompt agents, includes task, tools, conversation, events.
-        """
-        config_dict = DotDict()
-        config_dict["name"] = name
-        config_dict["type"] = agent_config.type_
-        config_dict["execution"] = agent_config.execution
-        config_dict["task"] = agent_config.task.model_dump()
-
-        # Add type-specific fields
-        self._add_type_specific_fields(config_dict, agent_config)
-
-        # Common optional fields
-        self._add_optional_fields(config_dict, agent_config)
-
-        # Add extra fields from YAML (rating, max_retries, similarity_threshold, etc.)
-        # These are fields not explicitly defined in AgentConfigYAML schema
-        if hasattr(agent_config, "__pydantic_extra__") and agent_config.__pydantic_extra__:
-            config_dict.update(agent_config.__pydantic_extra__)
-
-        return config_dict
-
-    def _add_type_specific_fields(self, config_dict: DotDict, agent_config: Any) -> None:
-        """Add type-specific fields to config dict."""
-        # Identity is common to all agent types
-        config_dict["identity"] = agent_config.identity
-
-        if agent_config.type_ == "programmatic":
-            config_dict["module"] = agent_config.module
-            config_dict["factory"] = agent_config.factory
-            config_dict["config"] = agent_config.config
-        else:
-            # Prompt agents use conversation and events
-            config_dict["conversation"] = agent_config.conversation
-            if agent_config.events:
-                config_dict["events"] = {
-                    name: handler.model_dump() for name, handler in agent_config.events.items()
-                }
-
-    def _add_optional_fields(self, config_dict: DotDict, agent_config: Any) -> None:
-        """Add optional fields to config dict."""
-        if agent_config.directive is not None:
-            config_dict["directive"] = (
-                agent_config.directive
-                if isinstance(agent_config.directive, str)
-                else agent_config.directive.model_dump()
-            )
-
-        if agent_config.method is not None:
-            config_dict["method"] = agent_config.method
-
-        if agent_config.tools:
-            config_dict["tools"] = agent_config.tools
-
-        if agent_config.schedule is not None:
-            config_dict["schedule"] = agent_config.schedule.model_dump()
 
     def _apply_cli_overrides(self, config: Any) -> None:
         """Apply command-line overrides to config."""

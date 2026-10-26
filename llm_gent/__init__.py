@@ -10,7 +10,7 @@ from importlib.metadata import PackageNotFoundError, version
 from llm_kelt.core.types import ScoredEntity
 from llm_kelt.memory.atomic import Fact
 
-from .core.agent import Agent, Config, Identity
+from .core.agent import Agent, AgentFactory, Identity
 from .core.errors import AgentError, ConfigError
 from .core.llm import (
     CompletionResult,
@@ -24,6 +24,7 @@ from .core.task import Task, TaskCompletion, TaskResult, TaskStatus
 from .core.tools import (
     BaseTool,
     CompleteTaskTool,
+    FetchResult,
     FileReadTool,
     FileWriteTool,
     HTTPFetchTool,
@@ -48,17 +49,28 @@ from .core.traits import (
     DirectiveTrait,
     HTTPConfig,
     HTTPTrait,
-    LearnConfig,
-    LearnTrait,
     LLMConfig,
     LLMTrait,
+    ManifestNotFoundError,
+    MemoryConfig,
+    MemoryTrait,
     MethodTrait,
     SAIAConfig,
     SAIATrait,
     ToolsTrait,
+    TrainingConfig,
+    TrainingTrait,
     Trait,
 )
-from .core.traits.factory import Factory as TraitFactory
+from .core.traits.factory import TraitFactory
+from .schema import (
+    SchemaManager,
+    SchemaMode,
+    SchemaState,
+    SchemaStatus,
+    SchemaVersionError,
+    ensure_schema,
+)
 
 
 try:
@@ -69,17 +81,18 @@ except PackageNotFoundError:
 __all__ = [
     # Agents
     "Agent",
-    "Config",
     "Identity",
     # Errors
     "AgentError",
     "ConfigError",
     # Factories
+    "AgentFactory",
     "ToolFactory",
     "TraitFactory",
     # Tools
     "BaseTool",
     "CompleteTaskTool",
+    "FetchResult",
     "FileReadTool",
     "FileWriteTool",
     "HTTPFetchTool",
@@ -100,14 +113,17 @@ __all__ = [
     "BaseTrait",
     "Directive",
     "DirectiveTrait",
-    "LearnConfig",
-    "LearnTrait",
     "LLMConfig",
     "LLMTrait",
+    "ManifestNotFoundError",
+    "MemoryConfig",
+    "MemoryTrait",
     "MethodTrait",
     "SAIAConfig",
     "SAIATrait",
     "Trait",
+    "TrainingConfig",
+    "TrainingTrait",
     # HTTP
     "HTTPConfig",
     "HTTPTrait",
@@ -128,4 +144,11 @@ __all__ = [
     "TaskStatus",
     # Tools trait
     "ToolsTrait",
+    # Schema management
+    "SchemaManager",
+    "SchemaMode",
+    "SchemaState",
+    "SchemaStatus",
+    "SchemaVersionError",
+    "ensure_schema",
 ]

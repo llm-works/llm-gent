@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from appinfra import DotDict
 
-from llm_gent.core.agent.factory import Factory
+from llm_gent.core.agent.factory import AgentFactory
 from llm_gent.core.agent.helpers import _substitute_in_dict
 from llm_gent.core.dispatcher import Dispatcher
 from llm_gent.core.llm.caller import LLMCaller
@@ -246,7 +246,7 @@ class TestCoreAgentFactory:
     def test_agent_class_not_set_raises(self):
         platform = PlatformContext(MagicMock(), config={"llm": {}})
 
-        class BadFactory(Factory):
+        class BadFactory(AgentFactory):
             agent_class = None
 
         f = BadFactory(platform=platform)

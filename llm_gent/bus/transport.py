@@ -133,20 +133,19 @@ class ZMQCoordinatorBus:
         self._async_request_types: set[str] = set()
 
     def start(self) -> None:
-        """Bind sockets and start polling thread."""
+        """Bind sockets and start polling thread.
+
+        A bind that fails (a port in use) closes the sockets opened so far
+        and the context before the error propagates: a failed start leaves
+        no port bound.
+        """
+        try:
+            self._bind()
+        except zmq.ZMQError:
+            self._discard_sockets()
+            raise
+
         cfg = self._config
-        self._ctx = zmq.Context()
-
-        self._router = self._ctx.socket(zmq.ROUTER)
-        self._router.bind(f"tcp://{cfg.bind_host}:{cfg.router_port}")
-
-        self._pub = self._ctx.socket(zmq.PUB)
-        self._pub.bind(f"tcp://{cfg.bind_host}:{cfg.pub_port}")
-
-        self._sub = self._ctx.socket(zmq.SUB)
-        self._sub.bind(f"tcp://{cfg.bind_host}:{cfg.sub_port}")
-        self._sub.setsockopt_string(zmq.SUBSCRIBE, "")
-
         self._async_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bus-async")
         self._running = True
         self._poll_thread = threading.Thread(
@@ -181,15 +180,33 @@ class ZMQCoordinatorBus:
         for transport in transports:
             transport.close()
 
+        self._discard_sockets(linger=100)
+        self._lg.info("coordinator bus stopped")
+
+    def _bind(self) -> None:
+        """Create the context and bind the ROUTER, PUB and SUB sockets."""
+        cfg = self._config
+        self._ctx = zmq.Context()
+
+        self._router = self._ctx.socket(zmq.ROUTER)
+        self._router.bind(f"tcp://{cfg.bind_host}:{cfg.router_port}")
+
+        self._pub = self._ctx.socket(zmq.PUB)
+        self._pub.bind(f"tcp://{cfg.bind_host}:{cfg.pub_port}")
+
+        self._sub = self._ctx.socket(zmq.SUB)
+        self._sub.bind(f"tcp://{cfg.bind_host}:{cfg.sub_port}")
+        self._sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
+    def _discard_sockets(self, linger: int = 0) -> None:
+        """Close whatever :meth:`_bind` opened, at once, and terminate the context."""
         for sock in (self._router, self._pub, self._sub):
             if sock is not None:
-                sock.close(linger=100)
-
+                sock.close(linger=linger)
+        self._router = self._pub = self._sub = None
         if self._ctx is not None:
             self._ctx.term()
             self._ctx = None
-
-        self._lg.info("coordinator bus stopped")
 
     # -------------------------------------------------------------------------
     # Agent transports (for appinfra channel integration)

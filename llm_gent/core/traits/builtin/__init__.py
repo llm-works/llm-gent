@@ -4,17 +4,21 @@
 """Built-in traits for composable agent capabilities."""
 
 from .conversation import ConversationTrait, ConversationTraitConfig
+from .cost import CostTrait
 from .directive import Directive, DirectiveTrait, MethodTrait
 from .http import HTTPConfig, HTTPTrait
-from .learn import LearnConfig, LearnTrait
 from .llm import LLMConfig, LLMTrait
+from .memory import MemoryConfig, MemoryTrait
 from .rating import RatingConfig, RatingTrait
 from .saia import SAIAConfig, SAIATrait
 from .storage import StorageTrait
 from .tools import ToolsTrait
+from .training import ManifestNotFoundError, TrainingConfig, TrainingTrait
 
 
 __all__ = [
+    # Cost
+    "CostTrait",
     # Conversation
     "ConversationTrait",
     "ConversationTraitConfig",
@@ -25,9 +29,13 @@ __all__ = [
     # HTTP
     "HTTPConfig",
     "HTTPTrait",
-    # Learn
-    "LearnConfig",
-    "LearnTrait",
+    # Memory
+    "MemoryConfig",
+    "MemoryTrait",
+    # Training (adapter manifest / schema resolution)
+    "ManifestNotFoundError",
+    "TrainingConfig",
+    "TrainingTrait",
     # LLM
     "LLMConfig",
     "LLMTrait",

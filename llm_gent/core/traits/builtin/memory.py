@@ -1,24 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Learn trait for agent memory and feedback capabilities."""
+"""Memory trait for agent kelt-backed memory, feedback, and learned completions."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
-from appinfra.db.pg import PG
+from appinfra import DotDict
 from llm_infer.client import ChatClient, ChatResponse, EmbeddingClient
-from llm_infer.client import Factory as LLMClientFactory
-from llm_infer.client.types import AdapterInfo
 from llm_kelt import Client as KeltClient
+from llm_kelt import SchemaMode
 from llm_kelt.core import Database
 from llm_kelt.core.types import ScoredEntity
 from llm_kelt.inference import ContextBuilder
 from llm_kelt.memory.atomic import EmbeddingFilter, Fact
 from llm_kelt.memory.isolation import ClientContext
 from llm_kelt.scoped_client import ScopedClient
-from llm_kelt.training import Factory as TrainFactory
 
 from ...llm.types import CompletionResult
 from ...runnable import ExecutionResult
@@ -30,37 +28,27 @@ if TYPE_CHECKING:
     from ...agent import Agent, Identity
 
 
-from appinfra import DotDict
-
-
-class ManifestNotFoundError(Exception):
-    """Raised when adapter manifest cannot be found for schema resolution."""
-
-    pass
-
-
-# Type alias for Learn configuration
-LearnConfig = DotDict
-"""Learn configuration as DotDict.
+# Type alias for Memory configuration
+MemoryConfig = DotDict
+"""Memory configuration as DotDict.
 
 Expected fields:
     identity: Resolved Identity (required).
-    schema: Schema config dict with 'name' and 'enforce' (default: {"name": "public"}).
+    schema: Schema config dict with 'name' (default: {"name": "public"}).
     llm: LLM configuration for learned completions.
     db: Database configuration dict (with url, extensions, etc.).
     embedder_url: URL for embedding service (None = no RAG).
     embedder_model: Model name for embeddings (default: "default").
     embedder_timeout: Embedder timeout in seconds (default: 30.0).
-    training: Training configuration dict (default_profiles, etc.).
-    adapters: Adapter registry config dict (lora.base_path for manifest lookups).
+    training: Kelt training configuration dict (default_profiles, etc.).
 """
 
 
-class LearnTrait(BaseTrait):
-    """Learn capability trait for memory, feedback, and learned completions.
+class MemoryTrait(BaseTrait):
+    """Memory capability trait for kelt-backed facts, feedback, and learned completions.
 
     Wraps llm_kelt.Client, ChatClient, and EmbeddingClient to provide
-    learning-enabled completions with memory and feedback.
+    memory-enabled completions with fact injection and feedback capture.
 
     Capabilities:
         - complete(): Generate completions with automatic fact injection
@@ -68,47 +56,88 @@ class LearnTrait(BaseTrait):
         - recall(): Search facts by semantic similarity
         - record_feedback(): Record feedback on responses
         - record_preference(): Record preference pairs for training
+        - record_solution(): Record execution solutions
+
+    Adapter-manifest-driven schema resolution lives in TrainingTrait (training.py).
+
+    Dependency ownership: the trait imports no external factory. Database,
+    ChatClient, and EmbeddingClient are built by ``TraitFactory._create_memory``
+    and injected at construction. Two seams:
+
+    - Config-time (standard path): ``TraitFactory.create_memory_trait`` builds
+      the three clients from ``memory_config`` and passes them with
+      ``owns_chat_client=True`` and ``owns_embedder=True`` so the trait closes
+      them on ``on_stop``. Note: Database/PG lifecycle is not managed by this
+      trait — the underlying connection pool outlives the trait. This is
+      intentional for shared-pool scenarios; explicit pool shutdown belongs
+      at the application layer.
+    - Direct injection (test / advanced): pass ``chat_client``, ``embedder``,
+      or ``database`` yourself with the corresponding ``owns_*=False``; caller
+      retains close responsibility. See ``.with_chat_client()``,
+      ``.with_embedder()``, and ``.with_database()`` for immutable-view
+      fluent overrides.
 
     Example:
-        from llm_gent.core.traits import LearnTrait, LearnConfig, LLMConfig
-        from llm_gent.core.agent import Identity
+        from llm_gent.agent import AgentFactory
 
-        agent = Agent(lg, config)
-        learn_trait = LearnTrait(agent, LearnConfig(
-            identity=Identity.from_name("my-agent"),
-            llm=LLMConfig(base_url="http://localhost:8000/v1"),
-            embedder_url="http://localhost:8001/v1",
-        ))
-        agent.add_trait(learn_trait)
+        # Standard construction — TraitFactory builds the external clients.
+        agent = AgentFactory(lg).from_config({
+            "identity": "my-agent",
+            "llm": {"backends": {"local": {...}}},
+            "memory": {
+                "db": {"url": "postgresql://localhost/kelt"},
+                "embedder_url": "http://localhost:8001/v1",
+            },
+        })
         agent.start()
 
         # Learned completion with fact injection
-        result = agent.get_trait(LearnTrait).complete("What do I prefer?")
-
-        # Store a fact
-        agent.get_trait(LearnTrait).remember("User prefers concise answers")
+        result = agent.get_trait(MemoryTrait).complete("What do I prefer?")
 
     Lifecycle:
-        - on_start(): Creates Client, ChatClient, EmbeddingClient, ContextBuilder
-        - on_stop(): Closes ChatClient and EmbeddingClient
+        - ``__init__``: composes ``KeltClient`` and ``ContextBuilder`` from the
+          injected database, chat client, and embedder.
+        - ``on_start()``: resolves LLM defaults from config (no client build).
+        - ``on_stop()``: closes the chat client / embedder iff the matching
+          ``owns_*`` flag is True.
     """
 
-    def __init__(self, agent: Agent, config: LearnConfig) -> None:
-        """Initialize learn trait.
+    def __init__(
+        self,
+        agent: Agent,
+        config: MemoryConfig,
+        *,
+        database: Database,
+        chat_client: ChatClient,
+        embedder: EmbeddingClient | None = None,
+        owns_chat_client: bool = False,
+        owns_embedder: bool = False,
+    ) -> None:
+        """Initialize memory trait with injected clients.
 
         Args:
             agent: The agent this trait belongs to.
-            config: Learn configuration.
+            config: Memory configuration (identity, schema, llm defaults, etc.).
+            database: Live ``Database``. Built by ``TraitFactory`` in the
+                standard path; may be a stub for tests.
+            chat_client: Live ``ChatClient`` for learned completions.
+            embedder: Live ``EmbeddingClient`` for RAG, or None if no embedder
+                is configured.
+            owns_chat_client: If True, ``on_stop`` closes ``chat_client``. Set
+                by ``TraitFactory`` for factory-built clients. Callers that
+                inject their own client keep this False and clean up themselves.
+            owns_embedder: Same semantic for ``embedder``.
         """
         super().__init__(agent)
         self.config = config
-        self._database: Database | None = None
-        self._kelt: KeltClient | None = None
-        self._train_factory: TrainFactory | None = None  # initialized in on_start
-        self._embedder: EmbeddingClient | None = None
-        self._context: ContextBuilder | None = None
-        self._client: ChatClient | None = None
+        self._database = database
+        self._client = chat_client
+        self._embedder = embedder
+        self._owns_chat_client = owns_chat_client
+        self._owns_embedder = owns_embedder
         self._llm_defaults: dict[str, Any] = {}
+        self._kelt: KeltClient = self._create_kelt_client(database, embedder, chat_client)
+        self._context: ContextBuilder = ContextBuilder(self._kelt.atomic.assertions)
 
     def _create_kelt_client(
         self, database: Database, embedder: EmbeddingClient | None, llm_client: ChatClient | None
@@ -121,15 +150,15 @@ class LearnTrait(BaseTrait):
             llm_client: LLM client instance (None if not configured).
 
         Returns:
-            Schema-agnostic KeltClient. Use client.with_schema("X") for
-            per-operation schema selection.
+            KeltClient scoped to default_schema. Use client.with_schema("X")
+            to override for specific operations.
         """
         identity = self._resolve_identity()
         if identity is None:
-            raise ValueError("LearnConfig must have identity set")
+            raise ValueError("MemoryConfig must have identity set")
 
-        # Schema-agnostic context - no schema_name
-        context = ClientContext(context_key=identity.context_key)
+        # Use default_schema for default operations; callers can override with with_schema()
+        context = ClientContext(context_key=identity.context_key, schema_name=self.default_schema)
 
         return KeltClient(
             lg=self.agent.lg,
@@ -137,6 +166,7 @@ class LearnTrait(BaseTrait):
             context=context,
             embedder=embedder,
             llm_client=llm_client,
+            schema_mode=SchemaMode.ENSURE,
             training_config=self.config.get("training"),
         )
 
@@ -146,81 +176,123 @@ class LearnTrait(BaseTrait):
         return identity
 
     def on_start(self) -> None:
-        """Create learn client, LLM client, and embedder on agent start."""
-        from ...errors import ConfigError
-
-        # Create database from config
-        if self.config.db is None:
-            raise ConfigError("LearnConfig.db is required")
-        pg = PG(self.agent.lg, self.config.db)
-        self._database = Database(self.agent.lg, pg)
-
-        # Create LLM client for completions (before Client)
-        llm_config: DotDict = self.config.get("llm") or DotDict()
-        self._client = LLMClientFactory(self.agent.lg).from_config(llm_config)
-        self._llm_defaults = _resolve_llm_defaults(llm_config)
-
-        # Create embedder if URL provided (before Client)
-        if self.config.embedder_url:
-            self._embedder = LLMClientFactory(self.agent.lg).embeddings(
-                base_url=self.config.embedder_url,
-                model=self.config.embedder_model,
-                timeout=self.config.embedder_timeout,
-            )
-        else:
-            self._embedder = None
-
-        # Create kelt client with embedder and llm_client already available
-        self._kelt = self._create_kelt_client(self._database, self._embedder, self._client)
-        self._context = ContextBuilder(self._kelt.atomic.assertions)
-
-        # Train factory created lazily via _get_train_factory() when needed
+        """Resolve config-derived LLM defaults. Clients are already injected."""
+        self.agent.lg.trace(
+            "starting memory trait...",
+            extra={
+                "agent": self.agent.name,
+                "owns_chat_client": self._owns_chat_client,
+                "owns_embedder": self._owns_embedder,
+                "has_embedder": self._embedder is not None,
+            },
+        )
+        self._llm_defaults = _resolve_llm_defaults(self.config.get("llm") or DotDict())
+        self.agent.lg.trace(
+            "memory trait started",
+            extra={
+                "agent": self.agent.name,
+                "owns_chat_client": self._owns_chat_client,
+                "owns_embedder": self._owns_embedder,
+            },
+        )
 
     def on_stop(self) -> None:
-        """Close LLM client and embedder on agent stop."""
-        if self._client is not None:
-            self._client.close()
-            self._client = None
-        if self._embedder is not None:
-            self._embedder.close()
-            self._embedder = None
-        self._kelt = None
-        self._train_factory = None
-        self._context = None
-        self._database = None
+        """Close the chat client and embedder iff this trait owns their lifecycles."""
+        self.agent.lg.trace(
+            "stopping memory trait...",
+            extra={
+                "agent": self.agent.name,
+                "owns_chat_client": self._owns_chat_client,
+                "owns_embedder": self._owns_embedder,
+            },
+        )
+        try:
+            if self._owns_chat_client:
+                self._client.close()
+        finally:
+            if self._owns_embedder and self._embedder is not None:
+                self._embedder.close()
+        self.agent.lg.trace(
+            "memory trait stopped",
+            extra={
+                "agent": self.agent.name,
+                "closed_chat_client": self._owns_chat_client,
+                "closed_embedder": self._owns_embedder and self._embedder is not None,
+            },
+        )
 
-    def _get_train_factory(self) -> TrainFactory | None:
-        """Get or create training factory for manifest lookups.
+    def with_chat_client(self, chat_client: ChatClient) -> Self:
+        """Return a new trait bound to ``chat_client``, detached from the registry.
 
-        Returns:
-            TrainFactory if adapters.lora.base_path is configured, None otherwise.
+        Immutable-view fluent (mirrors ``LLMTrait.with_router``): ``self`` stays
+        canonical for ``agent.get_trait(MemoryTrait)`` and its chat client is
+        unchanged. The returned instance shares ``agent``, ``config``,
+        ``database``, and ``embedder`` but is not registered.
+
+        Ownership: ``owns_chat_client`` on the returned trait is False. The
+        caller owns the injected client's lifecycle. For a persistent swap,
+        call ``agent.replace_trait(new)``.
         """
-        if self._train_factory is not None:
-            return self._train_factory
+        new = type(self)(
+            self.agent,
+            self.config,
+            database=self._database,
+            chat_client=chat_client,
+            embedder=self._embedder,
+            owns_chat_client=False,
+            owns_embedder=False,
+        )
+        self.agent.lg.debug(
+            "memory trait detached with new chat client",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
+        return new
 
-        from pathlib import Path
+    def with_embedder(self, embedder: EmbeddingClient | None) -> Self:
+        """Return a new trait bound to ``embedder``, detached from the registry.
 
-        adapters_config = self.config.get("adapters") or {}
-        lora_config = adapters_config.get("lora") or {}
-        base_path = lora_config.get("base_path")
+        See ``.with_chat_client()`` for the ownership and registry semantics.
+        """
+        new = type(self)(
+            self.agent,
+            self.config,
+            database=self._database,
+            chat_client=self._client,
+            embedder=embedder,
+            owns_chat_client=False,
+            owns_embedder=False,
+        )
+        self.agent.lg.debug(
+            "memory trait detached with new embedder",
+            extra={
+                "agent": self.agent.name,
+                "detached_from_registry": True,
+                "has_embedder": embedder is not None,
+            },
+        )
+        return new
 
-        if not base_path:
-            self.agent.lg.warning(
-                "no adapters.lora.base_path configured, manifest lookup disabled",
-                extra={"adapters_config": adapters_config},
-            )
-            return None
+    def with_database(self, database: Database) -> Self:
+        """Return a new trait bound to ``database``, detached from the registry.
 
-        registry_path = Path(base_path).expanduser()
-        if not registry_path.exists():
-            self.agent.lg.warning(
-                "adapter registry path does not exist, manifest lookup disabled",
-                extra={"path": str(registry_path)},
-            )
-            return None
-
-        self._train_factory = TrainFactory(self.agent.lg, registry_path)
-        return self._train_factory
+        See ``.with_chat_client()`` for the ownership and registry semantics.
+        Database has no owned lifecycle on this trait; ownership stays with
+        whoever built it (``TraitFactory`` in the standard path).
+        """
+        new = type(self)(
+            self.agent,
+            self.config,
+            database=database,
+            chat_client=self._client,
+            embedder=self._embedder,
+            owns_chat_client=False,
+            owns_embedder=False,
+        )
+        self.agent.lg.debug(
+            "memory trait detached with new database",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
+        return new
 
     # =========================================================================
     # Schema-aware client access
@@ -243,60 +315,15 @@ class LearnTrait(BaseTrait):
         """
         return self.kelt.with_schema(schema)
 
-    def resolve_schema_for_adapter(self, adapter_info: AdapterInfo) -> str:
-        """Resolve the schema for an adapter by looking up its manifest.
-
-        If `enforce=true` is set in schema config, always uses the config schema
-        regardless of the adapter's manifest.
-
-        Args:
-            adapter_info: Adapter info from LLM response.
-
-        Returns:
-            Schema name from manifest, or default schema if not found/not configured.
-        """
-        # Config override: if enforce=true, use config schema instead of manifest lookup
-        schema_config = self.config.get("schema", {})
-        if schema_config.get("enforce", False):
-            return self._default_schema
-
-        md5 = adapter_info.md5
-        if not md5:
-            self.agent.lg.debug("no md5 in adapter info, using default schema")
-            return self._default_schema
-
-        # Try manifest lookup (returns None if adapters not configured)
-        train_factory = self._get_train_factory()
-        if train_factory is None:
-            self.agent.lg.debug("no train factory, using default schema")
-            return self._default_schema
-
-        manifest = train_factory.manifest.get_manifest(md5)
-        if manifest and manifest.source and manifest.source.schema_name:
-            schema = str(manifest.source.schema_name)
-            self.agent.lg.trace("resolved schema from manifest", extra={"schema": schema})
-            return schema
-
-        raise ManifestNotFoundError(
-            f"Manifest lookup failed for md5={md5}. "
-            f"Cannot determine schema - refusing to use default to prevent data corruption."
-        )
-
     @property
-    def _default_schema(self) -> str:
-        """Get default schema from config (schema.name)."""
-        schema_config = self.config.get("schema", {})
+    def default_schema(self) -> str:
+        """Default schema name from config (schema.name), falling back to 'public'."""
+        schema_config = self.config.get("schema") or {}
         return str(schema_config.get("name") or "public")
 
     @property
     def kelt(self) -> KeltClient:
-        """Access the kelt client.
-
-        Raises:
-            RuntimeError: If trait not started.
-        """
-        if self._kelt is None:
-            raise RuntimeError("LearnTrait not started - ensure agent.start() was called")
+        """Access the kelt client."""
         return self._kelt
 
     @property
@@ -311,13 +338,7 @@ class LearnTrait(BaseTrait):
 
     @property
     def client(self) -> ChatClient:
-        """Access the LLM router.
-
-        Raises:
-            RuntimeError: If trait not started.
-        """
-        if self._client is None:
-            raise RuntimeError("LearnTrait not started - ensure agent.start() was called")
+        """Access the LLM router."""
         return self._client
 
     # =========================================================================
@@ -383,7 +404,7 @@ class LearnTrait(BaseTrait):
 
         if rag:
             if self._embedder is None:
-                raise ValueError("RAG requires embedder - configure embedder_url in LearnConfig")
+                raise ValueError("RAG requires embedder - configure embedder_url in MemoryConfig")
             return self.build_prompt_rag(
                 base_prompt=base_prompt,
                 query=query,
@@ -485,7 +506,7 @@ class LearnTrait(BaseTrait):
             ValueError: If embedder not configured.
         """
         if self._embedder is None:
-            raise ValueError("recall() requires embedder - configure embedder_url in LearnConfig")
+            raise ValueError("recall() requires embedder - configure embedder_url in MemoryConfig")
 
         embedding = self._embedder.embed(query)
         client = self.kelt if schema is None else self.kelt.with_schema(schema)
@@ -518,9 +539,6 @@ class LearnTrait(BaseTrait):
         Returns:
             System prompt with facts appended.
         """
-        if self._context is None:
-            raise RuntimeError("LearnTrait not started")
-
         return self._context.build_system_prompt(
             base_prompt=base_prompt,
             categories=categories,
@@ -548,8 +566,6 @@ class LearnTrait(BaseTrait):
         Raises:
             ValueError: If embedder not configured.
         """
-        if self._context is None:
-            raise RuntimeError("LearnTrait not started")
         if self._embedder is None:
             raise ValueError("build_prompt_rag() requires embedder")
 

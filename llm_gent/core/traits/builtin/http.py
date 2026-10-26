@@ -9,7 +9,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from queue import Empty
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from fastapi import APIRouter
 
@@ -65,14 +65,27 @@ class HTTPTrait(BaseTrait):
         agent.add_trait(HTTPTrait(agent, HTTPConfig(port=8080)))
         agent.start()
 
+    Dependency ownership: the trait builds its own ``HTTPServer`` at
+    construction from ``config`` + the agent's router factory — the trait
+    owns the server and stops it on ``on_stop``. Advanced callers (typically
+    tests) can inject a pre-built server via ``server=`` at construction;
+    ``owns_server=False`` keeps caller-owned server lifecycle. See
+    ``.with_server()`` for the immutable-view fluent form.
+
     Lifecycle:
-        - __init__(): Creates HTTPServer instance
+        - __init__(): builds HTTPServer (or takes an injected one)
         - on_start(): Starts server subprocess and IPC thread
-        - on_stop(): Stops IPC thread and server
+        - on_stop(): Stops IPC thread; stops the server iff owned
     """
 
     def __init__(
-        self, agent: Agent, config: HTTPConfig | None = None, handler: Any | None = None
+        self,
+        agent: Agent,
+        config: HTTPConfig | None = None,
+        handler: Any | None = None,
+        *,
+        server: HTTPServer | None = None,
+        owns_server: bool = False,
     ) -> None:
         """Initialize HTTP trait.
 
@@ -80,33 +93,44 @@ class HTTPTrait(BaseTrait):
             agent: The agent this trait belongs to.
             config: HTTP configuration.
             handler: Optional HTTP protocol handler (must implement complete, remember, etc.).
+            server: Pre-built ``HTTPServer`` for injection. When None, the
+                trait builds one from ``config`` + agent's router factory.
+            owns_server: If True, ``on_stop`` stops the server. Set
+                automatically to True when the trait builds its own server.
+                Injected servers default to False so the caller keeps the
+                lifecycle.
         """
         super().__init__(agent)
         self.config = config or HTTPConfig()
         self._handler = handler
+        if server is None:
+            self._server: HTTPServer | None = self._build_server(agent)
+            self._owns_server = True
+        else:
+            self._server = server
+            self._owns_server = owns_server
+        self._ipc_thread: threading.Thread | None = None
+        self._ipc_shutdown = threading.Event()
 
+        self.agent.lg.trace(
+            "HTTP server configured",
+            extra={"host": self.config.host, "port": self.config.port},
+        )
+
+    def _build_server(self, agent: Agent) -> HTTPServer:
+        """Build an HTTPServer from ``self.config`` + the agent's router factory."""
         from ....runtime.server.http import HTTPServer, HTTPServerConfig
 
         router_factory = self._get_router_factory(agent)
         title = self.config.title or f"{agent.name} API"
         description = self.config.description or f"HTTP API for {agent.name}"
-
         http_config = HTTPServerConfig(
             host=self.config.host,
             port=self.config.port,
             title=title,
             description=description,
         )
-        self._server: HTTPServer | None = HTTPServer(
-            self.agent.lg, http_config, router_factory=router_factory
-        )
-        self._ipc_thread: threading.Thread | None = None
-        self._ipc_shutdown = threading.Event()
-
-        self.agent.lg.info(
-            "HTTP server configured",
-            extra={"host": self.config.host, "port": self.config.port},
-        )
+        return HTTPServer(agent.lg, http_config, router_factory=router_factory)
 
     def _get_router_factory(self, agent: Agent) -> Callable[[], APIRouter]:
         """Get router factory from agent or use default."""
@@ -122,16 +146,58 @@ class HTTPTrait(BaseTrait):
         if self._server is None:
             raise RuntimeError("HTTPServer not initialized")
 
+        self.agent.lg.trace(
+            "starting HTTP trait...",
+            extra={
+                "agent": self.agent.name,
+                "owns_server": self._owns_server,
+                "host": self.config.host,
+                "port": self.config.port,
+            },
+        )
         self._server.start()
         self._start_ipc_thread()
-        self.agent.lg.info("HTTP server started")
+        self.agent.lg.trace(
+            "HTTP trait started",
+            extra={
+                "agent": self.agent.name,
+                "owns_server": self._owns_server,
+                "host": self.config.host,
+                "port": self.config.port,
+            },
+        )
 
     def on_stop(self) -> None:
-        """Stop IPC thread and HTTP server."""
+        """Stop IPC thread. Stop the server iff this trait owns it."""
+        self.agent.lg.trace(
+            "stopping HTTP trait...",
+            extra={"agent": self.agent.name, "owns_server": self._owns_server},
+        )
         self._stop_ipc_thread()
-        if self._server:
+        stopped_server = False
+        if self._owns_server and self._server:
             self._server.stop()
-            self.agent.lg.info("HTTP server stopped")
+            stopped_server = True
+        self.agent.lg.trace(
+            "HTTP trait stopped",
+            extra={"agent": self.agent.name, "stopped_server": stopped_server},
+        )
+
+    def with_server(self, server: HTTPServer) -> Self:
+        """Return a new trait bound to ``server``, detached from the registry.
+
+        Immutable-view fluent (mirrors ``LLMTrait.with_router``): ``self``
+        stays canonical for ``agent.get_trait(HTTPTrait)`` and its server is
+        unchanged. ``owns_server`` on the returned trait is False; the caller
+        retains stop responsibility. For a persistent swap, call
+        ``agent.replace_trait(new)``.
+        """
+        new = type(self)(self.agent, self.config, self._handler, server=server, owns_server=False)
+        self.agent.lg.debug(
+            "HTTP trait detached with new server",
+            extra={"agent": self.agent.name, "detached_from_registry": True},
+        )
+        return new
 
     @property
     def server(self) -> HTTPServer | None:

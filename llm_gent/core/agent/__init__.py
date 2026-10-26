@@ -4,16 +4,16 @@
 """Agent package - core agent abstractions and implementations."""
 
 from .agent import Agent
-from .config import Config
-from .factory import Factory
+from .factory import AgentFactory
 from .identity import Identity
+from .runnable import RunnableAgent
 from .types import ExecutionResult
 
 
 __all__ = [
     "Agent",
-    "Config",
+    "AgentFactory",
     "ExecutionResult",
-    "Factory",
     "Identity",
+    "RunnableAgent",
 ]

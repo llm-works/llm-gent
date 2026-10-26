@@ -7,14 +7,16 @@ from enum import StrEnum
 
 from .base import BaseTrait, Trait
 from .builtin import (
+    CostTrait,
     Directive,
     DirectiveTrait,
     HTTPConfig,
     HTTPTrait,
-    LearnConfig,
-    LearnTrait,
     LLMConfig,
     LLMTrait,
+    ManifestNotFoundError,
+    MemoryConfig,
+    MemoryTrait,
     MethodTrait,
     RatingConfig,
     RatingTrait,
@@ -22,8 +24,10 @@ from .builtin import (
     SAIATrait,
     StorageTrait,
     ToolsTrait,
+    TrainingConfig,
+    TrainingTrait,
 )
-from .factory import Factory
+from .factory import TraitFactory
 from .registry import Registry
 
 
@@ -34,28 +38,32 @@ class TraitName(StrEnum):
     Agents can declare required/optional traits using these enum values.
     """
 
+    COST = "cost"
     DIRECTIVE = "directive"
     LLM = "llm"
-    LEARN = "learn"
+    MEMORY = "memory"
     HTTP = "http"
     RATING = "rating"
     SAIA = "saia"
     STORAGE = "storage"
     TOOLS = "tools"
     METHOD = "method"
+    TRAINING = "training"
 
 
 # All trait types available in the platform
 ALL_TRAITS: list[TraitName] = [
+    TraitName.COST,
     TraitName.DIRECTIVE,
     TraitName.LLM,
-    TraitName.LEARN,
+    TraitName.MEMORY,
     TraitName.HTTP,
     TraitName.RATING,
     TraitName.SAIA,
     TraitName.STORAGE,
     TraitName.TOOLS,
     TraitName.METHOD,
+    TraitName.TRAINING,
 ]
 
 
@@ -67,8 +75,10 @@ __all__ = [
     "TraitName",
     "ALL_TRAITS",
     # Factory & Registry
-    "Factory",
     "Registry",
+    "TraitFactory",
+    # Cost
+    "CostTrait",
     # Directive/Method
     "Directive",
     "DirectiveTrait",
@@ -76,12 +86,12 @@ __all__ = [
     # HTTP
     "HTTPConfig",
     "HTTPTrait",
-    # Learn
-    "LearnConfig",
-    "LearnTrait",
     # LLM
     "LLMConfig",
     "LLMTrait",
+    # Memory
+    "MemoryConfig",
+    "MemoryTrait",
     # Rating
     "RatingConfig",
     "RatingTrait",
@@ -92,4 +102,8 @@ __all__ = [
     "StorageTrait",
     # Tools
     "ToolsTrait",
+    # Training (adapter manifest / schema resolution)
+    "ManifestNotFoundError",
+    "TrainingConfig",
+    "TrainingTrait",
 ]

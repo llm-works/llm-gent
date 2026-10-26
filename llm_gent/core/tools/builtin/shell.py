@@ -5,29 +5,18 @@
 
 from __future__ import annotations
 
-import re
+import shlex
 import subprocess
 from typing import Any
 
 from ..base import BaseTool, ToolResult
 
 
-# Shell metacharacters that enable command chaining/injection
-_SHELL_METACHAR_PATTERN = re.compile(
-    r"""
-    ;           |  # command separator
-    &&          |  # AND operator
-    \|\|        |  # OR operator
-    \|          |  # pipe
-    \$[\(\{]    |  # command/variable substitution $() or ${}
-    \$[A-Za-z_] |  # variable reference $VAR
-    `           |  # backtick command substitution
-    \n          |  # newline (command separator)
-    &\s*$       |  # background execution at end
-    >           |  # output redirection (includes >>)
-    <              # input redirection (includes << heredoc)
-    """,
-    re.VERBOSE,
+_ALLOWLIST_DESCRIPTION = (
+    "Run a command and return its output. "
+    "The command runs without a shell, in the configured working directory: "
+    "no pipes, redirects, globs, variables or command chaining; quote "
+    "arguments that contain spaces. Only allowed commands run."
 )
 
 
@@ -37,10 +26,14 @@ class ShellTool(BaseTool):
     Allows the agent to run shell commands and receive their output.
     Useful for git operations, file system exploration, running tests, etc.
 
-    Security Note:
-        This tool executes arbitrary shell commands. Only use in trusted
-        environments where the LLM's actions are acceptable. Consider
-        sandboxing or command allowlists for production use.
+    Without ``allowed_commands`` the command runs in a shell: the agent can
+    do anything the shell can. With it, the command is split into
+    arguments (:func:`shlex.split`) and its program runs without a shell,
+    so pipes, redirects, globs, variables and chaining are plain arguments;
+    the program must be in the list. Each listed program is fully trusted:
+    the agent can do whatever it can (``find -exec`` and git aliases run
+    other programs). ``working_dir`` is where commands start, not a
+    boundary; confining the agent to it is the deployment's job.
 
     Example:
         tool = ShellTool(working_dir="/path/to/repo")
@@ -78,13 +71,15 @@ class ShellTool(BaseTool):
             working_dir: Working directory for commands. Defaults to current dir.
             timeout: Command timeout in seconds. Defaults to 30.
             max_output_chars: Maximum output characters to return. Defaults to 50000.
-            allowed_commands: If set, only these command prefixes are allowed.
-                              E.g., ["git", "ls", "grep"] allows git/ls/grep commands.
+            allowed_commands: If set, only these programs run, without a shell.
+                              E.g., ["ls", "grep"] allows ls and grep.
         """
         self._working_dir = working_dir
         self._timeout = timeout
         self._max_output_chars = max_output_chars
         self._allowed_commands = allowed_commands
+        if allowed_commands:
+            self.description = _ALLOWLIST_DESCRIPTION
 
     def execute(self, **kwargs: Any) -> ToolResult:
         """Execute a shell command.
@@ -101,43 +96,35 @@ class ShellTool(BaseTool):
                 success=False, output="", error="Missing or invalid 'command' argument"
             )
 
-        if error := self._check_allowed(command):
-            return error
-
-        return self._run_command(command)
-
-    def _check_allowed(self, command: str) -> ToolResult | None:
-        """Check if command is in allowed list. Returns error result if not allowed."""
         if not self._allowed_commands:
-            return None
+            return self._run_command(command)
+        argv = self._allowed_argv(self._allowed_commands, command)
+        if isinstance(argv, ToolResult):
+            return argv
+        return self._run_command(argv)
 
-        # Reject commands with shell metacharacters that could bypass allowlist
-        if _SHELL_METACHAR_PATTERN.search(command):
-            return ToolResult(
-                success=False,
-                output="",
-                error="Command contains shell metacharacters (;, &&, ||, |, $(), `) "
-                "which are not allowed when command allowlist is enabled",
-            )
-
-        parts = command.split()
-        if not parts:
+    def _allowed_argv(self, allowed: list[str], command: str) -> list[str] | ToolResult:
+        """The command's arguments when its program is allowed, else the error."""
+        try:
+            argv = shlex.split(command)
+        except ValueError as e:
+            return ToolResult(success=False, output="", error=f"Cannot parse command: {e}")
+        if not argv:
             return ToolResult(success=False, output="", error="Empty command")
-        cmd_prefix = parts[0]
-        if cmd_prefix not in self._allowed_commands:
+        if argv[0] not in allowed:
             return ToolResult(
                 success=False,
                 output="",
-                error=f"Command '{cmd_prefix}' not in allowed list: {self._allowed_commands}",
+                error=f"Command '{argv[0]}' not in allowed list: {allowed}",
             )
-        return None
+        return argv
 
-    def _run_command(self, command: str) -> ToolResult:
-        """Run the shell command and return result."""
+    def _run_command(self, command: str | list[str]) -> ToolResult:
+        """Run ``command``: a string in a shell, an argument list without one."""
         try:
             result = subprocess.run(
                 command,
-                shell=True,
+                shell=isinstance(command, str),
                 cwd=self._working_dir,
                 capture_output=True,
                 text=True,

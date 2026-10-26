@@ -10,6 +10,7 @@ import pytest
 
 from llm_gent import (
     BaseTool,
+    FetchResult,
     FileReadTool,
     FileWriteTool,
     HTTPFetchTool,
@@ -215,64 +216,58 @@ class TestShellTool:
         assert result.success is False
         assert "Empty command" in result.error
 
-    def test_shell_metacharacters_blocked_with_allowlist(self):
-        """Shell metacharacters are blocked when allowlist is enabled to prevent bypass."""
-        tool = ShellTool(allowed_commands=["echo", "ls"])
+    @pytest.mark.parametrize(
+        "syntax",
+        [
+            "; touch {m}",
+            "&& touch {m}",
+            "|| touch {m}",
+            "| touch {m}",
+            "& touch {m}",
+            "$(touch {m})",
+            "`touch {m}`",
+            "> {m}",
+            ">> {m}",
+        ],
+    )
+    def test_shell_syntax_is_plain_arguments_with_allowlist(self, tmp_path, syntax):
+        """With an allowlist nothing runs in a shell: chaining, substitution and redirects run nothing."""
+        marker = tmp_path / "marker"
+        tool = ShellTool(allowed_commands=["echo"])
 
-        # Command chaining with semicolon
-        result = tool.execute(command="echo hello; rm -rf /")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        result = tool.execute(command=f"echo hello {syntax.format(m=marker)}")
 
-        # Command chaining with &&
-        result = tool.execute(command="echo hello && cat /etc/passwd")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        assert result.success is True
+        assert result.output.startswith("hello ")
+        assert not marker.exists()
 
-        # Pipe
-        result = tool.execute(command="ls | grep secret")
-        assert result.success is False
-        assert "metacharacters" in result.error
+    def test_variables_are_not_expanded_with_allowlist(self):
+        tool = ShellTool(allowed_commands=["echo"])
 
-        # Command substitution
-        result = tool.execute(command="echo $(whoami)")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        result = tool.execute(command="echo $HOME ${PATH}")
 
-        # Backticks
-        result = tool.execute(command="echo `id`")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        assert result.output.strip() == "$HOME ${PATH}"
 
-        # Variable expansion with braces ${VAR}
-        result = tool.execute(command="echo ${PATH}")
-        assert result.success is False
-        assert "metacharacters" in result.error
+    def test_quoted_arguments_with_allowlist(self, tmp_path):
+        (tmp_path / "a file.txt").write_text("needle here\n")
+        tool = ShellTool(working_dir=str(tmp_path), allowed_commands=["grep"])
 
-        # Variable reference $VAR
-        result = tool.execute(command="echo $HOME")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        result = tool.execute(command="grep -n 'needle here' 'a file.txt'")
 
-        # Output redirection
-        result = tool.execute(command="echo x > /tmp/test")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        assert result.success is True
+        assert result.output.strip() == "1:needle here"
 
-        # Append redirection
-        result = tool.execute(command="echo x >> /tmp/test")
-        assert result.success is False
-        assert "metacharacters" in result.error
+    def test_unbalanced_quotes_are_rejected_with_allowlist(self):
+        tool = ShellTool(allowed_commands=["echo"])
 
-        # Input redirection
-        result = tool.execute(command="cat < /etc/passwd")
-        assert result.success is False
-        assert "metacharacters" in result.error
+        result = tool.execute(command="echo 'unterminated")
 
-        # Heredoc
-        result = tool.execute(command="cat << EOF")
         assert result.success is False
-        assert "metacharacters" in result.error
+        assert "Cannot parse command" in result.error
+
+    def test_allowlist_description_says_no_shell(self):
+        assert "without a shell" in ShellTool(allowed_commands=["ls"]).description
+        assert "without a shell" not in ShellTool().description
 
     def test_invalid_command_type(self):
         """Non-string command argument is rejected."""
@@ -1277,6 +1272,185 @@ class TestHTTPFetchTool:
         assert "dns" in result.error.lower() or "resolution" in result.error.lower()
 
 
+_DNS = {
+    "site.example": "93.184.216.10",
+    "other.example": "93.184.216.20",
+    "www.example": "93.184.216.30",
+    "intranet.example": "10.0.0.5",
+}
+
+
+def _resolve(host: str, *_: object) -> list[tuple[object, ...]]:
+    """socket.getaddrinfo over the _DNS table."""
+    import socket
+
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_DNS[host], 0))]
+
+
+class _Site:
+    """Stands in for httpx.Client: answers GETs from a URL -> (status, headers, body)
+    table and records every request it was sent, with the Cookie header the
+    client's jar would add."""
+
+    def __init__(self, routes: dict[str, tuple[int, dict[str, str], str]]) -> None:
+        self.routes = routes
+        self.sent: list[httpx.Request] = []
+
+    def client(self, **kwargs: object) -> MagicMock:
+        cookies = kwargs.get("cookies")
+        client = MagicMock()
+        client.__enter__.return_value.get.side_effect = lambda url, headers: self._get(
+            url, headers, cookies
+        )
+        return client
+
+    def _get(self, url: str, headers: dict[str, str], cookies: object) -> httpx.Response:
+        request = httpx.Request("GET", url, headers=headers)
+        if isinstance(cookies, httpx.Cookies):
+            cookies.set_cookie_header(request)
+        self.sent.append(request)
+        status, response_headers, body = self.routes[url]
+        return httpx.Response(status, headers=response_headers, text=body, request=request)
+
+
+class TestHTTPFetchRedirects:
+    """HTTPFetchTool follows redirects; every hop is checked like the requested URL."""
+
+    def _fetch(
+        self, site: _Site, url: str, tool: HTTPFetchTool | None = None, **kwargs: object
+    ) -> ToolResult:
+        with (
+            patch("llm_gent.core.tools.builtin.http.socket.getaddrinfo", side_effect=_resolve),
+            patch("llm_gent.core.tools.builtin.http.httpx.Client", side_effect=site.client),
+        ):
+            return (tool or HTTPFetchTool()).execute(url=url, **kwargs)
+
+    def test_a_303_to_a_public_page_returns_that_page_and_its_url(self):
+        site = _Site(
+            {
+                "https://site.example/a": (303, {"location": "https://www.example/a"}, ""),
+                "https://www.example/a": (200, {}, "the page"),
+            }
+        )
+        result = self._fetch(site, "https://site.example/a")
+        assert isinstance(result, FetchResult)
+        assert (result.success, result.output, result.url) == (
+            True,
+            "the page",
+            "https://www.example/a",
+        )
+
+    def test_a_response_without_redirects_carries_the_requested_url(self):
+        site = _Site({"https://site.example/a": (200, {}, "body")})
+        result = self._fetch(site, "https://site.example/a")
+        assert isinstance(result, FetchResult)
+        assert result.url == "https://site.example/a"
+
+    def test_a_cookie_set_by_a_redirect_is_sent_on_the_next_hop(self):
+        """A cookie round trip: the redirect sets a cookie and points back."""
+        site = _Site(
+            {
+                "https://site.example/a": (
+                    303,
+                    {"location": "/a?check", "set-cookie": "session=s1; Path=/"},
+                    "",
+                ),
+                "https://site.example/a?check": (200, {}, "the page"),
+            }
+        )
+        result = self._fetch(site, "https://site.example/a")
+        assert result.output == "the page"
+        assert site.sent[1].headers.get("cookie") == "session=s1"
+
+    def test_a_relative_location_resolves_against_the_current_url(self):
+        site = _Site(
+            {
+                "https://site.example/x/a": (302, {"location": "../b"}, ""),
+                "https://site.example/b": (200, {}, "b"),
+            }
+        )
+        assert self._fetch(site, "https://site.example/x/a").output == "b"
+
+    def test_a_redirect_to_a_private_ip_is_refused_before_any_request(self):
+        site = _Site(
+            {"https://site.example/a": (302, {"location": "http://intranet.example/page"}, "")}
+        )
+        result = self._fetch(site, "https://site.example/a")
+        assert result.success is False
+        assert "http://intranet.example/page" in result.error
+        assert "private" in result.error
+        assert [str(r.url) for r in site.sent] == ["https://site.example/a"]
+
+    def test_a_redirect_to_a_blocked_domain_is_refused(self):
+        site = _Site({"https://site.example/a": (302, {"location": "https://www.example/"}, "")})
+        tool = HTTPFetchTool(blocked_domains=["www.example"])
+        result = self._fetch(site, "https://site.example/a", tool)
+        assert result.success is False
+        assert "blocked" in result.error
+        assert len(site.sent) == 1
+
+    def test_a_redirect_outside_the_allowed_domains_is_refused(self):
+        site = _Site({"https://site.example/a": (302, {"location": "https://www.example/"}, "")})
+        tool = HTTPFetchTool(allowed_domains=["site.example"])
+        result = self._fetch(site, "https://site.example/a", tool)
+        assert result.success is False
+        assert "not in allowed list" in result.error
+        assert len(site.sent) == 1
+
+    def test_a_redirect_to_a_non_http_scheme_is_refused(self):
+        site = _Site({"https://site.example/a": (302, {"location": "ftp://files.example/a"}, "")})
+        result = self._fetch(site, "https://site.example/a")
+        assert result.success is False
+        assert "scheme" in result.error
+        assert len(site.sent) == 1
+
+    def test_more_redirects_than_the_limit_is_an_error(self):
+        site = _Site(
+            {f"https://site.example/{i}": (302, {"location": f"/{i + 1}"}, "") for i in range(4)}
+        )
+        result = self._fetch(site, "https://site.example/0", HTTPFetchTool(max_redirects=2))
+        assert result.success is False
+        assert result.error == "Too many redirects (more than 2)"
+        assert len(site.sent) == 3
+
+    def test_max_redirects_zero_returns_the_redirect_as_the_response(self):
+        site = _Site({"https://site.example/a": (303, {"location": "/b"}, "see other")})
+        result = self._fetch(site, "https://site.example/a", HTTPFetchTool(max_redirects=0))
+        assert isinstance(result, FetchResult)
+        assert result.success is False
+        assert result.error == "HTTP 303: See Other"
+        assert result.url == "https://site.example/a"
+
+    def test_a_negative_max_redirects_is_rejected(self):
+        with pytest.raises(ValueError, match="max_redirects"):
+            HTTPFetchTool(max_redirects=-1)
+
+    def test_a_redirect_without_location_is_the_response(self):
+        site = _Site({"https://site.example/a": (302, {}, "nowhere")})
+        result = self._fetch(site, "https://site.example/a")
+        assert result.success is False
+        assert result.error == "HTTP 302: Found"
+        assert len(site.sent) == 1
+
+    def test_credentials_stay_with_their_origin(self):
+        """Same-origin hops keep Authorization; a hop to another host drops it."""
+        site = _Site(
+            {
+                "https://site.example/a": (302, {"location": "/b"}, ""),
+                "https://site.example/b": (302, {"location": "https://other.example/c"}, ""),
+                "https://other.example/c": (200, {}, "done"),
+            }
+        )
+        tool = HTTPFetchTool(default_headers={"User-Agent": "TestBot/1.0"})
+        result = self._fetch(
+            site, "https://site.example/a", tool, headers={"Authorization": "Bearer t"}
+        )
+        assert result.output == "done"
+        auth = [r.headers.get("authorization") for r in site.sent]
+        assert auth == ["Bearer t", "Bearer t", None]
+        assert site.sent[2].headers["user-agent"] == "TestBot/1.0"
+
+
 # Note: Tool execution loop tests have been moved to llm-saia.
 # SAIA now handles the LLM ↔ tool interaction loop.
 
@@ -1286,18 +1460,18 @@ class TestRememberTool:
 
     def test_remember_success(self):
         """Store a fact successfully."""
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.remember.return_value = 42
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.remember.return_value = 42
 
-        tool = RememberTool(mock_learn_trait)
+        tool = RememberTool(mock_memory_trait)
         result = tool.execute(fact="User prefers Python")
 
         assert result.success is True
         assert "42" in result.output
         assert "User prefers Python" in result.output
-        mock_learn_trait.remember.assert_called_once_with(
+        mock_memory_trait.remember.assert_called_once_with(
             fact="User prefers Python",
             category="general",
             source="inferred",
@@ -1305,16 +1479,16 @@ class TestRememberTool:
 
     def test_remember_with_category(self):
         """Store a fact with category."""
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.remember.return_value = 123
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.remember.return_value = 123
 
-        tool = RememberTool(mock_learn_trait)
+        tool = RememberTool(mock_memory_trait)
         result = tool.execute(fact="Uses vim", category="preferences")
 
         assert result.success is True
-        mock_learn_trait.remember.assert_called_once_with(
+        mock_memory_trait.remember.assert_called_once_with(
             fact="Uses vim",
             category="preferences",
             source="inferred",
@@ -1322,12 +1496,12 @@ class TestRememberTool:
 
     def test_remember_failure(self):
         """Handle store failure gracefully."""
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.remember.side_effect = RuntimeError("Database error")
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.remember.side_effect = RuntimeError("Database error")
 
-        tool = RememberTool(mock_learn_trait)
+        tool = RememberTool(mock_memory_trait)
         result = tool.execute(fact="Some fact")
 
         assert result.success is False
@@ -1335,10 +1509,10 @@ class TestRememberTool:
 
     def test_tool_properties(self):
         """Tool has correct properties."""
-        from llm_gent.core.tools.builtin.learn import RememberTool
+        from llm_gent.core.tools.builtin.memory import RememberTool
 
-        mock_learn_trait = MagicMock()
-        tool = RememberTool(mock_learn_trait)
+        mock_memory_trait = MagicMock()
+        tool = RememberTool(mock_memory_trait)
 
         assert tool.name == "remember"
         assert "fact" in tool.parameters["properties"]
@@ -1351,7 +1525,7 @@ class TestRecallTool:
 
     def test_recall_with_embedder(self):
         """Search facts using semantic search."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
         mock_fact = MagicMock()
         mock_fact.content = "User prefers Python"
@@ -1361,21 +1535,21 @@ class TestRecallTool:
         mock_scored_entity.entity = mock_fact
         mock_scored_entity.score = 0.85
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = True
-        mock_learn_trait.recall.return_value = [mock_scored_entity]
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = True
+        mock_memory_trait.recall.return_value = [mock_scored_entity]
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         result = tool.execute(query="programming language")
 
         assert result.success is True
         assert "User prefers Python" in result.output
         assert "0.85" in result.output
-        mock_learn_trait.recall.assert_called_once()
+        mock_memory_trait.recall.assert_called_once()
 
     def test_recall_without_embedder(self):
         """Fall back to listing facts without semantic search."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
         mock_fact = MagicMock()
         mock_fact.content = "Uses vim"
@@ -1389,11 +1563,11 @@ class TestRecallTool:
         mock_learn = MagicMock()
         mock_learn.atomic = mock_atomic
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = False
-        mock_learn_trait.kelt = mock_learn
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = False
+        mock_memory_trait.kelt = mock_learn
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         result = tool.execute(query="editor")
 
         assert result.success is True
@@ -1401,13 +1575,13 @@ class TestRecallTool:
 
     def test_recall_no_results(self):
         """Handle no matching facts."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = True
-        mock_learn_trait.recall.return_value = []
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = True
+        mock_memory_trait.recall.return_value = []
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         result = tool.execute(query="nonexistent topic")
 
         assert result.success is True
@@ -1415,16 +1589,16 @@ class TestRecallTool:
 
     def test_recall_with_category_filter(self):
         """Filter recall by category."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = True
-        mock_learn_trait.recall.return_value = []
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = True
+        mock_memory_trait.recall.return_value = []
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         tool.execute(query="test", category="preferences")
 
-        mock_learn_trait.recall.assert_called_once_with(
+        mock_memory_trait.recall.assert_called_once_with(
             query="test",
             top_k=5,
             min_similarity=0.3,
@@ -1433,13 +1607,13 @@ class TestRecallTool:
 
     def test_recall_failure(self):
         """Handle recall failure gracefully."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        mock_learn_trait = MagicMock()
-        mock_learn_trait.has_embedder = True
-        mock_learn_trait.recall.side_effect = RuntimeError("Embedder error")
+        mock_memory_trait = MagicMock()
+        mock_memory_trait.has_embedder = True
+        mock_memory_trait.recall.side_effect = RuntimeError("Embedder error")
 
-        tool = RecallTool(mock_learn_trait)
+        tool = RecallTool(mock_memory_trait)
         result = tool.execute(query="test")
 
         assert result.success is False
@@ -1447,10 +1621,10 @@ class TestRecallTool:
 
     def test_tool_properties(self):
         """Tool has correct properties."""
-        from llm_gent.core.tools.builtin.learn import RecallTool
+        from llm_gent.core.tools.builtin.memory import RecallTool
 
-        mock_learn_trait = MagicMock()
-        tool = RecallTool(mock_learn_trait)
+        mock_memory_trait = MagicMock()
+        tool = RecallTool(mock_memory_trait)
 
         assert tool.name == "recall"
         assert "query" in tool.parameters["properties"]

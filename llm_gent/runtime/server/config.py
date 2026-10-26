@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from appinfra import DotDict
 from appinfra.app.fastapi.config import ApiConfig
 from pydantic import BaseModel, Field
 
@@ -138,6 +139,49 @@ class AgentConfigYAML(BaseModel):
 
     # Allow extra fields (rating, max_retries, etc.) to pass through from YAML
     model_config = {"populate_by_name": True, "extra": "allow"}
+
+    def factory_config(self, name: str) -> DotDict:
+        """The config an agent factory builds agent ``name`` from, as ``llm-gent serve`` passes it.
+
+        Programmatic agents get module, factory and config; prompt agents
+        get conversation and events. Fields this schema does not declare
+        (rating, max_retries, …) pass through unchanged.
+        """
+        config = DotDict()
+        config["name"] = name
+        config["type"] = self.type_
+        config["execution"] = self.execution
+        config["task"] = self.task.model_dump()
+        config["identity"] = self.identity
+        self._add_type_fields(config)
+        self._add_optional_fields(config)
+        if self.__pydantic_extra__:
+            config.update(self.__pydantic_extra__)
+        return config
+
+    def _add_type_fields(self, config: DotDict) -> None:
+        """Add the fields of a programmatic or a prompt agent."""
+        if self.type_ == "programmatic":
+            config["module"] = self.module
+            config["factory"] = self.factory
+            config["config"] = self.config
+            return
+        config["conversation"] = self.conversation
+        if self.events:
+            config["events"] = {name: handler.model_dump() for name, handler in self.events.items()}
+
+    def _add_optional_fields(self, config: DotDict) -> None:
+        """Add directive, method, tools and schedule when set."""
+        if self.directive is not None:
+            config["directive"] = (
+                self.directive if isinstance(self.directive, str) else self.directive.model_dump()
+            )
+        if self.method is not None:
+            config["method"] = self.method
+        if self.tools:
+            config["tools"] = self.tools
+        if self.schedule is not None:
+            config["schedule"] = self.schedule.model_dump()
 
 
 class HubConfigYAML(BaseModel):

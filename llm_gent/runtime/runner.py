@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from appinfra.log import Logger
 
     from ..bus.transport import WorkerBusConfig, ZMQWorkerBus
-    from ..core.agent import Agent
+    from ..core.agent import RunnableAgent
 
 
 # =============================================================================
@@ -344,9 +344,9 @@ class BaseAgentRunner(ABC):
 
 
 class _AgentHandler:
-    """Adapts an Agent instance to the Handler protocol."""
+    """Adapts a RunnableAgent instance to the Handler protocol."""
 
-    def __init__(self, agent: Agent) -> None:
+    def __init__(self, agent: RunnableAgent) -> None:
         self._agent = agent
 
     def on_ask(self, question: str) -> str:
@@ -370,7 +370,7 @@ class ManagedAgentRunner(BaseAgentRunner):
     def __init__(
         self,
         lg: Logger,
-        agent: Agent,
+        agent: RunnableAgent,
         bus_config: WorkerBusConfig,
         schedule_interval: float | None = None,
     ) -> None:

@@ -1,13 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Agent factory base class and configuration utilities."""
+"""Agent factory base class and configuration utilities.
+
+Config schema (agent-config dict passed to ``create`` / ``from_config``):
+
+    {
+        "identity":  {"name": str, "context_key": str | None},   # required
+        "llm":       str | dict,                                  # LLMTrait reads
+        "directive": str | dict,                                  # DirectiveTrait reads
+        "method":    str,                                         # MethodTrait reads
+        "kelt":      dict,                                        # Memory/Training read
+        "tools":     {name: config, ...},                         # ToolsTrait reads
+        "traits":    {"required": [name, ...]},                   # selects traits to attach
+    }
+
+Trait selection: ``config["traits"]["required"]`` (list of trait names, wins)
+or the factory-class ``required_traits`` class variable. Each builtin trait
+reads its own top-level key from ``agent.config``; nesting under
+``traits.<name>`` is NOT recognized.
+
+Two construction paths:
+
+- ``AgentFactory(lg)`` — bare-Logger tutorial path. Synthesizes an empty
+  ``PlatformContext(lg, {})``; platform-level ``llm`` / ``learn`` blocks are
+  empty, so the full trait configuration must live in the agent-config.
+- ``AgentFactory(platform)`` — advanced/multi-agent path. Uses the supplied
+  ``PlatformContext``; agent-config keys override platform-level defaults.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from appinfra import DotDict
+from appinfra.log import Logger
 
 from ..errors import ConfigError, TraitNotFoundError
 from ..traits import TraitName
@@ -19,45 +46,53 @@ if TYPE_CHECKING:
     from ..platform import PlatformContext
 
 
-class Factory:
-    """Base factory for agents with standard initialization.
+class AgentFactory:
+    """Factory for creating :class:`Agent` instances from configuration.
 
-    This factory handles common patterns:
-    - Parses identity → constructs Identity
-    - Extracts config params → passes to agent __init__
-    - Creates and attaches traits based on requirements
-    - Configures tools from YAML or factory defaults
+    Default construction returns a plain :class:`Agent` — no subclass
+    required. Advanced setups (custom agent class, factory-level trait
+    requirements, default tools) subclass and override the class variables.
 
-    Trait Requirements (3 ways, priority order):
-        1. YAML config (highest priority):
-            traits:
-              required: [llm, learn]
+    Trait requirements (priority order):
+        1. Config: ``config["traits"]["required"] = ["llm", ...]``
+        2. Class variable: ``required_traits = [TraitName.LLM, ...]``
+        3. None — agent starts without traits.
 
-        2. Factory class variable:
-            class CustomFactory(Factory):
-                agent_class = MyAgent
-                required_traits = [TraitName.LLM, TraitName.LEARN]
+    Tool configuration (priority order):
+        1. Config: ``config["tools"] = {name: cfg, ...}``
+        2. Class variable: ``default_tools = {name: cfg, ...}``
 
-        3. No requirements (agent handles validation in code)
+    Tutorial-shape usage (bare Logger, no subclass, no PlatformContext)::
 
-    Tool Configuration (2 ways, priority order):
-        1. YAML config (highest priority):
-            tools:
-              remember: {}
-              recall: {}
+        from llm_gent import AgentFactory, LLMTrait
+        from appinfra.log import create_lg
 
-        2. Factory class variable:
-            class CustomFactory(Factory):
-                agent_class = MyAgent
-                default_tools = {"remember": {}, "recall": {}}
+        lg = create_lg("hello", "info")
+        agent = AgentFactory(lg).from_config({
+            "identity": {"name": "hello"},
+            "llm": {"default": "local", "backends": {...}},
+            "directive": "You are a helpful assistant.",
+            "traits": {"required": ["llm", "directive"]},
+        })
+        agent.start()
+        result = agent.require_trait(LLMTrait).complete(
+            [{"role": "user", "content": "Say hello."}]
+        )
+        agent.stop()
 
-    Usage:
-        class CustomFactory(Factory):
-            agent_class = MyAgent  # Just specify your agent class
+    Advanced multi-agent usage::
+
+        class CustomFactory(AgentFactory):
+            agent_class = MyAgent
+            required_traits = [TraitName.LLM, TraitName.MEMORY]
+
+        platform = PlatformContext.from_config(lg, llm_cfg, learn_cfg)
+        agent = CustomFactory(platform).create(config)
     """
 
-    # Subclasses must set this
-    agent_class: ClassVar[type[Agent]] = None  # type: ignore[assignment]
+    # Default agent class; subclasses override to instantiate custom Agent subclasses.
+    # Typed as Optional so subclasses can set None to trigger the ConfigError guard.
+    agent_class: ClassVar[type[Agent] | None] = Agent
 
     # Optional: declare required traits at factory level
     required_traits: ClassVar[list[TraitName]] = []
@@ -69,14 +104,42 @@ class Factory:
     # When set, enables: ./llm-gent.py agent <agent-name> <command>
     cli_tool: ClassVar[type | None] = None
 
-    def __init__(self, platform: PlatformContext) -> None:
-        """Initialize factory with platform context.
+    def __init__(self, platform: Logger | PlatformContext) -> None:
+        """Initialize factory with a Logger or PlatformContext.
 
         Args:
-            platform: Platform context with all resources.
+            platform: Either a bare :class:`Logger` (tutorial path — an
+                empty :class:`PlatformContext` is synthesized, so all trait
+                config must live in agent-config) or a fully-configured
+                :class:`PlatformContext` (advanced path — platform-level
+                configs are exposed to trait creators). Parameter name
+                retained as ``platform`` for compatibility with existing
+                keyword callers.
         """
-        self._platform = platform
-        self._lg = platform.logger
+        from ..platform import PlatformContext
+
+        if isinstance(platform, Logger):
+            self._platform = PlatformContext(lg=platform, config={})
+        else:
+            self._platform = platform
+        self._lg = self._platform.logger
+
+    def from_config(self, config: dict[str, Any]) -> Agent:
+        """Build and wire an agent from a plain dict config.
+
+        Convenience wrapper over :meth:`create`: accepts a raw dict (the
+        tutorial-shape entry point) and returns the un-started agent. The
+        caller is expected to call ``agent.start()`` / ``agent.stop()``
+        (or use ``async with agent``).
+
+        Args:
+            config: Agent config (see module docstring for the schema).
+
+        Returns:
+            Configured agent, traits attached, not yet started.
+        """
+        dotdict = config if isinstance(config, DotDict) else DotDict(config)
+        return self.create(dotdict)
 
     def create(
         self,
@@ -194,23 +257,25 @@ class Factory:
         """Build mapping from trait names to trait classes for validation."""
         from ..traits.builtin.directive import DirectiveTrait, MethodTrait
         from ..traits.builtin.http import HTTPTrait
-        from ..traits.builtin.learn import LearnTrait
         from ..traits.builtin.llm import LLMTrait
+        from ..traits.builtin.memory import MemoryTrait
         from ..traits.builtin.rating import RatingTrait
         from ..traits.builtin.saia import SAIATrait
         from ..traits.builtin.storage import StorageTrait
         from ..traits.builtin.tools import ToolsTrait
+        from ..traits.builtin.training import TrainingTrait
 
         return {
             TraitName.DIRECTIVE: DirectiveTrait,
             TraitName.LLM: LLMTrait,
-            TraitName.LEARN: LearnTrait,
+            TraitName.MEMORY: MemoryTrait,
             TraitName.RATING: RatingTrait,
             TraitName.STORAGE: StorageTrait,
             TraitName.METHOD: MethodTrait,
             TraitName.HTTP: HTTPTrait,
             TraitName.SAIA: SAIATrait,
             TraitName.TOOLS: ToolsTrait,
+            TraitName.TRAINING: TrainingTrait,
         }
 
     def _validate_trait_requirements(
@@ -241,7 +306,7 @@ class Factory:
         if missing:
             raise TraitNotFoundError(
                 f"{agent.name} requires traits {missing} but they were not created. "
-                f"Check platform configuration (e.g., 'learn' section for LearnTrait)."
+                f"Check platform configuration (e.g., 'learn' section for MemoryTrait)."
             )
 
     def _configure_tools(self, agent: Agent, config: DotDict) -> None:
@@ -256,7 +321,7 @@ class Factory:
             agent: Agent instance.
             config: Full config dict from manifest.
         """
-        from ..traits.builtin.learn import LearnTrait
+        from ..traits.builtin.memory import MemoryTrait
         from ..traits.builtin.tools import ToolsTrait
 
         # Determine which tools to configure
@@ -264,10 +329,10 @@ class Factory:
         if not tools_config:
             return
 
-        # Bind LearnTrait to platform.tool_factory if available
-        learn_trait = agent.get_trait(LearnTrait)
-        if learn_trait:
-            self._platform.tool_factory.set_learn_trait(learn_trait)
+        # Bind MemoryTrait to platform.tool_factory if available
+        memory_trait = agent.get_trait(MemoryTrait)
+        if memory_trait:
+            self._platform.tool_factory.set_memory_trait(memory_trait)
 
         try:
             # Get or create ToolsTrait and populate with configured tools
@@ -283,9 +348,9 @@ class Factory:
             if is_new and tools_trait.has_tools():
                 agent.add_trait(tools_trait)
         finally:
-            # Clear learn_trait to avoid leaking state between agents
-            if learn_trait:
-                self._platform.tool_factory.set_learn_trait(None)
+            # Clear memory_trait to avoid leaking state between agents
+            if memory_trait:
+                self._platform.tool_factory.set_memory_trait(None)
 
     def _create_and_register_tools(
         self, agent: Agent, tools_config: dict[str, dict[str, Any]], tools_trait: Any

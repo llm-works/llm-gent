@@ -8,6 +8,7 @@ from enum import StrEnum
 from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult
 from .builtin import (
     CompleteTaskTool,
+    FetchResult,
     FileReadTool,
     FileWriteTool,
     HTTPFetchTool,
@@ -51,7 +52,7 @@ ALL_TOOLS: list[ToolName] = [
     ToolName.WEB_FETCH,
     ToolName.WEB_SEARCH,
     ToolName.COMPLETE_TASK,
-    # Note: REMEMBER/RECALL require LearnTrait, added dynamically when needed
+    # Note: REMEMBER/RECALL require MemoryTrait, added dynamically when needed
 ]
 
 
@@ -73,6 +74,7 @@ __all__ = [
     "ToolExecutionResult",
     # Built-in tools
     "CompleteTaskTool",
+    "FetchResult",
     "FileReadTool",
     "FileWriteTool",
     "HTTPFetchTool",

@@ -22,17 +22,25 @@ class Identity:
         context_key: Data isolation key (defaults to name if not specified).
 
     Examples:
-        # Simple (context_key defaults to name)
-        identity = Identity.from_config({"name": "jokester"})
+        # Shorthand (context_key defaults to name)
+        identity = Identity("jokester")
         # → name = "jokester", context_key = "jokester"
 
         # Renaming (preserve data by explicit context_key)
-        identity = Identity.from_config({"name": "joke-master", "context_key": "jokester"})
+        identity = Identity("joke-master", context_key="jokester")
         # → name = "joke-master", context_key = "jokester"
     """
 
     name: str
-    context_key: str
+    context_key: str = ""
+
+    def __post_init__(self) -> None:
+        # context_key defaults to name when caller omits it or passes an empty
+        # string; frozen dataclass requires object.__setattr__ to mutate.
+        if not self.context_key:
+            object.__setattr__(self, "context_key", self.name)
+        if not self.name:
+            raise ValueError(f"Identity name cannot be empty. Got name={self.name!r}")
 
     @classmethod
     def from_name(cls, name: str) -> Identity:
@@ -75,7 +83,7 @@ class Identity:
         name = cfg.get("name") or defs.get("name", "default")
 
         # Get context_key (defaults to name if not specified)
-        context_key = cfg.get("context_key") or defs.get("context_key", name)
+        context_key = cfg.get("context_key") or defs.get("context_key") or name
 
         # Validate that name and context_key are not empty
         if not name or not context_key:

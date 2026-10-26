@@ -36,81 +36,47 @@ push. `requires-python = ">=3.11"`.
 ## Quick Start
 
 ```python
-from appinfra import DotDict
 from appinfra.log import create_lg
 
-from llm_gent import Agent, LLMTrait
-from llm_gent.core.agent.types import ExecutionResult
+from llm_gent import AgentFactory, LLMTrait
 
+lg = create_lg("my-agent", "info")
 
-# The public Agent class is abstract — a real application defines a small
-# concrete subclass. Trivial stubs suffice when the workflow only uses
-# LLMTrait.complete() directly.
-class HelloAgent(Agent):
-    def start(self) -> None:
-        self._start_traits()
-
-    def stop(self) -> None:
-        self._stop_traits()
-
-    def run_once(self) -> ExecutionResult:
-        return ExecutionResult(success=True, content="")
-
-    def ask(self, question: str) -> str:
-        return ""
-
-    def record_feedback(self, message: str) -> None:
-        pass
-
-    def get_recent_results(self, limit: int = 10) -> list[ExecutionResult]:
-        return []
-
-
-lg = create_lg("hello-agent", "info")
-
-# Agent reads config.identity.name internally.
-config = {"identity": {"name": "hello-agent"}}
-
-llm_config = DotDict(
+agent = AgentFactory(lg).from_config(
     {
-        "default": "local",
-        "backends": {
-            "local": {
-                "type": "openai_compatible",
-                "base_url": "http://localhost:8000/v1",
-                "model": "default",
-            }
+        "identity": {"name": "my-agent"},
+        "llm": {
+            "default": "local",
+            "backends": {
+                "local": {
+                    "type": "openai_compatible",
+                    "base_url": "http://localhost:8000/v1",
+                    "model": "default",
+                }
+            },
         },
+        "directive": "You are a helpful assistant.",
+        "traits": {"required": ["llm", "directive"]},
     }
 )
 
-agent = HelloAgent(lg, config)
-agent.add_trait(LLMTrait(agent, llm_config))
 agent.start()
-
-# LLMTrait.complete() accepts OpenAI-style message dicts.
 llm = agent.require_trait(LLMTrait)
-result = llm.complete(
-    [
-        {"role": "system", "content": "You are a concise assistant."},
-        {"role": "user", "content": "Say hello."},
-    ]
-)
+result = llm.complete([{"role": "user", "content": "Hello!"}])
 print(result.content)
-
 agent.stop()
 ```
 
-A runnable version of this example lives at `llm_gent/examples/quickstart.py`. Set
-`LLM_GENT_SMOKE=1` to run it against a stub LLM router (used by CI's
-wheel-smoke job).
+A runnable version of this example lives at `llm_gent/examples/quickstart.py`. Pass
+`--smoke` to run it against a stub LLM router (no real backend contacted).
 
 ## Core Concepts
 
 ### Agents
 
 An `Agent` is a container for traits with lifecycle management. Agents have an identity
-(domain/workspace/name) and can be started, stopped, and run in cycles.
+(`name` plus optional `context_key`) and can be started, stopped, and — via
+`RunnableAgent` — run in cycles.
 
 ### Traits
 

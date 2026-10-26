@@ -24,8 +24,8 @@ class StorageTrait(BaseTrait):
     Wraps KeltClient to provide direct SQLAlchemy access for agent tables
     with automatic isolation.
 
-    **IMPORTANT:** StorageTrait depends on LearnTrait. LearnTrait must be attached
-    to the agent BEFORE StorageTrait, as StorageTrait.on_start() requires LearnTrait
+    **IMPORTANT:** StorageTrait depends on MemoryTrait. MemoryTrait must be attached
+    to the agent BEFORE StorageTrait, as StorageTrait.on_start() requires MemoryTrait
     to be available. Ensure correct ordering in factory required_traits or YAML config.
 
     Philosophy:
@@ -34,7 +34,7 @@ class StorageTrait(BaseTrait):
         - Full SQL power for complex queries
 
     Example:
-        from llm_gent.core.traits import StorageTrait, LearnTrait
+        from llm_gent.core.traits import StorageTrait, MemoryTrait
         from llm_gent.storage import AgentTable
         from sqlalchemy import String, Boolean, Float, func, select
         from sqlalchemy.orm import Mapped, mapped_column
@@ -49,7 +49,7 @@ class StorageTrait(BaseTrait):
             rating: Mapped[float | None] = mapped_column(Float, nullable=True)
 
         # Attach traits
-        agent.add_trait(LearnTrait(agent, learn_config))
+        agent.add_trait(MemoryTrait(agent, memory_config))
         agent.add_trait(StorageTrait(agent))
         agent.start()
 
@@ -74,7 +74,7 @@ class StorageTrait(BaseTrait):
         results = storage.execute(stmt).all()
 
     Lifecycle:
-        - on_start(): Creates AgentStorage from LearnTrait's KeltClient
+        - on_start(): Creates AgentStorage from MemoryTrait's KeltClient
         - on_stop(): Cleanup (no-op, AgentStorage is stateless)
     """
 
@@ -88,25 +88,27 @@ class StorageTrait(BaseTrait):
         self._storage: AgentStorage | None = None
 
     def on_start(self) -> None:
-        """Create AgentStorage from LearnTrait's KeltClient.
+        """Create AgentStorage from MemoryTrait's KeltClient.
 
         Raises:
-            TraitNotFoundError: If LearnTrait is not attached.
+            TraitNotFoundError: If MemoryTrait is not attached.
         """
-        from .learn import LearnTrait
+        from .memory import MemoryTrait
 
-        # Require LearnTrait
-        learn_trait = self.agent.require_trait(LearnTrait)
+        self.agent.lg.trace("starting storage trait...", extra={"agent": self.agent.name})
+        # Require MemoryTrait
+        memory_trait = self.agent.require_trait(MemoryTrait)
 
         # Create storage wrapping KeltClient
-        self._storage = AgentStorage(self.agent.lg, learn_trait.kelt)
+        self._storage = AgentStorage(self.agent.lg, memory_trait.kelt)
 
-        self.agent.lg.debug("storage trait started")
+        self.agent.lg.trace("storage trait started", extra={"agent": self.agent.name})
 
     def on_stop(self) -> None:
         """Clean up storage resources."""
+        self.agent.lg.trace("stopping storage trait...", extra={"agent": self.agent.name})
         self._storage = None
-        self.agent.lg.debug("storage trait stopped")
+        self.agent.lg.trace("storage trait stopped", extra={"agent": self.agent.name})
 
     @property
     def storage(self) -> AgentStorage:

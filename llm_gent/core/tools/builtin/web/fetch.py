@@ -35,7 +35,9 @@ class WebFetchTool(BaseTool):
     stripping navigation, ads, footers, and boilerplate. Non-HTML
     responses (JSON, plain text) are returned as-is.
 
-    Reuses HTTPFetchTool's SSRF protection, IP pinning, and domain filtering.
+    Reuses HTTPFetchTool's SSRF protection, IP pinning, domain filtering and
+    redirect following; a fetched page comes back as a
+    :class:`~llm_gent.core.tools.builtin.http.FetchResult` carrying its final URL.
 
     Example:
         tool = WebFetchTool(lg)
@@ -71,6 +73,7 @@ class WebFetchTool(BaseTool):
         blocked_domains: list[str] | None = None,
         block_private_ips: bool = True,
         user_agent: str | None = None,
+        max_redirects: int = 5,
     ) -> None:
         """Initialize web fetch tool.
 
@@ -84,6 +87,7 @@ class WebFetchTool(BaseTool):
             blocked_domains: If set, these domains are blocked.
             block_private_ips: Block requests to private/internal IPs.
             user_agent: Custom User-Agent string. Defaults to a Chrome UA.
+            max_redirects: Redirects followed per fetch (passed to HTTPFetchTool).
         """
         self._lg = lg
         self._max_text_length = max_text_length
@@ -98,6 +102,7 @@ class WebFetchTool(BaseTool):
                 "Accept-Language": "en-US,en;q=0.9",
             },
             block_private_ips=block_private_ips,
+            max_redirects=max_redirects,
         )
 
     def execute(self, **kwargs: Any) -> ToolResult:
@@ -114,7 +119,7 @@ class WebFetchTool(BaseTool):
             return result
 
         text = self._extract_content(result.output)
-        return self._truncate(text)
+        return self._truncate(result, text)
 
     def fetch_raw(self, **kwargs: Any) -> ToolResult:
         """Fetch a URL and return the raw response (no HTML extraction).
@@ -152,10 +157,12 @@ class WebFetchTool(BaseTool):
         )
         return extracted if extracted else content
 
-    def _truncate(self, text: str) -> ToolResult:
-        """Truncate text to max length, including the suffix."""
-        if len(text) <= self._max_text_length:
-            return ToolResult(success=True, output=text)
-        suffix = f"\n\n(truncated, max {self._max_text_length} chars)"
-        truncated = text[: self._max_text_length - len(suffix)]
-        return ToolResult(success=True, output=truncated + suffix)
+    def _truncate(self, result: ToolResult, text: str) -> ToolResult:
+        """``result`` with ``text`` as its output, truncated to max length including the suffix.
+
+        A copy of ``result``, so a FetchResult keeps its URL.
+        """
+        if len(text) > self._max_text_length:
+            suffix = f"\n\n(truncated, max {self._max_text_length} chars)"
+            text = text[: self._max_text_length - len(suffix)] + suffix
+        return result.model_copy(update={"output": text})

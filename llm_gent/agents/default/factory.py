@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ...core.agent import Factory as BaseFactory
+from ...core.agent import AgentFactory as BaseFactory
 from ...core.traits.builtin.saia import SAIAConfig, SAIATrait
 from .agent import Agent
 
@@ -72,7 +72,8 @@ class Factory(BaseFactory):
     ) -> Agent:
         """Create prompt-based Agent from configuration.
 
-        Extends base create() to extract default_prompt from task config.
+        Extends base create() to set the agent's ``default_prompt`` (what
+        ``run_once()`` runs) from ``task.description``.
 
         Args:
             config: Configuration dictionary.
@@ -83,13 +84,9 @@ class Factory(BaseFactory):
         """
         from appinfra import DotDict
 
-        # Extract default_prompt and inject into config.config for base Factory
+        # Agent reads default_prompt from the top level of its config
         task_config = config.get("task", {})
-        default_prompt = task_config.get("description", "")
-
-        if "config" not in config:
-            config["config"] = {}
-        config["config"]["default_prompt"] = default_prompt
+        config["default_prompt"] = task_config.get("description", config.get("default_prompt", ""))
 
         # Convert to DotDict once for consistent usage
         dotdict_config = DotDict(config)
@@ -113,8 +110,8 @@ class Factory(BaseFactory):
 
         saia_config = SAIAConfig(
             terminal_tool=config.get("terminal_tool", "complete_task"),
-            max_iterations=config.get("max_iterations", 0),
-            timeout_secs=config.get("timeout_secs", 0),
+            max_iterations=_task_setting(config, "max_iterations"),
+            timeout_secs=_task_setting(config, "timeout_secs"),
             system_prompt=system_prompt,
         )
         agent.add_trait(SAIATrait(agent, self._get_backend(), saia_config))
@@ -214,3 +211,9 @@ class Factory(BaseFactory):
             )
 
         return handler
+
+
+def _task_setting(config: dict[str, Any], key: str) -> Any:
+    """``task.<key>`` (where the agent YAML sets it), else top-level ``<key>``, else 0 (no limit)."""
+    task_config = config.get("task") or {}
+    return task_config.get(key, config.get(key, 0))

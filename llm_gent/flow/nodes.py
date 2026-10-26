@@ -1,0 +1,451 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
+
+"""Composition-graph node types and per-run environment.
+
+Internal to :mod:`llm_gent.flow`: the private dataclasses (:class:`_Node`,
+:class:`_Branch`, :class:`_Iterate`, :class:`_Map`, :class:`_RunEnv`), and
+the type aliases used by the fluent builder's callback slots. Public
+symbols are routed through this module as well: :class:`Failure`, the
+sentinel returned in place of a failed item by :meth:`Flow.map` when
+``strict=False`` (with :class:`RestoredError` for a failure restored from
+a checkpoint); :class:`Skipped`, the sentinel returned in place of an
+item whose :meth:`Flow.guard` predicate returned falsy; :data:`UNSET`
+(with its :class:`Unset` type), the "no value here" sentinel used by
+:meth:`Flow.run`'s ``state=`` default and by rescue policies'
+``pending_input`` positional; and :data:`HALTED` (with its :class:`Halted`
+type), what :meth:`Flow.run` returns when the halt stopped the run.
+
+Depends only on :mod:`.context` and :mod:`.state`; :class:`Flow` is
+referenced solely inside string-form annotations (via
+``from __future__ import annotations``), so this module imports cleanly
+without pulling in :mod:`.flow`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Final
+
+from appinfra.log import Logger
+
+from .context import Context
+from .resource import NO_RESOURCES, ResourceKey
+from .state import State, StateFactory
+from .state.snapshot import ScopePath, ScopeRegistry
+
+
+if TYPE_CHECKING:
+    from ._checkpoint_ctx import CheckpointContext
+    from ._shortcut import ShortcutRun
+    from .flow import Flow
+
+from .checkpoint import CheckpointPolicy
+
+
+class Unset:
+    """Singleton sentinel type used by :data:`UNSET`.
+
+    Distinct from ``None`` — appears where ``None`` is a legitimate value
+    that must be distinguished from "no value was supplied here". The
+    canonical comparison is identity (``x is UNSET``); ``isinstance(x, Unset)``
+    works too and is what tooling checks against the ``Any | Unset`` union
+    in :type:`RescuePolicy`.
+    """
+
+    _instance: Unset | None = None
+
+    def __new__(cls) -> Unset:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET: Final[Unset] = Unset()
+"""Sentinel meaning "no value here" — distinct from ``None``.
+
+Surfaces in two places on the public API:
+
+- :meth:`Flow.run` — ``state=UNSET`` is the sentinel default that resolves
+  to the flow's construction ``state`` (or a fresh empty ``dict``); passing
+  ``state=None`` explicitly is honored as "payload is ``None``".
+- :type:`RescuePolicy` — the ``pending_input`` positional is :data:`UNSET`
+  when the failing node is the chain's first node and :meth:`Flow.run` was
+  called with no positional argument.
+"""
+
+
+class Halted:
+    """Singleton sentinel type used by :data:`HALTED`.
+
+    Compare by identity: ``result is HALTED``.
+    """
+
+    _instance: Halted | None = None
+
+    def __new__(cls) -> Halted:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "HALTED"
+
+
+HALTED: Final[Halted] = Halted()
+"""What :meth:`Flow.run` returns when the halt stopped the run before its end.
+
+The run wrote its halt checkpoint; ``resume="latest"`` continues it. A run
+whose last step completed returns that step's result — ``None`` included —
+also when the halt was set during that step: it finished.
+"""
+
+
+RescuePolicy = Callable[[BaseException, Any, Context[Any]], Any]
+"""Failure hook: ``(exception, pending_input, ctx) -> fallback``. May be async.
+
+``pending_input`` is the value that would have been passed into the failing
+node (post ``project=`` if one was set) — carried through so a rescue can
+fall back to a prior result without a preceding ``.after``-hook stash. When
+the failing node is the chain's first node and :meth:`Flow.run` had no
+positional argument, ``pending_input`` is :data:`UNSET`.
+"""
+
+AfterHook = Callable[[Any, Context[Any]], Any]
+"""Success hook: ``(result, ctx) -> None`` (return value ignored). May be async."""
+
+ProjectFn = Callable[[Any], Any]
+"""Data-flow projection: transforms the previous node's result into the next input."""
+
+WhenFn = Callable[[Any, Context[Any]], Any]
+"""Branch predicate: ``(prev_result, ctx) -> bool``. May be async."""
+
+UntilFn = Callable[[Any, Context[Any]], Any]
+"""Iterate stop predicate: ``(result, ctx) -> bool``. May be async.
+
+``result`` is the last iteration's body return value; ``ctx.state`` carries
+mutations made during the body. Either signal — or both — can drive
+termination.
+"""
+
+ItemsFn = Callable[[Any, Context[Any]], Any]
+"""Map item source: ``(prev_result, ctx) -> iterable``. May be async. Consumed eagerly to a list."""
+
+MaxConcurrencyFn = Callable[[list[Any], Context[Any]], Any]
+"""Map concurrency cap computed at map start: ``(items, ctx) -> int``. May be async.
+
+Called once per map run with the resolved items, when any are left to
+run; must return an ``int >= 1``. Not saved: a resumed map calls it again.
+"""
+
+AggregateFn = Callable[[list[Any]], Any]
+"""Map result reducer: ``list[R] -> R'``. May be async. If omitted, .map returns the list as-is."""
+
+GuardFn = Callable[[Any, Context[Any]], Any]
+"""Map per-item skip predicate: ``(item, ctx) -> bool``. May be async.
+
+Falsy return skips the item; a :class:`Skipped` sentinel lands in that
+position of the result list. The predicate runs after per-item state
+projection so it can read ``ctx.state``.
+"""
+
+OnErrorFn = Callable[[BaseException, Any, Context[Any]], Any]
+"""Map per-item error hook: ``(exception, item, ctx) -> None``. Return value ignored.
+
+Fires in both ``strict`` modes for side-effect narration (logging,
+tracing). Does not alter control flow — in ``strict=True`` the exception
+still propagates after ``on_error`` returns; in ``strict=False`` the item
+is still replaced by a :class:`Failure` sentinel.
+"""
+
+OnItemCompleteFn = Callable[[Any, Any, Context[Any]], Any]
+"""Map per-item completion hook: ``(item, outcome, ctx) -> None``. Return value ignored.
+
+Fires exactly once per item after it reaches a terminal state, for
+observability (progress, streaming, adaptive throttling). ``outcome``
+is the value that lands in the map's result list: the body's return
+for successful items, :class:`Failure` for items whose body raised
+(both ``strict`` modes), or :class:`Skipped` for guard- or halt-skipped
+items. Success-path hooks fire after per-item merge; ``ctx.state``
+is the child state, and the merged parent is reachable via
+``ctx.state.root()`` when projection is used.
+
+Does not fire on :class:`asyncio.CancelledError`; cancellation
+propagates unconditionally. A hook exception is logged and swallowed
+so a broken observer never masks the item outcome — mirrors
+:type:`OnErrorFn`.
+"""
+
+StateProject = Callable[[Any], Any]
+"""Scoped-state projection: ``(parent_state) -> child_state``. May be async.
+
+Runs once around a :meth:`Flow.call` subflow, once around a :meth:`Flow.iterate`
+(before the first iteration), and once per item for :meth:`Flow.map`.
+"""
+
+StateMerge = Callable[[Any, Any], Any]
+"""Scoped-state merge: ``(parent_state, child_state) -> None``. May be async.
+
+Runs only when the isolated block completes successfully. Return value is
+ignored — mutate ``parent_state`` in place.
+"""
+
+
+@dataclass(frozen=True)
+class Failure:
+    """Placeholder for a failed item in :meth:`Flow.map` when ``strict=False``.
+
+    Exposes the raised exception and the input item that produced it so
+    downstream aggregators can partition successes from failures without
+    losing either.
+
+    A checkpoint stores it wherever the map's result goes — a step's input,
+    an iterate's carried value — as the exception's type name and message
+    with the item (:meth:`to_dict`); it comes back with a
+    :class:`RestoredError`.
+    """
+
+    exception: BaseException
+    """The exception the item's subflow raised (never :class:`asyncio.CancelledError`).
+
+    A :class:`RestoredError` when the item failed before the checkpoint the
+    run resumed from.
+    """
+
+    item: Any
+    """The input item whose subflow run failed."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """The exception's type name and message, and the item."""
+        exc = self.exception
+        if isinstance(exc, RestoredError):
+            return {"type": exc.type_name, "message": exc.message, "item": self.item}
+        return {"type": type(exc).__name__, "message": str(exc), "item": self.item}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Failure:
+        """The failure :meth:`to_dict` stored, its exception a :class:`RestoredError`."""
+        return cls(RestoredError(data["type"], data["message"]), data["item"])
+
+
+class RestoredError(Exception):
+    """A map item's failure, restored from a checkpoint: the original exception's type and message.
+
+    A failed item of a ``strict=False`` map stays failed across resume: it
+    does not run again, and its :class:`Failure` carries this in place of
+    the exception it raised, which a checkpoint cannot store.
+    """
+
+    def __init__(self, type_name: str, message: str) -> None:
+        super().__init__(f"{type_name}: {message}")
+        self.type_name = type_name
+        """The original exception's class name, e.g. ``"ValueError"``."""
+        self.message = message
+        """The original exception's message (``str(exception)``)."""
+
+
+@dataclass(frozen=True)
+class Skipped:
+    """Placeholder for an item whose :meth:`Flow.guard` predicate returned falsy.
+
+    Occupies the same positional slot in :meth:`Flow.map`'s result list
+    that a successful or failed item would, so aggregators can partition
+    ``list[R | Failure | Skipped]`` by isinstance without losing position.
+    A checkpoint stores it with its item wherever the map's result goes.
+    """
+
+    item: Any
+    """The input item that was gated out before the map body ran."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """The item."""
+        return {"item": self.item}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Skipped:
+        """The skip :meth:`to_dict` stored."""
+        return cls(data["item"])
+
+
+class Interrupted(BaseException):  # noqa: N818 — a signal, like asyncio.CancelledError
+    """Raised by a step that stops because of the halt before finishing its work.
+
+    The halt is cooperative: a step that sees ``ctx.halt`` set either
+    finishes its work and returns, or raises ``Interrupted``. A step that
+    returns is complete — the halt checkpoint moves past it; a step that
+    raises ``Interrupted`` runs again when the run resumes. A Loop whose
+    SAIA turn paused counts as interrupted without raising.
+
+    A :class:`BaseException`, like :class:`asyncio.CancelledError`, so
+    rescue policies and non-strict maps do not catch it as a failure.
+    Raising it while no halt is set is an error.
+    """
+
+
+@dataclass(frozen=True)
+class Checkpointer:
+    """A flow's :meth:`~llm_gent.flow.Flow.with_checkpointer`: saves inside it write commits.
+
+    A save belongs to the innermost checkpointer enclosing the step that
+    saves; with a ``name`` it also moves the run's tag ``tags/<name>``.
+    """
+
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class _RunEnv:
+    """Per-run environment threaded through the execution helpers.
+
+    Bundles the runtime flow (factory + saia cache + logger source), the
+    currently active :class:`State`, any ambient halt event and the run's
+    resources so helpers do not each need to carry them as separate
+    positional arguments. ``lg`` is cached off ``runtime`` at the top of
+    :meth:`Flow.run` for brevity in the debug/warning call sites. ``halt``
+    is the ambient :class:`asyncio.Event` attached via :meth:`Flow.with_halt`
+    (or inherited from the outer runtime); ``None`` when no halt is in
+    scope. ``checkpoint_ctx`` is the run's repo (the top-level flow's
+    checkpoint store); ``checkpointer`` the innermost
+    :meth:`Flow.with_checkpointer` on this flow or above it — saves write
+    commits only under one.
+
+    Composition-graph position is threaded via a pair of content-addressed
+    hashes: ``chain_context`` is the hash used to compute this Flow's own
+    chain-step node IDs, and ``ancestor_chain`` is the tuple of ancestor
+    ``_Node`` IDs from the run's root down to the ``_Node`` whose descent
+    entered this Flow. Extended pairwise on every subflow / branch-arm /
+    iterate-body descent. The pair is what the checkpoint layer walks to
+    address any point in the composition tree.
+
+    ``path`` is the snapshot path of this Flow's position — node ids plus
+    the iterate pass and map item coordinates that tell repeated
+    executions apart (:mod:`llm_gent.flow.state.snapshot`). Scopes opened
+    under this Flow register at ``path`` extended by their owner.
+
+    ``shortcuts`` are the :meth:`Flow.with_shortcut` regions this run is
+    in, outermost first: the enclosing flows' and this Flow's own. Its
+    chain, iterates, maps and Loop calls fast-forward while one of their
+    signals is set.
+
+    ``resources`` are the resources this run runs with (``ctx.resource``;
+    the cost tracker, ``ctx.cost``, among them): the ones this Flow
+    declares, its per-run children, and the ones inherited
+    (:mod:`llm_gent.flow.resource._runtime`).
+    """
+
+    runtime: Flow
+    state: State[Any]
+    lg: Logger
+    halt: asyncio.Event | None = None
+    checkpoint_ctx: CheckpointContext | None = None
+    checkpointer: Checkpointer | None = None
+    chain_context: str = ""
+    ancestor_chain: tuple[str, ...] = ()
+    extra: dict[str, Any] = field(default_factory=dict)
+    policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
+    path: ScopePath = ()
+    shortcuts: tuple[ShortcutRun, ...] = ()
+    resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
+
+    @property
+    def scopes(self) -> ScopeRegistry:
+        """The run's live-scope registry, owned by the top-level Flow."""
+        return self.runtime._scopes
+
+    def owner_path(self, node_id: str) -> ScopePath:
+        """Snapshot path of the step ``node_id`` of this Flow."""
+        return (*self.path, "n", node_id)
+
+
+@dataclass
+class _Branch:
+    """Composition-graph node: run one of two subflows based on a predicate."""
+
+    when: WhenFn
+    then_flow: Flow
+    else_flow: Flow | None
+    name: str | None = None
+
+
+@dataclass
+class _Iterate:
+    """Composition-graph node: iterate a subflow until a bound or predicate fires."""
+
+    body: Flow
+    until: UntilFn | None
+    max_iters: int | None
+    deadline: float | None
+    state_fn: StateProject | None = None
+    merge_fn: StateMerge | None = None
+    state_factory: StateFactory[Any] | None = None
+    name: str | None = None
+
+
+@dataclass
+class _Map:
+    """Composition-graph node: fan out over items or members, and (optionally) reduce.
+
+    A map over items runs its one body on each item. A map over members
+    (``member_keys`` set) runs each of its bodies once, on the step's input;
+    a member's key identifies it across reorders (its target and its
+    occurrence among members with the same target).
+    """
+
+    bodies: tuple[Flow, ...]
+    member_keys: tuple[str, ...]
+    items: ItemsFn | None
+    aggregate: AggregateFn | None
+    strict: bool
+    state_fn: StateProject | None = None
+    merge_fn: StateMerge | None = None
+    guard: GuardFn | None = None
+    on_error: OnErrorFn | None = None
+    on_item_complete: OnItemCompleteFn | None = None
+    max_concurrency: int | MaxConcurrencyFn | None = None
+    state_factory: StateFactory[Any] | None = None
+    name: str | None = None
+
+    @property
+    def over_members(self) -> bool:
+        """Whether the map runs its members on one input, not one body on many items."""
+        return bool(self.member_keys)
+
+
+@dataclass
+class _Node:
+    """One step in a Flow composition chain.
+
+    Identity is content-addressed but derived lazily, not stored: the
+    executor computes each node's runtime ``node_id`` from the enclosing
+    :attr:`_RunEnv.chain_context` plus the node's local key
+    (kind + target qualname + occurrence among same-target steps) on
+    descent. The hash chain from root gives every node in the
+    composition tree a globally-unique identifier the checkpoint layer
+    uses; see :func:`llm_gent.flow._node_id._compute_node_ids`.
+    """
+
+    target: Any
+    project: ProjectFn | None = None
+    rescue: RescuePolicy | None = None
+    after: AfterHook | None = None
+    state_fn: StateProject | None = None
+    merge_fn: StateMerge | None = None
+    state_factory: StateFactory[Any] | None = None
+    name: str | None = None
+    """A ``.call`` / ``.then`` step's label; primitives carry theirs on the target."""
+    conclude: bool = False
+    """Appended with :meth:`Flow.conclude`: the step runs even while its chain fast-forwards."""
+
+
+def step_name(node: _Node) -> str | None:
+    """The ``name=`` a chain step was built with: its own, or its primitive's."""
+    if node.name is not None:
+        return node.name
+    if isinstance(node.target, _Branch | _Iterate | _Map):
+        return node.target.name
+    return None

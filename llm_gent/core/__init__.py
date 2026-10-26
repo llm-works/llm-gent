@@ -26,7 +26,7 @@ from llm_kelt.conversation import (
     Config as ConversationConfig,
 )
 
-from .agent import Agent, Config, ExecutionResult
+from .agent import Agent, ExecutionResult
 from .errors import (
     AgentError,
     ConfigError,
@@ -38,7 +38,7 @@ from .platform import PlatformContext
 from .runnable import Runnable
 from .task import Task, TaskResult
 from .tools.factory import ToolFactory
-from .traits.factory import Factory as TraitFactory
+from .traits.factory import TraitFactory
 
 
 __all__ = [
@@ -47,7 +47,6 @@ __all__ = [
     "Runnable",
     # Agents
     "Agent",
-    "Config",
     # Errors
     "AgentError",
     "ConfigError",

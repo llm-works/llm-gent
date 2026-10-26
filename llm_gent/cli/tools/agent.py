@@ -13,7 +13,7 @@ from appinfra.app.tools import Tool, ToolConfig
 
 
 if TYPE_CHECKING:
-    from ...core.agent import Factory
+    from ...core.agent import AgentFactory
 
 
 class AgentTool(Tool):
@@ -127,7 +127,7 @@ class AgentTool(Tool):
 
         return str(module)
 
-    def _load_factory_class(self, factory_module: str) -> type[Factory] | None:
+    def _load_factory_class(self, factory_module: str) -> type[AgentFactory] | None:
         """Load Factory class from module."""
         try:
             module = importlib.import_module(factory_module)

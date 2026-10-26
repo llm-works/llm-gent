@@ -18,12 +18,12 @@ from typing import TYPE_CHECKING, Any
 from appinfra.log import Logger
 
 from .tools.factory import ToolFactory
-from .traits.factory import Factory as TraitFactory
+from .traits.factory import TraitFactory
 
 
 if TYPE_CHECKING:
-    from .traits.builtin.learn import LearnConfig
     from .traits.builtin.llm import LLMConfig
+    from .traits.builtin.memory import MemoryConfig
 
 
 class PlatformContext:
@@ -69,14 +69,14 @@ class PlatformContext:
         self._tool_factory = ToolFactory(lg)
         self._trait_factory = TraitFactory(platform=self)
 
-        self._lg.info("platform context initialized")
+        self._lg.debug("platform context initialized")
 
     @classmethod
     def from_config(
         cls,
         lg: Logger,
         llm_config: LLMConfig,
-        learn_config: LearnConfig | None = None,
+        learn_config: MemoryConfig | None = None,
     ) -> PlatformContext:
         """Create platform context from configuration.
 
@@ -138,11 +138,11 @@ class PlatformContext:
         Called during platform shutdown to release resources.
         Currently minimal - agents manage their own trait lifecycles.
         """
-        self._lg.info("cleaning up platform context")
+        self._lg.debug("cleaning up platform context...")
 
         # Future: Close shared resources (message bus, etc.)
 
-        self._lg.info("platform context cleaned up")
+        self._lg.debug("platform context cleaned up")
 
     def __repr__(self) -> str:
         """String representation of platform context."""
