@@ -9,34 +9,20 @@ and lifecycle state. Replaces the separate bus and runtime registries.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Any
 
 from appinfra import DotDict
 
+from ..bus.health import AgentHealth as AgentHealth
+from ..bus.health import AgentRecord, HeartbeatRegistry
+from ..bus.health import AgentType as AgentType
 from ..bus.protocol import AgentStats
 
 
-class AgentHealth(StrEnum):
-    """Agent health states derived from heartbeat recency."""
-
-    HEALTHY = "healthy"
-    UNHEALTHY = "unhealthy"
-    DEAD = "dead"
-
-
-class AgentType(StrEnum):
-    """How the agent is managed by the hub."""
-
-    INJECTED = "injected"
-    EXTERNAL = "external"
-
-
 @dataclass
-class AgentEntry:
+class AgentEntry(AgentRecord):
     """Registry entry for a connected agent.
 
     Combines membership, configuration, health, and lifecycle state
@@ -62,28 +48,6 @@ class AgentEntry:
     # Timeout for health derivation (seconds without heartbeat before dead).
     dead_timeout: float = 90.0
 
-    def is_alive(self, timeout_secs: float | None = None) -> bool:
-        """Check if agent has heartbeated within the timeout window."""
-        threshold = timeout_secs if timeout_secs is not None else self.dead_timeout
-        elapsed = (datetime.now(UTC) - self.last_heartbeat).total_seconds()
-        return elapsed < threshold
-
-    @property
-    def health(self) -> AgentHealth:
-        """Derive health from heartbeat recency.
-
-        Uses two thresholds derived from ``dead_timeout``:
-        - < dead_timeout: healthy
-        - dead_timeout .. 2*dead_timeout: unhealthy
-        - >= 2*dead_timeout: dead
-        """
-        elapsed = (datetime.now(UTC) - self.last_heartbeat).total_seconds()
-        if elapsed < self.dead_timeout:
-            return AgentHealth.HEALTHY
-        elif elapsed < 2 * self.dead_timeout:
-            return AgentHealth.UNHEALTHY
-        return AgentHealth.DEAD
-
     @property
     def schedule_interval(self) -> float | None:
         """Extract schedule interval from config."""
@@ -98,17 +62,12 @@ class AgentEntry:
         return None
 
 
-class Registry:
+class Registry(HeartbeatRegistry[AgentEntry]):
     """Unified thread-safe agent registry.
 
     Tracks all agents in the swarm -- injected and external -- with
     their configuration, health, and lifecycle state.
     """
-
-    def __init__(self, dead_timeout: float = 90.0) -> None:
-        self._agents: dict[str, AgentEntry] = {}
-        self._lock = threading.RLock()
-        self._dead_timeout = dead_timeout
 
     def register(
         self,
@@ -167,11 +126,6 @@ class Registry:
                 metadata=metadata,
             )
 
-    def unregister(self, agent_id: str) -> bool:
-        """Remove an agent. Returns True if found."""
-        with self._lock:
-            return self._agents.pop(agent_id, None) is not None
-
     def get(self, agent_id: str) -> AgentEntry | None:
         """Get an agent's entry."""
         with self._lock:
@@ -200,45 +154,3 @@ class Registry:
         """Get agents of a specific type."""
         with self._lock:
             return [a for a in self._agents.values() if a.agent_type == agent_type]
-
-    def get_healthy(self) -> list[AgentEntry]:
-        """Get agents with recent heartbeats."""
-        with self._lock:
-            return [a for a in self._agents.values() if a.is_alive(self._dead_timeout)]
-
-    def get_unhealthy(self) -> list[AgentEntry]:
-        """Get agents that missed heartbeats but aren't dead."""
-        with self._lock:
-            return [a for a in self._agents.values() if a.health == AgentHealth.UNHEALTHY]
-
-    def get_dead(self) -> list[AgentEntry]:
-        """Get agents past the dead threshold."""
-        with self._lock:
-            return [a for a in self._agents.values() if a.health == AgentHealth.DEAD]
-
-    def cleanup_dead(self) -> list[str]:
-        """Remove dead agents. Returns removed IDs."""
-        with self._lock:
-            dead = [a.id for a in self._agents.values() if a.health == AgentHealth.DEAD]
-            for agent_id in dead:
-                del self._agents[agent_id]
-            return dead
-
-    def increment_restart(self, agent_id: str) -> int:
-        """Increment restart count. Returns new count (0 if not found)."""
-        with self._lock:
-            entry = self._agents.get(agent_id)
-            if entry is None:
-                return 0
-            entry.restart_count += 1
-            return entry.restart_count
-
-    @property
-    def count(self) -> int:
-        with self._lock:
-            return len(self._agents)
-
-    @property
-    def healthy_count(self) -> int:
-        with self._lock:
-            return sum(1 for a in self._agents.values() if a.is_alive(self._dead_timeout))

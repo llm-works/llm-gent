@@ -39,13 +39,13 @@ class StarFilter:
         """Check if stars value matches this filter."""
         if self.op == "==":
             return stars == self.value
-        elif self.op == ">=":
+        if self.op == ">=":
             return stars >= self.value
-        elif self.op == "<=":
+        if self.op == "<=":
             return stars <= self.value
-        elif self.op == ">":
+        if self.op == ">":
             return stars > self.value
-        elif self.op == "<":
+        if self.op == "<":
             return stars < self.value
         raise ValueError(f"Unsupported operator for StarFilter: {self.op!r}")
 

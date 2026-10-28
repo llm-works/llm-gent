@@ -75,7 +75,7 @@ def _llm_config() -> dict[str, Any]:
 
 
 @app.tool(name="run", help="Run the hello-agent example")
-@app.argument(  # type: ignore[untyped-decorator]
+@app.argument(
     "--smoke",
     action="store_true",
     help="Swap in a stub router (no real backend contacted)",

@@ -91,7 +91,7 @@ __all__ = [
     "TraitFactory",
     # Tools
     "BaseTool",
-    "CompleteTaskTool",
+    "CompleteTaskTool",  # cq: keep re-exports llm_gent.core.tools' list
     "FetchResult",
     "FileReadTool",
     "FileWriteTool",

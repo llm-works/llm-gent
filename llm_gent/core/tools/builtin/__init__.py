@@ -17,7 +17,7 @@ from .web import (
 
 
 __all__ = [
-    "CompleteTaskTool",
+    "CompleteTaskTool",  # cq: keep llm_gent.core.tools repeats this list
     "FetchResult",
     "FileReadTool",
     "FileWriteTool",

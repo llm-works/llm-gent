@@ -134,13 +134,12 @@ Respond only with the JSON, no additional text."""
 
     def _call_llm(self, prompt: str, request: Request | BatchRequest) -> Any:
         """Call LLM with rating prompt."""
-        result = self._llm_caller.chat(
+        return self._llm_caller.chat(
             messages=[{"role": "user", "content": prompt}],
             model=request.model,
             temperature=request.temperature,
             backend=request.backend,
         )
-        return result
 
     def _parse_response(
         self,

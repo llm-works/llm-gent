@@ -101,7 +101,6 @@ class Agent(BaseAgent):
         For default agents, handlers are registered by the factory.
         This method exists as a hook for subclasses to customize behavior.
         """
-        pass
 
     async def handle_task(
         self,

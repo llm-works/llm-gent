@@ -4,14 +4,14 @@
 """Stop tool - stop an agent."""
 
 import argparse
-import json
 from typing import Any
 
-import httpx
-from appinfra.app.tools import Tool, ToolConfig
+from appinfra.app.tools import ToolConfig
+
+from .gateway import GatewayTool
 
 
-class StopTool(Tool):
+class StopTool(GatewayTool):
     """Stop an agent."""
 
     def __init__(self, parent: Any = None) -> None:
@@ -23,43 +23,15 @@ class StopTool(Tool):
             "name",
             help="Name of the agent to stop",
         )
-        parser.add_argument(
-            "--server",
-            default="http://localhost:8080",
-            help="Gateway server URL (default: http://localhost:8080)",
-        )
+        super().add_args(parser)
 
     def run(self, **kwargs: Any) -> int:
-        server = self.args.server.rstrip("/")
         name = self.args.name
-
-        data = self._stop_agent(server, name)
+        data = self._request("POST", f"/agents/{name}/stop", timeout=30.0, agent=name)
         if data is None:
             return 1
 
         return self._handle_response(name, data)
-
-    def _stop_agent(self, server: str, name: str) -> dict[str, Any] | None:
-        """Send stop request to gateway."""
-        try:
-            response = httpx.post(f"{server}/agents/{name}/stop", timeout=30.0)
-            if response.status_code == 404:
-                print(f"Error: Agent '{name}' not found")
-                return None
-            response.raise_for_status()
-            return dict(response.json())
-        except httpx.RequestError as e:
-            self.lg.error("failed to connect to server", extra={"exception": e})
-            print(f"Error: Could not connect to gateway at {server}")
-            return None
-        except httpx.HTTPStatusError as e:
-            self.lg.error("server error", extra={"status": e.response.status_code})
-            print(f"Error: Server returned {e.response.status_code}")
-            return None
-        except json.JSONDecodeError:
-            self.lg.error("invalid JSON response from server")
-            print("Error: Server returned invalid response")
-            return None
 
     def _handle_response(self, name: str, data: dict[str, Any]) -> int:
         """Handle stop response and print status."""

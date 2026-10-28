@@ -105,8 +105,6 @@ class BaseTrait:
 
     def on_start(self) -> None:
         """Called when agent starts. Override to add startup logic."""
-        pass
 
     def on_stop(self) -> None:
         """Called when agent stops. Override to add cleanup logic."""
-        pass

@@ -346,8 +346,7 @@ class TestAgentExecution:
 
         # Create trait with correct type for registry lookup
         # Use _saia (the backing field) instead of saia (the property)
-        trait = create_mock_trait(SAIATrait, _saia=mock_saia)
-        return trait
+        return create_mock_trait(SAIATrait, _saia=mock_saia)
 
     @pytest.fixture
     def agent_with_saia(self, mock_logger, mock_saia_trait):

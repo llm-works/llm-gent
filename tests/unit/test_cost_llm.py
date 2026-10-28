@@ -165,32 +165,32 @@ class TestLookup:
 
 class TestPrecedence:
     def test_provider_cost_override_wins(self) -> None:
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         assert p.compute("m", provider_cost=42.5, input_tokens=999_999_999) == 42.5
 
     def test_provider_cost_rejects_nan(self) -> None:
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         with pytest.raises(ValueError, match="provider_cost"):
             p.compute("m", provider_cost=math.nan)
 
     def test_provider_cost_rejects_negative(self) -> None:
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         with pytest.raises(ValueError, match="provider_cost"):
             p.compute("m", provider_cost=-0.01)
 
     def test_provider_cost_rejects_bool(self) -> None:
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         with pytest.raises(TypeError, match="provider_cost"):
             p.compute("m", provider_cost=True)
 
     def test_response_triggers_dispatch(self) -> None:
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         resp = _resp("openai", {"usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0}})
         cost = p.compute("m", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)
 
     def test_rate_card_lookup_when_no_response(self) -> None:
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         assert p.compute("m", input_tokens=1_000_000, output_tokens=0) == pytest.approx(1.0)
 
 
@@ -202,14 +202,14 @@ class TestPrecedence:
 class TestAnthropicDispatch:
     def test_cache_read_from_wire_at_default_multiplier(self) -> None:
         # cached_input_per_mtok unset → cache_read bills at 0.1 * input rate.
-        p = LLMPricingProvider(_config(**{"claude": _op("claude")}))
+        p = LLMPricingProvider(_config(claude=_op("claude")))
         raw = {"usage": {"cache_read_input_tokens": 1_000_000}}
         resp = _resp("anthropic", raw)
         cost = p.compute("claude", response=resp, input_tokens=0, output_tokens=0)
         assert cost == pytest.approx(0.1)
 
     def test_cache_read_at_configured_cached_rate(self) -> None:
-        p = LLMPricingProvider(_config(**{"claude": _op("claude", cached=0.25)}))
+        p = LLMPricingProvider(_config(claude=_op("claude", cached=0.25)))
         raw = {"usage": {"cache_read_input_tokens": 1_000_000}}
         resp = _resp("anthropic", raw)
         cost = p.compute("claude", response=resp, input_tokens=0, output_tokens=0)
@@ -217,7 +217,7 @@ class TestAnthropicDispatch:
 
     def test_cache_write_at_default_multiplier(self) -> None:
         # 1.25 * input rate * cache_write_tokens
-        p = LLMPricingProvider(_config(**{"claude": _op("claude")}))
+        p = LLMPricingProvider(_config(claude=_op("claude")))
         raw = {"usage": {"cache_creation_input_tokens": 1_000_000}}
         resp = _resp("anthropic", raw)
         cost = p.compute("claude", response=resp, input_tokens=0, output_tokens=0)
@@ -225,7 +225,7 @@ class TestAnthropicDispatch:
 
     def test_cache_write_configurable_multiplier(self) -> None:
         p = LLMPricingProvider(
-            _config(**{"claude": _op("claude")}),
+            _config(claude=_op("claude")),
             anthropic_cache_write_multiplier=2.0,
         )
         raw = {"usage": {"cache_creation_input_tokens": 1_000_000}}
@@ -235,7 +235,7 @@ class TestAnthropicDispatch:
 
     def test_cache_read_configurable_multiplier(self) -> None:
         p = LLMPricingProvider(
-            _config(**{"claude": _op("claude")}),
+            _config(claude=_op("claude")),
             anthropic_cache_read_multiplier=0.05,
         )
         raw = {"usage": {"cache_read_input_tokens": 1_000_000}}
@@ -245,7 +245,7 @@ class TestAnthropicDispatch:
 
     def test_uncached_input_separate_from_cache(self) -> None:
         # Anthropic prompt_tokens is uncached-only on the wire.
-        p = LLMPricingProvider(_config(**{"claude": _op("claude", cached=0.1)}))
+        p = LLMPricingProvider(_config(claude=_op("claude", cached=0.1)))
         raw = {
             "usage": {
                 "cache_read_input_tokens": 500_000,
@@ -258,7 +258,7 @@ class TestAnthropicDispatch:
         assert cost == pytest.approx(2.175)
 
     def test_explicit_cached_overrides_wire(self) -> None:
-        p = LLMPricingProvider(_config(**{"claude": _op("claude", cached=0.1)}))
+        p = LLMPricingProvider(_config(claude=_op("claude", cached=0.1)))
         raw = {"usage": {"cache_read_input_tokens": 999_999}}
         resp = _resp("anthropic", raw)
         cost = p.compute(
@@ -269,7 +269,7 @@ class TestAnthropicDispatch:
     def test_explicit_cache_creation_overrides_wire(self) -> None:
         # Symmetric with cached_tokens override — invoice reconciliation
         # or test fixtures can inject cache_creation_tokens without wire.
-        p = LLMPricingProvider(_config(**{"claude": _op("claude")}))
+        p = LLMPricingProvider(_config(claude=_op("claude")))
         raw = {"usage": {"cache_creation_input_tokens": 999_999}}
         resp = _resp("anthropic", raw)
         cost = p.compute(
@@ -289,13 +289,13 @@ class TestAnthropicDispatch:
 
 class TestOpenAICompatDispatch:
     def test_input_output_math(self) -> None:
-        p = LLMPricingProvider(_config(**{"gpt": _op("gpt")}))
+        p = LLMPricingProvider(_config(gpt=_op("gpt")))
         resp = _resp("openai", {"usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0}})
         cost = p.compute("gpt", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)
 
     def test_cached_from_prompt_tokens_details(self) -> None:
-        p = LLMPricingProvider(_config(**{"gpt": _op("gpt", cached=0.1)}))
+        p = LLMPricingProvider(_config(gpt=_op("gpt", cached=0.1)))
         raw = {
             "usage": {
                 "prompt_tokens": 1_000_000,
@@ -308,7 +308,7 @@ class TestOpenAICompatDispatch:
         assert cost == pytest.approx(0.55)
 
     def test_explicit_cached_overrides_wire(self) -> None:
-        p = LLMPricingProvider(_config(**{"gpt": _op("gpt", cached=0.1)}))
+        p = LLMPricingProvider(_config(gpt=_op("gpt", cached=0.1)))
         raw = {
             "usage": {
                 "prompt_tokens": 1_000_000,
@@ -337,14 +337,14 @@ class TestGeminiDispatch:
     def test_no_cache_math_applied(self) -> None:
         # Even if raw carries Anthropic-style cache fields, Gemini branch
         # ignores them — priority-tier / caching is consumer concern.
-        p = LLMPricingProvider(_config(**{"gemini": _op("gemini", cached=0.1)}))
+        p = LLMPricingProvider(_config(gemini=_op("gemini", cached=0.1)))
         raw = {"usage": {"cache_read_input_tokens": 999_999}}
         resp = _resp("google", raw)
         cost = p.compute("gemini", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)  # cache field ignored
 
     def test_vertex_provider_tag_routes_to_gemini(self) -> None:
-        p = LLMPricingProvider(_config(**{"gemini": _op("gemini")}))
+        p = LLMPricingProvider(_config(gemini=_op("gemini")))
         resp = _resp("vertex", {"usage": {}})
         cost = p.compute("gemini", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)
@@ -358,7 +358,7 @@ class TestGeminiDispatch:
 class TestFloatTokenCounts:
     def test_float_input_tokens_coerced_not_zeroed(self) -> None:
         # 1500.0 from a JSON decoder that upcast the int must NOT bill $0.
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         resp = _resp("openai", {"usage": {}})
         cost = p.compute("m", response=resp, input_tokens=1_500_000.0, output_tokens=0)
         assert cost == pytest.approx(1.5)
@@ -366,7 +366,7 @@ class TestFloatTokenCounts:
     def test_float_from_wire_cache_read_coerced(self) -> None:
         # Wire-side value arriving as float (uncommon but possible from
         # loose JSON decoders) still bills correctly.
-        p = LLMPricingProvider(_config(**{"claude": _op("claude", cached=0.1)}))
+        p = LLMPricingProvider(_config(claude=_op("claude", cached=0.1)))
         raw = {"usage": {"cache_read_input_tokens": 1_000_000.0}}
         resp = _resp("anthropic", raw)
         cost = p.compute("claude", response=resp, input_tokens=0, output_tokens=0)
@@ -374,13 +374,13 @@ class TestFloatTokenCounts:
 
     def test_nan_float_still_zeroed(self) -> None:
         # NaN must not silently propagate as a huge int() cast — collapse to 0.
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         resp = _resp("openai", {"usage": {}})
         cost = p.compute("m", response=resp, input_tokens=math.nan, output_tokens=0)
         assert cost == 0.0
 
     def test_non_numeric_string_still_zeroed(self) -> None:
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         resp = _resp("openai", {"usage": {}})
         cost = p.compute("m", response=resp, input_tokens="oops", output_tokens=0)
         assert cost == 0.0
@@ -394,21 +394,21 @@ class TestFloatTokenCounts:
 class TestProviderDetection:
     def test_response_provider_preferred(self) -> None:
         # Explicit anthropic tag with no Anthropic cache fields — still routes anthropic.
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         resp = _resp("anthropic", {"usage": {}})
         cost = p.compute("m", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)  # Anthropic uncached input rate
 
     def test_wire_field_sniff_detects_anthropic(self) -> None:
         # No provider tag — sniff detects Anthropic via cache_creation_input_tokens.
-        p = LLMPricingProvider(_config(**{"claude": _op("claude")}))
+        p = LLMPricingProvider(_config(claude=_op("claude")))
         raw = {"usage": {"cache_creation_input_tokens": 1_000_000}}
         resp = _resp(None, raw)
         cost = p.compute("claude", response=resp, input_tokens=0, output_tokens=0)
         assert cost == pytest.approx(1.25)  # Anthropic cache_write path
 
     def test_unknown_provider_falls_to_openai_compat(self) -> None:
-        p = LLMPricingProvider(_config(**{"m": _op("m")}))
+        p = LLMPricingProvider(_config(m=_op("m")))
         resp = _resp(None, {"usage": {"prompt_tokens": 1_000_000}})
         cost = p.compute("m", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)
@@ -417,14 +417,14 @@ class TestProviderDetection:
         # llm-infer's ChatResponse.provider is typed as str but stores
         # Provider enum values by convention. Passing the enum member
         # directly must dispatch identically to the string value.
-        p = LLMPricingProvider(_config(**{"claude": _op("claude")}))
+        p = LLMPricingProvider(_config(claude=_op("claude")))
         raw = {"usage": {"cache_creation_input_tokens": 1_000_000}}
         resp = _resp(Provider.ANTHROPIC, raw)
         cost = p.compute("claude", response=resp, input_tokens=0, output_tokens=0)
         assert cost == pytest.approx(1.25)  # Anthropic cache_write path
 
     def test_provider_enum_google_routes_to_gemini(self) -> None:
-        p = LLMPricingProvider(_config(**{"gemini": _op("gemini")}))
+        p = LLMPricingProvider(_config(gemini=_op("gemini")))
         resp = _resp(Provider.GOOGLE, {"usage": {}})
         cost = p.compute("gemini", response=resp, input_tokens=1_000_000, output_tokens=0)
         assert cost == pytest.approx(1.0)
@@ -437,7 +437,7 @@ class TestProviderDetection:
 
 class TestOnMissing:
     def test_raise_default(self) -> None:
-        p = LLMPricingProvider(_config(**{"other": _op("other")}))
+        p = LLMPricingProvider(_config(other=_op("other")))
         with pytest.raises(MissingModelCostError) as excinfo:
             p.compute("unknown-model", input_tokens=100)
         err = excinfo.value
@@ -445,7 +445,7 @@ class TestOnMissing:
         assert err.configured == ["other"]
 
     def test_zero_returns_zero(self) -> None:
-        p = LLMPricingProvider(_config(**{"other": _op("other")}), on_missing=OnMissing.ZERO)
+        p = LLMPricingProvider(_config(other=_op("other")), on_missing=OnMissing.ZERO)
         assert p.compute("unknown-model", input_tokens=100) == 0.0
 
     def test_configured_excludes_default_key(self) -> None:
@@ -453,7 +453,7 @@ class TestOnMissing:
         # key. A rate card that includes "default" catches misses via the
         # default fallback (no miss fires), so this asserts the shape via
         # a rate card without the default key.
-        p = LLMPricingProvider(_config(**{"b": _op("b"), "a": _op("a")}))
+        p = LLMPricingProvider(_config(b=_op("b"), a=_op("a")))
         with pytest.raises(MissingModelCostError) as excinfo:
             p.compute("z", input_tokens=1)
         assert excinfo.value.configured == ["a", "b"]
@@ -466,9 +466,7 @@ class TestOnMissing:
 
 class TestNonLLMOp:
     def test_fixed_op_uses_own_cost_on_response_path(self) -> None:
-        p = LLMPricingProvider(
-            _config(**{"web_search": FixedOp(name="web_search", unit_cost=0.001)})
-        )
+        p = LLMPricingProvider(_config(web_search=FixedOp(name="web_search", unit_cost=0.001)))
         resp = _resp("openai", {"usage": {}})
         cost = p.compute("web_search", response=resp, count=3)
         assert cost == pytest.approx(0.003)
