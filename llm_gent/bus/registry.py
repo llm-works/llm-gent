@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .health import AgentHealth as AgentHealth
-from .health import AgentRecord, AgentTable
+from .health import AgentRecord, HeartbeatRegistry
 from .health import AgentType as AgentType
 
 
@@ -46,7 +46,7 @@ class AgentInfo(AgentRecord):
     dead_timeout: float = 90.0
 
 
-class AgentRegistry(AgentTable[AgentInfo]):
+class AgentRegistry(HeartbeatRegistry[AgentInfo]):
     """Thread-safe registry of agents connected to the swarm.
 
     Tracks agent membership, health, and statistics. Used by the hub

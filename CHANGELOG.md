@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Development: `make check` and CI fail on duplicated code blocks, unused private definitions,
   and the ruff rule groups C90, SIM, RET, PIE, PERF and FURB.
 
+### Fixed
+
+- `llm-gent stop` and `feedback` print the gateway's error detail on a 400, as `ask` and `start` do.
+
 ## [0.4.0] - 2026-10-26
 
 ### Added

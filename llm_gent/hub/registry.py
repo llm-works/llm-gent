@@ -16,7 +16,7 @@ from typing import Any
 from appinfra import DotDict
 
 from ..bus.health import AgentHealth as AgentHealth
-from ..bus.health import AgentRecord, AgentTable
+from ..bus.health import AgentRecord, HeartbeatRegistry
 from ..bus.health import AgentType as AgentType
 from ..bus.protocol import AgentStats
 
@@ -62,7 +62,7 @@ class AgentEntry(AgentRecord):
         return None
 
 
-class Registry(AgentTable[AgentEntry]):
+class Registry(HeartbeatRegistry[AgentEntry]):
     """Unified thread-safe agent registry.
 
     Tracks all agents in the swarm -- injected and external -- with

@@ -4,7 +4,7 @@
 """Heartbeat health shared by the swarm's agent registries.
 
 :class:`AgentRecord` derives an entry's health from its last heartbeat;
-:class:`AgentTable` holds entries by id under a lock and answers the
+:class:`HeartbeatRegistry` holds entries by id under a lock and answers the
 health queries.
 """
 
@@ -66,11 +66,11 @@ class AgentRecord:
 E = TypeVar("E", bound=AgentRecord)
 
 
-class AgentTable(Generic[E]):
+class HeartbeatRegistry(Generic[E]):
     """Thread-safe agent entries by id, with the heartbeat health queries."""
 
     def __init__(self, dead_timeout: float = 90.0) -> None:
-        """Initialize the table.
+        """Initialize the registry.
 
         Args:
             dead_timeout: Seconds without heartbeat before agent is considered dead.
