@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `llm-gent stop` and `feedback` print the gateway's error detail on a 400, as `ask` and `start` do.
+- `llm-gent ask`, `start`, `stop`, `feedback` and `list` print the gateway's error detail when a
+  request fails; before, only `ask` and `start` did, and only on a 400.
 
 ## [0.4.0] - 2026-10-26
 

@@ -96,6 +96,32 @@ def test_http_status_error_is_reported(
     mock_logger.error.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("response", "printed"),
+    [
+        (
+            httpx.Response(500, json={"detail": "agent crashed"}),
+            "Server returned 500: agent crashed",
+        ),
+        (httpx.Response(502, text="Bad Gateway"), "Server returned 502: Bad Gateway"),
+    ],
+)
+def test_http_status_error_prints_the_detail(
+    make_tool: Callable[..., GatewayTool],
+    capsys: pytest.CaptureFixture[str],
+    response: httpx.Response,
+    printed: str,
+) -> None:
+    tool = make_tool(AskTool)
+    with patch.object(httpx, "request") as request:
+        request.return_value.status_code = response.status_code
+        request.return_value.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "error", request=MagicMock(), response=response
+        )
+        assert tool._request("POST", "/x", timeout=1.0) is None
+    assert printed in capsys.readouterr().out
+
+
 def test_404_names_the_agent(
     make_tool: Callable[..., GatewayTool], capsys: pytest.CaptureFixture[str]
 ) -> None:

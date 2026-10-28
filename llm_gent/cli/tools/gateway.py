@@ -32,7 +32,7 @@ class GatewayTool(Tool):
     ) -> dict[str, Any] | None:
         """Send ``method`` ``path`` to the gateway: its JSON reply, or ``None`` once the error is printed.
 
-        A 404 reports ``agent`` as not found; a 400 prints the gateway's ``detail``.
+        A 404 reports ``agent`` as not found; other errors print the gateway's ``detail``.
         """
         server = self.args.server.rstrip("/")
         try:
@@ -50,10 +50,20 @@ class GatewayTool(Tool):
             print(f"Error: Could not connect to gateway at {server}")
             return None
         except httpx.HTTPStatusError as e:
-            self.lg.error("server error", extra={"status": e.response.status_code})
-            print(f"Error: Server returned {e.response.status_code}")
+            status = e.response.status_code
+            detail = _detail(e.response)
+            self.lg.error("server error", extra={"status": status, "detail": detail})
+            print(f"Error: Server returned {status}" + (f": {detail}" if detail else ""))
             return None
         except json.JSONDecodeError:
             self.lg.error("invalid JSON response from server")
             print("Error: Server returned invalid response")
             return None
+
+
+def _detail(response: httpx.Response) -> str:
+    """The gateway's ``detail`` field, or the raw body when the reply is not a JSON object."""
+    try:
+        return str(response.json()["detail"])
+    except (ValueError, TypeError, KeyError):
+        return response.text
