@@ -46,7 +46,7 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-asyncio>=0.23",
     "pytest-xdist>=3.0",
-    "ruff>=0.5.0",
+    "ruff>=0.16.0,<1.0.0",  # 0.16 formats code blocks in Markdown, as CI's format check does
     "types-PyYAML>=6.0,<7.0",
 ]
 
@@ -123,6 +123,11 @@ select = [
     "UP",     # pyupgrade
     "ARG",    # flake8-unused-arguments
     "SIM",    # flake8-simplify
+    "C90",    # mccabe complexity
+    "RET",    # flake8-return
+    "PIE",    # flake8-pie
+    "PERF",   # perflint
+    "FURB",   # refurb
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
@@ -130,6 +135,9 @@ ignore = [
     "ARG001", # unused function argument (common in protocols/bases)
     "ARG002", # unused method argument
 ]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.ruff.lint.isort]
 known-first-party = ["llm_gent"]

@@ -278,7 +278,7 @@ class TestHTTPTraitHandleRequest:
         """Create mock LLMTrait."""
         from llm_gent.core.traits.builtin.llm import LLMTrait
 
-        trait = create_mock_trait(
+        return create_mock_trait(
             LLMTrait,
             complete=CompletionResult(
                 id="resp-123",
@@ -288,14 +288,13 @@ class TestHTTPTraitHandleRequest:
                 latency_ms=100,
             ),
         )
-        return trait
 
     @pytest.fixture
     def mock_memory_trait(self):
         """Create mock MemoryTrait."""
         from llm_gent.core.traits.builtin.memory import MemoryTrait
 
-        trait = create_mock_trait(
+        return create_mock_trait(
             MemoryTrait,
             remember={"return_value": 42},
             recall={
@@ -313,7 +312,6 @@ class TestHTTPTraitHandleRequest:
             record_feedback=MagicMock(),
             has_embedder=False,
         )
-        return trait
 
     @pytest.fixture
     def agent(self, mock_logger, mock_llm_trait, mock_memory_trait):
@@ -333,9 +331,7 @@ class TestHTTPTraitHandleRequest:
         """Create HTTPTrait attached to agent."""
         from llm_gent.agents.default.http import HTTPHandler
 
-        handler = HTTPHandler(agent)
-        trait = HTTPTrait(agent, handler=handler)
-        return trait
+        return HTTPTrait(agent, handler=HTTPHandler(agent))
 
     def test_handle_health_request(self, http_trait):
         req = HealthRequest(id="req-1")

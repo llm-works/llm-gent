@@ -27,12 +27,11 @@ def recall_chronological(memory_trait: Any, agent_name: str, limit: int = 5) -> 
         List of solution facts, ordered by most recent first.
     """
     try:
-        solutions = memory_trait.kelt.atomic.solutions.list_by_agent(
+        return memory_trait.kelt.atomic.solutions.list_by_agent(  # type: ignore[no-any-return]
             agent_name=agent_name,
             limit=limit,
             active_only=True,
         )
-        return solutions  # type: ignore[no-any-return]
     except Exception as e:
         # Log failure for debugging, but don't fail (graceful degradation)
         if hasattr(memory_trait, "_lg"):

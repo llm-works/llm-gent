@@ -32,8 +32,6 @@ class BarTrait(BaseTrait):
 class NoNameTrait(BaseTrait):
     """Trait without trait_name attribute."""
 
-    pass
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

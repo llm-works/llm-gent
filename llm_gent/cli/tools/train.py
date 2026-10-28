@@ -209,13 +209,12 @@ class TrainTool(Tool):
         try:
             if method == "sft":
                 return self._run_sft(provider)
-            elif method == "dpo":
+            if method == "dpo":
                 return self._run_dpo(provider)
-            elif method == "prompt":
+            if method == "prompt":
                 return self._run_prompt(provider)
-            else:
-                print(f"Unknown method: {method}")
-                return 1
+            print(f"Unknown method: {method}")
+            return 1
         except AdapterNotFoundError as e:
             print(f"Error: {e}")
             return 1
@@ -365,7 +364,7 @@ class TrainTool(Tool):
             overrides["lora_dropout"] = self.args.lora_dropout
         if getattr(self.args, "rslora", False):
             overrides["use_rslora"] = True
-        return overrides if overrides else None
+        return overrides or None
 
     def _get_training_overrides(self) -> dict[str, Any] | None:
         """Get training config overrides from command line args."""
@@ -378,7 +377,7 @@ class TrainTool(Tool):
             overrides["batch_size"] = self.args.batch_size
         if getattr(self.args, "neftune_alpha", None) is not None:
             overrides["neftune_noise_alpha"] = self.args.neftune_alpha
-        return overrides if overrides else None
+        return overrides or None
 
     def _submit_manifest(
         self,
@@ -458,7 +457,7 @@ class TrainTool(Tool):
             config.update(prompt)  # Prompt args go at top level
         if training := self._get_training_overrides():
             config.update(training)  # Training args go at top level of config
-        return config if config else None
+        return config or None
 
     def _get_prompt_overrides(self) -> dict[str, Any] | None:
         """Get prompt tuning config overrides from command line args."""
@@ -480,7 +479,7 @@ class TrainTool(Tool):
             if init_text:
                 overrides["prompt_tuning_init_text"] = init_text
 
-        return overrides if overrides else None
+        return overrides or None
 
     def _confirm_replace(self, adapter_name: str) -> bool:
         """Confirm replacement of existing manifest."""

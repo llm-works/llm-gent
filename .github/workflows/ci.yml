@@ -37,7 +37,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install zizmor==1.31.1 actionlint-py==1.7.12.25
           # TODO: remove after these packages are released to PyPI
-          python -m pip install "git+https://github.com/llm-works/appinfra.git@develop"
+          # check: pylint, which the duplicated-code check runs
+          python -m pip install "appinfra[check] @ git+https://github.com/llm-works/appinfra.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
@@ -54,6 +55,12 @@ jobs:
 
       - name: Lint
         run: python -m ruff check .
+
+      - name: Check function size, duplicated and dead code
+        run: |
+          python -m appinfra.cli.cli -l error cq cf --strict
+          python -m appinfra.cli.cli -l error cq dup llm_gent/ --strict
+          python -m appinfra.cli.cli -l error cq dead llm_gent/ --strict
 
       - name: Type check
         run: python -m mypy llm_gent/
