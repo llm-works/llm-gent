@@ -200,13 +200,14 @@ class PgStore(Store):
     def write_ref(self, repo: str, name: str, new: str | None, old: str | None) -> bool:
         """Point ref ``name`` at ``new`` (``None``: delete) if it points at ``old`` (``None``: absent).
 
-        One statement either way, so the row count says whether this writer won.
+        One statement either way, so the row it returns says whether this writer won. The
+        returned row, not ``rowcount``: psycopg 3 reports -1 for an ``INSERT``.
         """
         if new is None and old is None:
             return self.read_ref(repo, name) is None
         with self._pg.session() as session:
             result = session.execute(_ref_statement(repo, name, new, old))
-        return _rowcount(result) == 1
+            return result.first() is not None
 
     def list_refs(self, repo: str) -> dict[str, str]:
         """Return every ref of the repository: name to object id."""
@@ -216,17 +217,26 @@ class PgStore(Store):
 
 
 def _ref_statement(repo: str, name: str, new: str | None, old: str | None) -> Any:
-    """The compare-and-set statement for one ref write: create, move or delete."""
+    """The compare-and-set statement for one ref write: create, move or delete.
+
+    Each returns the ref's name when it wrote the row, and nothing when another writer won.
+    """
     if old is None:
         return (
             insert(CasRef)
             .values(repo=repo, name=name, target=new)
             .on_conflict_do_nothing(index_elements=["repo", "name"])
+            .returning(CasRef.name)
         )
     where = (CasRef.repo == repo, CasRef.name == name, CasRef.target == old)
     if new is None:
-        return delete(CasRef).where(*where)
-    return update(CasRef).where(*where).values(target=new, updated_at=func.clock_timestamp())
+        return delete(CasRef).where(*where).returning(CasRef.name)
+    return (
+        update(CasRef)
+        .where(*where)
+        .values(target=new, updated_at=func.clock_timestamp())
+        .returning(CasRef.name)
+    )
 
 
 def _rowcount(result: Any) -> int:

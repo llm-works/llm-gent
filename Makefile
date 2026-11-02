@@ -5,38 +5,41 @@ local := $(dir $(realpath $(lastword $(MAKEFILE_LIST))))
 infra := $(shell appinfra scripts-path)
 
 # Configuration
-INFRA_DEV_PKG_NAME := llm_gent
+APPINFRA_DEV_PKG_NAME := llm_gent
 
 # Code quality strictness
 # - true: Fail on any code quality violations (CI mode)
 # - false: Report violations but don't fail (development mode)
-INFRA_DEV_CQ_STRICT := true
+APPINFRA_DEV_CQ_STRICT := true
 
 # SPDX header enforcement
-INFRA_DEV_CQ_SPDX := true
+APPINFRA_DEV_CQ_SPDX := true
 
 # No ruff rules reported as warnings only: they are enforced in pyproject's select
-INFRA_DEV_CQ_LINT_SELECT :=
+APPINFRA_DEV_CQ_LINT_SELECT := false
 
 # Fail on duplicated code blocks and unused private definitions
-INFRA_DEV_CQ_DUP := strict
-INFRA_DEV_CQ_DEAD := strict
+APPINFRA_DEV_CQ_DUP := strict
+APPINFRA_DEV_CQ_DEAD := strict
+
+# Report tests that sit in another suite's directory, or leak process-wide state
+APPINFRA_DEV_TEST_HEALTH := warn
 
 # Run every example script as a `make check` subcheck (mirrors `make examples.check`)
-INFRA_DEV_CHECK_EXAMPLES := true
+APPINFRA_DEV_CHECK_EXAMPLES := true
 
 # PyTest and Docstring coverage thresholds
-INFRA_PYTEST_COVERAGE_THRESHOLD := 70
-INFRA_DEV_DOCSTRING_THRESHOLD := 95
+APPINFRA_PYTEST_COVERAGE_THRESHOLD := 70
+APPINFRA_DEV_DOCSTRING_THRESHOLD := 95
 
 # Coverage counts both unit and integration tests (integration exercises the
 # alembic-backed Postgres store; unit-only coverage would understate real
 # coverage of llm_gent/flow/stores and llm_gent/schema).
-INFRA_PYTEST_COVERAGE_MARKERS := unit or integration
+APPINFRA_PYTEST_COVERAGE_MARKERS := unit or integration
 
 # PostgreSQL configuration (drives Makefile.pg targets and alembic CLI)
-INFRA_PG_CONFIG_FILE := pg.yaml
-INFRA_PG_DATABASES := main unittest
+APPINFRA_PG_CONFIG_FILE := pg.yaml
+APPINFRA_PG_DATABASES := main unittest
 
 # Point the alembic CLI at etc/pg.yaml so `make migrate` works without
 # additional env setup. env.py reads dbs.<LLM_GENT_DB_KEY>.url (default main).
