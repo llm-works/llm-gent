@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Requires appinfra `>= 0.14.0`; SQLAlchemy 2.1, psycopg 3 and pydantic now come through its
+  `sql` and `validation` extras. `PgStore` works with psycopg 3.
 - Development: `make check` and CI fail on duplicated code blocks, unused private definitions,
   and the ruff rule groups C90, SIM, RET, PIE, PERF and FURB.
 

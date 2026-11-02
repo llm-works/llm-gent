@@ -136,9 +136,7 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Run examples
-        # appinfra's make files look for ~/.venv unless told which Python to use
-        env:
-          INFRA_ENV_PYTHON: python
+        # appinfra's make files use python3 on PATH: the setup-python interpreter
         run: make examples.check
 
   test-summary:

@@ -6,8 +6,9 @@
 Three responsibilities live here:
 
 1. **Plugin registration** — enables :mod:`appinfra.testing` (markers,
-   expected-skip machinery) and :mod:`appinfra.db.pg.testing` (schema-
-   isolated PG fixtures).
+   expected-skip machinery), :mod:`appinfra.db.pg.testing` (schema-
+   isolated PG fixtures) and :mod:`appinfra.pytest_suites` (test
+   structure health).
 2. **Postgres availability protocol** — probes the configured PG
    endpoint once per session and, when unreachable, deselects every
    test that transitively pulls in the ``pg_test_config`` fixture.
@@ -33,7 +34,7 @@ from appinfra.log import Logger
 from tests.helpers import make_test_logger
 
 
-pytest_plugins = ["appinfra.testing", "appinfra.db.pg.testing"]
+pytest_plugins = ["appinfra.testing", "appinfra.db.pg.testing", "appinfra.pytest_suites"]
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
