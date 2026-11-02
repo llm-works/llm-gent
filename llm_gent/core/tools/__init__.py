@@ -3,8 +3,6 @@
 
 """Tool use infrastructure for agents."""
 
-from enum import StrEnum
-
 from .base import BaseTool, Tool, ToolCall, ToolCallResult, ToolResult
 from .builtin import (
     CompleteTaskTool,
@@ -22,38 +20,8 @@ from .builtin import (
 )
 from .executor import SimpleToolExecutor, ToolExecutionResult
 from .factory import ToolFactory
+from .names import ALL_TOOLS, ToolName
 from .registry import Registry
-
-
-class ToolName(StrEnum):
-    """Tool name identifiers.
-
-    Using str Enum so values work in YAML configs and as strings.
-    Matches ToolFactory constants for consistency.
-    """
-
-    SHELL = "shell"
-    READ_FILE = "read_file"
-    WRITE_FILE = "write_file"
-    HTTP_FETCH = "http_fetch"
-    WEB_FETCH = "web_fetch"
-    WEB_SEARCH = "web_search"
-    COMPLETE_TASK = "complete_task"
-    REMEMBER = "remember"
-    RECALL = "recall"
-
-
-# All tool types available in the platform
-ALL_TOOLS: list[ToolName] = [
-    ToolName.SHELL,
-    ToolName.READ_FILE,
-    ToolName.WRITE_FILE,
-    ToolName.HTTP_FETCH,
-    ToolName.WEB_FETCH,
-    ToolName.WEB_SEARCH,
-    ToolName.COMPLETE_TASK,
-    # Note: REMEMBER/RECALL require MemoryTrait, added dynamically when needed
-]
 
 
 __all__ = [
@@ -73,7 +41,7 @@ __all__ = [
     "SimpleToolExecutor",
     "ToolExecutionResult",
     # Built-in tools
-    "CompleteTaskTool",
+    "CompleteTaskTool",  # cq: keep re-exports .builtin's list; llm_gent repeats it
     "FetchResult",
     "FileReadTool",
     "FileWriteTool",

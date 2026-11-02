@@ -4,14 +4,14 @@
 """Feedback tool - provide feedback to an agent."""
 
 import argparse
-import json
 from typing import Any
 
-import httpx
-from appinfra.app.tools import Tool, ToolConfig
+from appinfra.app.tools import ToolConfig
+
+from .gateway import GatewayTool
 
 
-class FeedbackTool(Tool):
+class FeedbackTool(GatewayTool):
     """Provide feedback to an agent."""
 
     def __init__(self, parent: Any = None) -> None:
@@ -27,18 +27,17 @@ class FeedbackTool(Tool):
             "message",
             help="Feedback message",
         )
-        parser.add_argument(
-            "--server",
-            default="http://localhost:8080",
-            help="Gateway server URL (default: http://localhost:8080)",
-        )
+        super().add_args(parser)
 
     def run(self, **kwargs: Any) -> int:
-        server = self.args.server.rstrip("/")
         name = self.args.name
-        message = self.args.message
-
-        data = self._send_feedback(server, name, message)
+        data = self._request(
+            "POST",
+            f"/agents/{name}/feedback",
+            timeout=10.0,
+            agent=name,
+            body={"message": self.args.message},
+        )
         if data is None:
             return 1
 
@@ -47,27 +46,3 @@ class FeedbackTool(Tool):
             return 0
         print("Failed to record feedback")
         return 1
-
-    def _send_feedback(self, server: str, name: str, message: str) -> dict[str, Any] | None:
-        """Send feedback request to gateway."""
-        try:
-            response = httpx.post(
-                f"{server}/agents/{name}/feedback", json={"message": message}, timeout=10.0
-            )
-            if response.status_code == 404:
-                print(f"Error: Agent '{name}' not found")
-                return None
-            response.raise_for_status()
-            return dict(response.json())
-        except httpx.RequestError as e:
-            self.lg.error("failed to connect to server", extra={"exception": e})
-            print(f"Error: Could not connect to gateway at {server}")
-            return None
-        except httpx.HTTPStatusError as e:
-            self.lg.error("server error", extra={"status": e.response.status_code})
-            print(f"Error: Server returned {e.response.status_code}")
-            return None
-        except json.JSONDecodeError:
-            self.lg.error("invalid JSON response from server")
-            print("Error: Server returned invalid response")
-            return None

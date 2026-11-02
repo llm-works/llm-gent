@@ -897,7 +897,7 @@ class TestNestedShape:
     """``prepare``, then the region (passes of a map over items), then ``finish``."""
 
     @staticmethod
-    def _flow(cut: asyncio.Event, ran: list[str], cut_at: str) -> Any:
+    def _flow(cut: asyncio.Event, ran: list[str], cut_at: str) -> Any:  # noqa: C901 - the scenario's verbs close over its probes
         gate = asyncio.Event()
         pass_n = [0]
 

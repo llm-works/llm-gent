@@ -35,8 +35,6 @@ Expected fields:
 class ManifestNotFoundError(Exception):
     """Raised when adapter manifest cannot be found for schema resolution."""
 
-    pass
-
 
 class TrainingTrait(BaseTrait):
     """Kelt-training-side capabilities: adapter manifest lookup and schema resolution.

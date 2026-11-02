@@ -50,7 +50,7 @@ from .types import PairingResult, PreferencePair, RatedItem
 
 __all__ = [
     # Generic types
-    "RatedItem",
+    "RatedItem",  # cq: keep llm_gent.core.training repeats this list
     "PreferencePair",
     "PairingResult",
     # Star-based types

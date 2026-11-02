@@ -175,20 +175,15 @@ class JSONCleaner:
         Returns:
             Cleaned JSON string ready for json.loads().
         """
-        cleaned = self._basic_clean(content)
-
         # If multiple objects (e.g., LLM echoed schema), extract last one
-        cleaned = self._extract_last_object(cleaned)
-
-        return cleaned
+        return self._extract_last_object(self._basic_clean(content))
 
     def _basic_clean(self, content: str) -> str:
         """Basic cleaning without multi-object handling."""
         cleaned = content.strip()
         cleaned = self._strip_code_fences(cleaned)
         cleaned = self._fix_literal_escapes(cleaned)
-        cleaned = self._auto_close_json(cleaned)
-        return cleaned
+        return self._auto_close_json(cleaned)
 
     def _fix_literal_escapes(self, content: str) -> str:
         """Fix literal escape sequences outside of strings.
@@ -244,7 +239,7 @@ class JSONCleaner:
         """Get replacement for literal escape sequence outside strings."""
         if next_char == "n":
             return "\n", 2
-        elif next_char == "t":
+        if next_char == "t":
             return "\t", 2
         return "\\" + next_char, 2
 

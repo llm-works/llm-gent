@@ -210,7 +210,7 @@ class FileReadTool(_FileToolBase):
             )
 
         # Apply limit and select lines
-        effective_limit = limit if limit else self._max_lines
+        effective_limit = limit or self._max_lines
         end_idx = min(start_idx + effective_limit, total_lines)
         selected_lines = lines[start_idx:end_idx]
 

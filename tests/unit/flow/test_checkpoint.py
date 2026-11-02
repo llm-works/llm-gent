@@ -20,14 +20,14 @@ suite; gent's Postgres store runs it in
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 from appinfra.cas import FileStore
 
-from llm_gent.flow import FlowCommit
+from llm_gent.flow import FlowCommit, Role
 from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.testing.checkpoint import (
     assert_resume_determinism,
@@ -58,6 +58,64 @@ class SaiaResult:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SaiaResult:
         return cls(**data)
+
+
+@dataclass
+class Conv:
+    """A conversation a Loop saves with a paused turn and rebuilds on resume."""
+
+    messages: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"messages": list(self.messages)}
+
+
+class ConvFactory:
+    """Builds a :class:`Conv`, fresh or from a saved turn's state."""
+
+    def create(self) -> Conv:
+        return Conv()
+
+    def create_from_state(self, state: dict[str, Any]) -> Conv:
+        return Conv(messages=list(state.get("messages", [])))
+
+
+class RecordingSAIA:
+    """SAIA stub recording every call; in phase "first" it sets the halt and pauses."""
+
+    def __init__(
+        self, role: Role, halt: asyncio.Event, phase: str, calls: list[dict[str, Any]]
+    ) -> None:
+        self.role = role
+        self._halt = halt
+        self._phase = phase
+        self._calls = calls
+
+    async def complete(self, task: str, **kwargs: Any) -> SaiaResult:
+        self._calls.append(
+            {
+                "phase": self._phase,
+                "task": task,
+                "resume": kwargs.get("resume", False),
+                "conversation": kwargs.get("conversation"),
+            }
+        )
+        if self._phase == "first":
+            self._halt.set()
+            return SaiaResult(paused=True, reason="halt")
+        return SaiaResult(paused=False)
+
+
+class PhaseFactory:
+    """SAIA factory building a :class:`RecordingSAIA` for one run's phase."""
+
+    def __init__(self, halt: asyncio.Event, phase: str, calls: list[dict[str, Any]]) -> None:
+        self._halt = halt
+        self._phase = phase
+        self._calls = calls
+
+    def build(self, role: Role) -> RecordingSAIA:
+        return RecordingSAIA(role, self._halt, self._phase, self._calls)
 
 
 @dataclass
@@ -591,27 +649,9 @@ class TestPausedTurnInSnapshot:
 
     async def test_halt_commit_holds_paused_turn_at_the_call_path(self, store: FileStore) -> None:
         """Loop paused mid-turn → the snapshot holds its task + conversation at ``<step>/t/0``."""
-        from dataclasses import dataclass, field
-
-        from llm_gent.flow import Context, Factory, History, Loop, Role, verb
+        from llm_gent.flow import Context, Factory, History, Loop, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
-
-        @dataclass
-        class _Conv:
-            messages: list[str] = field(default_factory=list)
-
-            def to_dict(self) -> dict[str, Any]:
-                return {"messages": list(self.messages), "n": len(self.messages)}
-
-        class _ConvFactory:
-            def create(self) -> _Conv:
-                return _Conv()
-
-            def create_from_state(self, state: dict[str, Any]) -> _Conv:
-                c = _Conv()
-                c.messages = list(state.get("messages", []))
-                return c
 
         @dataclass
         class _Result:
@@ -619,8 +659,8 @@ class TestPausedTurnInSnapshot:
             reason: str = "halt"
 
         halt = asyncio.Event()
-        conv = _Conv(messages=["hello", "world"])
-        loop = Loop(role, conversation_factory=_ConvFactory())
+        conv = Conv(messages=["hello", "world"])
+        loop = Loop(role, conversation_factory=ConvFactory())
 
         # SAIA stub simulates a mid-turn pause: sets halt during complete and
         # returns paused so Loop captures the conversation before returning.
@@ -671,32 +711,14 @@ class TestPausedTurnInSnapshot:
         Loop B then sets the halt and completes, so the halt commit's
         cursor is at the step after B and holds no paused turn.
         """
-        from dataclasses import dataclass, field
-
-        from llm_gent.flow import Context, Factory, History, Loop, Role, verb
+        from llm_gent.flow import Context, Factory, History, Loop, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
-        @dataclass
-        class _Conv:
-            messages: list[str] = field(default_factory=list)
-
-            def to_dict(self) -> dict[str, Any]:
-                return {"messages": list(self.messages), "n": len(self.messages)}
-
-        class _ConvFactory:
-            def create(self) -> _Conv:
-                return _Conv()
-
-            def create_from_state(self, state: dict[str, Any]) -> _Conv:
-                c = _Conv()
-                c.messages = list(state.get("messages", []))
-                return c
-
         _Result = SaiaResult
         halt = asyncio.Event()
-        conv_a = _Conv(messages=["from-a"])
-        conv_b = _Conv(messages=["from-b"])
+        conv_a = Conv(messages=["from-a"])
+        conv_b = Conv(messages=["from-b"])
 
         class _PausingSAIA:
             def __init__(self, role: Role) -> None:
@@ -713,8 +735,8 @@ class TestPausedTurnInSnapshot:
                 halt.set()
                 return _Result(paused=False)
 
-        loop_a = Loop(role, saia=_PausingSAIA(role), conversation_factory=_ConvFactory())
-        loop_b = Loop(role, saia=_HaltingSAIA(role), conversation_factory=_ConvFactory())
+        loop_a = Loop(role, saia=_PausingSAIA(role), conversation_factory=ConvFactory())
+        loop_b = Loop(role, saia=_HaltingSAIA(role), conversation_factory=ConvFactory())
 
         @verb(role=role)
         async def run_a(ctx: Context, _prev: Any = None) -> Any:
@@ -754,64 +776,17 @@ class TestPausedTurnInSnapshot:
         iterate in pass 0 and the chain at that step: resume re-dispatches
         it with the paused turn, then runs pass 1 fresh.
         """
-        from dataclasses import dataclass, field
-
-        from llm_gent.flow import Context, Factory, Loop, Role, verb
+        from llm_gent.flow import Context, Factory, Loop, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
-        @dataclass
-        class _Conv:
-            messages: list[str] = field(default_factory=list)
-
-            def to_dict(self) -> dict[str, Any]:
-                return {"messages": list(self.messages)}
-
-        class _ConvFactory:
-            def create(self) -> _Conv:
-                return _Conv()
-
-            def create_from_state(self, state: dict[str, Any]) -> _Conv:
-                c = _Conv()
-                c.messages = list(state.get("messages", []))
-                return c
-
-        _Result = SaiaResult
-
-        # Recording SAIA — captures every call so the test can assert what
-        # the resume-side dispatch handed to complete().
+        # Every SAIA call, so the test can assert what the resume-side
+        # dispatch handed to complete().
         complete_calls: list[dict[str, Any]] = []
-
-        class _RecordingSAIA:
-            def __init__(self, role: Role, halt: asyncio.Event, phase: str) -> None:
-                self.role = role
-                self._halt = halt
-                self._phase = phase
-
-            async def complete(self, task: str, **kwargs: Any) -> _Result:
-                complete_calls.append(
-                    {
-                        "phase": self._phase,
-                        "conversation": kwargs.get("conversation"),
-                        "resume": kwargs.get("resume", False),
-                    }
-                )
-                if self._phase == "first":
-                    self._halt.set()
-                    return _Result(paused=True, reason="halt")
-                return _Result(paused=False)
-
-        class _PhaseFactory:
-            def __init__(self, halt: asyncio.Event, phase: str) -> None:
-                self._halt = halt
-                self._phase = phase
-
-            def build(self, role: Role) -> _RecordingSAIA:
-                return _RecordingSAIA(role, self._halt, self._phase)
 
         # ONE Loop instance and ONE pair of verbs — same qualnames across both
         # runs so ctx._node_id is stable and the resume dict entry matches.
-        loop = Loop(role, conversation_factory=_ConvFactory())
+        loop = Loop(role, conversation_factory=ConvFactory())
 
         @verb(role=role)
         async def run_loop(ctx: Context, _prev: Any = None) -> Any:
@@ -832,7 +807,7 @@ class TestPausedTurnInSnapshot:
 
         # ---- Run 1: iterate iteration 0 halts mid-Loop-turn.
         halt1 = asyncio.Event()
-        ff1 = Factory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
+        ff1 = Factory(make_test_logger(), saia_factory=PhaseFactory(halt1, "first", complete_calls))
         flow1 = (
             ff1.create(state={})
             .with_checkpoint_store(store, "resume-round-trip")
@@ -840,7 +815,7 @@ class TestPausedTurnInSnapshot:
             .with_halt(halt1)
             .iterate(body, max_iters=2)
         )
-        await flow1.run(extra={"conv": _Conv(messages=["from-turn-1"])})
+        await flow1.run(extra={"conv": Conv(messages=["from-turn-1"])})
         assert [c["phase"] for c in complete_calls] == ["first"]
 
         # ---- Run 2: resume="latest" re-runs iteration 0. The Loop's re-dispatch
@@ -849,7 +824,9 @@ class TestPausedTurnInSnapshot:
         # conversation — the resume path must override it with the rebuilt
         # one from the halted commit.
         halt2 = asyncio.Event()
-        ff2 = Factory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
+        ff2 = Factory(
+            make_test_logger(), saia_factory=PhaseFactory(halt2, "resume", complete_calls)
+        )
         flow2 = (
             ff2.create(state={})
             .with_checkpoint_store(store, "resume-round-trip")
@@ -859,73 +836,25 @@ class TestPausedTurnInSnapshot:
         )
         await flow2.run(
             resume="latest",
-            extra={"conv": _Conv(messages=["caller-supplied-but-overridden"])},
+            extra={"conv": Conv(messages=["caller-supplied-but-overridden"])},
         )
 
         resume_calls = [c for c in complete_calls if c["phase"] == "resume"]
         # Pass 0 resumes the paused turn; pass 1 (max_iters=2) dispatches fresh.
         assert [c["resume"] for c in resume_calls] == [True, False]
         resumed = resume_calls[0]
-        assert isinstance(resumed["conversation"], _Conv)
+        assert isinstance(resumed["conversation"], Conv)
         assert resumed["conversation"].messages == ["from-turn-1"]
 
     async def test_chain_resume_re_dispatches_paused_loop_verb(self, store: FileStore) -> None:
         """Chain flow with Loop verb: halt on turn 1 → resume re-runs the loop verb."""
-        from dataclasses import dataclass, field
-
-        from llm_gent.flow import Context, Factory, Loop, Role, verb
+        from llm_gent.flow import Context, Factory, Loop, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
-        @dataclass
-        class _Conv:
-            messages: list[str] = field(default_factory=list)
-
-            def to_dict(self) -> dict[str, Any]:
-                return {"messages": list(self.messages)}
-
-        class _ConvFactory:
-            def create(self) -> _Conv:
-                return _Conv()
-
-            def create_from_state(self, state: dict[str, Any]) -> _Conv:
-                c = _Conv()
-                c.messages = list(state.get("messages", []))
-                return c
-
-        _Result = SaiaResult
         after_calls: list[int] = []
         complete_calls: list[dict[str, Any]] = []
-
-        class _RecordingSAIA:
-            def __init__(self, role: Role, halt: asyncio.Event, phase: str) -> None:
-                self.role = role
-                self._halt = halt
-                self._phase = phase
-
-            async def complete(self, task: str, **kwargs: Any) -> _Result:
-                complete_calls.append(
-                    {
-                        "phase": self._phase,
-                        "task": task,
-                        "resume": kwargs.get("resume", False),
-                        "conversation": kwargs.get("conversation"),
-                    }
-                )
-                if self._phase == "first":
-                    self._halt.set()
-                    return _Result(paused=True)
-                return _Result(paused=False)
-
-        class _PhaseFactory:
-            def __init__(self, halt: asyncio.Event, phase: str) -> None:
-                self._halt = halt
-                self._phase = phase
-
-            def build(self, role: Role) -> _RecordingSAIA:
-                return _RecordingSAIA(role, self._halt, self._phase)
-
-        loop = Loop(role, conversation_factory=_ConvFactory())
+        loop = Loop(role, conversation_factory=ConvFactory())
 
         @verb(role=role)
         async def run_loop(ctx: Context, _prev: Any = None) -> Any:
@@ -940,7 +869,7 @@ class TestPausedTurnInSnapshot:
         # commit lands at run_loop's node (not after_step's) so resume re-runs
         # the loop verb.
         halt1 = asyncio.Event()
-        ff1 = Factory(make_test_logger(), saia_factory=_PhaseFactory(halt1, "first"))
+        ff1 = Factory(make_test_logger(), saia_factory=PhaseFactory(halt1, "first", complete_calls))
         flow1 = (
             ff1.create(state={})
             .with_checkpoint_store(store, "chain-resume")
@@ -949,13 +878,15 @@ class TestPausedTurnInSnapshot:
             .call(run_loop)
             .then(after_step)
         )
-        await flow1.run(extra={"task": "saved-task", "conv": _Conv(messages=["turn-1"])})
+        await flow1.run(extra={"task": "saved-task", "conv": Conv(messages=["turn-1"])})
         assert after_calls == []  # halt observed before after_step ran
 
         # Run 2: resume. Loop is re-dispatched, consumes paused_turn, SAIA
         # completes non-paused, chain moves on to after_step.
         halt2 = asyncio.Event()
-        ff2 = Factory(make_test_logger(), saia_factory=_PhaseFactory(halt2, "resume"))
+        ff2 = Factory(
+            make_test_logger(), saia_factory=PhaseFactory(halt2, "resume", complete_calls)
+        )
         flow2 = (
             ff2.create(state={})
             .with_checkpoint_store(store, "chain-resume")
@@ -969,15 +900,15 @@ class TestPausedTurnInSnapshot:
             # Caller passes DIFFERENT task + conv on run 2 to prove the resume
             # path forwards the SAVED values from the envelope, not the ones
             # the verb happened to hand this dispatch.
-            extra={"task": "caller-task", "conv": _Conv(messages=["overridden"])},
+            extra={"task": "caller-task", "conv": Conv(messages=["overridden"])},
         )
 
         resume_calls = [c for c in complete_calls if c["phase"] == "resume"]
         assert len(resume_calls) == 1
         assert resume_calls[0]["resume"] is True
         # SAIA must receive the checkpoint-restored Conversation, not the
-        # caller-supplied _Conv(["overridden"]).
-        assert isinstance(resume_calls[0]["conversation"], _Conv)
+        # caller-supplied Conv(["overridden"]).
+        assert isinstance(resume_calls[0]["conversation"], Conv)
         assert resume_calls[0]["conversation"].messages == ["turn-1"]
         # SAIA must receive the SAVED task from the envelope, not the caller's
         # "caller-task" on run 2 — a regression that forwarded the caller task
@@ -988,34 +919,17 @@ class TestPausedTurnInSnapshot:
 
     async def test_resume_restores_saved_task_from_paused_turn_envelope(self) -> None:
         """The Loop call rebuilds task and conversation from the turn saved at its path."""
-        from dataclasses import dataclass, field
         from types import SimpleNamespace
 
-        from llm_gent.flow import Loop, Role
+        from llm_gent.flow import Loop
         from llm_gent.flow.loop import _LoopTurn
         from llm_gent.flow.state import State
         from llm_gent.flow.state.snapshot import TURN, ScopeRegistry, Snapshot
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
-        @dataclass
-        class _Conv:
-            messages: list[str] = field(default_factory=list)
-
-            def to_dict(self) -> dict[str, Any]:
-                return {"messages": list(self.messages)}
-
-        class _ConvFactory:
-            def create(self) -> _Conv:
-                return _Conv()
-
-            def create_from_state(self, state: dict[str, Any]) -> _Conv:
-                c = _Conv()
-                c.messages = list(state.get("messages", []))
-                return c
-
         node_id = "node-abc"
-        loop = Loop(role, conversation_factory=_ConvFactory())
+        loop = Loop(role, conversation_factory=ConvFactory())
 
         # A checked-out snapshot whose turn at the step's first Loop call
         # carries BOTH the task and the conversation state.
@@ -1034,7 +948,7 @@ class TestPausedTurnInSnapshot:
         # A direct Loop chain step resumes with no task of its own: the saved
         # task is what reaches SAIA.
         assert task == "saved-task-string"
-        assert isinstance(conversation, _Conv)
+        assert isinstance(conversation, Conv)
         assert conversation.messages == ["mid-turn"]
         # The resuming turn stays in the run's snapshots until SAIA finishes it;
         # a saved turn without "used" counts as nothing used.

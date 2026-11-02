@@ -65,7 +65,7 @@ class ServeTool(Tool):
     def run(self, **kwargs: Any) -> int:
         from ...runtime.server import AgentServerConfig
 
-        raw_config = self.app.config if self.app.config else DotDict()
+        raw_config = self.app.config or DotDict()
         config = AgentServerConfig.from_dict(raw_config)
         self._apply_cli_overrides(config)
 

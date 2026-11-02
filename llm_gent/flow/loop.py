@@ -243,7 +243,7 @@ class Loop:
         self._on_finally = on_finally
         self._on_executor_ready = on_executor_ready
         self._on_cost = on_cost
-        self._paused_bytes: bytes | None = None
+        self._paused_bytes: bytes | None = None  # cq: keep introspection surface for callers
 
     @property
     def role(self) -> Role:

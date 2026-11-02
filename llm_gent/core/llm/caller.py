@@ -39,6 +39,23 @@ class CallResult:
     raw_response: ChatResponse | None  # None in dry-run mode
 
 
+def log_response(lg: Logger, response: ChatResponse) -> None:
+    """Log a full LLM response at trace level."""
+    lg.trace(
+        "llm response",
+        extra={
+            "content": response.content,
+            "model": response.model,
+            "usage": response.usage,
+            "tool_calls": [
+                {"name": tc.function.name, "arguments": tc.function.arguments}
+                for tc in (response.tool_calls or [])
+            ],
+            "adapter": response.adapter,
+        },
+    )
+
+
 class LLMCaller:
     """Framework wrapper for LLM calls with logging and dry-run.
 
@@ -136,7 +153,7 @@ class LLMCaller:
             **kwargs,
         )
 
-        self._log_response(response)
+        log_response(self._lg, response)
         return self._to_result(response)
 
     def _dry_run_result(self, model: str | None) -> CallResult:
@@ -203,22 +220,6 @@ class LLMCaller:
                 "messages": messages,
                 "tools": [t.get("function", {}).get("name") for t in (tools or [])],
                 "dry_run": self._dry_run,
-            },
-        )
-
-    def _log_response(self, response: ChatResponse) -> None:
-        """Log full LLM response at trace level."""
-        self._lg.trace(
-            "llm response",
-            extra={
-                "content": response.content,
-                "model": response.model,
-                "usage": response.usage,
-                "tool_calls": [
-                    {"name": tc.function.name, "arguments": tc.function.arguments}
-                    for tc in (response.tool_calls or [])
-                ],
-                "adapter": response.adapter,
             },
         )
 

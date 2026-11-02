@@ -377,7 +377,7 @@ class MemoryTrait(BaseTrait):
 
         response = self.client.chat(
             messages=[{"role": "user", "content": query}],
-            system=prompt if prompt else None,
+            system=prompt or None,
             model=self._llm_defaults.get("model"),
             temperature=temperature
             if temperature is not None

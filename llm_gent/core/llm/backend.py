@@ -58,13 +58,9 @@ class LLMBackend(Protocol):
 class LLMError(Exception):
     """Error from LLM backend."""
 
-    pass
-
 
 class StructuredOutputError(Exception):
     """Raised when structured output parsing or validation fails."""
-
-    pass
 
 
 class HTTPBackend:
@@ -92,7 +88,7 @@ class HTTPBackend:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._default_model = default_model
-        self._adapter_path: str | None = None
+        self._adapter_path: str | None = None  # cq: keep for server-side adapter loading
         self._client = httpx.Client(timeout=self._timeout)
 
     def close(self) -> None:

@@ -14,6 +14,7 @@ from llm_infer.client import ChatClient, ChatResponse
 from pydantic import BaseModel, ValidationError
 
 from ...llm.backend import StructuredOutputError
+from ...llm.caller import log_response
 from ...llm.types import CompletionResult, Message
 from ..base import BaseTrait
 from .directive import DirectiveTrait
@@ -260,7 +261,7 @@ class LLMTrait(BaseTrait):
             extra_body=extra_body,
         )
 
-        self._log_response(response)
+        log_response(self.agent.lg, response)
         result = self._response_to_result(response)
 
         if output_schema:
@@ -321,7 +322,7 @@ class LLMTrait(BaseTrait):
             extra_body=extra_body,
         )
 
-        self._log_response(response)
+        log_response(self.agent.lg, response)
         result = self._response_to_result(response)
 
         if output_schema:
@@ -475,22 +476,6 @@ class LLMTrait(BaseTrait):
                 "max_tokens": max_tokens,
                 "adapter": adapter,
                 "messages": messages,
-            },
-        )
-
-    def _log_response(self, response: ChatResponse) -> None:
-        """Log full LLM response at trace level."""
-        self.agent.lg.trace(
-            "llm response",
-            extra={
-                "content": response.content,
-                "model": response.model,
-                "usage": response.usage,
-                "tool_calls": [
-                    {"name": tc.function.name, "arguments": tc.function.arguments}
-                    for tc in (response.tool_calls or [])
-                ],
-                "adapter": response.adapter,
             },
         )
 

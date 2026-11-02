@@ -155,7 +155,7 @@ class WebFetchTool(BaseTool):
             include_tables=True,
             favor_recall=True,
         )
-        return extracted if extracted else content
+        return extracted or content
 
     def _truncate(self, result: ToolResult, text: str) -> ToolResult:
         """``result`` with ``text`` as its output, truncated to max length including the suffix.

@@ -123,37 +123,32 @@ def _typed_flow(store: Any, halt: asyncio.Event, ran: list[str], stop_at: int | 
     """
     count = [0]
 
-    def stopping(label: str) -> bool:
+    def step(label: str) -> None:
         count[0] += 1
         ran.append(label)
         if count[0] == stop_at:
             halt.set()
-            return True
-        return False
+            raise Interrupted()
 
     @verb
     async def seed(ctx: Context[Totals], n: int) -> Item:
-        if stopping("seed"):
-            raise Interrupted()
+        step("seed")
         return Item(n=n)
 
     @verb
     async def bump(ctx: Context[Totals], item: Item) -> Item:
-        if stopping(f"bump:{item.n}"):
-            raise Interrupted()
+        step(f"bump:{item.n}")
         ctx.state.data.last = item
         return Item(n=item.n + 1)
 
     @verb
     async def double(ctx: Context[Totals], item: Item) -> Item:
-        if stopping(f"double:{item.n}"):
-            raise Interrupted()
+        step(f"double:{item.n}")
         return Item(n=item.n * 2)
 
     @verb
     async def total(ctx: Context[Totals], items: list[Item]) -> int:
-        if stopping("total"):
-            raise Interrupted()
+        step("total")
         ctx.state.data.seen = [i.n for i in items]
         return sum(i.n for i in items)
 

@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
 
+from .names import ToolName
+
 
 if TYPE_CHECKING:
     from ..traits.builtin.memory import MemoryTrait
@@ -36,16 +38,16 @@ class ToolFactory:
         custom = factory.create("my_tool", {"option": "value"})
     """
 
-    # Canonical tool type constants
-    SHELL = "shell"
-    READ_FILE = "read_file"
-    WRITE_FILE = "write_file"
-    HTTP_FETCH = "http_fetch"
-    WEB_FETCH = "web_fetch"
-    WEB_SEARCH = "web_search"
-    COMPLETE_TASK = "complete_task"
-    REMEMBER = "remember"
-    RECALL = "recall"
+    # Canonical tool type constants: plain str, so configs dump and compare as before
+    SHELL = ToolName.SHELL.value
+    READ_FILE = ToolName.READ_FILE.value
+    WRITE_FILE = ToolName.WRITE_FILE.value
+    HTTP_FETCH = ToolName.HTTP_FETCH.value
+    WEB_FETCH = ToolName.WEB_FETCH.value
+    WEB_SEARCH = ToolName.WEB_SEARCH.value
+    COMPLETE_TASK = ToolName.COMPLETE_TASK.value
+    REMEMBER = ToolName.REMEMBER.value
+    RECALL = ToolName.RECALL.value
 
     # Built-in tool type aliases
     _ALIASES: dict[str, str] = {

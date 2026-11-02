@@ -23,7 +23,7 @@ from .pairing import (
 
 __all__ = [
     # Generic types
-    "RatedItem",
+    "RatedItem",  # cq: keep re-exports .pairing's list
     "PreferencePair",
     "PairingResult",
     # Star-based types

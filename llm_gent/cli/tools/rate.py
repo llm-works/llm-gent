@@ -104,7 +104,7 @@ class RateTool(Tool):
             return agent_name
 
         context_key = self._extract_context_key(config, agent_name)
-        return context_key if context_key else agent_name
+        return context_key or agent_name
 
     def _load_agent_config(self, agent_name: str) -> DotDict | None:
         """Load agent config from app config."""
@@ -284,17 +284,16 @@ class RateTool(Tool):
             stars = int(user_input)
             if stars == 1:
                 return ("negative", 1.0, 1)
-            elif stars == 2:
+            if stars == 2:
                 return ("negative", 0.5, 2)
-            elif stars == 3:
+            if stars == 3:
                 return ("dismiss", 1.0, 3)
-            elif stars == 4:
+            if stars == 4:
                 return ("positive", 0.5, 4)
-            elif stars == 5:
+            if stars == 5:
                 return ("positive", 1.0, 5)
-            else:
-                print("Stars must be 1-5")
-                return None
+            print("Stars must be 1-5")
+            return None
         except ValueError:
             print("Invalid input. Use: 1-5 (stars), g/👍 (5★), b/👎 (1★), s/skip, q/quit")
             return None
@@ -408,10 +407,9 @@ class RateTool(Tool):
         if limit == 0:
             print(f"Found {unrated_count} unrated facts. Rating all...")
             return unrated_count
-        else:
-            to_rate = min(limit, unrated_count)
-            print(f"Found {unrated_count} unrated facts. Rating {to_rate}...")
-            return to_rate
+        to_rate = min(limit, unrated_count)
+        print(f"Found {unrated_count} unrated facts. Rating {to_rate}...")
+        return to_rate
 
     def _rate_with_service(
         self,

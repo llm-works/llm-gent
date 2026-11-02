@@ -85,10 +85,9 @@ class ConversationTrait(BaseTrait):
         """Create compactor from config."""
         if self.config.compactor == "sliding_window":
             return SlidingWindowCompactor()
-        elif self.config.compactor == "summarizing":
+        if self.config.compactor == "summarizing":
             raise NotImplementedError("SummarizingCompactor not yet supported in ConversationTrait")
-        else:
-            raise ValueError(f"Unknown compactor: {self.config.compactor}")
+        raise ValueError(f"Unknown compactor: {self.config.compactor}")
 
     def on_start(self) -> None:
         """Initialize conversation with system prompt from agent."""
@@ -100,7 +99,6 @@ class ConversationTrait(BaseTrait):
 
     def on_stop(self) -> None:
         """Stop trait (conversation state preserved in memory)."""
-        pass
 
     @property
     def conversation(self) -> Conversation:

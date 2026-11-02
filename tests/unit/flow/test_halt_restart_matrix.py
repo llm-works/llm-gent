@@ -763,12 +763,7 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     if isinstance(node, Leaf):
         return flow.call(_leaf_verb(node, probe))
     if isinstance(node, Seq | Scope):
-        sub = Factory(LG).create()
-        for child in node.children if isinstance(node, Seq) else (node.body,):
-            _add(child, sub, probe, parallel)
-        if isinstance(node, Seq):
-            return flow.call(sub)
-        return flow.call(sub, state=lambda p: {"done": dict(p.get("done", {}))}, merge=_merge_scope)
+        return _add_sub(node, flow, probe, parallel)
     if isinstance(node, Iter):
         until = (lambda r, _ctx: _until(r)) if node.until else None
         return flow.iterate(
@@ -781,6 +776,16 @@ def _add(node: Node, flow: Flow, probe: Probe, parallel: bool) -> Flow:
             else_=lambda b: _add(node.else_, b, probe, parallel),
         )
     return _add_map(node, flow, probe, parallel)
+
+
+def _add_sub(node: Seq | Scope, flow: Flow, probe: Probe, parallel: bool) -> Flow:
+    """Append ``node``'s children as one subflow; a ``Scope``'s runs on its own state."""
+    sub = Factory(LG).create()
+    for child in node.children if isinstance(node, Seq) else (node.body,):
+        _add(child, sub, probe, parallel)
+    if isinstance(node, Seq):
+        return flow.call(sub)
+    return flow.call(sub, state=lambda p: {"done": dict(p.get("done", {}))}, merge=_merge_scope)
 
 
 def _cut_flow(node: Cut, probe: Probe, parallel: bool) -> Flow:

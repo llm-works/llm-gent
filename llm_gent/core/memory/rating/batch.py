@@ -155,16 +155,14 @@ class BatchRatingService:
 
         try:
             results = self._core_service.rate_batch(request)
-            rated: list[StarRatedItem] = []
-            for result in results:
-                if self._save_rating(result):
-                    rated.append(
-                        StarRatedItem(
-                            id=result.fact,
-                            content=content_map.get(result.fact, ""),
-                            score=result.stars,
-                        )
-                    )
+            # An item counts as rated once its rating is saved.
+            rated = [
+                StarRatedItem(
+                    id=result.fact, content=content_map.get(result.fact, ""), score=result.stars
+                )
+                for result in results
+                if self._save_rating(result)
+            ]
             return (rated, len(items) - len(rated))
         except Exception as e:
             self._lg.warning("batch rating failed", extra={"exception": e})
