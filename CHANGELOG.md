@@ -7,10 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-01
+
 ### Changed
 
-- Requires appinfra `>= 0.14.0`; SQLAlchemy 2.1, psycopg 3 and pydantic now come through its
-  `sql` and `validation` extras. `PgStore` works with psycopg 3.
+- Requires appinfra `>= 0.14.0`, llm-infer `>= 0.8.1` and llm-kelt `>= 0.5.1`; SQLAlchemy 2.1,
+  psycopg 3 and pydantic now come through appinfra's `sql` and `validation` extras. `PgStore`
+  works with psycopg 3.
 - Development: `make check` and CI fail on duplicated code blocks, unused private definitions,
   and the ruff rule groups C90, SIM, RET, PIE, PERF and FURB.
 
@@ -202,7 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migrated from llm-learn to llm-kelt for training
 - Refactored training infrastructure to core modules
 
-[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/llm-works/llm-gent/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/llm-works/llm-gent/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/llm-works/llm-gent/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/llm-works/llm-gent/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/llm-works/llm-gent/compare/v0.3.1...v0.3.2
