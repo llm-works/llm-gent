@@ -3,6 +3,8 @@
 
 """Tests for SAIATrait."""
 
+from collections.abc import Iterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -267,7 +269,22 @@ class TestToolToTooldef:
 # ---------------------------------------------------------------------------
 
 
+async def _inline(fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """``asyncio.to_thread`` without the thread: runs ``fn`` on the caller's."""
+    return fn(*args, **kwargs)
+
+
 class TestCreateExecutor:
+    @pytest.fixture(autouse=True)
+    def _no_worker_thread(self) -> Iterator[None]:
+        """The executor's tool call runs inline instead of on a worker thread.
+
+        ``_create_executor`` imports ``asyncio`` inside the function, so the patch goes on
+        ``asyncio`` itself.
+        """
+        with patch("asyncio.to_thread", _inline):
+            yield
+
     @pytest.mark.asyncio
     async def test_success(self):
         registry = MagicMock()

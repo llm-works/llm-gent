@@ -5,14 +5,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
 from appinfra.cas import Blob, ObjectNotFoundError, Store, Tree, TreeEntry
 
 from llm_gent.flow import Context, Factory, FlowCommit, History, verb
-from tests.helpers import file_store, memory_store
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -22,11 +21,10 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 NAME = "gc"
 
 
-@pytest.fixture(params=["mem", "file"])
-def store(request: pytest.FixtureRequest, tmp_path: Path) -> Store:
-    if request.param == "mem":
-        return memory_store()
-    return file_store(tmp_path / "cp")
+@pytest.fixture
+def store() -> Store:
+    """An in-memory store; :mod:`tests.integration.flow.test_prune_file` runs these on files."""
+    return memory_store()
 
 
 def _flow(store: Store, tag: str | None) -> Any:

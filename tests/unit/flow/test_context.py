@@ -8,13 +8,12 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from llm_gent.flow import Context, Flow, State, verb
-from tests.helpers import file_store
+from tests.helpers import memory_store
 
 from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
 
@@ -295,7 +294,7 @@ class TestCtxExtraResume:
     """``ctx.extra`` is not persisted and is re-supplied by the caller on resume."""
 
     @pytest.mark.asyncio
-    async def test_extra_not_checkpointed_and_re_supplied_on_resume(self, tmp_path: Path) -> None:
+    async def test_extra_not_checkpointed_and_re_supplied_on_resume(self) -> None:
         """Non-picklable extra survives halt+resume; verb sees the fresh dict post-resume.
 
         Places a :class:`threading.Lock` (non-picklable) in ``extra`` and
@@ -304,7 +303,7 @@ class TestCtxExtraResume:
         supplies a new Lock; the body verb observes the fresh instance,
         proving the caller's re-supplied dict wins on the resume path.
         """
-        store = file_store(tmp_path / "cp")
+        store = memory_store()
         seen: list[object] = []
         halt = asyncio.Event()
 

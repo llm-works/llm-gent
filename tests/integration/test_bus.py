@@ -10,7 +10,6 @@ message passing between coordinator and worker bus instances.
 import errno
 import socket
 import threading
-import time
 from typing import Any
 
 import pytest
@@ -33,6 +32,7 @@ from tests.integration._ports import (
     start_on_free_ports,
     worker_config,
 )
+from tests.integration._zmq import send_until
 
 
 pytestmark = pytest.mark.integration
@@ -45,32 +45,21 @@ def _start_coordinator(lg: Any, ports: list[int]) -> tuple[ZMQCoordinatorBus, li
     return coord, ports
 
 
-def _wait_for_zmq_connect(seconds: float = 0.2) -> None:
-    """Wait for ZMQ async connect/bind to settle.
-
-    ZMQ connect is asynchronous and provides no readiness signal.
-    A short sleep is the only reliable way to allow the underlying
-    TCP handshake and subscription propagation to complete.
-    """
-    time.sleep(seconds)
-
-
 @pytest.fixture
 def bus_pair():
     """Create coordinator + worker bus pair.
 
     No parent transport is created -- agent→hub requests go through the
     coordinator's on_request handler. Worker has a BufferedChannel for
-    request/response via its DEALER transport.
+    request/response via its DEALER transport, which queues requests until
+    it has connected.
     """
     from unittest.mock import MagicMock
 
     lg = MagicMock()
     coord, ports = start_on_free_ports(lambda p: _start_coordinator(lg, p))
-    _wait_for_zmq_connect(0.1)
     worker = ZMQWorkerBus(lg, "test-worker", worker_config(ports))
     worker.start()
-    _wait_for_zmq_connect(0.2)
 
     assert worker.transport is not None
     child_channel: BufferedChannel[Any, Any] = BufferedChannel(worker.transport)
@@ -141,12 +130,10 @@ class TestPubSub:
             event.set()
 
         worker.subscribe("broadcast", on_broadcast)
-        _wait_for_zmq_connect(0.1)
 
-        coord.broadcast(HeartbeatResponse(id="bc", agent_id="hub"))
-        event.wait(timeout=5.0)
+        send_until(lambda: coord.broadcast(HeartbeatResponse(id="bc", agent_id="hub")), event.wait)
 
-        assert len(received) == 1
+        assert isinstance(received[0], HeartbeatResponse)
 
     def test_worker_heartbeat_received_by_coordinator(self, bus_pair):
         """Worker publishes heartbeat response, coordinator receives it."""
@@ -159,12 +146,9 @@ class TestPubSub:
             event.set()
 
         coord.subscribe("heartbeat", on_heartbeat)
-        _wait_for_zmq_connect(0.1)
 
-        worker.publish_heartbeat({"ticks": 5, "errors": 0})
-        event.wait(timeout=5.0)
+        send_until(lambda: worker.publish_heartbeat({"ticks": 5, "errors": 0}), event.wait)
 
-        assert len(received) == 1
         assert isinstance(received[0], HeartbeatResponse)
         assert received[0].stats.ticks == 5
 
@@ -175,13 +159,11 @@ class TestPubSub:
         event = threading.Event()
 
         coord.subscribe("status.updates", lambda msg: (received.append(msg), event.set()))
-        _wait_for_zmq_connect(0.1)
 
         msg = HeartbeatRequest(agent_id="agent-1", stats=AgentStats(ticks=1))
-        worker.publish("status.updates", msg)
-        event.wait(timeout=5.0)
+        send_until(lambda: worker.publish("status.updates", msg), event.wait)
 
-        assert len(received) == 1
+        assert isinstance(received[0], HeartbeatRequest)
 
 
 class TestMultiWorker:
@@ -194,7 +176,6 @@ class TestMultiWorker:
 
         lg = MagicMock()
         coord, ports = start_on_free_ports(lambda p: _start_coordinator(lg, p))
-        _wait_for_zmq_connect(0.1)
 
         workers = []
         channels = []
@@ -206,8 +187,6 @@ class TestMultiWorker:
             assert w.transport is not None
             ch: BufferedChannel[Any, Any] = BufferedChannel(w.transport)
             channels.append(ch)
-
-        _wait_for_zmq_connect(0.3)
 
         yield coord, workers, channels
 
@@ -258,9 +237,9 @@ class TestMultiWorker:
         for w in workers:
             w.subscribe("broadcast", make_handler(w.agent_id))
 
-        _wait_for_zmq_connect(0.1)
-        coord.broadcast(HeartbeatResponse(id="bc", agent_id="hub"))
-        all_received.wait(timeout=5.0)
+        send_until(
+            lambda: coord.broadcast(HeartbeatResponse(id="bc", agent_id="hub")), all_received.wait
+        )
 
         assert len(counts) == 3
 
@@ -275,7 +254,6 @@ class TestAgentToAgent:
 
         lg = MagicMock()
         coord, ports = start_on_free_ports(lambda p: _start_coordinator(lg, p))
-        _wait_for_zmq_connect(0.1)
 
         workers = []
         for name in ("alice", "bob"):
@@ -284,8 +262,6 @@ class TestAgentToAgent:
             workers.append(w)
             # Register transport so coordinator can route to this agent
             coord.create_agent_transport(name)
-
-        _wait_for_zmq_connect(0.3)
 
         yield coord, workers[0], workers[1]
 
@@ -302,18 +278,18 @@ class TestAgentToAgent:
         assert bob.transport is not None
         bob_channel: BufferedChannel[Any, Any] = BufferedChannel(bob.transport)
 
-        # Alice sends to Bob
+        def arrived(wait: float) -> bool:
+            """Bob receives via channel."""
+            try:
+                received.append(bob_channel.recv(timeout=wait))
+            except ChannelTimeoutError:
+                return False
+            return True
+
+        # Alice sends to Bob; the coordinator drops it until Bob has connected
         msg = HeartbeatRequest(agent_id="alice", stats=AgentStats(ticks=99))
-        alice.send_to_agent("bob", msg)
+        send_until(lambda: alice.send_to_agent("bob", msg), arrived)
 
-        # Bob receives via channel
-        try:
-            received_msg = bob_channel.recv(timeout=5.0)
-            received.append(received_msg)
-        except Exception:
-            pass
-
-        assert len(received) == 1
         assert isinstance(received[0], HeartbeatRequest)
         assert received[0].stats.ticks == 99
 

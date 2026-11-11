@@ -56,13 +56,18 @@ def _iterate_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
 
 
 def _map_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
-    """A parallel map over four items, saving after each; ``die_at``'s item dies mid-body."""
+    """A parallel map over four items, saving after each.
+
+    ``die_at``'s item dies mid-body once another item completed: ``on_item_complete`` fires
+    after the item's save, so the death always leaves a saved item behind.
+    """
+    saved = asyncio.Event()
 
     @verb
     async def item(ctx: Context[dict[str, Any]], x: int) -> int:
         ran.append(x)
-        await asyncio.sleep(0.01 * x)
         if x == die_at:
+            await saved.wait()
             os._exit(EXIT_CODE)
         return x * 10
 
@@ -73,6 +78,7 @@ def _map_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
         .with_checkpointer()
         .with_checkpoint_policy(on_map_item=True)
         .map(lambda b: b.call(item), items=lambda _p, _c: [0, 1, 2, 3], aggregate=sum)
+        .on_item_complete(lambda *_: saved.set())
     )
 
 

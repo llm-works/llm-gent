@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,7 +20,7 @@ from llm_saia.core.config import CallOptions
 from llm_saia.core.types import LoopScore, TaskResult
 
 from llm_gent.flow import Context, Factory, History, Loop, Role, verb
-from tests.helpers import file_store
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -106,8 +105,8 @@ def _map_flow(store: Any, halt: asyncio.Event, saia: _PausingSAIA) -> Any:
 
 
 class TestLoopInMap:
-    async def test_each_item_resumes_its_own_paused_turn(self, tmp_path: Path) -> None:
-        store = file_store(tmp_path / "cp")
+    async def test_each_item_resumes_its_own_paused_turn(self) -> None:
+        store = memory_store()
         halt1 = asyncio.Event()
         await _map_flow(store, halt1, _PausingSAIA(halt1, arrivals=2)).run()
 
@@ -172,9 +171,9 @@ def _two_calls_flow(store: Any, halt: asyncio.Event, saia: _ScriptedSAIA, factor
 
 
 class TestTurnsInOneStep:
-    async def test_each_call_resumes_its_own_turn(self, tmp_path: Path) -> None:
+    async def test_each_call_resumes_its_own_turn(self) -> None:
         """Call 1 pauses and sets the halt; call 2 pauses on the halt. Both resume."""
-        store = file_store(tmp_path / "cp")
+        store = memory_store()
         halt1 = asyncio.Event()
         await _two_calls_flow(store, halt1, _ScriptedSAIA(halt1, {"a"}), _ConvFactory()).run()
 
@@ -184,9 +183,9 @@ class TestTurnsInOneStep:
 
         assert saia2.calls == [("a", ["turn-of-a"], True), ("b", ["turn-of-b"], True)]
 
-    async def test_uncaptured_turn_reruns_its_step_from_the_start(self, tmp_path: Path) -> None:
+    async def test_uncaptured_turn_reruns_its_step_from_the_start(self) -> None:
         """Without a ConversationFactory the paused step still counts as interrupted."""
-        store = file_store(tmp_path / "cp")
+        store = memory_store()
         halt1 = asyncio.Event()
         await _two_calls_flow(store, halt1, _ScriptedSAIA(halt1, {"a"}), None).run()
         history = History(store, "two-calls")
@@ -202,9 +201,9 @@ class TestTurnsInOneStep:
 
 
 class TestTurnPausedAgain:
-    async def test_second_pause_saves_the_continued_turn(self, tmp_path: Path) -> None:
+    async def test_second_pause_saves_the_continued_turn(self) -> None:
         """A resumed turn that pauses again is saved with everything it did so far."""
-        store = file_store(tmp_path / "cp")
+        store = memory_store()
         runs = [({"a"}, None), ({"a"}, "latest"), (set(), "latest")]
         saias: list[_ScriptedSAIA] = []
         for pause, resume in runs:
@@ -297,14 +296,12 @@ async def _run_sessions(
 class TestResumedTurnCaps:
     """A resumed turn runs under what is left of its caps, over every call that ran it."""
 
-    async def test_each_resume_gets_what_is_left(self, tmp_path: Path) -> None:
+    async def test_each_resume_gets_what_is_left(self) -> None:
         caps = CallOptions(max_iterations=16, max_total_tokens=1000)
-        seen = await _run_sessions(file_store(tmp_path / "cp"), caps, [(12, 600), (3, 300), None])
+        seen = await _run_sessions(memory_store(), caps, [(12, 600), (3, 300), None])
         assert seen == [(16, 1000), (4, 400), (1, 100)]
 
-    async def test_unlimited_stays_unlimited_and_a_spent_cap_leaves_one(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_unlimited_stays_unlimited_and_a_spent_cap_leaves_one(self) -> None:
         caps = CallOptions(max_iterations=0, max_total_tokens=500)
-        seen = await _run_sessions(file_store(tmp_path / "cp"), caps, [(5, 700), None])
+        seen = await _run_sessions(memory_store(), caps, [(5, 700), None])
         assert seen == [(0, 500), (0, 1)]

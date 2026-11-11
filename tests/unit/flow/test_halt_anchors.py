@@ -16,14 +16,13 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import pytest
-from appinfra.cas import FileStore
+from appinfra.cas import MemoryStore
 
 from llm_gent.flow import Context, Factory, History, Interrupted, verb
-from tests.helpers import file_store
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -32,9 +31,9 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> FileStore:
-    """A fresh store under an isolated temp root."""
-    return file_store(tmp_path / "cp")
+def store() -> MemoryStore:
+    """A fresh in-memory store."""
+    return memory_store()
 
 
 def _with_halt(flow: Any, halt: asyncio.Event | None) -> Any:
@@ -72,7 +71,7 @@ def _two_steps(
 
 
 class TestHaltInLastStep:
-    async def test_completed_last_step_finishes_the_run(self, store: FileStore) -> None:
+    async def test_completed_last_step_finishes_the_run(self, store: MemoryStore) -> None:
         calls: list[str] = []
         assert await _two_steps(store, "finish", asyncio.Event(), calls, "finish").run() is None
         history = History(store, "finish")
@@ -81,7 +80,7 @@ class TestHaltInLastStep:
         assert head is not None
         assert (await history.snapshot(head)).root == {"s1": 1, "s2": 1}
 
-    async def test_interrupted_last_step_runs_again_on_resume(self, store: FileStore) -> None:
+    async def test_interrupted_last_step_runs_again_on_resume(self, store: MemoryStore) -> None:
         calls: list[str] = []
         await _two_steps(store, "bail", asyncio.Event(), calls, "bail").run()
         history = History(store, "bail")
@@ -99,7 +98,7 @@ class TestHaltInLastStep:
         assert (await history.snapshot(head)).root == {"s1": 1, "s2": 1}
 
     async def test_interrupted_run_is_never_deleted_under_gc_on_success(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         halt = asyncio.Event()
 
@@ -126,7 +125,7 @@ class TestHaltInLastStep:
         assert (snapshot.root, snapshot.scopes) == ({"s1": 1}, {})
         assert not await history.is_complete()
 
-    async def test_map_as_last_step_is_not_complete(self, store: FileStore) -> None:
+    async def test_map_as_last_step_is_not_complete(self, store: MemoryStore) -> None:
         """Items the halt skipped leave the run halted, not complete."""
         halt = asyncio.Event()
         ran: list[int] = []

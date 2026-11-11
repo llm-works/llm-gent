@@ -1285,7 +1285,7 @@ class TestDrainLoop:
 
 
 class _SlowTurn:
-    """A turn that sets ``event``, takes a while, then reports whether its abort was set."""
+    """A turn that sets ``event``, lets the loop run, then reports whether its abort was set."""
 
     def __init__(self, event: asyncio.Event) -> None:
         self.role = ROLE
@@ -1293,7 +1293,10 @@ class _SlowTurn:
 
     async def complete(self, task: str, **kwargs: Any) -> Any:
         self._event.set()
-        await asyncio.sleep(0.01)  # long enough for any forwarding between events
+        # A region's signal reaches the turn's abort through at most one forwarding task
+        # (``turn_abort``); yielding to the loop a few times lets it run.
+        for _ in range(3):
+            await asyncio.sleep(0)
         return _Result(paused=kwargs["abort_signal"].is_set(), text=task)
 
 

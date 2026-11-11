@@ -4,7 +4,7 @@
 """End-to-end Flow-level checkpoint/resume smoke tests.
 
 Runs the canonical multi-stage flow (add_one → times_two → minus_three,
-iterated) through a real :class:`FileStore` and asserts:
+iterated) through a :class:`MemoryStore` and asserts:
 
 - fresh runs save at iterate boundaries;
 - resume from a mid-run halt reaches the same final state as an
@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import pytest
-from appinfra.cas import FileStore
+from appinfra.cas import MemoryStore
 
 from llm_gent.flow import FlowCommit, Role
 from llm_gent.flow.checkpoint import HEAD_REF
@@ -33,7 +32,7 @@ from llm_gent.flow.testing.checkpoint import (
     assert_resume_determinism,
     build_canonical_flow,
 )
-from tests.helpers import file_store
+from tests.helpers import memory_store
 
 from .conftest import commit_ids, head_commit, make_test_logger, read_commit
 
@@ -132,7 +131,7 @@ class AppHandle:
         self.qid = qid
 
 
-def fail_first_commit(store: FileStore) -> None:
+def fail_first_commit(store: MemoryStore) -> None:
     """Make the store's first commit write raise ``OSError("disk full")``."""
     original = store.write_object
     failed: list[bool] = []
@@ -146,7 +145,7 @@ def fail_first_commit(store: FileStore) -> None:
     store.write_object = flaky  # type: ignore[method-assign]
 
 
-def stored_commits(store: FileStore, client_flow_id: str) -> list[FlowCommit]:
+def stored_commits(store: MemoryStore, client_flow_id: str) -> list[FlowCommit]:
     """Every commit the history's repository holds, in no particular order."""
     return [read_commit(store, client_flow_id, cid) for cid in commit_ids(store, client_flow_id)]
 
@@ -157,9 +156,9 @@ def stored_commits(store: FileStore, client_flow_id: str) -> list[FlowCommit]:
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> FileStore:
-    """A fresh store under an isolated temp root, default retention."""
-    return file_store(tmp_path / "cp")
+def store() -> MemoryStore:
+    """A fresh in-memory store, default retention."""
+    return memory_store()
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +167,7 @@ def store(tmp_path: Path) -> FileStore:
 
 
 class TestFreshRunSaves:
-    async def test_saves_a_commit_per_iteration(self, store: FileStore) -> None:
+    async def test_saves_a_commit_per_iteration(self, store: MemoryStore) -> None:
         """Each successful iterate iteration writes a commit + ref."""
         await build_canonical_flow(
             make_test_logger(), max_iters=3, store=store, client_flow_id="freshrun"
@@ -176,7 +175,7 @@ class TestFreshRunSaves:
         # A resolvable ref exists — the history reached at least one commit.
         assert store.repo("freshrun").get_ref(HEAD_REF) is not None
 
-    async def test_default_retention_keeps_history_on_success(self, store: FileStore) -> None:
+    async def test_default_retention_keeps_history_on_success(self, store: MemoryStore) -> None:
         """retention="retain" (default): clean-exit does NOT delete the history."""
         await build_canonical_flow(
             make_test_logger(), max_iters=2, store=store, client_flow_id="retain-1"
@@ -191,7 +190,7 @@ class TestFreshRunSaves:
 
 
 class TestRetention:
-    async def test_gc_on_success_deletes_the_history(self, store: FileStore) -> None:
+    async def test_gc_on_success_deletes_the_history(self, store: MemoryStore) -> None:
         """retention="gc_on_success": clean-exit deletes the history's repository."""
         await build_canonical_flow(
             make_test_logger(),
@@ -202,7 +201,7 @@ class TestRetention:
         ).run()
         assert "gc-1" not in store.list_repos()
 
-    async def test_halt_preserves_history_regardless_of_retention(self, store: FileStore) -> None:
+    async def test_halt_preserves_history_regardless_of_retention(self, store: MemoryStore) -> None:
         """A halt-triggered exit preserves the history even under gc_on_success —
         the framework only deletes it on fully successful runs.
         """
@@ -228,7 +227,7 @@ class TestCheckpointPolicyIterate:
     """CheckpointPolicy.on_iterate gates the iterate-boundary auto-save."""
 
     async def test_default_policy_writes_only_the_final_state_commit(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """Default CheckpointPolicy (halt-only) skips per-iteration saves.
 
@@ -265,7 +264,7 @@ class TestCheckpointPolicyIterate:
             f"only the $end final-state commit should have been written; got {node_paths}"
         )
 
-    async def test_on_iterate_true_writes_per_iteration_commits(self, store: FileStore) -> None:
+    async def test_on_iterate_true_writes_per_iteration_commits(self, store: MemoryStore) -> None:
         """CheckpointPolicy(on_iterate=True) restores per-iteration saves.
 
         Opting in should produce an iterate-boundary ref alongside the
@@ -309,7 +308,7 @@ class TestCheckpointPolicyIterate:
 class TestCheckpointPolicyMap:
     """CheckpointPolicy.on_map_item gates the map per-item auto-save."""
 
-    async def test_default_policy_writes_no_map_item_commits(self, store: FileStore) -> None:
+    async def test_default_policy_writes_no_map_item_commits(self, store: MemoryStore) -> None:
         """Under the default policy a completed map writes only the $end final-state commit."""
         from llm_gent.flow import Context, Factory, verb
 
@@ -334,7 +333,7 @@ class TestCheckpointPolicyMap:
             f"only the $end commit should exist under default policy; got {node_paths}"
         )
 
-    async def test_on_map_item_true_writes_per_item_commits(self, store: FileStore) -> None:
+    async def test_on_map_item_true_writes_per_item_commits(self, store: MemoryStore) -> None:
         """CheckpointPolicy(on_map_item=True) saves after each successful item.
 
         Runs a 3-item map and asserts that three iteration-indexed
@@ -373,7 +372,7 @@ class TestCheckpointPolicyMap:
         assert iterations == [0, 1, 2], f"expected three item slots 0/1/2; got {iterations}"
 
     async def test_failed_item_commit_restores_the_state_before_the_merge(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """A per-item commit that fails rolls the merge back to the prior state, not to empty."""
         from llm_gent.flow import Context, Factory, verb
@@ -407,7 +406,7 @@ class TestCheckpointPolicyMap:
         assert await outer.run() == {"total": 1}
 
     async def test_failed_item_commit_without_state_keeps_sibling_writes(
-        self, tmp_path: Path
+        self, store: MemoryStore
     ) -> None:
         """Without ``state=`` items write the shared state; a failed commit must not erase them.
 
@@ -416,7 +415,6 @@ class TestCheckpointPolicyMap:
         """
         from llm_gent.flow import Context, Factory, History, verb
 
-        store = file_store(tmp_path / "cp")
         fail_first_commit(store)
 
         @verb
@@ -445,7 +443,7 @@ class TestCheckpointPolicyMap:
 
 
 class TestCommitConsistency:
-    async def test_every_scope_in_a_commit_comes_from_one_moment(self, tmp_path: Path) -> None:
+    async def test_every_scope_in_a_commit_comes_from_one_moment(self, store: MemoryStore) -> None:
         """A commit's scopes all come from one moment.
 
         Each item bumps a counter in the root and in the subflow's scope in
@@ -454,8 +452,6 @@ class TestCommitConsistency:
         one after would hold counters that disagree.
         """
         from llm_gent.flow import Context, Factory, History, verb
-
-        store = file_store(tmp_path / "cp")
 
         @verb
         async def bump(ctx: Context[dict[str, Any]], _item: int) -> None:
@@ -489,7 +485,7 @@ class TestCheckpointedRunValues:
     never have to be JSON-serializable.
     """
 
-    async def test_app_object_passed_between_steps(self, store: FileStore) -> None:
+    async def test_app_object_passed_between_steps(self, store: MemoryStore) -> None:
         from llm_gent.flow import Context, Factory, verb
 
         @verb
@@ -510,7 +506,7 @@ class TestCheckpointedRunValues:
         )
         assert await flow.run() == 7
 
-    async def test_non_strict_guarded_map_of_app_objects(self, store: FileStore) -> None:
+    async def test_non_strict_guarded_map_of_app_objects(self, store: MemoryStore) -> None:
         """Items that fail, are skipped by the guard, or return app objects all reach the next step."""
         from llm_gent.flow import Context, Factory, verb
 
@@ -539,7 +535,7 @@ class TestCheckpointedRunValues:
         )
         assert await flow.run() == ["AppHandle", "Failure", "Skipped"]
 
-    async def test_non_strict_map_with_a_failed_item(self, store: FileStore) -> None:
+    async def test_non_strict_map_with_a_failed_item(self, store: MemoryStore) -> None:
         from llm_gent.flow import Context, Factory, verb
 
         @verb
@@ -566,7 +562,7 @@ class TestCheckpointedRunValues:
 class TestCtxCheckpoint:
     """Explicit ctx.checkpoint() writes a commit regardless of policy."""
 
-    async def test_ctx_checkpoint_from_chain_step(self, store: FileStore) -> None:
+    async def test_ctx_checkpoint_from_chain_step(self, store: MemoryStore) -> None:
         """A verb calling ``ctx.checkpoint()`` writes a commit at that step's node.
 
         Runs under the default (halt-only) policy so no iterate-
@@ -599,7 +595,7 @@ class TestCtxCheckpoint:
             f"expected exactly one explicit-checkpoint commit; got {non_final}"
         )
 
-    async def test_unchanged_state_is_not_put_again(self, store: FileStore) -> None:
+    async def test_unchanged_state_is_not_put_again(self, store: MemoryStore) -> None:
         """Two checkpoints of the same state put its blob and tree once; only the commits differ."""
         from llm_gent.flow import Context, Factory, verb
 
@@ -647,7 +643,7 @@ class TestCtxCheckpoint:
 class TestPausedTurnInSnapshot:
     """A Loop's paused turn lands in the halt commit's snapshot at the call's path."""
 
-    async def test_halt_commit_holds_paused_turn_at_the_call_path(self, store: FileStore) -> None:
+    async def test_halt_commit_holds_paused_turn_at_the_call_path(self, store: MemoryStore) -> None:
         """Loop paused mid-turn → the snapshot holds its task + conversation at ``<step>/t/0``."""
         from llm_gent.flow import Context, Factory, History, Loop, verb
 
@@ -705,7 +701,7 @@ class TestPausedTurnInSnapshot:
         nothing_used = {"iterations": 0, "total_tokens": 0}
         assert turn == {"task": "t", "conversation": conv.to_dict(), "used": nothing_used}
 
-    async def test_turn_paused_before_the_run_halt_is_not_saved(self, store: FileStore) -> None:
+    async def test_turn_paused_before_the_run_halt_is_not_saved(self, store: MemoryStore) -> None:
         """Loop A pauses with the run's halt unset: its step completed, its turn is dropped.
 
         Loop B then sets the halt and completes, so the halt commit's
@@ -768,7 +764,7 @@ class TestPausedTurnInSnapshot:
         assert not any("turn" in c for c in snapshot.cursors.values())
 
     async def test_resume_round_trip_hands_reconstructed_conv_and_resume_true(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """Halt mid-Loop-turn on run 1 → resume dispatches SAIA with resume=True + rebuilt conv.
 
@@ -846,7 +842,7 @@ class TestPausedTurnInSnapshot:
         assert isinstance(resumed["conversation"], Conv)
         assert resumed["conversation"].messages == ["from-turn-1"]
 
-    async def test_chain_resume_re_dispatches_paused_loop_verb(self, store: FileStore) -> None:
+    async def test_chain_resume_re_dispatches_paused_loop_verb(self, store: MemoryStore) -> None:
         """Chain flow with Loop verb: halt on turn 1 → resume re-runs the loop verb."""
         from llm_gent.flow import Context, Factory, Loop, verb
 
@@ -960,7 +956,7 @@ class TestSaveOnHaltChain:
     """Chain-only halt-observation site writes a commit at the not-yet-run step."""
 
     async def test_chain_only_halt_saves_commit_and_resume_lands_on_halted_step(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """Chain flow with no iterate: halt set by step b → commit at c; resume lands at c."""
         from llm_gent.flow import Context, Factory, verb
@@ -1039,7 +1035,7 @@ class TestSaveOnHaltChain:
         await flow.run()
 
     async def test_halt_before_branch_with_plain_verb_resumes_at_branch(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """Halt before a Branch containing only plain verbs → resume runs the branch."""
         from llm_gent.flow import Context, Factory, verb
@@ -1095,7 +1091,7 @@ class TestSaveOnHaltChain:
         assert result == 111
 
     async def test_pre_set_halt_with_checkpointer_resumes_at_second_step(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """Pre-set halt + checkpointer: checkpoint saved before second step; resume runs it."""
         from llm_gent.flow import Context, Factory, verb
@@ -1141,7 +1137,7 @@ class TestSaveOnHaltChain:
         assert result == 6  # sum([1, 2, 3])
 
     async def test_nested_flow_halt_does_not_clobber_outer_checkpoint(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """Nested flow's halt doesn't emit checkpoint — only outer flow does."""
         from llm_gent.flow import Context, Factory, verb
@@ -1208,7 +1204,7 @@ class TestSaveOnHaltIterate:
     """Iterate halt-observation site writes a commit at the halted iteration."""
 
     async def test_halt_before_first_iteration_saves_at_iteration_zero(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """Halt already set on entry to the iterate → commit saved at iteration=0."""
 
@@ -1235,7 +1231,7 @@ class TestSaveOnHaltIterate:
         assert result["iterations_completed"] == 5
 
     async def test_halt_between_iterations_overwrites_ok_ref_with_halted_commit(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """Halt after body N → halted commit overwrites the ok ref at iteration=N."""
 
@@ -1268,7 +1264,7 @@ class TestSaveOnHaltIterate:
 # ---------------------------------------------------------------------------
 
 
-def _seed_dangling_commit(store: FileStore, client_flow_id: str, tree: str) -> None:
+def _seed_dangling_commit(store: MemoryStore, client_flow_id: str, tree: str) -> None:
     """Store a commit of ``tree`` at ``HEAD`` without checking that ``tree`` is stored."""
     from llm_gent.flow.state.cas import CommitMeta, ProducedBy
 
@@ -1287,7 +1283,7 @@ def _seed_dangling_commit(store: FileStore, client_flow_id: str, tree: str) -> N
     store.write_ref(client_flow_id, HEAD_REF, commit.id, None)
 
 
-def _chain_from_head(store: FileStore, client_flow_id: str) -> list[FlowCommit]:
+def _chain_from_head(store: MemoryStore, client_flow_id: str) -> list[FlowCommit]:
     """Walk parent links from the newest ref; return commits newest-first."""
     chain: list[FlowCommit] = []
     commit_hash = store.repo(client_flow_id).get_ref(HEAD_REF)
@@ -1300,7 +1296,7 @@ def _chain_from_head(store: FileStore, client_flow_id: str) -> list[FlowCommit]:
 
 
 class TestHistoryLineage:
-    async def test_iterate_commits_form_one_chain(self, store: FileStore) -> None:
+    async def test_iterate_commits_form_one_chain(self, store: MemoryStore) -> None:
         """Per-iteration commits chain onto each other; the final-state commit is the head."""
         await build_canonical_flow(
             make_test_logger(), max_iters=3, store=store, client_flow_id="lineage-iter"
@@ -1313,7 +1309,7 @@ class TestHistoryLineage:
         assert {c.id for c in chain} == commit_ids(store, "lineage-iter")
         assert len(chain) == 4
 
-    async def test_concurrent_map_items_chain_linearly(self, store: FileStore) -> None:
+    async def test_concurrent_map_items_chain_linearly(self, store: MemoryStore) -> None:
         """Parallel map-item saves serialize into one chain, not siblings of one parent."""
         from llm_gent.flow import Context, Factory, verb
 
@@ -1339,7 +1335,7 @@ class TestHistoryLineage:
         assert len(chain) == 5
         assert sorted(c.meta.iteration for c in chain[1:]) == [0, 1, 2, 3]
 
-    async def test_resume_continues_the_same_history(self, store: FileStore) -> None:
+    async def test_resume_continues_the_same_history(self, store: MemoryStore) -> None:
         """A resumed run's first commit takes the halted run's last commit as parent."""
         halt = asyncio.Event()
         await build_canonical_flow(
@@ -1363,7 +1359,7 @@ class TestHistoryLineage:
         assert {c.id for c in chain} == commit_ids(store, "lineage-resume")
         assert sum(1 for c in chain if not c.parents) == 1
 
-    async def test_deleting_the_history_restarts_the_chain(self, store: FileStore) -> None:
+    async def test_deleting_the_history_restarts_the_chain(self, store: MemoryStore) -> None:
         """After the history is deleted the next commit starts a new history with no parent."""
         from appinfra.cas import Tree
 
@@ -1390,7 +1386,7 @@ class TestHistoryLineage:
 
 
 class TestFlowRootHash:
-    async def test_every_commit_records_the_flow_root_hash(self, store: FileStore) -> None:
+    async def test_every_commit_records_the_flow_root_hash(self, store: MemoryStore) -> None:
         """Halt, iterate-boundary and final-state commits all carry the flow's structure hash."""
         halt = asyncio.Event()
         flow = build_canonical_flow(
@@ -1415,7 +1411,7 @@ class TestFlowRootHash:
 
 
 class TestRunScopedCache:
-    async def test_reused_flow_sees_an_external_delete(self, store: FileStore) -> None:
+    async def test_reused_flow_sees_an_external_delete(self, store: MemoryStore) -> None:
         """A Flow reused after someone else deleted its history writes a new one."""
         from llm_gent.flow import History
 
@@ -1447,7 +1443,7 @@ class TestRunScopedCache:
 class TestCompletionTag:
     """Clean exit commits the final state at ``$end`` and moves the ``complete`` tag to it."""
 
-    async def test_unserializable_final_state_still_completes(self, store: FileStore) -> None:
+    async def test_unserializable_final_state_still_completes(self, store: MemoryStore) -> None:
         """A finished run whose state can't be serialized returns normally; no state is kept."""
         from llm_gent.flow import Context, Factory, History, verb
 
@@ -1472,7 +1468,7 @@ class TestCompletionTag:
         assert await history.is_complete()
         assert not (await history.snapshot(head)).has_state
 
-    async def test_final_state_commit_is_tagged_head(self, store: FileStore) -> None:
+    async def test_final_state_commit_is_tagged_head(self, store: MemoryStore) -> None:
         """A halt-only run with no save points still leaves its final state at the head."""
         from llm_gent.flow import Context, Factory, History, verb
         from llm_gent.flow.checkpoint import COMPLETE_TAG, COMPLETION_PRODUCER
@@ -1501,7 +1497,7 @@ class TestCompletionTag:
         snapshot = await History(store, "final-state").snapshot(commit)
         assert (snapshot.root, snapshot.scopes, snapshot.cursors) == ({"n": 3}, {}, {})
 
-    async def test_rerun_after_completion_appends_to_same_history(self, store: FileStore) -> None:
+    async def test_rerun_after_completion_appends_to_same_history(self, store: MemoryStore) -> None:
         """resume="latest" on a complete history runs fresh; its commits extend the history."""
         from llm_gent.flow.checkpoint import COMPLETE_TAG
 
@@ -1520,7 +1516,9 @@ class TestCompletionTag:
         assert first_end in {c.id for c in chain[1:]}
         assert [c.meta.node_path for c in chain].count("$end") == 2
 
-    async def test_commit_after_completion_makes_history_resumable(self, store: FileStore) -> None:
+    async def test_commit_after_completion_makes_history_resumable(
+        self, store: MemoryStore
+    ) -> None:
         """A halt after a completed run leaves the tag behind; the next resume continues the halt."""
         from llm_gent.flow.checkpoint import COMPLETE_TAG
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
@@ -1555,7 +1553,7 @@ class TestCompletionTag:
         assert repo.get_ref(COMPLETE_TAG) == repo.get_ref(HEAD_REF)
 
     async def test_untagged_final_state_head_is_still_the_final_state(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """A crash between the $end commit and the tag write: resume continues from $end."""
         from llm_gent.flow._checkpoint_ctx import CheckpointContext
@@ -1588,7 +1586,7 @@ class TestCompletionTag:
 
 
 class TestResumeDeterminism:
-    async def test_resume_matches_uninterrupted(self, store: FileStore) -> None:
+    async def test_resume_matches_uninterrupted(self, store: MemoryStore) -> None:
         """The load-bearing invariant: resume state == uninterrupted state."""
         final = await assert_resume_determinism(
             make_test_logger(),
@@ -1600,7 +1598,7 @@ class TestResumeDeterminism:
         # Final iterations_completed reflects the full max_iters run.
         assert final["iterations_completed"] == 5
 
-    async def test_resume_with_no_prior_checkpoint_starts_fresh(self, store: FileStore) -> None:
+    async def test_resume_with_no_prior_checkpoint_starts_fresh(self, store: MemoryStore) -> None:
         """resume="latest" on a history with no ref falls back to a fresh run."""
         flow = build_canonical_flow(
             make_test_logger(), max_iters=2, store=store, client_flow_id="never-saved"
@@ -1609,7 +1607,7 @@ class TestResumeDeterminism:
         assert result["iterations_completed"] == 2
 
     async def test_resume_after_clean_exit_starts_a_new_run_on_the_final_state(
-        self, store: FileStore
+        self, store: MemoryStore
     ) -> None:
         """The final commit holds no cursors: resume continues from its state, not a position.
 
@@ -1650,7 +1648,7 @@ class TestResumeDeterminism:
         await _flow().run(resume="latest")
         assert tail_calls == [3, 6], f"tail should fire once per run; got {tail_calls}"
 
-    async def test_multiple_resume_boundaries(self, store: FileStore) -> None:
+    async def test_multiple_resume_boundaries(self, store: MemoryStore) -> None:
         """Interrupt at different iterations, resume each — final state matches uninterrupted."""
         for cut_at in (1, 2, 3, 4):
             cfid = f"multi-cut-{cut_at}"
@@ -1663,7 +1661,7 @@ class TestResumeDeterminism:
             )
             assert final["iterations_completed"] == 5
 
-    async def test_scope_less_iterate_restores_carry_from_cursor(self, store: FileStore) -> None:
+    async def test_scope_less_iterate_restores_carry_from_cursor(self, store: MemoryStore) -> None:
         """A scope-less iterate (no state=) restores the carried value from its cursor on resume.
 
         The cursor is registered at ``n/<node_id>`` under the parent scope, not at
@@ -1710,7 +1708,7 @@ class TestResumeDeterminism:
 
 
 class TestResumeErrorPaths:
-    async def test_resume_raises_when_commit_object_missing(self, store: FileStore) -> None:
+    async def test_resume_raises_when_commit_object_missing(self, store: MemoryStore) -> None:
         """Ref points at a commit that isn't stored → HistoryCorrupt, not a fresh run."""
         from llm_gent.flow import HistoryCorrupt
 
@@ -1722,7 +1720,7 @@ class TestResumeErrorPaths:
         with pytest.raises(HistoryCorrupt, match="commit"):
             await flow.run(resume="latest")
 
-    async def test_resume_raises_when_tree_object_missing(self, store: FileStore) -> None:
+    async def test_resume_raises_when_tree_object_missing(self, store: MemoryStore) -> None:
         """Commit points at a tree that isn't stored → HistoryCorrupt, not a fresh run."""
         from llm_gent.flow import HistoryCorrupt
 
@@ -1733,7 +1731,7 @@ class TestResumeErrorPaths:
         with pytest.raises(HistoryCorrupt, match="tree"):
             await flow.run(resume="latest")
 
-    async def test_resume_raises_when_blob_missing(self, store: FileStore) -> None:
+    async def test_resume_raises_when_blob_missing(self, store: MemoryStore) -> None:
         """Tree entry references a blob that isn't stored → HistoryCorrupt, not a fresh run."""
         from appinfra.cas import Tree, TreeEntry
 
@@ -1756,7 +1754,7 @@ class TestResumeErrorPaths:
 
 
 class TestScopedStateRoundTrip:
-    async def test_call_scope_state_survives_resume(self, store: FileStore) -> None:
+    async def test_call_scope_state_survives_resume(self, store: MemoryStore) -> None:
         """A ``.call(state=child)`` scope's mutations survive resume.
 
         Outer flow projects a child scope for its inner subflow; inner
@@ -1810,7 +1808,7 @@ class TestScopedStateRoundTrip:
         )
         await outer_resume.run(resume="latest")
 
-    async def test_three_level_nested_scopes_survive_resume(self, store: FileStore) -> None:
+    async def test_three_level_nested_scopes_survive_resume(self, store: MemoryStore) -> None:
         """3-level nested ``.call(state=)`` chain — intermediate scope restores.
 
         Composition::
@@ -1916,7 +1914,7 @@ class TestScopedStateRoundTrip:
             f"— re-projected middle would land at 3 instead"
         )
 
-    async def test_leaf_iterate_with_state_survives_resume(self, store: FileStore) -> None:
+    async def test_leaf_iterate_with_state_survives_resume(self, store: MemoryStore) -> None:
         """A leaf iterate with its own ``state=`` projection restores on resume.
 
         Regression test for the case where the leaf iterate (not just its

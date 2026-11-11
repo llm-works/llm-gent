@@ -17,7 +17,8 @@ work (before a Loop turn's work is mid-turn, where the halt pauses the
 turn), the checkpoint policy (none,
 ``on_iterate``, ``on_map_item``, or ``ctx.checkpoint()`` in every leaf),
 sequential or parallel maps, and the store (in-memory; a subset against
-the file store).
+the file store runs in the integration suite,
+:mod:`tests.integration.flow.test_halt_restart_matrix_file`).
 
 Leaves are not state-driven: a leaf does its work every time it runs,
 so a leaf that runs again shows up in the executed list. They honour the
@@ -61,7 +62,6 @@ import asyncio
 from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -78,7 +78,7 @@ from llm_gent.flow import (
     Role,
     verb,
 )
-from tests.helpers import file_store, memory_store
+from tests.helpers import memory_store
 
 from .conftest import make_test_logger
 
@@ -960,10 +960,13 @@ def _file_cases() -> Iterator[Case]:
                     yield Case(name, stop, stop_at, "after", policy, False, "file")
 
 
-def _cases(full: bool) -> list[Case]:
-    """Every case with ``full`` (``--full-matrix``), else the distinct ones (:func:`_distinct`)."""
+def matrix_cases(full: bool, store: str) -> list[Case]:
+    """The cases against ``store`` (``"mem"`` or ``"file"``).
+
+    Every one with ``full`` (``--full-matrix``), else the distinct ones (:func:`_distinct`).
+    """
     cases = [*_memory_cases(), *_cycle_cases(), *_file_cases()]
-    return cases if full else [case for case in cases if _distinct(case)]
+    return [case for case in cases if case.store == store and (full or _distinct(case))]
 
 
 # --- Distinct cases ---------------------------------------------------------
@@ -1031,21 +1034,20 @@ def _before_matters(case: Case) -> bool:
     return case.stop_at == 1 or _has_map(SHAPES[case.shape])
 
 
-def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    """The stop/resume test's cases: the distinct ones, every one with ``--full-matrix``."""
+def parametrize_cases(metafunc: pytest.Metafunc, store: str) -> None:
+    """Give the stop/resume test its cases against ``store``: the distinct ones, or every one."""
     if metafunc.function.__name__ != "test_resume_after_stop_matches_uninterrupted_run":
         return
     full = bool(metafunc.config.getoption("--full-matrix"))
-    metafunc.parametrize("case", [pytest.param(c, id=c.id) for c in _cases(full)])
+    metafunc.parametrize("case", [pytest.param(c, id=c.id) for c in matrix_cases(full, store)])
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """The stop/resume test's in-memory cases."""
+    parametrize_cases(metafunc, "mem")
 
 
 # --- Tests ------------------------------------------------------------------
-
-
-def _store(kind: str, tmp_path: Path) -> Store:
-    if kind == "mem":
-        return memory_store()
-    return file_store(tmp_path / "cp")
 
 
 @pytest.mark.parametrize("parallel", [False, True], ids=["seq", "par"])
@@ -1172,10 +1174,14 @@ async def _check_finished(history: History, baseline: dict[str, int], merges: li
     assert sorted(root.get("merges", [])) == merges, "a scoped map merged an item twice or never"
 
 
-async def test_resume_after_stop_matches_uninterrupted_run(case: Case, tmp_path: Path) -> None:
+async def test_resume_after_stop_matches_uninterrupted_run(case: Case) -> None:
+    await check_resume_after_stop(case, memory_store())
+
+
+async def check_resume_after_stop(case: Case, inner: Store) -> None:
+    """Run ``case`` against ``inner``: stop, resume, and check every property in the docstring."""
     shape = SHAPES[case.shape]
     expected_result, baseline, merges = model(shape)
-    inner = _store(case.store, tmp_path)
     history = History(inner, FLOW_NAME)
 
     prior: set[str] = set()

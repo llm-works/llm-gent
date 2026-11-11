@@ -37,6 +37,9 @@ APPINFRA_DEV_DOCSTRING_THRESHOLD := 95
 # coverage of llm_gent/flow/stores and llm_gent/schema).
 APPINFRA_PYTEST_COVERAGE_MARKERS := unit or integration
 
+# These suites live in their tests/<suite>/ directory alone; their runs collect only it
+APPINFRA_PYTEST_BOUND_SUITES := e2e security performance
+
 # PostgreSQL configuration (drives Makefile.pg targets and alembic CLI)
 APPINFRA_PG_CONFIG_FILE := pg.yaml
 APPINFRA_PG_DATABASES := main unittest

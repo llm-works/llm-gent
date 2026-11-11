@@ -4,7 +4,6 @@
 """Tests for the bus module: protocol and registry (unit tests only)."""
 
 import threading
-import time
 
 import pytest
 
@@ -316,18 +315,19 @@ class TestAgentRegistry:
         assert registry.unregister("ghost") is False
 
     def test_heartbeat_updates_timestamp(self, registry):
-        """Heartbeat updates last_heartbeat."""
-        registry.register("agent-1")
-        info_before = registry.get("agent-1")
-        assert info_before is not None
-        ts_before = info_before.last_heartbeat
+        """Heartbeat moves last_heartbeat to now."""
+        from datetime import timedelta
 
-        time.sleep(0.01)
+        registry.register("agent-1")
+        # Mutate internal state directly (get() returns a copy).
+        stale = registry._agents["agent-1"].last_heartbeat - timedelta(seconds=60)
+        registry._agents["agent-1"].last_heartbeat = stale
+
         registry.heartbeat("agent-1")
 
         info_after = registry.get("agent-1")
         assert info_after is not None
-        assert info_after.last_heartbeat > ts_before
+        assert info_after.last_heartbeat > stale
 
     def test_heartbeat_updates_stats(self, registry):
         """Heartbeat can update agent stats."""
@@ -412,6 +412,7 @@ class TestAgentRegistry:
 
         assert registry.healthy_count == 2
 
+    @pytest.mark.integration
     def test_thread_safety(self, registry):
         """Concurrent operations don't corrupt state."""
         errors: list[Exception] = []
