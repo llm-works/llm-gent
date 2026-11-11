@@ -102,7 +102,8 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Run tests
-        run: python -m pytest tests/ -v --tb=short
+        # Through make, so the Makefile's test settings (bound suites, markers) apply
+        run: make test.all
 
   # Every example script, each run as its `# ci-run:` / `# ci-skip:` header
   # says (appinfra's run_examples.py). One Python version; the test matrix
