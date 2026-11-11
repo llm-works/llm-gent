@@ -3,7 +3,6 @@
 
 """Integration tests for the Hub with real ZMQ bus."""
 
-import time
 from typing import Any
 
 import pytest
@@ -13,6 +12,7 @@ from llm_gent.bus.protocol import RegisterRequest, UnregisterRequest
 from llm_gent.bus.transport import ZMQWorkerBus
 from llm_gent.hub import Hub, HubConfig
 from tests.integration._ports import coordinator_config, start_on_free_ports, worker_config
+from tests.integration._zmq import holds, send_until
 
 
 pytestmark = pytest.mark.integration
@@ -30,27 +30,18 @@ def _start_hub(lg: Any, ports: list[int]) -> tuple[Hub, list[int]]:
     return hub, ports
 
 
-def _wait_for_zmq_connect(seconds: float = 0.2) -> None:
-    """Wait for ZMQ async connect/bind to settle.
-
-    ZMQ connect is asynchronous and provides no readiness signal.
-    A short sleep is the only reliable way to allow the underlying
-    TCP handshake and subscription propagation to complete.
-    """
-    time.sleep(seconds)
-
-
 @pytest.fixture
 def hub_and_worker():
-    """Start a real Hub + worker bus with channel."""
+    """Start a real Hub + worker bus with channel.
+
+    The worker's DEALER transport queues requests until it has connected.
+    """
     from unittest.mock import MagicMock
 
     lg = MagicMock()
     hub, ports = start_on_free_ports(lambda p: _start_hub(lg, p))
-    _wait_for_zmq_connect(0.1)
     worker = ZMQWorkerBus(lg, "test-worker", worker_config(ports))
     worker.start()
-    _wait_for_zmq_connect(0.2)
 
     assert worker.transport is not None
     channel: BufferedChannel[Any, Any] = BufferedChannel(worker.transport)
@@ -96,12 +87,11 @@ class TestHubHeartbeatFlow:
 
         channel.submit(RegisterRequest(agent_id="test-worker"), timeout=5.0)
 
-        worker.publish_heartbeat({"ticks": 42, "errors": 2})
-        _wait_for_zmq_connect(0.5)
+        def updated() -> bool:
+            info = hub.registry.get("test-worker")
+            return info is not None and info.stats.ticks == 42
 
-        info = hub.registry.get("test-worker")
-        assert info is not None
-        assert info.stats.ticks == 42
+        send_until(lambda: worker.publish_heartbeat({"ticks": 42, "errors": 2}), holds(updated))
 
 
 class TestHubMultipleWorkers:
@@ -113,7 +103,6 @@ class TestHubMultipleWorkers:
 
         lg = MagicMock()
         hub, ports = start_on_free_ports(lambda p: _start_hub(lg, p))
-        _wait_for_zmq_connect(0.1)
 
         workers = []
         channels = []
@@ -124,8 +113,6 @@ class TestHubMultipleWorkers:
             assert w.transport is not None
             ch: BufferedChannel[Any, Any] = BufferedChannel(w.transport)
             channels.append(ch)
-
-        _wait_for_zmq_connect(0.3)
 
         yield hub, workers, channels
 

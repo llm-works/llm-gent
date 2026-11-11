@@ -571,9 +571,11 @@ class TestHTTPTraitLifecycle:
 
         config = HTTPConfig(host="0.0.0.0", port=9000, title="Test API")
         trait = HTTPTrait(mock_agent, config=config)
-        trait.on_start()
+        with patch.object(trait, "_start_ipc_thread") as start_ipc:
+            trait.on_start()
 
         mock_server.start_subprocess.assert_called_once()
+        start_ipc.assert_called_once_with()
         trait.on_stop()
 
     @patch("llm_gent.runtime.server.http.mp.Queue")
@@ -607,7 +609,8 @@ class TestHTTPTraitLifecycle:
         mock_builder.build.return_value = mock_server
 
         trait = HTTPTrait(mock_agent)
-        trait.on_start()
+        with patch.object(trait, "_start_ipc_thread"):
+            trait.on_start()
         trait.on_stop()
 
         mock_server.stop.assert_called_once()
@@ -638,10 +641,9 @@ class TestHTTPTraitIPCLoop:
 
         trait = HTTPTrait(mock_agent, server=mock_server)
 
-        # Patch handle_request to raise an exception
-        original_handle = trait.handle_request
-
+        # The handler raises, and asks the loop to stop once this request is answered
         def failing_handler(request):
+            trait._ipc_shutdown.set()
             raise RuntimeError("Handler crashed")
 
         trait.handle_request = failing_handler
@@ -650,24 +652,8 @@ class TestHTTPTraitIPCLoop:
         req = HealthRequest(id="req-1")
         mock_server.request_queue.put(req)
 
-        # Signal shutdown after processing one request
-        import threading
-
-        def shutdown_after_delay():
-            import time
-
-            time.sleep(0.2)
-            trait._ipc_shutdown.set()
-
-        shutdown_thread = threading.Thread(target=shutdown_after_delay)
-        shutdown_thread.start()
-
-        # Run the IPC loop (will process one request then exit)
-        trait._ipc_loop(poll_timeout=0.05)
-        shutdown_thread.join()
-
-        # Restore original handler
-        trait.handle_request = original_handle
+        # Run the IPC loop on this thread: it answers the one request, then exits
+        trait._ipc_loop()
 
         # Verify error response was sent
         assert not mock_server.response_queue.empty()

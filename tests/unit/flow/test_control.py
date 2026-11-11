@@ -9,6 +9,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from appinfra.testing import FakeClock
 
 from llm_gent.flow import HALTED, Context, Failure, Flow, Skipped, verb
 
@@ -341,20 +342,22 @@ class TestIterateExecution:
         assert await flow.run(10) == 13
 
     @pytest.mark.asyncio
-    async def test_deadline_stops_between_iterations(self) -> None:
+    async def test_deadline_stops_between_iterations(self, fake_clock: FakeClock) -> None:
         """A running body is not interrupted, but no new iteration starts past deadline."""
+        fake_clock.patch("llm_gent.flow._iterate")
 
         @verb(role=ROLE_A)
         async def slow(ctx: Context, x: int) -> int:
-            """Sleep so the deadline is exceeded within a couple iterations."""
-            await asyncio.sleep(0.05)
+            """Take 50ms of the iterate's clock."""
+            fake_clock.sleep(0.05)
             return x + 1
 
         flow = make_ff().create()
-        flow.call(_identity).iterate(lambda f: f.call(slow), max_iters=100, deadline=0.06)
+        flow.call(_identity).iterate(lambda f: f.call(slow), max_iters=100, deadline=0.12)
         result = await flow.run(0)
-        # ~1-2 iterations should fit in 60ms; must not run all 100.
-        assert 1 <= result <= 5
+        # Passes start at 0, 50 and 100ms; the next would start at 150ms, past the deadline.
+        # Real time only adds to each pass, so it can only end sooner.
+        assert 1 <= result <= 3
 
     @pytest.mark.asyncio
     async def test_cancellation_in_body_propagates(self) -> None:
@@ -424,16 +427,22 @@ class TestMapExecution:
     @pytest.mark.asyncio
     async def test_preserves_order_across_concurrency(self) -> None:
         """Results are ordered by input position, not completion order."""
+        finished = [asyncio.Event() for _ in range(4)]
+        completion: list[int] = []
 
         @verb(role=ROLE_A)
-        async def delayed(ctx: Context, x: int) -> int:
-            """Later items sleep less so they finish first."""
-            await asyncio.sleep(0.02 - x * 0.005)
+        async def reversed_finish(ctx: Context, x: int) -> int:
+            """Each item waits for the next one to finish, so the last finishes first."""
+            if x + 1 < len(finished):
+                await finished[x + 1].wait()
+            completion.append(x)
+            finished[x].set()
             return x
 
         flow = make_ff().create()
-        flow.call(_identity).map(lambda f: f.call(delayed))
+        flow.call(_identity).map(lambda f: f.call(reversed_finish))
         assert await flow.run([0, 1, 2, 3]) == [0, 1, 2, 3]
+        assert completion == [3, 2, 1, 0]
 
     @pytest.mark.asyncio
     async def test_aggregate_reduces_results(self) -> None:
@@ -1075,28 +1084,12 @@ class TestMapMaxConcurrency:
     @pytest.mark.asyncio
     async def test_caps_concurrent_in_flight_items(self) -> None:
         """At most max_concurrency runners execute their body at once."""
-        in_flight = 0
-        peak = 0
-        lock = asyncio.Lock()
-
-        @verb(role=ROLE_A)
-        async def slow(_ctx: Context, x: int) -> int:
-            """Track concurrency by bumping a shared counter across a sleep."""
-            nonlocal in_flight, peak
-            async with lock:
-                in_flight += 1
-                peak = max(peak, in_flight)
-            await asyncio.sleep(0.01)
-            async with lock:
-                in_flight -= 1
-            return x
-
+        slow, peak = _peak_tracker(2)
         flow = make_ff().create()
         flow.call(_identity).map(slow, max_concurrency=2)
         results = await flow.run([1, 2, 3, 4, 5])
         assert results == [1, 2, 3, 4, 5]
-        assert peak <= 2
-        assert peak >= 1  # at least one item ran
+        assert peak[0] == 2
 
     @pytest.mark.asyncio
     async def test_max_concurrency_of_one_is_serial(self) -> None:
@@ -1118,17 +1111,25 @@ class TestMapMaxConcurrency:
         assert order == [1, -1, 2, -2, 3, -3]
 
 
-def _peak_tracker() -> tuple[Any, list[int]]:
-    """A map body that records the peak number of items running at once, in ``peak[0]``."""
+def _peak_tracker(cap: int) -> tuple[Any, list[int]]:
+    """A map body that records the peak number of items running at once, in ``peak[0]``.
+
+    The first items wait inside the body until ``cap`` of them run at once, so a cap that
+    holds shows as a peak of exactly ``cap``. The wait's deadline is the failure path: a map
+    that never runs ``cap`` items together fails instead of hanging.
+    """
     peak = [0]
     in_flight = 0
+    full = asyncio.Event()
 
     @verb(role=ROLE_A)
     async def slow(_ctx: Context, x: int) -> int:
         nonlocal in_flight
         in_flight += 1
         peak[0] = max(peak[0], in_flight)
-        await asyncio.sleep(0.01)
+        if in_flight == cap:
+            full.set()
+        await asyncio.wait_for(full.wait(), timeout=5.0)
         in_flight -= 1
         return x
 
@@ -1140,7 +1141,7 @@ class TestMapComputedConcurrency:
 
     @pytest.mark.asyncio
     async def test_computed_cap_limits_items_in_flight(self) -> None:
-        slow, peak = _peak_tracker()
+        slow, peak = _peak_tracker(2)
         flow = make_ff().create().call(_identity).map(slow, max_concurrency=lambda _i, _c: 2)
         assert await flow.run([1, 2, 3, 4, 5]) == [1, 2, 3, 4, 5]
         assert peak[0] == 2

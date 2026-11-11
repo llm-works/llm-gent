@@ -155,13 +155,13 @@ class TestCreateHaltAndCheckpointer:
         flow = ff.create()
         assert flow._halt_event is factory_halt
 
-    def test_create_checkpointer_pair_binds_flow(self, tmp_path: Any) -> None:
+    def test_create_checkpointer_pair_binds_flow(self) -> None:
         """``checkpointer=(store, id)`` binds the run's repo via .with_checkpoint_store, nothing more."""
 
         from llm_gent.flow import Factory
-        from tests.helpers import file_store
+        from tests.helpers import memory_store
 
-        store = file_store(tmp_path)
+        store = memory_store()
         ff = Factory(make_test_logger(), saia_factory=StubFactory())
         flow = ff.create(checkpointer=(store, "flow-1"))
         assert flow._checkpoint_ctx is not None
@@ -169,14 +169,14 @@ class TestCreateHaltAndCheckpointer:
         assert flow._checkpoint_ctx.client_flow_id == "flow-1"
         assert flow._checkpointer is None  # saves need an explicit with_checkpointer()
 
-    def test_create_checkpointer_supersedes_factory_pair(self, tmp_path: Any) -> None:
+    def test_create_checkpointer_supersedes_factory_pair(self) -> None:
         """``checkpointer=`` wins over the factory-level store + client_flow_id."""
 
         from llm_gent.flow import Factory
-        from tests.helpers import file_store
+        from tests.helpers import memory_store
 
-        factory_store = file_store(tmp_path / "a")
-        create_store = file_store(tmp_path / "b")
+        factory_store = memory_store()
+        create_store = memory_store()
         ff = Factory(make_test_logger(), saia_factory=StubFactory(), checkpoint_store=factory_store)
         flow = ff.create(client_flow_id="ignored", checkpointer=(create_store, "flow-override"))
         assert flow._checkpoint_ctx is not None

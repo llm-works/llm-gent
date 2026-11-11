@@ -372,17 +372,16 @@ class TestHubStart:
     """Tests for Hub.start()."""
 
     def test_start_configures_bus(self, hub):
-        """start() calls bus.start and wires up handlers."""
-        hub.start()
+        """start() calls bus.start, wires up handlers and starts the heartbeat broadcaster."""
+        with patch.object(hub, "_start_heartbeat_broadcaster") as start_broadcaster:
+            hub.start()
 
         hub._bus.start.assert_called_once()
         hub._bus.on_request.assert_called_once()
         hub._bus.set_route_validator.assert_called_once()
         hub._bus.register_async_request.assert_called_once_with("relay_request")
         hub._bus.subscribe.assert_called_once_with("heartbeat", hub._handle_heartbeat_response)
-
-        # Cleanup: stop heartbeat broadcaster thread
-        hub._stop_heartbeat_broadcaster()
+        start_broadcaster.assert_called_once_with()
 
 
 class TestHubStopExtended:

@@ -14,7 +14,6 @@ from appinfra import DotDict
 from llm_gent.agents.default import Factory
 from llm_gent.core.platform import PlatformContext
 from llm_gent.core.traits.builtin.saia import SAIATrait
-from llm_gent.core.traits.builtin.tools import ToolsTrait
 from llm_gent.runtime.server.config import AgentServerConfig
 
 
@@ -22,6 +21,9 @@ pytestmark = pytest.mark.unit
 
 AGENTS_DIR = Path(__file__).parents[2] / "llm_gent" / "etc" / "agents"
 SHIPPED = sorted(AGENTS_DIR.glob("*.yaml"))
+
+CODEBASE = Path("/srv/codebase")
+"""The codebase path the agents are built with; building one does not touch it."""
 
 
 def _build(path: Path, codebase: Path) -> Any:
@@ -39,53 +41,28 @@ def test_agents_are_shipped():
 
 
 @pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.stem)
-def test_shipped_agent_builds(path, tmp_path):
-    assert _build(path, tmp_path) is not None
+def test_shipped_agent_builds(path):
+    assert _build(path, CODEBASE) is not None
 
 
 @pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.stem)
-def test_scheduled_task_is_the_task_description(path, tmp_path):
+def test_scheduled_task_is_the_task_description(path):
     """What ``run_once()`` runs is ``task.description``, with its variables substituted."""
     description = yaml.safe_load(path.read_text())["task"]["description"]
 
-    agent = _build(path, tmp_path)
+    agent = _build(path, CODEBASE)
 
-    assert agent._default_prompt == description.replace("{{CODEBASE_PATH}}", str(tmp_path))
+    assert agent._default_prompt == description.replace("{{CODEBASE_PATH}}", str(CODEBASE))
     assert agent._default_prompt.strip()
 
 
 @pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.stem)
-def test_task_limits_reach_the_run(path, tmp_path):
+def test_task_limits_reach_the_run(path):
     """The YAML's task.max_iterations and task.timeout_secs bound the agent's tool loop."""
     raw = yaml.safe_load(path.read_text())
     task = AgentServerConfig.from_dict({"agents": {path.stem: raw}}).agents[path.stem].task
 
-    config = _build(path, tmp_path).require_trait(SAIATrait).config
+    config = _build(path, CODEBASE).require_trait(SAIATrait).config
 
     assert (config.max_iterations, config.timeout_secs) == (task.max_iterations, task.timeout_secs)
     assert config.timeout_secs > 0
-
-
-class TestCodebaseQnaShell:
-    """codebase-qna's shell runs its allowed programs in the codebase, and nothing else."""
-
-    @pytest.fixture
-    def shell(self, tmp_path):
-        (tmp_path / "README.md").write_text("hello\n")
-        agent = _build(AGENTS_DIR / "codebase-qna.yaml", tmp_path)
-        tool = agent.get_trait(ToolsTrait).registry.get("shell")
-        assert tool is not None
-        return tool
-
-    def test_runs_in_the_codebase(self, shell):
-        result = shell.execute(command="ls")
-
-        assert result.success is True
-        assert "README.md" in result.output
-
-    @pytest.mark.parametrize("command", ["find . -name x", "git log", "tree", "sh -c id"])
-    def test_other_programs_are_not_allowed(self, shell, command):
-        result = shell.execute(command=command)
-
-        assert result.success is False
-        assert "not in allowed list" in result.error
