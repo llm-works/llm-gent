@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel", "setuptools-scm>=8.0,<9.0"]
+requires = ["setuptools>=77.0.3", "wheel", "setuptools-scm>=8.0,<9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,13 +7,12 @@ name = "llm-gent"
 dynamic = ["version"]
 description = "Agent framework with learning capabilities"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 requires-python = ">=3.11"
 keywords = ["agents", "llm", "ai", "learning"]
 authors = [{ name = "LLM Works LLC", email = "info@llm-works.ai" }]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
