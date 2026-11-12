@@ -144,7 +144,8 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     needs: [test, smoke-wheel, examples]
-    if: always()
+    # Skipped, not failed, when a newer push to the same ref cancels the run
+    if: ${{ !cancelled() }}
     steps:
       - name: Check test results
         run: |
