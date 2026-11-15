@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Building from source requires setuptools `>= 77.0.3`; the package declares its license as the
   SPDX expression `Apache-2.0`.
+- A paused turn's messages are stored as an appinfra CAS `Vector`, one blob per message, so a turn
+  paused again stores only the messages it added. Earlier gent versions cannot read such snapshots.
+- `PgStore` writes a batch of objects in one transaction and looks up object types in one query;
+  a checkpoint stores its snapshot as one batch.
 
 ## [0.4.1] - 2026-11-01
 
