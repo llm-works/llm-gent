@@ -27,7 +27,9 @@ that tell repeated executions apart::
     flow                              the structure of the flow that wrote it
 
 A dict payload is stored as a tree with one blob per top-level key, so
-keys that did not change keep their id from one commit to the next.
+keys that did not change keep their id from one commit to the next. A
+paused turn's messages are stored as an :class:`appinfra.cas.Vector` of
+one blob per message, so a turn paused again stores only what it added.
 
 :class:`ScopeRegistry` tracks the live scopes and cursors during a run;
 :func:`build_snapshot_tree` turns them into :mod:`appinfra.cas` objects;
@@ -37,10 +39,22 @@ keys that did not change keep their id from one commit to the next.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar
 
-from appinfra.cas import Blob, Object, Tree, TreeEntry, canonical_json
+from appinfra.cas import (
+    Batch,
+    Blob,
+    Object,
+    Tree,
+    TreeEntry,
+    Vector,
+    VectorNode,
+    canonical_json,
+)
+from appinfra.cas.objects import TreeEntryType
 
 from . import codec, serialize_state_data
 from .base import State
@@ -316,70 +330,134 @@ def _to_json(scope: State[Any], path: ScopePath) -> Any:
         raise TypeError(f"scope at {where!r} cannot be checkpointed: {e}") from e
 
 
+_VECTOR_AT: dict[str, tuple[str, ...]] = {TURN: ("conversation", "messages")}
+"""Leaf entries holding a list stored as a vector: entry name to the keys that lead to it.
+
+A paused turn's messages, so a turn paused again stores only the messages
+it added. The keys follow the ``to_dict()`` shape of kelt's
+``Conversation``; a conversation of another shape is stored as one blob.
+"""
+
+
 def build_snapshot_tree(
-    flat: dict[ScopePath, Any], structure: Blob
-) -> tuple[Tree, list[Blob | Tree]]:
-    """Build the snapshot tree for captured values; return it and every object to store.
+    flat: dict[ScopePath, Any],
+    structure: Blob,
+    batch: Batch,
+    stored: AbstractSet[str] = frozenset(),
+) -> tuple[Tree, set[str]]:
+    """Queue the snapshot tree for captured values on ``batch``; return it and what was queued.
 
     ``structure`` is the structure of the flow writing the snapshot
     (:meth:`~llm_gent.flow.structure.Structure.blob`), held at the
-    root as :data:`FLOW`. Pure and synchronous: hashing only, no store
-    access. The objects come children first, the order a repository
-    accepts them in.
+    root as :data:`FLOW`. Blobs and trees whose ids are in ``stored`` are
+    not queued again; the returned set holds the ids of the blobs and
+    trees queued. Vector nodes are queued by :class:`~appinfra.cas.Vector`
+    and are in neither. Synchronous: nothing is stored before the batch's
+    block ends.
     """
     nested: dict[str, Any] = {}
     for path, value in flat.items():
         node = nested
         for segment in path[:-1]:
             node = node.setdefault(segment, {})
-        node[path[-1]] = _Leaf(value)
+        node[path[-1]] = _Leaf(value, _VECTOR_AT.get(path[-1], ()))
     assert FLOW not in nested, "no scope or cursor is registered at the root as 'flow'"
     nested[FLOW] = structure
-    objects: list[Blob | Tree] = []
-    return _build_tree(nested, objects), objects
+    sink = _Sink(batch, stored)
+    tree = _build_tree(nested, sink)
+    sink.put(tree)
+    return tree, sink.queued
 
 
 @dataclass(frozen=True)
 class _Leaf:
-    """A captured value at a :data:`STATE` or :data:`PASS` entry."""
+    """A captured value at a :data:`STATE` or cursor entry; ``vector_at`` as in :data:`_VECTOR_AT`."""
 
     value: Any
+    vector_at: tuple[str, ...]
 
 
-def _build_tree(node: dict[str, Any], objects: list[Blob | Tree]) -> Tree:
-    """Tree for one level of the nested path map; objects are appended children-first."""
+@dataclass(frozen=True)
+class _Ref:
+    """What a tree entry points at: its entry type and object id."""
+
+    type: TreeEntryType
+    id: str
+
+    def named(self, name: str) -> TreeEntry:
+        """The tree entry ``name`` pointing here."""
+        return TreeEntry(name, self.type, self.id)
+
+
+class _Sink:
+    """Queues objects on a batch, skipping those already stored, and records what it queued."""
+
+    def __init__(self, batch: Batch, stored: AbstractSet[str]) -> None:
+        self.batch = batch
+        self._stored = stored
+        self.queued: set[str] = set()
+
+    def put(self, obj: Blob | Tree) -> _Ref:
+        """Queue ``obj`` unless it is stored; return a reference to it."""
+        if obj.id not in self._stored:
+            self.batch.put(obj)
+            self.queued.add(obj.id)
+        return _Ref("blob" if isinstance(obj, Blob) else "tree", obj.id)
+
+    def blob(self, value: Any) -> _Ref:
+        """Queue ``value`` as a blob of canonical JSON."""
+        return self.put(Blob(canonical_json(value)))
+
+
+def _build_tree(node: dict[str, Any], sink: _Sink) -> Tree:
+    """Tree for one level of the nested path map; what it points at is queued, not the tree."""
     entries: list[TreeEntry] = []
     for name, child in node.items():
         if isinstance(child, _Leaf):
-            obj: Blob | Tree = _leaf_object(child.value, objects)
+            ref = _leaf_ref(child.value, child.vector_at, sink)
         elif isinstance(child, Blob):
-            objects.append(child)
-            obj = child
+            ref = sink.put(child)
         else:
-            obj = _build_tree(child, objects)
-        entries.append(TreeEntry(name, "blob" if isinstance(obj, Blob) else "tree", obj.id))
-    tree = Tree(tuple(entries))
-    objects.append(tree)
-    return tree
+            ref = sink.put(_build_tree(child, sink))
+        entries.append(ref.named(name))
+    return Tree(tuple(entries))
 
 
-def _leaf_object(value: Any, objects: list[Blob | Tree]) -> Blob | Tree:
-    """A dict payload becomes a tree with one blob per key; anything else is one blob.
+def _leaf_ref(value: Any, vector_at: tuple[str, ...], sink: _Sink) -> _Ref:
+    """A dict payload becomes a tree with one entry per key; anything else is one blob.
 
     A dict with an empty key is one blob too: a tree entry needs a name.
+    The key ``vector_at`` names leads one level down: its value is a tree
+    of its own when the keys after it lead to a list, which is stored as a
+    vector of one blob per element. Without such a list it stays a blob.
     """
     if not isinstance(value, dict) or "" in value:
-        blob = Blob(canonical_json(value))
-        objects.append(blob)
-        return blob
+        return sink.blob(value)
     entries: list[TreeEntry] = []
     for key, item in value.items():
-        blob = Blob(canonical_json(item))
-        objects.append(blob)
-        entries.append(TreeEntry(key, "blob", blob.id))
-    tree = Tree(tuple(entries))
-    objects.append(tree)
-    return tree
+        if vector_at and key == vector_at[0] and _leads_to_list(item, vector_at[1:]):
+            ref = _nested_ref(item, vector_at[1:], sink)
+        else:
+            ref = sink.blob(item)
+        entries.append(ref.named(key))
+    return sink.put(Tree(tuple(entries)))
+
+
+def _leads_to_list(value: Any, keys: tuple[str, ...]) -> bool:
+    """True when ``keys`` lead through dicts with named keys to a list inside ``value``."""
+    if not keys:
+        return isinstance(value, list)
+    if not isinstance(value, dict) or "" in value:
+        return False
+    return keys[0] in value and _leads_to_list(value[keys[0]], keys[1:])
+
+
+def _nested_ref(value: Any, keys: tuple[str, ...], sink: _Sink) -> _Ref:
+    """The list at the end of ``keys`` (see :func:`_leads_to_list`) as a vector, in its trees."""
+    if not keys:
+        ids = [sink.blob(element).id for element in value]
+        return _Ref("vector", Vector.build(sink.batch, ids).id)
+    return _leaf_ref(value, keys, sink)
 
 
 @dataclass(frozen=True)
@@ -438,8 +516,29 @@ def _read_level(tree_id: str, path: ScopePath, load: Loader, flat: dict[ScopePat
 
 
 def _read_leaf(entry: TreeEntry, load: Loader) -> Any:
-    """A leaf's value: a blob's JSON, or a key tree rebuilt into a dict."""
+    """A leaf's value: a blob's JSON, a tree as a dict of its entries, a vector as a list.
+
+    Trees nest: an entry of a leaf's tree is read the same way, so a key
+    can hold a tree or a vector of its own. A vector's elements are blobs
+    of JSON.
+    """
     if entry.type == "blob":
         return json.loads(load(entry.id, Blob).data)
-    keys = load(entry.id, Tree)
-    return {e.name: json.loads(load(e.id, Blob).data) for e in keys.entries}
+    if entry.type == "vector":
+        return [json.loads(load(e, Blob).data) for e in _vector_elements(entry.id, load)]
+    return {e.name: _read_leaf(e, load) for e in load(entry.id, Tree).entries}
+
+
+def _vector_elements(node_id: str, load: Loader) -> Iterator[str]:
+    """The element ids of the vector whose root node is ``node_id``, in order.
+
+    A level-0 node lists elements; a node above it lists the nodes one
+    level down. Reading through ``load`` keeps a missing node the
+    loader's error, as for every other object.
+    """
+    node = load(node_id, VectorNode)
+    if node.level == 0:
+        yield from node.children
+        return
+    for child in node.children:
+        yield from _vector_elements(child, load)

@@ -30,7 +30,7 @@ the store just uses the tables.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, cast
@@ -42,6 +42,8 @@ from sqlalchemy import (
     DateTime,
     LargeBinary,
     String,
+    any_,
+    bindparam,
     delete,
     extract,
     func,
@@ -50,7 +52,7 @@ from sqlalchemy import (
     union,
     update,
 )
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -59,6 +61,9 @@ from llm_gent.schema import Base
 
 _DELETE_BATCH = 500
 """Object ids per DELETE statement in :meth:`PgStore.delete_objects`."""
+
+_WRITE_BATCH = 500
+"""Objects per INSERT statement in :meth:`PgStore.write_objects`: 2,000 bind parameters."""
 
 _LOCK_KEY = "hashtextextended(current_schema() || '/' || :repo, 0)"
 """Advisory lock key of a repository: the schema in use and the repository name.
@@ -169,6 +174,43 @@ class PgStore(Store):
         )
         with self._pg.session() as session:
             session.execute(stmt)
+
+    def object_types(self, repo: str, object_ids: Iterable[str]) -> dict[str, ObjectType]:
+        """Return the type of each stored id in one query; absent ids are left out."""
+        ids = list(dict.fromkeys(object_ids))
+        if not ids:
+            return {}
+        stmt = select(CasObject.id, CasObject.type).where(
+            CasObject.repo == repo,
+            CasObject.id == any_(bindparam("ids", ids, type_=ARRAY(String))),
+        )
+        with self._pg.session() as session:
+            return {str(oid): cast(ObjectType, otype) for oid, otype in session.execute(stmt)}
+
+    def write_objects(self, repo: str, objects: Sequence[tuple[str, ObjectType, bytes]]) -> None:
+        """Store objects in one transaction; rewriting an existing one refreshes its write time.
+
+        One transaction makes every object visible at once, so the order the
+        rows are written in does not matter. An id listed twice is written
+        once: Postgres refuses an ``ON CONFLICT DO UPDATE`` that touches the
+        same row twice in one statement.
+        """
+        rows = list(
+            {
+                oid: {"repo": repo, "id": oid, "type": otype, "data": data}
+                for oid, otype, data in objects
+            }.values()
+        )
+        with self._pg.session() as session:
+            for start in range(0, len(rows), _WRITE_BATCH):
+                stmt = (
+                    insert(CasObject)
+                    .values(rows[start : start + _WRITE_BATCH])
+                    .on_conflict_do_update(
+                        index_elements=["repo", "id"], set_={"written_at": func.clock_timestamp()}
+                    )
+                )
+                session.execute(stmt)
 
     def list_objects(self, repo: str) -> dict[str, float]:
         """Return every object id of the repository with its last write time (epoch secs)."""

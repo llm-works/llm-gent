@@ -17,6 +17,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from appinfra.cas import Blob, ObjectType
 from appinfra.cas.conformance import StoreConformance
 from appinfra.db.pg import PG
 from appinfra.log import Logger
@@ -24,7 +25,7 @@ from sqlalchemy import delete, update
 
 from llm_gent.flow import History
 from llm_gent.flow.stores import PgStore
-from llm_gent.flow.stores.postgres import CasObject, CasRef
+from llm_gent.flow.stores.postgres import _WRITE_BATCH, CasObject, CasRef
 from llm_gent.flow.testing.checkpoint import build_canonical_flow
 
 
@@ -61,6 +62,41 @@ def age(pg_migrated: PG) -> Callable[[str, str, float], None]:
 
 class TestConformance(StoreConformance):
     """The behaviour every :class:`appinfra.cas.Store` shares."""
+
+
+def _blobs(n: int) -> list[tuple[str, ObjectType, bytes]]:
+    """``n`` distinct blobs as ``write_objects`` takes them."""
+    blobs = [Blob(f"blob {i}".encode()) for i in range(n)]
+    return [(b.id, b.type, b.serialize()) for b in blobs]
+
+
+class TestBulkWrites:
+    """What the bulk overrides do beyond the conformance suite: one statement's limits."""
+
+    def test_an_id_listed_twice_is_written_once(self, store: PgStore) -> None:
+        """A repeated id in one call does not hit ON CONFLICT twice in one statement."""
+        objects = _blobs(2)
+        store.write_objects("r", [*objects, objects[0]])
+        assert set(store.list_objects("r")) == {oid for oid, _, _ in objects}
+
+    def test_more_objects_than_one_statement_holds(self, store: PgStore) -> None:
+        """A call over the per-statement row count stores every object."""
+        objects = _blobs(_WRITE_BATCH + 1)
+        store.write_objects("r", objects)
+        ids = [oid for oid, _, _ in objects]
+        assert set(store.list_objects("r")) == set(ids)
+        assert store.object_types("r", ids) == dict.fromkeys(ids, "blob")
+
+    def test_rewriting_refreshes_the_write_time(
+        self, store: PgStore, age: Callable[[str, str, float], None]
+    ) -> None:
+        """Writing a stored object again makes it recent, as write_object does."""
+        objects = _blobs(1)
+        store.write_objects("r", objects)
+        oid = objects[0][0]
+        age("r", oid, 3600)
+        store.write_objects("r", objects)
+        assert store.now() - store.list_objects("r")[oid] < 60
 
 
 class TestCheckpointedRun:
