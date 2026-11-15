@@ -37,10 +37,11 @@ keys that did not change keep their id from one commit to the next.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar
 
-from appinfra.cas import Blob, Object, Tree, TreeEntry, canonical_json
+from appinfra.cas import Blob, Object, Tree, TreeEntry, VectorNode, canonical_json
 
 from . import codec, serialize_state_data
 from .base import State
@@ -438,8 +439,29 @@ def _read_level(tree_id: str, path: ScopePath, load: Loader, flat: dict[ScopePat
 
 
 def _read_leaf(entry: TreeEntry, load: Loader) -> Any:
-    """A leaf's value: a blob's JSON, or a key tree rebuilt into a dict."""
+    """A leaf's value: a blob's JSON, a tree as a dict of its entries, a vector as a list.
+
+    Trees nest: an entry of a leaf's tree is read the same way, so a key
+    can hold a tree or a vector of its own. A vector's elements are blobs
+    of JSON.
+    """
     if entry.type == "blob":
         return json.loads(load(entry.id, Blob).data)
-    keys = load(entry.id, Tree)
-    return {e.name: json.loads(load(e.id, Blob).data) for e in keys.entries}
+    if entry.type == "vector":
+        return [json.loads(load(e, Blob).data) for e in _vector_elements(entry.id, load)]
+    return {e.name: _read_leaf(e, load) for e in load(entry.id, Tree).entries}
+
+
+def _vector_elements(node_id: str, load: Loader) -> Iterator[str]:
+    """The element ids of the vector whose root node is ``node_id``, in order.
+
+    A level-0 node lists elements; a node above it lists the nodes one
+    level down. Reading through ``load`` keeps a missing node the
+    loader's error, as for every other object.
+    """
+    node = load(node_id, VectorNode)
+    if node.level == 0:
+        yield from node.children
+        return
+    for child in node.children:
+        yield from _vector_elements(child, load)

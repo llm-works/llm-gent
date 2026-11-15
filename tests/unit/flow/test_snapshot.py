@@ -14,7 +14,17 @@ import asyncio
 from typing import Any
 
 import pytest
-from appinfra.cas import Blob, Object, Tree
+from appinfra.cas import (
+    Blob,
+    MemoryStore,
+    Object,
+    Repo,
+    Tree,
+    TreeEntry,
+    Vector,
+    VectorNode,
+    canonical_json,
+)
 
 from llm_gent.flow import Context, Factory, History, verb
 from llm_gent.flow.state import State
@@ -123,6 +133,92 @@ class TestSnapshotTree:
         scopes.open(("n", "call"), State(data={"handle": object()}, _parent=root))
         with pytest.raises(TypeError, match="scope at 'n/call' cannot be checkpointed"):
             scopes.capture()
+
+
+def _repo() -> Repo:
+    """An empty in-memory repository."""
+    return MemoryStore(LG).repo("snap")
+
+
+def _loader(repo: Repo) -> Any:
+    """A :class:`Loader` over ``repo``: every object it is asked for is stored."""
+
+    def load(object_id: str, cls: type[Object]) -> Any:
+        obj = repo.get(object_id, cls)
+        assert obj is not None
+        return obj
+
+    return load
+
+
+def _message_vector(repo: Repo, messages: list[Any]) -> Vector:
+    """``messages`` stored as JSON blobs and listed in a vector."""
+    return Vector.build(repo, [repo.put(Blob(canonical_json(m))) for m in messages])
+
+
+def _root_with(repo: Repo, path: tuple[str, str], entry: TreeEntry) -> str:
+    """A snapshot root holding an empty root scope and ``entry`` under ``path[0]``."""
+    state = repo.put(Blob(canonical_json({})))
+    owner = repo.put(Tree((TreeEntry(path[1], entry.type, entry.id),)))
+    return repo.put(Tree((TreeEntry("state", "blob", state), TreeEntry(path[0], "tree", owner))))
+
+
+class TestVectorLeaves:
+    """Snapshot trees whose leaves hold vectors read back as lists."""
+
+    def test_a_vector_inside_a_leaf_tree_reads_as_a_list(self) -> None:
+        """A turn stored as nested trees with its messages in a vector reads as one dict."""
+        repo = _repo()
+        messages = [{"role": "user", "content": f"m{i}"} for i in range(3)]
+        vector = _message_vector(repo, messages)
+        conversation = repo.put(
+            Tree(
+                (
+                    TreeEntry("messages", "vector", vector.id),
+                    TreeEntry("token_count", "blob", repo.put(Blob(canonical_json(7)))),
+                )
+            )
+        )
+        turn = repo.put(
+            Tree(
+                (
+                    TreeEntry("conversation", "tree", conversation),
+                    TreeEntry("task", "blob", repo.put(Blob(canonical_json("do it")))),
+                )
+            )
+        )
+        root = _root_with(repo, ("t", "turn"), TreeEntry("turn", "tree", turn))
+
+        snapshot = read_snapshot(root, _loader(repo))
+        assert snapshot.cursors == {
+            "t": {
+                "turn": {
+                    "conversation": {"messages": messages, "token_count": 7},
+                    "task": "do it",
+                }
+            }
+        }
+
+    def test_a_leaf_that_is_a_vector_reads_as_a_list(self) -> None:
+        repo = _repo()
+        vector = _message_vector(repo, [1, 2, 3])
+        root = _root_with(repo, ("n", "done"), TreeEntry("done", "vector", vector.id))
+        assert read_snapshot(root, _loader(repo)).cursors == {"n": {"done": [1, 2, 3]}}
+
+    def test_a_vector_over_several_nodes_reads_in_order(self) -> None:
+        """Past one leaf node's 256 entries, the elements come back in order across nodes."""
+        repo = _repo()
+        values = list(range(1000))
+        vector = _message_vector(repo, values)
+        root_node = repo.get(vector.id, VectorNode)
+        assert root_node is not None and root_node.level > 0
+        root = _root_with(repo, ("n", "done"), TreeEntry("done", "vector", vector.id))
+        assert read_snapshot(root, _loader(repo)).cursors == {"n": {"done": values}}
+
+    def test_an_empty_vector_reads_as_an_empty_list(self) -> None:
+        repo = _repo()
+        root = _root_with(repo, ("n", "done"), TreeEntry("done", "vector", Vector.empty(repo).id))
+        assert read_snapshot(root, _loader(repo)).cursors == {"n": {"done": []}}
 
 
 class TestRegistry:
