@@ -283,17 +283,24 @@ class CheckpointContext:
         """Put the snapshot tree of every live scope in ``scopes``; return its root tree.
 
         Every scope is serialized in one synchronous pass
-        (:meth:`ScopeRegistry.capture`) and the objects are put without
+        (:meth:`ScopeRegistry.capture`) and the objects are stored without
         yielding to other tasks, so the snapshot holds the scopes as they
-        were at one moment even while concurrent map items run.
+        were at one moment even while concurrent map items run. They are
+        stored as one batch (:meth:`appinfra.cas.Repo.batch`): one link
+        lookup and one store write for the whole snapshot. Blobs and trees
+        this run already stored are left out of it.
 
         The root tree also holds the run's flow structure
         (:data:`~llm_gent.flow.state.snapshot.FLOW`), whose
         id every commit of the run records as ``flow_root_hash``.
         """
-        tree, objects = build_snapshot_tree(scopes.capture(), self._run_structure_blob())
-        for obj in objects:
-            self.put(obj)
+        flat = scopes.capture()
+        with self.repo.batch() as batch:
+            tree, queued = build_snapshot_tree(
+                flat, self._run_structure_blob(), batch, self._written
+            )
+        # After the block: a batch that raised stored nothing.
+        self._written |= queued
         return tree
 
     async def save_completion_commit(self, tree: Tree) -> FlowCommit:
