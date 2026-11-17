@@ -36,6 +36,7 @@ from appinfra.log import Logger
 
 from .checkpoint import maybe_await
 from .context import Context
+from .state.cas import CommitOutcome
 from .state.codec import encode
 
 
@@ -240,7 +241,7 @@ class CheckpointEvent(HookEvent):
     """``after_checkpoint``: a checkpoint commit was written."""
 
     commit_id: str
-    outcome: str
+    outcome: CommitOutcome
 
 
 # --- hooks ---
