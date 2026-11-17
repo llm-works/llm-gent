@@ -24,10 +24,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from appinfra.cas import MemoryStore
+from appinfra.cas import MemoryStore, Tree
 
 from llm_gent.flow import FlowCommit, Role
-from llm_gent.flow.checkpoint import HEAD_REF
+from llm_gent.flow._checkpoint_ctx import CheckpointContext
+from llm_gent.flow.checkpoint import HEAD_REF, ConcurrentWriteError
+from llm_gent.flow.structure import Structure
 from llm_gent.flow.testing.checkpoint import (
     assert_resume_determinism,
     build_canonical_flow,
@@ -1383,6 +1385,54 @@ class TestHistoryLineage:
         ctx.put(tree)
         restarted = await _append(0)
         assert restarted.parents == ()
+
+    async def test_a_delete_failing_partway_keeps_the_head(self, store: MemoryStore) -> None:
+        """Tags go before HEAD: a store error partway leaves the history with its head."""
+        ctx, _, head = await _history_beside_records(store, "partial-delete")
+        real = ctx.repo.delete_ref
+        calls: list[str] = []
+
+        def failing(name: str, old: str) -> bool:
+            calls.append(name)
+            if len(calls) == 2:
+                raise OSError("store unavailable")
+            return real(name, old)
+
+        ctx.repo.delete_ref = failing  # type: ignore[method-assign]
+        with pytest.raises(OSError):
+            await ctx.delete_history()
+        assert store.repo("partial-delete").get_ref(HEAD_REF) == head.id
+
+    async def test_a_ref_moved_during_the_delete_raises(self, store: MemoryStore) -> None:
+        """A history ref another writer moves after it was read is not left silently."""
+        ctx, first, head = await _history_beside_records(store, "moved-delete")
+        real = ctx.repo.refs
+
+        def moved(prefix: str = "") -> dict[str, str]:
+            refs = real(prefix)
+            ctx.repo.set_ref(HEAD_REF, first.id, head.id)
+            return refs
+
+        ctx.repo.refs = moved  # type: ignore[method-assign]
+        with pytest.raises(ConcurrentWriteError):
+            await ctx.delete_history()
+        assert store.repo("moved-delete").get_ref(HEAD_REF) == first.id
+
+
+async def _history_beside_records(
+    store: MemoryStore, client_flow_id: str
+) -> tuple[CheckpointContext, FlowCommit, FlowCommit]:
+    """A history of two commits, the first tagged, in a repository with a ref it does not own."""
+    ctx = CheckpointContext(store, client_flow_id, lambda: Structure(()), "retain")
+    tree = Tree()
+    ctx.put(tree)
+    commits = []
+    for iteration in range(2):
+        meta = ctx._build_commit_meta("node", iteration, "node", "ok", ())
+        commits.append(await ctx.append_commit(tree.id, meta))
+    await ctx.put_tag("tags/complete", commits[0].id)
+    ctx.repo.set_ref("records", commits[0].id, None)
+    return ctx, commits[0], commits[1]
 
 
 class TestFlowRootHash:

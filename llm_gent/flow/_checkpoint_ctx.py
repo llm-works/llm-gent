@@ -195,16 +195,22 @@ class CheckpointContext:
         A repository holding no other refs is deleted whole. One that does
         (version-control records, an app's own refs) keeps them and what they
         reach; objects only the history reached stay until a prune of the
-        repository deletes them.
+        repository deletes them. There the refs go one by one, tags before
+        ``HEAD``, so a delete that fails partway leaves the history its head.
+
+        Raises:
+            ConcurrentWriteError: Another writer moved a history ref after
+                it was read.
         """
         try:
             refs = self.repo.refs()
             if all(_is_history_ref(name) for name in refs):
                 self.store.delete_repo(self.client_flow_id)
             else:
-                for name, target in refs.items():
-                    if _is_history_ref(name):
-                        self.repo.delete_ref(name, target)
+                history = [name for name in refs if _is_history_ref(name)]
+                for name in sorted(history, key=lambda name: name == HEAD_REF):
+                    if not self.repo.delete_ref(name, refs[name]):
+                        raise ConcurrentWriteError(self.client_flow_id, name, refs[name])
         finally:
             # Also on a failed delete: the next access re-reads the store
             # instead of trusting a head the store may have half-removed.
