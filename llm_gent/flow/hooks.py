@@ -72,10 +72,10 @@ HOOK_NAMES: tuple[HookName, ...] = (
 StepKind = Literal["verb", "loop", "subflow", "branch", "iterate", "map"]
 """What a chain step runs."""
 
-RunOutcome = Literal["ok", "halted", "failed", "denied"]
+RunOutcome = Literal["ok", "halted", "failed", "denied", "cancelled"]
 """How a run ended: finished, stopped by its halt, raised, or refused by ``before_run``."""
 
-StepOutcome = Literal["ok", "interrupted", "failed", "denied", "paused"]
+StepOutcome = Literal["ok", "interrupted", "failed", "denied", "paused", "cancelled"]
 """How a step ended: finished, stopped by the halt, raised, or stopped by ``before_step``."""
 
 
@@ -179,7 +179,10 @@ class HookEvent:
     activity_id: str
     """Unique per invocation: each run, step execution or LLM call has its own."""
     parent_activity_id: str | None = None
-    """The invocation this one runs inside: the enclosing step, or the run."""
+    """The invocation this one runs inside: the nearest enclosing step hooks observe, else the run.
+
+    A step of a flow without hooks has no activity; ``where`` still locates it.
+    """
     actor: Actor = field(default_factory=Actor)
     trace: TraceIds = field(default_factory=TraceIds)
     ctx: Context[Any] | None = None
@@ -236,7 +239,9 @@ class LLMCallEvent(HookEvent):
     """``after_llm_call``: one model call of a Loop turn."""
 
     conversation: Any = None
-    """The conversation as sent: the context the model saw, before its response."""
+    """The conversation SAIA appends the turn to, live: while the hook runs it holds what
+    the model was sent, before the response; later it holds the response and what followed.
+    A hook that keeps it copies what it needs."""
     response: Any = None
 
 

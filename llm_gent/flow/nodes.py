@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Final
 from appinfra.log import Logger
 
 from .context import Context
+from .hooks import Hooks
 from .resource import NO_RESOURCES, ResourceKey
 from .state import State, StateFactory
 from .state.snapshot import ScopePath, ScopeRegistry
@@ -336,6 +337,12 @@ class _RunEnv:
     the cost tracker, ``ctx.cost``, among them): the ones this Flow
     declares, its per-run children, and the ones inherited
     (:mod:`llm_gent.flow.resource._runtime`).
+
+    ``hooks`` are the hooks in effect here (:meth:`Flow.with_hooks`): this
+    Flow's and the ones it inherits; ``None`` when there are none, so a run
+    without hooks builds no events. ``activity_id`` is the invocation the
+    events raised here belong to: the step running this Flow, ``None`` at
+    the top level.
     """
 
     runtime: Flow
@@ -351,6 +358,8 @@ class _RunEnv:
     path: ScopePath = ()
     shortcuts: tuple[ShortcutRun, ...] = ()
     resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
+    hooks: Hooks | None = None
+    activity_id: str | None = None
 
     @property
     def scopes(self) -> ScopeRegistry:

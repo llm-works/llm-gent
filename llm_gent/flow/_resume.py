@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from appinfra.cas import Tree, canonical_json
 
+from ._hook_points import checkpoint_written
 from .checkpoint import COMPLETE_TAG, is_commit_hash
 from .history import History
 from .state import State, restore_state_data, serialize_state_data
@@ -58,6 +59,8 @@ class Resume:
         assert ctx is not None
         self.flow = flow
         self._history = History(ctx.store, ctx.client_flow_id)
+        self.checked_out: str | None = None
+        """The commit whose snapshot the run starts from, once one is checked out."""
 
     async def checkout(self, fallback: State[Any]) -> tuple[State[Any], Snapshot | None]:
         """Check out the snapshot of the newest commit that has state.
@@ -91,6 +94,7 @@ class Resume:
                 ctx = self.flow._checkpoint_ctx
                 if ctx is not None and head is not None:
                     await ctx.continue_from(head, expect_head=head)
+                self.checked_out = commit.id
                 return self._root_state(snapshot.root), snapshot
             skipped.append(commit.meta.node_path)
         if skipped:
@@ -129,6 +133,7 @@ class Resume:
         ctx = self.flow._checkpoint_ctx
         assert ctx is not None
         await ctx.continue_from(commit.id)
+        self.checked_out = commit.id
         return root, snapshot
 
     async def restart(
@@ -234,7 +239,7 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
     if ctx.retention == "gc_on_success":
         await ctx.delete_history()
     else:
-        await commit_completion(flow, final_state)
+        await _run_checkpoint_written(flow, await commit_completion(flow, final_state))
 
 
 def _drop_unreached_scopes(flow: Flow, client_flow_id: str) -> None:
@@ -290,7 +295,7 @@ async def commit_halt(flow: Flow) -> None:
     at = flow._halt_at
     assert at is not None, "a halted run reached its end without observing the halt"
     try:
-        await ctx.save_scope_commit(
+        commit = await ctx.save_scope_commit(
             at.ancestor_chain, at.iteration, at.node_id, flow._scopes, at.state, "halted"
         )
     except TypeError:
@@ -300,6 +305,14 @@ async def commit_halt(flow: Flow) -> None:
         # Store/IO errors propagate: the caller expects the halt checkpoint to exist.
         flow._lg.warning("halt commit could not be written", extra={"exception": e})
         raise
+    await _run_checkpoint_written(flow, commit)
+
+
+async def _run_checkpoint_written(flow: Flow, commit: FlowCommit) -> None:
+    """Call the top-level hooks' ``after_checkpoint`` for one of the run's own commits."""
+    run_hooks = flow._run_hooks
+    hooks = None if run_hooks is None else run_hooks.hooks
+    await checkpoint_written(hooks, None, flow._run_info, commit)
 
 
 def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:

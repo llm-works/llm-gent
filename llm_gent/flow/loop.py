@@ -47,6 +47,7 @@ from llm_saia.core.config import DEFAULT_CALL
 from llm_saia.core.conversation import ConversationFactory
 
 from ._halt_observer import is_run_halted
+from ._hook_points import llm_call_hook
 from ._shortcut import is_fast_forward, turn_abort
 from .checkpoint import maybe_await
 from .context import Context
@@ -372,14 +373,25 @@ class Loop:
         env = ctx._env
         return contextlib.nullcontext(ctx.halt) if env is None else turn_abort(env)
 
-    def _make_iter_bridge(self, ctx: Context[Any]) -> Callable[[int, Any], Awaitable[None]] | None:
-        """Return a SAIA-compatible per-turn bridge, or ``None`` when unwired."""
+    def _make_iter_bridge(
+        self, ctx: Context[Any], conversation: Any
+    ) -> Callable[[int, Any], Awaitable[None]] | None:
+        """Return a SAIA-compatible per-turn bridge, or ``None`` when unwired.
+
+        Calls the flow's ``after_llm_call`` hooks
+        (:mod:`llm_gent.flow.hooks`), then ``on_iteration``. SAIA calls it
+        after each model response, before appending it to ``conversation``.
+        """
         hook = self._on_iteration
-        if hook is None:
+        llm_call = llm_call_hook(ctx, conversation, type(self).__name__, self.role.name)
+        if hook is None and llm_call is None:
             return None
 
         async def bridge(iteration: int, response: Any) -> None:
-            await maybe_await(hook(iteration, response, ctx))
+            if llm_call is not None:
+                await llm_call(response)
+            if hook is not None:
+                await maybe_await(hook(iteration, response, ctx))
 
         return bridge
 
@@ -472,7 +484,7 @@ class Loop:
             # it keeps history internally and a pause leaves nothing to capture.
             conversation = self._conversation_factory.create()
         complete_kwargs: dict[str, Any] = {
-            "on_iteration": self._make_iter_bridge(ctx),
+            "on_iteration": self._make_iter_bridge(ctx, conversation),
             "conversation": conversation,
         }
         if is_resume:

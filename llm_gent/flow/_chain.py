@@ -20,11 +20,13 @@ Constructed once per :meth:`Flow._run_as_subflow` entry:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import is_halt_signaled, note_halt
+from ._hook_points import StepHooks
 from ._node_id import _compute_node_ids
 from ._shortcut import is_fast_forward
 from .nodes import Interrupted
@@ -204,21 +206,43 @@ class Chain:
         runs that stopped early — or a Loop call in it left a paused SAIA
         turn.
 
+        With hooks in effect the step runs as its own invocation
+        (:class:`~._hook_points.StepHooks`): ``before_step`` is called
+        before it, ``after_step`` after it however it ended.
+
         Raises:
             RuntimeError: The step raised :class:`Interrupted` while no halt
                 was set.
         """
-        ctx = _build_ctx(node.target, self.env, node_id)
+        step = StepHooks.start(self.env, self.flow, node, node_id)
+        env = self.env if step is None else step.env
+        ctx = _build_ctx(node.target, env, node_id)
         try:
-            result = await _execute_node(node, ctx, self.env, node_args, node_kwargs, node_id)
+            result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id, step)
         except Interrupted:
             if not is_halt_signaled(self.env):
                 label = self.flow._name or "<anonymous>"
-                raise RuntimeError(
+                error = RuntimeError(
                     f"Flow {label!r}: step {node_id!r} raised Interrupted while no halt is set"
-                ) from None
+                )
+                if step is not None:
+                    await step.finish("failed", error=error)
+                raise error from None
+            if step is not None:
+                await step.finish("interrupted")
             return None, True
-        return result, self.env.scopes.holds_under(self.env.owner_path(node_id), TURN)
+        except asyncio.CancelledError as e:
+            if step is not None:
+                await step.finish("cancelled", error=e)
+            raise
+        except Exception as e:
+            if step is not None:
+                await step.finish("failed", error=e)
+            raise
+        interrupted = self.env.scopes.holds_under(self.env.owner_path(node_id), TURN)
+        if step is not None:
+            await step.finish("interrupted" if interrupted else "ok", result=result)
+        return result, interrupted
 
     def _halted_after(
         self,

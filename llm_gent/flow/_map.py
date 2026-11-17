@@ -427,6 +427,8 @@ class MapItemRunner:
             parent_path=self.path,
             # A started item runs to its end however its drain regions are cut.
             parent_shortcuts=leave_drains(env.shortcuts),
+            parent_hooks=env.hooks,
+            parent_activity=env.activity_id,
         )
 
     async def _on_success(

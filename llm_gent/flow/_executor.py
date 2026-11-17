@@ -25,6 +25,7 @@ import inspect
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+from ._hook_points import StepHooks, checkpoint_written
 from .checkpoint import checkpoint_tag
 from .context import Context
 from .nodes import (
@@ -101,16 +102,24 @@ async def _execute_node(
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
     node_id: str,
+    step: StepHooks | None = None,
 ) -> Any:
     """Invoke a node's target with cancellation-safe rescue + optional after hook.
 
     ``asyncio.CancelledError`` propagates unchanged past any rescue policy.
     Other exceptions surface unless a rescue is attached; the rescue's
     return value (awaited if awaitable) becomes the node's result.
+
+    ``step`` calls the ``before_step`` hooks first: a step a hook denies
+    raises :class:`~llm_gent.flow.hooks.HookDenied`, which a rescue policy
+    handles like any other exception; a pause stops the step as the halt
+    does (:class:`Interrupted` passes every rescue).
     """
     target_name = _target_label(node.target)
     env.lg.debug("executing node", extra={"target": target_name})
     try:
+        if step is not None:
+            await step.check(ctx, node_args, node_kwargs)
         result = await _invoke_target(node, ctx, env, node_args, node_kwargs, node_id)
     except asyncio.CancelledError:
         raise
@@ -304,6 +313,8 @@ async def _run_subflow(
             parent_policy=env.policy,
             parent_path=path,
             parent_shortcuts=env.shortcuts,
+            parent_hooks=env.hooks,
+            parent_activity=env.activity_id,
             **node_kwargs,
         )
         await _merge_state(merge_fn, env.state, child_state)
@@ -517,6 +528,8 @@ async def _run_arm(
             parent_policy=env.policy,
             parent_path=path,
             parent_shortcuts=env.shortcuts,
+            parent_hooks=env.hooks,
+            parent_activity=env.activity_id,
         )
 
 
@@ -556,6 +569,7 @@ async def _save_scope_commit(
     )
     if checkpointer.name is not None:
         await ctx.put_tag(checkpoint_tag(checkpointer.name), commit.id)
+    await checkpoint_written(env.hooks, env, env.runtime._run_info, commit, node_id)
     return commit
 
 

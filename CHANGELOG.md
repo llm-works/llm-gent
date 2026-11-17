@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Flow hooks (`llm_gent.flow.hooks`, `Flow.with_hooks`): called before and after each run and
+  step, and after each Loop model call and checkpoint; a `before_*` hook can deny or pause.
+
 ### Changed
 
 - Building from source requires setuptools `>= 77.0.3`; the package declares its license as the
