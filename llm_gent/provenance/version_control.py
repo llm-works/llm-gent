@@ -151,11 +151,16 @@ class VersionControl(Hook):
         """Record a model call: the context it was sent and its response.
 
         Runs while SAIA waits, before the response joins the conversation,
-        so the context is what the model saw.
+        so the context is what the model saw. A conversation that cannot be
+        read is named in ``omitted``; the response is still recorded.
         """
-        context = _messages(event.conversation)
-        inputs = {} if context is None else {"context": context}
-        self._commit(_meta("llm_call", event, {}), inputs, {"response": event.response})
+        try:
+            context = _messages(event.conversation)
+            inputs = _entities({} if context is None else {"context": context}, INPUTS)
+        except Exception:
+            inputs = _Entities(omitted=(f"{INPUTS}/context",))
+        outputs = _entities({"response": event.response}, OUTPUTS)
+        self._commit_entities(_meta("llm_call", event, {}), inputs, outputs)
 
     def after_checkpoint(self, event: CheckpointEvent) -> None:
         """Record that a checkpoint was written, naming its commit."""
@@ -307,7 +312,7 @@ def _facets(facets: Mapping[str, Any]) -> dict[str, Any]:
     for name, value in facets.items():
         try:
             out[str(name)] = _json(value)
-        except (TypeError, RecursionError):
+        except Exception:
             out[str(name)] = repr(value)
     return out
 
@@ -361,7 +366,7 @@ def _entities(values: Mapping[str, Any], where: str) -> _Entities:
     for name, value in values.items():
         try:
             encoded[name] = _encode(value)
-        except (TypeError, RecursionError):  # no JSON form, or one that contains itself
+        except Exception:  # no JSON form, one that contains itself, a failing serializer
             omitted.append(f"{where}/{name}")
     return _Entities(encoded, tuple(omitted))
 

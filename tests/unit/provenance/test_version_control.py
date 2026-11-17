@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from appinfra.cas import MemoryStore, RefConflictError, Tree, Vector, canonical_json
+from pydantic import BaseModel
 
 from llm_gent.flow import Context, Factory, Flow, Loop, Role, verb
 from llm_gent.flow.checkpoint import HEAD_REF
@@ -186,7 +187,34 @@ class _Conversations:
         return [{"role": "user", "content": "go"}]
 
 
+class _Unreadable:
+    """A conversation whose ``to_dict()`` fails."""
+
+    def __init__(self) -> None:
+        self.items: list[Any] = []
+
+    def append(self, message: Any) -> None:
+        self.items.append(message)
+
+    def to_dict(self) -> dict[str, Any]:
+        raise RuntimeError("conversation unreadable")
+
+
+class _UnreadableConversations:
+    def create(self) -> _Unreadable:
+        return _Unreadable()
+
+
 class TestModelCalls:
+    async def test_a_context_that_cannot_be_read_is_named_and_the_call_kept(self) -> None:
+        vc = _vc(memory_store())
+        loop = Loop(Role(name="worker"), conversation_factory=_UnreadableConversations())  # type: ignore[arg-type]
+        await _flow(saia_factory=_Factory()).call(loop).with_hooks(vc).run("go")
+        calls = [r for r in _oldest_first(vc) if r.kind == "llm_call"]
+        assert len(calls) == 3
+        assert calls[0].meta["omitted"] == ["inputs/context"]
+        assert vc.load(calls[0].outputs["response"])["content"] == "turn-0"
+
     async def test_each_call_records_its_context_as_a_vector_and_its_response(self) -> None:
         vc = _vc(memory_store())
         loop = Loop(Role(name="worker"), conversation_factory=_Conversations())  # type: ignore[arg-type]
@@ -284,6 +312,26 @@ class TestCheckpointsAndRepo:
         assert kept.meta["omitted"] == ["inputs/loop"]
         assert vc.load(kept.inputs["ok"]) == 1
         assert kept.meta["facets"] == {"loop": "[[...]]"}
+
+    async def test_a_value_whose_encoding_fails_is_left_out_and_its_siblings_kept(self) -> None:
+        class Model(BaseModel):
+            value: Any
+
+        vc = _vc(memory_store())
+        broken = Model(value=object())  # model_dump raises PydanticSerializationError
+
+        @verb
+        async def keep(ctx: Context[Any], x: int) -> int:
+            found = ctx.hook(VersionControl)
+            assert found is not None
+            found.record(ctx, "kept", inputs={"model": broken, "ok": 1}, facets={"model": broken})
+            return x
+
+        await _flow().call(keep).with_hooks(vc).run(1)
+        kept = _oldest_first(vc)[0]
+        assert kept.meta["omitted"] == ["inputs/model"]
+        assert vc.load(kept.inputs["ok"]) == 1
+        assert kept.meta["facets"] == {"model": repr(broken)}
 
     async def test_a_ref_moved_by_another_writer_is_committed_on(self) -> None:
         vc = _vc(memory_store())
