@@ -249,7 +249,7 @@ async def checkpoint_written(
         run=run,
         where=where,
         activity_id=new_activity_id(),
-        parent_activity_id=None if env is None else env.activity_id,
+        parent_activity_id=run.run_id if env is None else env.activity_id,
         commit_id=commit.id,
         outcome=commit.meta.outcome,
     )

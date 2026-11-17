@@ -97,7 +97,7 @@ from .checkpoint import (
 )
 from .context import Context
 from .factory import SAIAFactory
-from .hooks import Decision, HookDenied, Hooks, RunInfo, Where
+from .hooks import Decision, HookDenied, Hooks, RunInfo, RunOutcome, Where
 from .nodes import (
     HALTED,
     UNSET,
@@ -1334,18 +1334,35 @@ class Flow:
         if stopped is not None:
             return await self._stopped_before_run(hooks, stopped)
         try:
-            result = await self._walk_top(active_state, extra, args, kwargs)
-        except Interrupted:
-            # Everything has stopped, each part registered where it stopped.
-            await commit_halt(self)
-            await hooks.after("halted")
-            return HALTED
+            outcome, value = await self._walk_and_finalize(active_state, extra, args, kwargs)
+        except asyncio.CancelledError as e:
+            await hooks.after("cancelled", e)
+            raise
         except Exception as e:
             await hooks.after("failed", e)
             raise
-        await apply_clean_exit_retention(self, active_state)
-        await hooks.after("ok")
-        return result
+        await hooks.after(outcome)
+        return value
+
+    async def _walk_and_finalize(
+        self,
+        state: State[Any],
+        extra: dict[str, Any] | None,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[RunOutcome, Any]:
+        """Walk the flow, then commit its halt or apply clean-exit retention.
+
+        Returns ``("halted", HALTED)`` when the halt stopped it, else ``("ok", result)``.
+        """
+        try:
+            result = await self._walk_top(state, extra, args, kwargs)
+        except Interrupted:
+            # Everything has stopped, each part registered where it stopped.
+            await commit_halt(self)
+            return "halted", HALTED
+        await apply_clean_exit_retention(self, state)
+        return "ok", result
 
     async def _walk_top(
         self,

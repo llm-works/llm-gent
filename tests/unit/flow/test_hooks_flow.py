@@ -154,6 +154,34 @@ class TestEvents:
         assert rec.events[-1].name == "after_run"
         assert isinstance(rec.events[-1], RunEvent) and rec.events[-1].outcome == "failed"
 
+    async def test_a_cancelled_step_ends_cancelled_and_so_does_the_run(self) -> None:
+        @verb
+        async def cancelled(ctx: Context[Any], x: int) -> int:
+            raise asyncio.CancelledError
+
+        rec = Recorder()
+        with pytest.raises(asyncio.CancelledError):
+            await _flow().call(cancelled, name="c").with_hooks(rec).run(1)
+        (step,) = rec.steps()
+        assert step.outcome == "cancelled" and isinstance(step.error, asyncio.CancelledError)
+        run = rec.events[-1]
+        assert isinstance(run, RunEvent) and run.name == "after_run"
+        assert run.outcome == "cancelled" and isinstance(run.error, asyncio.CancelledError)
+
+    async def test_a_run_whose_finalization_raises_ends_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def raises(*_: Any) -> None:
+            raise OSError("store unavailable")
+
+        monkeypatch.setattr("llm_gent.flow.flow.apply_clean_exit_retention", raises)
+        rec = Recorder()
+        with pytest.raises(OSError, match="store unavailable"):
+            await _two_steps().with_hooks(rec).run(1)
+        run = rec.events[-1]
+        assert isinstance(run, RunEvent) and run.name == "after_run"
+        assert run.outcome == "failed" and isinstance(run.error, OSError)
+
 
 class TestAttachment:
     async def test_hooks_on_a_subflow_see_only_its_steps(self) -> None:
@@ -296,6 +324,7 @@ class TestCheckpoints:
         commits = [e for e in rec.events if isinstance(e, CheckpointEvent)]
         assert [c.commit_id for c in commits][0] == hashes[0]
         assert [c.outcome for c in commits] == ["ok", "ok"]  # save point, final state
+        assert commits[-1].parent_activity_id == commits[-1].run.run_id
 
     async def test_the_halt_commit_is_reported(self) -> None:
         store, halt = memory_store(), asyncio.Event()
@@ -317,6 +346,7 @@ class TestCheckpoints:
         assert await flow.run(1) is HALTED
         (commit,) = [e for e in rec.events if isinstance(e, CheckpointEvent)]
         assert commit.outcome == "halted"
+        assert commit.parent_activity_id == commit.run.run_id
         assert isinstance(rec.events[-1], RunEvent) and rec.events[-1].outcome == "halted"
 
     async def test_a_resumed_run_names_the_commit_it_started_from(self) -> None:

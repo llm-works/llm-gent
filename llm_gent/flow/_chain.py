@@ -20,6 +20,7 @@ Constructed once per :meth:`Flow._run_as_subflow` entry:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -227,6 +228,10 @@ class Chain:
             if step is not None:
                 await step.finish("interrupted")
             return None, True
+        except asyncio.CancelledError as e:
+            if step is not None:
+                await step.finish("cancelled", error=e)
+            raise
         except Exception as e:
             if step is not None:
                 await step.finish("failed", error=e)
