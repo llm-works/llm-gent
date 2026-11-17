@@ -22,9 +22,10 @@ Backend modes:
   ``llm_infer.client.Factory(lg).anthropic()``.
 - Either real :class:`~llm_infer.client.LLMClient` is wrapped as
   a ``saia.Backend`` by :class:`SAIAAdapter`.
-- **Smoke** (``--smoke``): :class:`_FakeBackend` returns scripted
-  tool-call responses and cooperates with ``abort_signal``. No
-  network; CI-safe.
+- **Smoke** (``--smoke``): llm-infer's scripted client, wrapped by
+  :class:`SAIAAdapter` like a real one: it calls ``lookup_reference``
+  on a turn's first call and ``submit_summary`` after. No network;
+  CI-safe.
 
 The mechanism the demo verifies is the same in both modes: the
 first tool call sets a shared :class:`asyncio.Event` and the
@@ -40,10 +41,8 @@ Layout
   the framework serializes at every iterate boundary.
 - :func:`_make_tool_executor` — closure over the halt event; the
   first successful ``lookup_reference`` call flips it.
-- :class:`_FakeBackend` — scripted ``saia.Backend`` for
-  ``--smoke``; also cooperates with ``abort_signal``.
-- :func:`_build_real_backend` — OpenAI-compatible vs Anthropic
-  client, per ``--base-url``.
+- :func:`~llm_gent.examples._clients.real_client` — OpenAI-compatible
+  vs Anthropic client, per ``--base-url``.
 - :class:`_SAIAFactory` — gent :class:`~llm_gent.flow.SAIAFactory`
   binding a role to a SAIA built from the shared backend +
   per-run tool executor.
@@ -103,12 +102,13 @@ from typing import Any
 from appinfra.cas import FileStore
 from appinfra.log import Logger, quick_console_logger
 from llm_infer.client import Factory as LLMInferFactory
+from llm_infer.client import LLMClient, ScriptedBackend
 from llm_infer.client.saia import SAIAAdapter
 from llm_kelt.conversation import ConversationFactory as KeltConversationFactory
-from llm_saia import SAIA, ChatResponse, Message, ToolCall, ToolDef
+from llm_saia import SAIA, ToolDef
 from llm_saia.core.backend import Backend
-from llm_saia.core.errors import PauseRequested
 
+from llm_gent.examples._clients import ANTHROPIC_MODEL, real_client
 from llm_gent.flow import (
     HALTED,
     Context,
@@ -131,9 +131,6 @@ STORE_DIR = Path.home() / ".cache" / "llm-gent-durable-resume"
 
 CLIENT_FLOW_ID = "durable-resume-demo"
 """Client flow id naming this example's history — the resume path reads back commits under it."""
-
-ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-"""Cheap, tool-capable Anthropic model. Override with ``--model``."""
 
 
 @dataclass
@@ -212,96 +209,19 @@ def _make_tool_executor(
     return execute
 
 
-class _FakeBackend(Backend):
-    """Scripted :class:`saia.Backend` for ``--smoke``: no network.
+def _fresh_turns(client: LLMClient) -> int:
+    """Requests the scripted ``client`` got with no tool call yet in their conversation.
 
-    Two-iteration script matching what the model would produce:
-
-    1. Last message is a user prompt → return a tool_call requesting
-       ``lookup_reference(term=<derived-from-task>)``.
-    2. Last message is a tool_result → return a tool_call for the
-       terminal ``submit_summary`` with a canned summary.
-
-    Cooperates with ``abort_signal`` — checks it at entry and raises
-    :class:`PauseRequested`, matching the real
-    :class:`SAIAAdapter._chat_with_abort` contract.
-
-    :attr:`lookups` counts ``lookup_reference`` calls issued — the
-    smoke check uses it to tell a resumed turn from a restarted one.
+    Each is a turn started from its task; a resumed turn's requests
+    already carry the tool call made before the halt.
     """
-
-    def __init__(self) -> None:
-        self._call = 0
-        self.lookups = 0
-
-    async def chat(
-        self,
-        messages: list[Message],
-        system: str | None = None,
-        tools: list[ToolDef] | None = None,
-        response_schema: dict[str, Any] | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
-        context: dict[str, Any] | None = None,
-        abort_signal: asyncio.Event | None = None,
-    ) -> ChatResponse:
-        if abort_signal is not None and abort_signal.is_set():
-            raise PauseRequested()
-        self._call += 1
-        last = messages[-1] if messages else None
-        if last is not None and last.role == "tool":
-            summary = "A concise concept from systems research."
-            return self._tool_call("submit_summary", {"summary": summary})
-        term = self._extract_term(last.content if last else "")
-        self.lookups += 1
-        return self._tool_call("lookup_reference", {"term": term})
-
-    def _tool_call(self, name: str, arguments: dict[str, Any]) -> ChatResponse:
-        """Build a single-tool-call response, as a tool-using model would return."""
-        return ChatResponse(
-            content="",
-            tool_calls=[ToolCall(id=f"fake-{self._call}", name=name, arguments=arguments)],
-            finish_reason="tool_use",
-            input_tokens=0,
-            output_tokens=0,
-            model="fake",
-        )
-
-    @staticmethod
-    def _extract_term(text: str) -> str:
-        marker = "term: "
-        idx = text.lower().find(marker)
-        return text[idx + len(marker) :].strip() if idx >= 0 else "unknown"
-
-
-def _build_real_backend(lg: Logger, base_url: str | None, model: str | None) -> Backend:
-    """Wrap a real :class:`~llm_infer.client.LLMClient` as a ``saia.Backend``.
-
-    ``base_url`` set → OpenAI-compatible endpoint (e.g. a local
-    server); otherwise Anthropic, keyed by ``ANTHROPIC_API_KEY``.
-    """
-    factory = LLMInferFactory(lg)
-    if base_url is not None:
-        # llm_infer appends endpoint paths (/models, /chat/completions) to
-        # base_url verbatim, so a bare server root would 404.
-        base_url = base_url.rstrip("/")
-        if not base_url.endswith("/v1"):
-            base_url += "/v1"
-        model = model or _first_served_model(factory, base_url)
-        print(f"  model: {model} @ {base_url}")
-        client = factory.openai(base_url=base_url, default_model=model)
-    else:
-        client = factory.anthropic(default_model=model or ANTHROPIC_MODEL)
-    return SAIAAdapter(client)
-
-
-def _first_served_model(factory: LLMInferFactory, base_url: str) -> str:
-    """Return the first model the endpoint lists on ``/v1/models``."""
-    with factory.openai(base_url=base_url) as probe:
-        models = probe.backend.list_models()
-    if not models:
-        raise RuntimeError(f"{base_url} lists no models; pass --model")
-    return models[0]
+    backend = client.backend
+    assert isinstance(backend, ScriptedBackend)
+    return sum(
+        1
+        for request in backend.requests
+        if not any(m.get("role") == "assistant" and m.get("tool_calls") for m in request.messages)
+    )
 
 
 SUMMARIZE_ROLE = Role(
@@ -526,20 +446,21 @@ async def _run_smoke(lg: Logger) -> int:
     disk.
     """
     store_dir = Path(tempfile.mkdtemp(prefix="gent-example-durable-resume-"))
-    resumed_backend = _FakeBackend()
+    resumed = LLMInferFactory(lg).scripted()
     try:
-        first, halted = await _invoke(lg, store_dir, _FakeBackend(), "smoke")
+        fresh = SAIAAdapter(LLMInferFactory(lg).scripted())
+        first, halted = await _invoke(lg, store_dir, fresh, "smoke")
         turn_saved = await _paused_turn_saved(History(FileStore(lg, store_dir), CLIENT_FLOW_ID))
         print()
-        final, still_halted = await _invoke(lg, store_dir, resumed_backend, "smoke")
+        final, still_halted = await _invoke(lg, store_dir, SAIAAdapter(resumed), "smoke")
     finally:
         shutil.rmtree(store_dir, ignore_errors=True)
-    # One lookup in phase 2 = topic 2 only; the halted topic-1 turn resumed past
-    # its tool call instead of restarting from the task.
+    # One fresh turn in phase 2 = topic 2 only; the halted topic-1 turn resumed
+    # past its tool call instead of restarting from the task.
     checks = {
         "halted with state untouched": halted and first.pending == list(TOPICS),
         "halt commit holds the paused turn": turn_saved,
-        "resume continued the paused turn": resumed_backend.lookups == len(TOPICS) - 1,
+        "resume continued the paused turn": _fresh_turns(resumed) == len(TOPICS) - 1,
         "full drain": not still_halted
         and not final.pending
         and len(final.summaries) == len(TOPICS)
@@ -556,7 +477,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--smoke",
         action="store_true",
-        help="Fake backend (no network); runs halt + resume in one process on a temp store.",
+        help="Scripted client (no network); runs halt + resume in one process on a temp store.",
     )
     parser.add_argument(
         "--reset", action="store_true", help="Delete the on-disk store before running."
@@ -585,7 +506,7 @@ async def main() -> int:
     if args.reset:
         shutil.rmtree(STORE_DIR, ignore_errors=True)
     STORE_DIR.mkdir(parents=True, exist_ok=True)
-    backend = _build_real_backend(lg, args.base_url, args.model)
+    backend = SAIAAdapter(real_client(lg, args.base_url, args.model))
     await _invoke(lg, STORE_DIR, backend, "real")
     return 0
 
