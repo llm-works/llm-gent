@@ -35,6 +35,7 @@ from .checkpoint import (
     COMPLETION_PRODUCER,
     END_NODE_PATH,
     HEAD_REF,
+    TAG_PREFIX,
     ConcurrentWriteError,
     Retention,
 )
@@ -75,6 +76,11 @@ def check_one_repo(root: Flow) -> None:
                 f"checkpoint store: checkpointers require a checkpoint store — call "
                 f"with_checkpoint_store(store, client_flow_id) on {_label(root)}"
             )
+
+
+def _is_history_ref(name: str) -> bool:
+    """True for the refs a checkpoint history owns: ``HEAD`` and its tags."""
+    return name == HEAD_REF or name.startswith(TAG_PREFIX)
 
 
 def _label(flow: Flow) -> str:
@@ -184,9 +190,27 @@ class CheckpointContext:
         await self.move_ref(name, commit_hash, await self.get_ref(name))
 
     async def delete_history(self) -> None:
-        """Delete the history's repository (objects, refs, tags); the next save starts a new one."""
+        """Delete the history: ``HEAD`` and its tags; the next save starts a new one.
+
+        A repository holding no other refs is deleted whole. One that does
+        (version-control records, an app's own refs) keeps them and what they
+        reach; objects only the history reached stay until a prune of the
+        repository deletes them. There the refs go one by one, tags before
+        ``HEAD``, so a delete that fails partway leaves the history its head.
+
+        Raises:
+            ConcurrentWriteError: Another writer moved a history ref after
+                it was read.
+        """
         try:
-            self.store.delete_repo(self.client_flow_id)
+            refs = self.repo.refs()
+            if all(_is_history_ref(name) for name in refs):
+                self.store.delete_repo(self.client_flow_id)
+            else:
+                history = [name for name in refs if _is_history_ref(name)]
+                for name in sorted(history, key=lambda name: name == HEAD_REF):
+                    if not self.repo.delete_ref(name, refs[name]):
+                        raise ConcurrentWriteError(self.client_flow_id, name, refs[name])
         finally:
             # Also on a failed delete: the next access re-reads the store
             # instead of trusting a head the store may have half-removed.
