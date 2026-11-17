@@ -287,11 +287,14 @@ class VersionControl(Hook):
         defaults to the response's ``model``.
         """
         scope = _scope(within)
-        actor = _actor(actor or Actor(model=_response_model(response)), scope)
+        actor = actor or Actor()
+        if actor.model is None:
+            actor = dataclasses.replace(actor, model=_response_model(response))
+        actor = _actor(actor, scope)
         meta = _explicit_meta(
             "llm_call", uuid.uuid4().hex, scope, actor, facets, _response_trace(response)
         )
-        outputs = _entities({"response": response}, OUTPUTS)
+        outputs = _response_entities(response)
         return self._commit_entities(meta, _context_entities(context), outputs)
 
     def llm_calls(
@@ -361,7 +364,7 @@ class VersionControl(Hook):
         so the context is what the model saw. A conversation that cannot be
         read is named in ``omitted``; the response is still recorded.
         """
-        outputs = _entities({"response": event.response}, OUTPUTS)
+        outputs = _response_entities(event.response)
         self._commit_entities(
             _meta("llm_call", event, {}), _context_entities(event.conversation), outputs
         )
@@ -586,6 +589,17 @@ def _response_model(response: Any) -> str | None:
     return model if isinstance(model, str) else None
 
 
+def _response_entities(response: Any) -> _Entities:
+    """A model response, encoded; a dataclass response without :data:`_NOT_STORED`."""
+    if dataclasses.is_dataclass(response) and not isinstance(response, type):
+        response = {
+            f.name: getattr(response, f.name)
+            for f in dataclasses.fields(response)
+            if f.name not in _NOT_STORED
+        }
+    return _entities({"response": response}, OUTPUTS)
+
+
 def _response_trace(response: Any) -> TraceIds | None:
     """The ids a response carries: SAIA's ``call_id``, llm-infer's ``request.id``."""
     call_id = getattr(response, "call_id", None) or None
@@ -656,9 +670,6 @@ def _put_entities(batch: Batch, entities: _Entities) -> str:
 def _json(value: Any) -> Any:
     """The JSON form of ``value``: the checkpoint codec's, else a dataclass's fields.
 
-    A dataclass the codec does not take (a model response) is stored as its
-    fields, without :data:`_NOT_STORED`.
-
     Raises:
         TypeError: ``value`` has no JSON form.
     """
@@ -666,11 +677,7 @@ def _json(value: Any) -> Any:
         return encode(value, "provenance record")
     except TypeError:
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            return {
-                f.name: _json(getattr(value, f.name))
-                for f in dataclasses.fields(value)
-                if f.name not in _NOT_STORED
-            }
+            return {f.name: _json(getattr(value, f.name)) for f in dataclasses.fields(value)}
         if isinstance(value, list | tuple):
             return [_json(item) for item in value]
         if isinstance(value, dict):

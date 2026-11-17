@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from llm_gent.flow import Context, Factory, Flow, Loop, Role, verb
 from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.hooks import Hook, StepEvent
-from llm_gent.provenance import REF, Messages, Record, VersionControl
+from llm_gent.provenance import REF, Actor, Messages, Record, VersionControl
 from tests.helpers import make_test_logger, memory_store
 
 
@@ -449,6 +449,15 @@ class TestExplicit:
         assert call.meta["actor"]["model"] == "m-2"
         assert call.meta["trace"] is None
 
+    async def test_an_actor_without_a_model_takes_the_responses(self) -> None:
+        vc = _vc(memory_store())
+        messages = [{"role": "user", "content": "hi"}]
+        vc.llm_call(messages, {"model": "m-2"}, actor=Actor(role="writer"))
+        vc.llm_call(messages, {"model": "m-2"}, actor=Actor(model="m-1"))
+        first, second = _oldest_first(vc)
+        assert first.meta["actor"] == {"verb": None, "role": "writer", "model": "m-2"}
+        assert second.meta["actor"]["model"] == "m-1"
+
     async def test_a_response_is_stored_without_its_request_and_raw(self) -> None:
         vc = _vc(memory_store())
         messages = [{"role": "user", "content": "hi"}]
@@ -457,6 +466,22 @@ class TestExplicit:
         (call,) = _oldest_first(vc)
         assert vc.load(call.outputs["response"]) == {"content": "hello", "model": "m-1"}
         assert call.meta["trace"]["llm_request_id"] == "req-1"
+
+    async def test_a_value_that_is_not_a_response_keeps_its_request_and_raw(self) -> None:
+        @dataclass
+        class Approval:
+            request: str
+            raw: str
+            approved: bool
+
+        vc = _vc(memory_store())
+        vc.commit("approve", outputs={"approval": Approval("approve invoice", "r", True)})
+        (approve,) = _oldest_first(vc)
+        assert vc.load(approve.outputs["approval"]) == {
+            "request": "approve invoice",
+            "raw": "r",
+            "approved": True,
+        }
 
     async def test_a_context_that_cannot_be_read_is_named_and_the_call_kept(self) -> None:
         vc = _vc(memory_store())
