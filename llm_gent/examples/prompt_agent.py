@@ -13,9 +13,10 @@ the server config, then the default agent factory — and ``run_once()`` runs
 its task once. The LLM backends come from the shipped ``etc/llm.yaml``;
 ``--base-url`` / ``--model`` override its ``local`` backend.
 
-``--smoke`` replaces the model with a scripted one: it calls the agent's
-``shell`` tool once, if it has one, then ``complete_task``. The real tool
-loop, tools and terminal tool run; only the model is fake.
+``--smoke`` replaces the model with llm-infer's scripted client: it calls
+the agent's ``shell`` tool once, if it has one, then ``complete_task``. The
+real client, tool loop, tools and terminal tool run; only the model's
+answers are scripted.
 
 The memory tools (``remember`` / ``recall``) need the learning database,
 which this example does not connect.
@@ -39,12 +40,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import argparse
 import json
-from typing import Any, cast
+from typing import Any
 
 import yaml
 from appinfra import DotDict
 from appinfra.log import Logger, create_lg
-from llm_infer.client import BackendError, ChatClient, ChatResponse, SAIAAdapter
+from llm_infer.client import BackendError, ChatRequest, ChatResponse, SAIAAdapter
+from llm_infer.client import Factory as LLMInferFactory
 from llm_infer.schemas.openai import FunctionCall, ToolCall
 
 import llm_gent
@@ -57,25 +59,22 @@ from llm_gent.runtime.server.config import AgentServerConfig
 ETC = Path(llm_gent.__file__).parent / "etc"
 
 
-class ScriptedModel:
-    """Chat client for ``--smoke``: calls ``shell`` once if offered, then ``complete_task``."""
+def _smoke_answer(request: ChatRequest) -> ChatResponse:
+    """The ``--smoke`` script: ``shell`` once if offered, then ``complete_task``.
 
-    def __init__(self) -> None:
-        self._shell_output: str | None = None
-
-    async def chat_async(self, messages: list[dict[str, Any]], **kwargs: Any) -> ChatResponse:
-        """The next scripted tool call, given the tools the agent offers."""
-        offered = {t["function"]["name"] for t in kwargs.get("tools") or []}
-        if "shell" in offered and self._shell_output is None:
-            self._shell_output = ""
-            return _tool_call("shell", {"command": "ls"})
-        if self._shell_output == "":
-            # The shell result is the newest tool message on the turn after the call
-            self._shell_output = _last_tool_output(messages)
-        conclusion = "smoke run" + (
-            f"; shell said: {self._shell_output!r}" if self._shell_output else ""
-        )
-        return _tool_call("complete_task", {"status": "done", "conclusion": conclusion})
+    The answer depends on the request alone: ``shell`` while no tool was
+    called yet, otherwise ``complete_task``, quoting the shell's result
+    (the first tool result) when the agent has a shell.
+    """
+    offered = {t["function"]["name"] for t in request.tools or []}
+    if "shell" not in offered:
+        return _tool_call("complete_task", {"status": "done", "conclusion": "smoke run"})
+    called = any(m.get("role") == "assistant" and m.get("tool_calls") for m in request.messages)
+    if not called:
+        return _tool_call("shell", {"command": "ls"})
+    output = _first_tool_output(request.messages)
+    conclusion = "smoke run" + (f"; shell said: {output!r}" if output else "")
+    return _tool_call("complete_task", {"status": "done", "conclusion": conclusion})
 
 
 def _tool_call(name: str, arguments: dict[str, Any]) -> ChatResponse:
@@ -86,10 +85,11 @@ def _tool_call(name: str, arguments: dict[str, Any]) -> ChatResponse:
     return ChatResponse(content="", tool_calls=[call], finish_reason="tool_calls")
 
 
-def _last_tool_output(messages: list[dict[str, Any]]) -> str:
-    """The first line of the last tool result in ``messages``, or ``""``."""
+def _first_tool_output(messages: list[dict[str, Any]]) -> str:
+    """The first line of the first tool result in ``messages``, or ``""``."""
     results = [m for m in messages if m.get("role") == "tool"]
-    return str(results[-1].get("content", "")).splitlines()[0] if results else ""
+    lines = str(results[0].get("content", "")).splitlines() if results else []
+    return lines[0] if lines else ""
 
 
 def _parse_args() -> argparse.Namespace:
@@ -138,11 +138,9 @@ def main() -> int:
     agent = _build(lg, args)
     if args.smoke:
         saia = agent.require_trait(SAIATrait)
-        # ScriptedModel implements the one ChatClient method the adapter calls
-        # with streaming off; the cast acknowledges the narrower contract.
-        backend = SAIAAdapter(client=cast(ChatClient, ScriptedModel()), streaming=False)
+        backend = SAIAAdapter(LLMInferFactory(lg).scripted(_smoke_answer))
         agent.replace_trait(SAIATrait(agent, backend, saia.config))
-        print("(smoke: scripted model, no backend contacted)\n")
+        print("(smoke: llm-infer's scripted client, no backend contacted)\n")
     agent.start()
     try:
         result = agent.run_once()
