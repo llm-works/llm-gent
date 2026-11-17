@@ -54,6 +54,7 @@ Buildable materializer :func:`_materialize`.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from typing import Any, Self, get_args
 
 from appinfra.cas import Store
@@ -64,6 +65,7 @@ from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext, check_one_repo
 from ._halt_observer import HaltPoint, check_one_halt
+from ._hook_points import RunHooks
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
@@ -95,6 +97,7 @@ from .checkpoint import (
 )
 from .context import Context
 from .factory import SAIAFactory
+from .hooks import Decision, HookDenied, Hooks, RunInfo, Where
 from .nodes import (
     HALTED,
     UNSET,
@@ -124,7 +127,7 @@ from .resource._runtime import Resources, check_resources, run_resources
 from .resource.cost import check_budget, check_budgets_have_a_tracker, check_cost_tracker
 from .role import Role
 from .state import State, StateFactory
-from .state.snapshot import ScopePath, ScopeRegistry, Snapshot
+from .state.snapshot import ScopePath, ScopeRegistry, Snapshot, path_str
 from .structure import Structure
 
 
@@ -211,6 +214,13 @@ class Flow:
         self._halt_at: HaltPoint | None = None
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._scopes: ScopeRegistry = ScopeRegistry()
+        self._hooks: tuple[object, ...] = ()
+        self._hooks_replace = False
+        # Per top-level run: the run's info when any flow in it has hooks, the
+        # top-level hooks' run events, and the commit the run checked out.
+        self._run_info: RunInfo | None = None
+        self._run_hooks: RunHooks | None = None
+        self._resumed_from: str | None = None
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -1158,6 +1168,31 @@ class Flow:
             self._checkpoint_policy = CheckpointPolicy(**kwargs)
         return self
 
+    def with_hooks(self, *hooks: object, replace: bool = False) -> Self:
+        """Attach hooks (:mod:`llm_gent.flow.hooks`) to this flow and every flow inside it.
+
+        A hook is called at points of the run inside this flow: each step
+        (``before_step`` / ``after_step``), each model call of a Loop
+        (``after_llm_call``) and each save point (``after_checkpoint``). On
+        the top-level flow it is also called for the run itself
+        (``before_run`` / ``after_run``) and its halt and final-state
+        commits. Hooks attached here run inside the ones this flow inherits:
+        their ``before_*`` methods run after, their ``after_*`` methods
+        before. With ``replace=True`` the inherited hooks, and the ones
+        attached here before, are not called inside this flow. Calling it
+        again without ``replace`` adds more hooks, after these.
+
+        A hook's ``child(where)`` is asked for the hook to use each time a
+        subflow, branch arm, iterate pass or map item starts under it.
+        Hooks are never checkpointed: a resumed run calls the hooks the
+        flows have then.
+
+        Returns ``self`` for chaining.
+        """
+        self._hooks = hooks if replace else (*self._hooks, *hooks)
+        self._hooks_replace = self._hooks_replace or replace
+        return self
+
     def _require_map_tail(self, method: str) -> _Map:
         """Return the last node's target if it is a :class:`_Map`, else raise."""
         if not self._nodes:
@@ -1293,21 +1328,58 @@ class Flow:
         active_state, saved = await self._start_state(self._wrap_top_state(state), resume, restart)
         self._scopes.begin(active_state, saved)
         self._halt_at = None
+        hooks = self._run_hooks = RunHooks(self, self._resumed_from)
+        self._run_info = hooks.info
+        stopped = await hooks.before()
+        if stopped is not None:
+            return await self._stopped_before_run(hooks, stopped)
         try:
-            with run_signals(self):
-                result = await self._run_as_subflow(
-                    *args,
-                    state=active_state,
-                    runtime=self,
-                    parent_extra=extra,
-                    **kwargs,
-                )
+            result = await self._walk_top(active_state, extra, args, kwargs)
         except Interrupted:
             # Everything has stopped, each part registered where it stopped.
             await commit_halt(self)
+            await hooks.after("halted")
             return HALTED
+        except Exception as e:
+            await hooks.after("failed", e)
+            raise
         await apply_clean_exit_retention(self, active_state)
+        await hooks.after("ok")
         return result
+
+    async def _walk_top(
+        self,
+        state: State[Any],
+        extra: dict[str, Any] | None,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """Walk this flow as the run's top level, with its signals set up."""
+        info = self._run_info
+        with run_signals(self):
+            return await self._run_as_subflow(
+                *args,
+                state=state,
+                runtime=self,
+                parent_extra=extra,
+                parent_activity=None if info is None else info.run_id,
+                **kwargs,
+            )
+
+    async def _stopped_before_run(self, hooks: RunHooks, decision: Decision) -> Any:
+        """A ``before_run`` hook stopped the run: return :data:`HALTED` on a pause, else raise.
+
+        Nothing ran and nothing is committed: a paused run started again
+        reaches ``before_run`` again.
+
+        Raises:
+            HookDenied: A hook denied the run.
+        """
+        if decision.verdict == "pause":
+            await hooks.after("halted")
+            return HALTED
+        await hooks.after("denied")
+        raise HookDenied("before_run", decision)
 
     def _check_run_args(self, resume: ResumeMode | str, restart: str | None) -> None:
         """Reject an empty flow, a bad start, misplaced wiring, a bad shortcut, a lone cap.
@@ -1360,14 +1432,23 @@ class Flow:
     async def _start_state(
         self, fallback: State[Any], resume: ResumeMode | str, restart: str | None
     ) -> tuple[State[Any], Snapshot | None]:
-        """The run's initial state and the snapshot it starts from (``None`` for a fresh run)."""
-        if restart is not None:
-            return await Resume(self).restart(restart, fallback)
-        if resume == "off":
+        """The run's initial state and the snapshot it starts from (``None`` for a fresh run).
+
+        Records the commit the run checked out (``None`` for a fresh run) for
+        the run's hook events.
+        """
+        self._resumed_from = None
+        if resume == "off" and restart is None:
             return fallback, None
-        if resume == "latest":
-            return await Resume(self).checkout(fallback)
-        return await Resume(self).checkout_at(resume)
+        checkout = Resume(self)
+        if restart is not None:
+            started = await checkout.restart(restart, fallback)
+        elif resume == "latest":
+            started = await checkout.checkout(fallback)
+        else:
+            started = await checkout.checkout_at(resume)
+        self._resumed_from = checkout.checked_out
+        return started
 
     async def _run_as_subflow(
         self,
@@ -1384,9 +1465,15 @@ class Flow:
         parent_policy: CheckpointPolicy | None = None,
         parent_path: ScopePath = (),
         parent_shortcuts: tuple[ShortcutRun, ...] = (),
+        parent_hooks: Hooks | None = None,
+        parent_activity: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
+
+        ``parent_hooks`` are the hooks in effect in the calling scope and
+        ``parent_activity`` the invocation entering this flow (the step, or
+        the run at the top level); see :attr:`_RunEnv.hooks`.
 
         The executor's subflow helpers (``.call`` targeting a Flow, and the
         ``.branch`` / ``.iterate`` / ``.map`` bodies) invoke this directly so
@@ -1437,7 +1524,37 @@ class Flow:
                 parent_path=parent_path,
                 shortcuts=parent_shortcuts + ((shortcut,) if shortcut is not None else ()),
             )
+            env = dataclasses.replace(
+                env,
+                hooks=self._resolve_hooks(env, parent_hooks),
+                activity_id=parent_activity,
+            )
             return await self._run_in(env, args, kwargs)
+
+    def _resolve_hooks(self, env: _RunEnv, parent: Hooks | None) -> Hooks | None:
+        """The hooks in effect in this flow: the inherited ones' children, then this flow's.
+
+        The inherited hooks are asked for their :meth:`~llm_gent.flow.hooks.Hook.child`
+        at this flow's place; ``replace`` drops them. ``None`` when no hook is
+        in effect.
+        """
+        inherited = None if parent is None else parent.child(self._entry_where(env))
+        if not self._hooks:
+            return None if self._hooks_replace else inherited
+        if inherited is None or self._hooks_replace:
+            return Hooks(env.lg, self._hooks)
+        return inherited.extend(self._hooks)
+
+    def _entry_where(self, env: _RunEnv) -> Where:
+        """Where this flow starts in the run: the step that entered it and its snapshot path."""
+        path = env.ancestor_chain
+        return Where(
+            flow=self,
+            node_id=path[-1] if path else None,
+            node_path=path,
+            scope_path=path_str(env.path),
+            step_name=self._name or None,
+        )
 
     async def _run_in(self, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         """Walk this Flow under ``env``."""

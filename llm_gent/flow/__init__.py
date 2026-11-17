@@ -83,6 +83,7 @@ from .context import Context
 from .factory import Factory, SAIAFactory
 from .flow import Flow
 from .history import History, HistoryCorrupt
+from .hooks import Hook, HookDenied, Pause
 from .loop import Loop, LoopFactory
 from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, Skipped, Unset
 from .resource import COST, Resource, ResourceKey, resource_method
@@ -108,9 +109,12 @@ __all__ = [
     "Halted",
     "History",
     "HistoryCorrupt",
+    "Hook",
+    "HookDenied",
     "Interrupted",
     "Loop",
     "LoopFactory",
+    "Pause",
     "Resource",
     "ResourceKey",
     "RestoredError",

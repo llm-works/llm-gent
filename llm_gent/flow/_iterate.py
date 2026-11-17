@@ -196,4 +196,6 @@ class IterateRunner:
             parent_policy=env.policy,
             parent_path=pass_path,
             parent_shortcuts=env.shortcuts,
+            parent_hooks=env.hooks,
+            parent_activity=env.activity_id,
         )

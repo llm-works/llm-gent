@@ -60,6 +60,9 @@ S = TypeVar("S")
 D = TypeVar("D")
 """Default type of :meth:`Context.resource`."""
 
+H = TypeVar("H")
+"""Hook type of :meth:`Context.hook`."""
+
 _NO_DEFAULT: Any = object()
 
 
@@ -269,6 +272,19 @@ class Context(Generic[T]):
                     f"with_resource(key, resource) on this flow or an enclosing one"
                 ) from None
             return default
+
+    def hook(self, cls: type[H]) -> H | None:
+        """The innermost hook of type ``cls`` in effect at this step, or ``None``.
+
+        Hooks are attached with :meth:`Flow.with_hooks`; a verb uses this to
+        call one directly, e.g. to record something of its own. ``None``
+        outside a run.
+        """
+        env = self._env
+        if env is None or env.hooks is None:
+            return None
+        found: H | None = env.hooks.find(cls)
+        return found
 
     @property
     def fast_forward(self) -> bool:
