@@ -373,6 +373,21 @@ class _InferResponse:
     request: _InferRequest | None = None
 
 
+@dataclass
+class _SerializedResponse:
+    """A response with its own serialization, leaving out a field with no JSON form."""
+
+    content: str
+    handle: Any = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"content": self.content}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> _SerializedResponse:
+        return cls(data["content"])
+
+
 class TestExplicit:
     """Records made without Flow: commit, activity, llm_call, llm_calls."""
 
@@ -466,6 +481,13 @@ class TestExplicit:
         (call,) = _oldest_first(vc)
         assert vc.load(call.outputs["response"]) == {"content": "hello", "model": "m-1"}
         assert call.meta["trace"]["llm_request_id"] == "req-1"
+
+    async def test_a_response_with_its_own_serialization_is_stored_by_it(self) -> None:
+        vc = _vc(memory_store())
+        vc.llm_call([{"role": "user", "content": "hi"}], _SerializedResponse("ok", object()))
+        (call,) = _oldest_first(vc)
+        assert "omitted" not in call.meta
+        assert vc.load(call.outputs["response"])["$data"] == {"content": "ok"}
 
     async def test_a_value_that_is_not_a_response_keeps_its_request_and_raw(self) -> None:
         @dataclass

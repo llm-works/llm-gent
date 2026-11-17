@@ -590,14 +590,28 @@ def _response_model(response: Any) -> str | None:
 
 
 def _response_entities(response: Any) -> _Entities:
-    """A model response, encoded; a dataclass response without :data:`_NOT_STORED`."""
-    if dataclasses.is_dataclass(response) and not isinstance(response, type):
+    """A model response, encoded: in the codec's form when it takes the response, else a
+    dataclass response as its fields without :data:`_NOT_STORED`."""
+    if (
+        dataclasses.is_dataclass(response)
+        and not isinstance(response, type)
+        and not _codec_takes(response)
+    ):
         response = {
             f.name: getattr(response, f.name)
             for f in dataclasses.fields(response)
             if f.name not in _NOT_STORED
         }
     return _entities({"response": response}, OUTPUTS)
+
+
+def _codec_takes(value: Any) -> bool:
+    """True when the checkpoint codec encodes ``value`` in a form of its own."""
+    try:
+        encode(value, "provenance record")
+    except Exception:
+        return False
+    return True
 
 
 def _response_trace(response: Any) -> TraceIds | None:
