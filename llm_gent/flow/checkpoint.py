@@ -36,8 +36,10 @@ successful :meth:`Flow.run` leaves behind:
 - ``"retain"`` (default): the history stays, ending in the final-state
   commit. The successful record is the one most often needed for audit,
   cross-run diff, and motif extraction across good runs.
-- ``"gc_on_success"``: the framework deletes the history's repository,
-  for consumers who don't want histories to accumulate.
+- ``"gc_on_success"``: the framework deletes the history (``HEAD`` and its
+  tags), for consumers who don't want histories to accumulate. A repository
+  holding nothing else is deleted whole; other refs in it, such as
+  version-control records (:mod:`llm_gent.provenance`), are kept.
 
 Halt / cancellation / unhandled exceptions preserve the history
 regardless of retention so a later resuming run can pick up.

@@ -273,6 +273,24 @@ class Context(Generic[T]):
                 ) from None
             return default
 
+    @property
+    def activity_id(self) -> str | None:
+        """The invocation this step runs as, as hook events name it; ``None`` without hooks.
+
+        Set when hooks are in effect (:meth:`Flow.with_hooks`): the step's
+        own ``activity_id``, which the events raised inside it name as their
+        parent.
+        """
+        return None if self._env is None else self._env.activity_id
+
+    @property
+    def run_id(self) -> str | None:
+        """The id of the :meth:`Flow.run` call this step runs in; ``None`` without hooks."""
+        if self._env is None:
+            return None
+        info = self._env.runtime._run_info
+        return None if info is None else info.run_id
+
     def hook(self, cls: type[H]) -> H | None:
         """The innermost hook of type ``cls`` in effect at this step, or ``None``.
 
