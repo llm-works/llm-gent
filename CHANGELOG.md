@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Flow hooks (`llm_gent.flow.hooks`, `Flow.with_hooks`): called before and after each run and
   step, and after each Loop model call and checkpoint; a `before_*` hook can deny or pause.
+- `llm_gent.provenance.VersionControl` commits a record of each step, model call, checkpoint and
+  run to an appinfra CAS repository, as a Flow hook or explicitly (`commit`, `activity`,
+  `llm_call`) without Flow.
 
 ### Changed
 
@@ -20,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paused again stores only the messages it added. Earlier gent versions cannot read such snapshots.
 - `PgStore` writes a batch of objects in one transaction and looks up object types in one query;
   a checkpoint stores its snapshot as one batch.
+- `retention="gc_on_success"` deletes only the checkpoint history (`HEAD` and its tags) when the
+  repository holds other refs, such as version-control records; otherwise the whole repository.
 
 ## [0.4.1] - 2026-11-01
 
