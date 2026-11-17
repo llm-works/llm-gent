@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from appinfra.cas import MemoryStore, RefConflictError, Vector
+from appinfra.cas import MemoryStore, RefConflictError, Tree, Vector, canonical_json
 
 from llm_gent.flow import Context, Factory, Flow, Loop, Role, verb
 from llm_gent.flow.checkpoint import HEAD_REF
@@ -64,6 +64,48 @@ class TestSteps:
         assert b.inputs["0"].id == a.outputs["result"].id
         assert vc.load(a.inputs["0"]) == 1
         assert vc.load(b.outputs["result"]) == 4
+
+    async def test_an_input_the_step_mutates_is_recorded_as_it_was_received(self) -> None:
+        @verb
+        async def start(ctx: Context[Any], x: int) -> list[int]:
+            return [x]
+
+        @verb
+        async def extend(ctx: Context[Any], items: list[int]) -> int:
+            items.append(2)
+            return len(items)
+
+        vc = _vc(memory_store())
+        await _flow().call(start, name="a").then(extend, name="b").with_hooks(vc).run(1)
+        a, b, _ = _oldest_first(vc)
+        assert vc.load(b.inputs["0"]) == [1]
+        assert b.inputs["0"].id == a.outputs["result"].id
+        assert vc._received == {}
+
+    async def test_a_keyword_named_like_a_positional_index_is_left_out_and_named(self) -> None:
+        @verb
+        async def take(ctx: Context[Any], x: int, **kw: int) -> int:
+            return x
+
+        vc = _vc(memory_store())
+        await _flow().call(take).with_hooks(vc).run(1, **{"0": 2, "y": 3})
+        step = _oldest_first(vc)[0]
+        assert vc.load(step.inputs["0"]) == 1
+        assert vc.load(step.inputs["y"]) == 3
+        assert step.meta["omitted"] == ["inputs/0 (keyword)"]
+
+    async def test_a_step_a_later_hook_denies_keeps_its_encoded_inputs(self) -> None:
+        class Deny(Hook):
+            def before_step(self, event: StepEvent) -> str:
+                return "no"
+
+        vc = _vc(memory_store())
+        flow = _flow().call(add_one, rescue=lambda _e, _p, _c: 0).with_hooks(vc, Deny())
+        assert await flow.run(5) == 0
+        step = _oldest_first(vc)[0]
+        assert step.meta["outcome"] == "denied"
+        assert vc.load(step.inputs["0"]) == 5
+        assert vc._received == {}
 
     async def test_records_name_their_activity_and_its_parent(self) -> None:
         vc = _vc(memory_store())
@@ -225,17 +267,39 @@ class TestCheckpointsAndRepo:
         assert vc.load(chose.outputs["log"]) == ["a", "b"]
         assert chose.outputs["log"].type == "vector"
 
+    async def test_a_cyclic_value_is_left_out_and_its_siblings_kept(self) -> None:
+        vc = _vc(memory_store())
+        cyclic: list[Any] = []
+        cyclic.append(cyclic)
+
+        @verb
+        async def keep(ctx: Context[Any], x: int) -> int:
+            found = ctx.hook(VersionControl)
+            assert found is not None
+            found.record(ctx, "kept", inputs={"loop": cyclic, "ok": 1}, facets={"loop": cyclic})
+            return x
+
+        await _flow().call(keep).with_hooks(vc).run(1)
+        kept = _oldest_first(vc)[0]
+        assert kept.meta["omitted"] == ["inputs/loop"]
+        assert vc.load(kept.inputs["ok"]) == 1
+        assert kept.meta["facets"] == {"loop": "[[...]]"}
+
     async def test_a_ref_moved_by_another_writer_is_committed_on(self) -> None:
         vc = _vc(memory_store())
         real = vc.repo.commit
-        calls = {"n": 0}
+        competing: list[str] = []
 
-        def flaky(ref: str, tree: str, payload: bytes = b"") -> str:
-            calls["n"] += 1
-            if calls["n"] == 1:
+        def racing(ref: str, tree: str, payload: bytes = b"") -> str:
+            if not competing:  # another writer commits first; this attempt loses the race
+                empty = vc.repo.put(Tree(()))
+                competing.append(real(ref, empty, canonical_json({"kind": "other"})))
                 raise RefConflictError(REPO, ref, None)
             return real(ref, tree, payload)
 
-        vc.repo.commit = flaky  # type: ignore[method-assign]
+        vc.repo.commit = racing  # type: ignore[method-assign]
         await _flow().call(add_one).with_hooks(vc).run(1)
-        assert [r.kind for r in _oldest_first(vc)] == ["step", "run"]
+        other, step, run = _oldest_first(vc)
+        assert (other.id, other.kind) == (competing[0], "other")
+        assert step.parents == (other.id,)
+        assert (step.kind, run.kind) == ("step", "run")

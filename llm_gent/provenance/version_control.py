@@ -16,14 +16,16 @@ were written:
 - its tree holds the entities: ``inputs/<name>`` and ``outputs/<name>``. A
   value is a blob of its JSON form (the checkpoint codec's), so equal values
   are one object: a step's input that is the previous step's result names the
-  same blob. A model call's context is a vector of its messages, so the
-  messages two calls share are stored once.
+  same blob. A step's inputs are encoded before it runs, so they are what it
+  received even when it mutates them. A model call's context is a vector of
+  its messages, so the messages two calls share are stored once.
 - its payload (canonical JSON) says what happened: ``kind`` (``step``,
   ``llm_call``, ``checkpoint``, ``run`` or a verb's own), ``activity`` and
   ``parent`` (invocation ids), ``run``, ``ts``, ``actor``, ``where``,
   ``outcome``, ``decision``, ``error``, ``trace``, ``facets`` and, for a
   checkpoint, ``checkpoint`` (its commit id). A value with no JSON form is
-  left out and named in ``omitted``.
+  left out and named in ``omitted``, as is a step's keyword argument named
+  like one of its positional indexes.
 
 The records are append-only and nothing in a run reads them: resume reads
 only checkpoints. Records are written synchronously, so concurrent map items
@@ -109,6 +111,8 @@ class VersionControl(Hook):
         self._lg = lg
         self.repo = repo
         self.ref = ref
+        # Inputs of the steps running now, encoded before each ran; by activity id.
+        self._received: dict[str, _Entities] = {}
 
     # --- hooks ---
 
@@ -117,13 +121,31 @@ class VersionControl(Hook):
         extra = {"outcome": event.outcome, "resumed_from": event.run.resumed_from}
         self._commit(_meta("run", event, extra, error=event.error), {}, {})
 
+    def before_step(self, event: StepEvent) -> None:
+        """Encode the step's inputs before it runs, so one it mutates is recorded as received.
+
+        Never keeps the step from running: a failure is logged, and the step's
+        record then holds its inputs as they are when it ends.
+        """
+        try:
+            self._received[event.activity_id] = _step_entities(event)
+        except Exception as e:
+            self._lg.warning("step inputs not encoded", extra={"exception": e})
+
     def after_step(self, event: StepEvent) -> None:
-        """Record a step: its inputs, its result when it returned one, how it ended."""
-        inputs = {str(i): arg for i, arg in enumerate(event.args)} | dict(event.kwargs)
+        """Record a step: the inputs it received, its result when it returned one, how it ended.
+
+        A step a hook stopped before this one's ``before_step`` never ran, so
+        its inputs are read now.
+        """
+        inputs = self._received.pop(event.activity_id, None)
+        if inputs is None:
+            inputs = _step_entities(event)
         outputs = {"result": event.result} if event.outcome in ("ok", "denied") else {}
         decision = None if event.decision is None else dataclasses.asdict(event.decision)
         extra = {"outcome": event.outcome, "decision": decision}
-        self._commit(_meta("step", event, extra, error=event.error), inputs, outputs)
+        meta = _meta("step", event, extra, error=event.error)
+        self._commit_entities(meta, inputs, _entities(outputs, OUTPUTS))
 
     def after_llm_call(self, event: LLMCallEvent) -> None:
         """Record a model call: the context it was sent and its response.
@@ -191,16 +213,20 @@ class VersionControl(Hook):
     # --- internals ---
 
     def _commit(self, meta: dict[str, Any], inputs: dict[str, Any], outputs: dict[str, Any]) -> str:
-        """Store the entities, then commit the record on the ref's head; return its id."""
-        omitted: list[str] = []
+        """Encode and store the entities, then commit the record; return its id."""
+        return self._commit_entities(meta, _entities(inputs, INPUTS), _entities(outputs, OUTPUTS))
+
+    def _commit_entities(self, meta: dict[str, Any], inputs: _Entities, outputs: _Entities) -> str:
+        """Store encoded entities, then commit the record on the ref's head; return its id."""
         with self.repo.batch() as batch:
             tree = Tree(
                 (
-                    TreeEntry(INPUTS, "tree", _put_entities(batch, inputs, INPUTS, omitted)),
-                    TreeEntry(OUTPUTS, "tree", _put_entities(batch, outputs, OUTPUTS, omitted)),
+                    TreeEntry(INPUTS, "tree", _put_entities(batch, inputs)),
+                    TreeEntry(OUTPUTS, "tree", _put_entities(batch, outputs)),
                 )
             )
             tree_id = batch.put(tree)
+        omitted = [*inputs.omitted, *outputs.omitted]
         if omitted:
             meta = {**meta, "omitted": omitted}
         return self._commit_tree(tree_id, canonical_json(meta))
@@ -281,7 +307,7 @@ def _facets(facets: Mapping[str, Any]) -> dict[str, Any]:
     for name, value in facets.items():
         try:
             out[str(name)] = _json(value)
-        except TypeError:
+        except (TypeError, RecursionError):
             out[str(name)] = repr(value)
     return out
 
@@ -299,25 +325,62 @@ def _messages(conversation: Any) -> Messages | None:
     return None
 
 
-def _put_entities(batch: Batch, values: Mapping[str, Any], where: str, omitted: list[str]) -> str:
-    """Put one subtree of named entities; names whose value has no JSON form go to ``omitted``."""
-    entries: list[TreeEntry] = []
+@dataclass(frozen=True)
+class _Encoded:
+    """A value in its stored form, not yet put: one blob, or a vector's elements."""
+
+    type: TreeEntryType
+    blobs: tuple[bytes, ...]
+
+
+@dataclass(frozen=True)
+class _Entities:
+    """Named values in their stored form; the names whose value has no JSON form in ``omitted``."""
+
+    encoded: dict[str, _Encoded] = field(default_factory=dict)
+    omitted: tuple[str, ...] = ()
+
+
+def _step_entities(event: StepEvent) -> _Entities:
+    """A step's inputs, encoded: positional arguments by index, keyword arguments by name.
+
+    A keyword argument named like a positional index (``run(1, **{"0": 2})``)
+    is left out and named in ``omitted`` as ``inputs/<name> (keyword)``.
+    """
+    inputs = {str(i): arg for i, arg in enumerate(event.args)}
+    clashes = tuple(f"{INPUTS}/{name} (keyword)" for name in event.kwargs if name in inputs)
+    inputs |= {name: value for name, value in event.kwargs.items() if name not in inputs}
+    entities = _entities(inputs, INPUTS)
+    return dataclasses.replace(entities, omitted=entities.omitted + clashes)
+
+
+def _entities(values: Mapping[str, Any], where: str) -> _Entities:
+    """Encode named values; a name whose value has no JSON form is named in ``omitted``."""
+    encoded: dict[str, _Encoded] = {}
+    omitted: list[str] = []
     for name, value in values.items():
         try:
-            entry_type, object_id = _put_value(batch, value)
-        except TypeError:
+            encoded[name] = _encode(value)
+        except (TypeError, RecursionError):  # no JSON form, or one that contains itself
             omitted.append(f"{where}/{name}")
-            continue
-        entries.append(TreeEntry(name, entry_type, object_id))
-    return batch.put(Tree(tuple(entries)))
+    return _Entities(encoded, tuple(omitted))
 
 
-def _put_value(batch: Batch, value: Any) -> tuple[TreeEntryType, str]:
-    """Put a value: :class:`Messages` as a vector of blobs, anything else as one blob."""
+def _encode(value: Any) -> _Encoded:
+    """A value's stored form: :class:`Messages` as a vector of blobs, anything else as one blob."""
     if isinstance(value, Messages):
-        ids = [batch.put(Blob(canonical_json(_json(item)))) for item in value.items]
-        return "vector", Vector.build(batch, ids).id
-    return "blob", batch.put(Blob(canonical_json(_json(value))))
+        return _Encoded("vector", tuple(canonical_json(_json(item)) for item in value.items))
+    return _Encoded("blob", (canonical_json(_json(value)),))
+
+
+def _put_entities(batch: Batch, entities: _Entities) -> str:
+    """Put one subtree of encoded entities; return its id."""
+    entries: list[TreeEntry] = []
+    for name, value in entities.encoded.items():
+        ids = [batch.put(Blob(data)) for data in value.blobs]
+        object_id = Vector.build(batch, ids).id if value.type == "vector" else ids[0]
+        entries.append(TreeEntry(name, value.type, object_id))
+    return batch.put(Tree(tuple(entries)))
 
 
 def _json(value: Any) -> Any:
