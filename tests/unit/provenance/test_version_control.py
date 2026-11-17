@@ -5,17 +5,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 from appinfra.cas import MemoryStore, RefConflictError, Tree, Vector, canonical_json
+from llm_saia import ListConversation, Message
 from pydantic import BaseModel
 
 from llm_gent.flow import Context, Factory, Flow, Loop, Role, verb
 from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.hooks import Hook, StepEvent
-from llm_gent.provenance import REF, Messages, Record, VersionControl
+from llm_gent.provenance import REF, Actor, Messages, Record, VersionControl
 from tests.helpers import make_test_logger, memory_store
 
 
@@ -271,44 +273,54 @@ class TestCheckpointsAndRepo:
         assert set(store.repo(REPO).refs()) == {REF}
         assert [r.kind for r in _oldest_first(vc)] == ["step", "run"]
 
-    async def test_a_verb_records_its_own_activity(self) -> None:
+    async def test_a_verb_commits_a_record_of_its_own_inside_its_step(self) -> None:
         vc = _vc(memory_store())
 
         @verb
         async def choose(ctx: Context[Any], x: int) -> int:
             found = ctx.hook(VersionControl)
             assert found is not None
-            found.record(
-                ctx,
+            found.commit(
                 "chose",
                 inputs={"options": [1, 2]},
                 outputs={"choice": 2, "log": Messages(["a", "b"])},
                 facets={"why": "bigger"},
+                within=ctx,
             )
             return 2
 
         await _flow().call(choose).with_hooks(vc).run(1)
-        chose, step, _ = _oldest_first(vc)
+        chose, step, run = _oldest_first(vc)
         assert chose.kind == "chose"
         assert chose.meta["parent"] == step.meta["activity"]
+        assert chose.meta["run"] == run.meta["run"]
         assert chose.meta["facets"] == {"why": "bigger"}
         assert vc.load(chose.outputs["log"]) == ["a", "b"]
         assert chose.outputs["log"].type == "vector"
+
+    async def test_a_verb_opens_an_activity_inside_its_step(self) -> None:
+        vc = _vc(memory_store())
+
+        @verb
+        async def work(ctx: Context[Any], x: int) -> int:
+            found = ctx.hook(VersionControl)
+            assert found is not None
+            with found.activity("plan", within=ctx) as act:
+                act.commit("note", outputs={"text": "hi"})
+            return x
+
+        await _flow().call(work).with_hooks(vc).run(1)
+        note, plan, step, _ = _oldest_first(vc)
+        assert note.meta["parent"] == plan.meta["activity"]
+        assert plan.meta["parent"] == step.meta["activity"]
+        assert plan.meta["run"] == step.meta["run"]
 
     async def test_a_cyclic_value_is_left_out_and_its_siblings_kept(self) -> None:
         vc = _vc(memory_store())
         cyclic: list[Any] = []
         cyclic.append(cyclic)
-
-        @verb
-        async def keep(ctx: Context[Any], x: int) -> int:
-            found = ctx.hook(VersionControl)
-            assert found is not None
-            found.record(ctx, "kept", inputs={"loop": cyclic, "ok": 1}, facets={"loop": cyclic})
-            return x
-
-        await _flow().call(keep).with_hooks(vc).run(1)
-        kept = _oldest_first(vc)[0]
+        vc.commit("kept", inputs={"loop": cyclic, "ok": 1}, facets={"loop": cyclic})
+        (kept,) = _oldest_first(vc)
         assert kept.meta["omitted"] == ["inputs/loop"]
         assert vc.load(kept.inputs["ok"]) == 1
         assert kept.meta["facets"] == {"loop": "[[...]]"}
@@ -319,16 +331,8 @@ class TestCheckpointsAndRepo:
 
         vc = _vc(memory_store())
         broken = Model(value=object())  # model_dump raises PydanticSerializationError
-
-        @verb
-        async def keep(ctx: Context[Any], x: int) -> int:
-            found = ctx.hook(VersionControl)
-            assert found is not None
-            found.record(ctx, "kept", inputs={"model": broken, "ok": 1}, facets={"model": broken})
-            return x
-
-        await _flow().call(keep).with_hooks(vc).run(1)
-        kept = _oldest_first(vc)[0]
+        vc.commit("kept", inputs={"model": broken, "ok": 1}, facets={"model": broken})
+        (kept,) = _oldest_first(vc)
         assert kept.meta["omitted"] == ["inputs/model"]
         assert vc.load(kept.inputs["ok"]) == 1
         assert kept.meta["facets"] == {"model": repr(broken)}
@@ -351,3 +355,211 @@ class TestCheckpointsAndRepo:
         assert (other.id, other.kind) == (competing[0], "other")
         assert step.parents == (other.id,)
         assert (step.kind, run.kind) == ("step", "run")
+
+
+@dataclass
+class _InferRequest:
+    messages: list[Any]
+    id: str = "req-1"
+
+
+@dataclass
+class _InferResponse:
+    """Shaped like llm-infer's ChatResponse: a back-reference to its request, and ``raw``."""
+
+    content: str
+    model: str = "m-1"
+    raw: Any = None
+    request: _InferRequest | None = None
+
+
+@dataclass
+class _SerializedResponse:
+    """A response with its own serialization, leaving out a field with no JSON form."""
+
+    content: str
+    handle: Any = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"content": self.content}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> _SerializedResponse:
+        return cls(data["content"])
+
+
+_SERIALIZED: list[str] = []
+
+
+@dataclass
+class _CountedResponse:
+    """A response with its own serialization that records each call to it."""
+
+    content: str
+
+    def to_dict(self) -> dict[str, Any]:
+        _SERIALIZED.append(self.content)
+        return {"content": self.content}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> _CountedResponse:
+        return cls(data["content"])
+
+
+class TestExplicit:
+    """Records made without Flow: commit, activity, llm_call, llm_calls."""
+
+    async def test_a_record_on_its_own_has_no_parent_and_no_run(self) -> None:
+        vc = _vc(memory_store())
+        vc.commit("note", inputs={"q": "why"}, outputs={"a": 42}, facets={"tag": "x"})
+        (note,) = _oldest_first(vc)
+        assert note.kind == "note"
+        assert (note.meta["parent"], note.meta["run"]) == (None, None)
+        assert vc.load(note.outputs["a"]) == 42
+        assert note.meta["facets"] == {"tag": "x"}
+
+    async def test_an_activity_commits_itself_after_the_records_inside_it(self) -> None:
+        vc = _vc(memory_store())
+        with vc.activity("summarize", inputs={"doc": "text"}) as act:
+            act.commit("note", outputs={"n": 1})
+            with act.activity("critique") as sub:
+                sub.commit("note", outputs={"n": 2})
+            act.outputs["summary"] = "short"
+            act.facets["words"] = 1
+        first, second, critique, summarize = _oldest_first(vc)
+        assert summarize.meta["activity"] == act.id == summarize.meta["run"]
+        assert summarize.meta["parent"] is None and summarize.meta["outcome"] == "ok"
+        assert first.meta["parent"] == act.id == critique.meta["parent"]
+        assert second.meta["parent"] == critique.meta["activity"] == sub.id
+        assert {r.meta["run"] for r in (first, second, critique)} == {act.id}
+        assert vc.load(summarize.inputs["doc"]) == "text"
+        assert vc.load(summarize.outputs["summary"]) == "short"
+        assert summarize.meta["facets"] == {"words": 1}
+
+    async def test_an_activity_records_its_inputs_as_it_received_them(self) -> None:
+        vc = _vc(memory_store())
+        items = [1]
+        with vc.activity("extend", inputs={"items": items}):
+            items.append(2)
+        (extend,) = _oldest_first(vc)
+        assert vc.load(extend.inputs["items"]) == [1]
+
+    async def test_an_activity_an_exception_escapes_is_failed(self) -> None:
+        vc = _vc(memory_store())
+        with pytest.raises(ValueError, match="boom"), vc.activity("work"):
+            raise ValueError("boom")
+        (work,) = _oldest_first(vc)
+        assert work.meta["outcome"] == "failed"
+        assert work.meta["error"] == "ValueError: boom"
+
+    async def test_a_cancelled_activity_is_interrupted(self) -> None:
+        vc = _vc(memory_store())
+        with pytest.raises(asyncio.CancelledError), vc.activity("work"):
+            raise asyncio.CancelledError
+        assert _oldest_first(vc)[0].meta["outcome"] == "interrupted"
+
+    async def test_a_failed_activity_record_does_not_replace_the_activitys_error(self) -> None:
+        vc = _vc(memory_store())
+
+        def unavailable(ref: str, tree: str, payload: bytes = b"") -> str:
+            raise OSError("store unavailable")
+
+        vc.repo.commit = unavailable  # type: ignore[method-assign]
+        with pytest.raises(ValueError, match="boom"), vc.activity("work"):
+            raise ValueError("boom")
+        with pytest.raises(OSError, match="store unavailable"), vc.activity("work"):
+            pass
+
+    async def test_a_plain_http_call_is_a_message_vector_and_its_json(self) -> None:
+        vc = _vc(memory_store())
+        messages = [{"role": "user", "content": "hi"}]
+        with vc.activity("chat") as act:
+            act.llm_call(messages, {"model": "m-2", "choices": [{"text": "hello"}]})
+        call, _ = _oldest_first(vc)
+        assert call.kind == "llm_call" and call.inputs["context"].type == "vector"
+        assert vc.load(call.inputs["context"]) == messages
+        assert vc.load(call.outputs["response"])["choices"] == [{"text": "hello"}]
+        assert call.meta["actor"]["model"] == "m-2"
+        assert call.meta["trace"] is None
+
+    async def test_an_actor_without_a_model_takes_the_responses(self) -> None:
+        vc = _vc(memory_store())
+        messages = [{"role": "user", "content": "hi"}]
+        vc.llm_call(messages, {"model": "m-2"}, actor=Actor(role="writer"))
+        vc.llm_call(messages, {"model": "m-2"}, actor=Actor(model="m-1"))
+        first, second = _oldest_first(vc)
+        assert first.meta["actor"] == {"verb": None, "role": "writer", "model": "m-2"}
+        assert second.meta["actor"]["model"] == "m-1"
+
+    async def test_a_response_is_stored_without_its_request_and_raw(self) -> None:
+        vc = _vc(memory_store())
+        messages = [{"role": "user", "content": "hi"}]
+        response = _InferResponse("hello", raw={"x": 1}, request=_InferRequest(messages))
+        vc.llm_call(messages, response)
+        (call,) = _oldest_first(vc)
+        assert vc.load(call.outputs["response"]) == {"content": "hello", "model": "m-1"}
+        assert call.meta["trace"]["llm_request_id"] == "req-1"
+
+    async def test_a_response_with_its_own_serialization_is_stored_by_it(self) -> None:
+        vc = _vc(memory_store())
+        vc.llm_call([{"role": "user", "content": "hi"}], _SerializedResponse("ok", object()))
+        (call,) = _oldest_first(vc)
+        assert "omitted" not in call.meta
+        assert vc.load(call.outputs["response"])["$data"] == {"content": "ok"}
+
+    async def test_a_response_with_its_own_serialization_is_serialized_once(self) -> None:
+        vc = _vc(memory_store())
+        _SERIALIZED.clear()
+        vc.llm_call([{"role": "user", "content": "hi"}], _CountedResponse("once"))
+        assert _SERIALIZED == ["once"]
+
+    async def test_a_value_that_is_not_a_response_keeps_its_request_and_raw(self) -> None:
+        @dataclass
+        class Approval:
+            request: str
+            raw: str
+            approved: bool
+
+        vc = _vc(memory_store())
+        vc.commit("approve", outputs={"approval": Approval("approve invoice", "r", True)})
+        (approve,) = _oldest_first(vc)
+        assert vc.load(approve.outputs["approval"]) == {
+            "request": "approve invoice",
+            "raw": "r",
+            "approved": True,
+        }
+
+    async def test_a_context_that_cannot_be_read_is_named_and_the_call_kept(self) -> None:
+        vc = _vc(memory_store())
+        vc.llm_call(_Unreadable(), _Response("done"))
+        (call,) = _oldest_first(vc)
+        assert call.meta["omitted"] == ["inputs/context"]
+        assert vc.load(call.outputs["response"])["content"] == "done"
+
+    async def test_a_saia_list_conversation_is_read_through_as_messages(self) -> None:
+        vc = _vc(memory_store())
+        conversation = ListConversation()
+        conversation.append(Message(role="user", content="go"))
+        vc.llm_call(conversation, _Response("done"))
+        (call,) = _oldest_first(vc)
+        assert call.inputs["context"].type == "vector"
+        # A typed value is stored in the checkpoint codec's form, naming its type.
+        (message,) = vc.load(call.inputs["context"])
+        assert message["$type"].endswith(":Message")
+        assert message["$data"] == {"role": "user", "content": "go"}
+
+    async def test_saia_iterations_are_calls_that_share_their_messages(self) -> None:
+        vc = _vc(memory_store())
+        conversation: list[Any] = [{"role": "user", "content": "go"}]
+        with vc.activity("task") as act:
+            on_iteration = act.llm_calls(conversation, role="writer")
+            for i in range(3):
+                response = _Response(f"turn-{i}", call_id=f"c-{i}")
+                await on_iteration(i, response)
+                conversation.append({"role": "assistant", "content": response.content})
+        calls = [r for r in _oldest_first(vc) if r.kind == "llm_call"]
+        assert [c.meta["facets"]["iteration"] for c in calls] == [0, 1, 2]
+        assert [c.meta["trace"]["call_id"] for c in calls] == ["c-0", "c-1", "c-2"]
+        assert {c.meta["actor"]["role"] for c in calls} == {"writer"}
+        contexts = [list(Vector(vc.repo, c.inputs["context"].id)) for c in calls]
+        assert contexts[2][:2] == contexts[1] and contexts[1][:1] == contexts[0]

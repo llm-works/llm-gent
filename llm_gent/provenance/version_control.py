@@ -3,12 +3,21 @@
 
 """Version control of agent runs on :mod:`appinfra.cas`: every step is a commit.
 
-:class:`VersionControl` is a Flow hook (:mod:`llm_gent.flow.hooks`). Attached
-with :meth:`Flow.with_hooks`, it commits a record of every chain step, every
-model call of a Loop, every checkpoint and every run to one ref of one
-repository: by default ``provenance`` in the repository a run's checkpoints
-use, next to them. Verbs add records of their own with :meth:`VersionControl.record`
-(``ctx.hook(VersionControl)``).
+:class:`VersionControl` commits records of what an agent did to one ref of one
+repository: by default ``provenance``, which can share a repository with a
+Flow run's checkpoints. Commits are made two ways, and read back the same:
+
+- **Explicitly**, with no Flow, SAIA or llm-infer required:
+  :meth:`VersionControl.commit` commits one record;
+  :meth:`VersionControl.activity` opens an :class:`Activity` that the records
+  made inside it name as their parent, and that commits itself on exit;
+  :meth:`VersionControl.llm_call` commits a model call from a message list (or
+  a SAIA conversation) and any response value, and
+  :meth:`VersionControl.llm_calls` is SAIA's ``on_iteration`` callback.
+- **As a Flow hook** (:mod:`llm_gent.flow.hooks`): attached with
+  :meth:`Flow.with_hooks`, it commits a record of every chain step, every model
+  call of a Loop, every checkpoint and every run. A verb commits records of its
+  own with ``within=ctx`` (``ctx.hook(VersionControl)``).
 
 A record is a commit whose parent is the previous record, in the order they
 were written:
@@ -16,16 +25,17 @@ were written:
 - its tree holds the entities: ``inputs/<name>`` and ``outputs/<name>``. A
   value is a blob of its JSON form (the checkpoint codec's), so equal values
   are one object: a step's input that is the previous step's result names the
-  same blob. A step's inputs are encoded before it runs, so they are what it
-  received even when it mutates them. A model call's context is a vector of
-  its messages, so the messages two calls share are stored once.
+  same blob. The inputs of a step or an activity are encoded when it starts,
+  so they are what it received even when it mutates them. A model call's
+  context is a vector of its messages, so the messages two calls share are
+  stored once.
 - its payload (canonical JSON) says what happened: ``kind`` (``step``,
-  ``llm_call``, ``checkpoint``, ``run`` or a verb's own), ``activity`` and
-  ``parent`` (invocation ids), ``run``, ``ts``, ``actor``, ``where``,
-  ``outcome``, ``decision``, ``error``, ``trace``, ``facets`` and, for a
-  checkpoint, ``checkpoint`` (its commit id). A value with no JSON form is
-  left out and named in ``omitted``, as is a step's keyword argument named
-  like one of its positional indexes.
+  ``llm_call``, ``checkpoint``, ``run`` or the caller's own), ``activity`` and
+  ``parent`` (invocation ids), ``run`` (the root activity), ``ts``,
+  ``actor``, ``facets``, ``trace`` and, where they apply, ``outcome``,
+  ``error``, ``where``, ``decision`` and ``checkpoint`` (a checkpoint's commit
+  id). A value with no JSON form is left out and named in ``omitted``, as is a
+  step's keyword argument named like one of its positional indexes.
 
 The records are append-only and nothing in a run reads them: resume reads
 only checkpoints. Records are written synchronously, so concurrent map items
@@ -38,9 +48,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import TracebackType
 from typing import Any
 
 from appinfra.cas import (
@@ -59,12 +70,14 @@ from appinfra.log import Logger
 
 from ..flow.context import Context
 from ..flow.hooks import (
+    Actor,
     CheckpointEvent,
     Hook,
     HookEvent,
     LLMCallEvent,
     RunEvent,
     StepEvent,
+    TraceIds,
     Where,
 )
 from ..flow.state.codec import encode
@@ -77,6 +90,11 @@ INPUTS = "inputs"
 OUTPUTS = "outputs"
 
 _RETRIES = 3
+
+_NOT_STORED = frozenset({"raw", "request"})
+"""Fields of a response dataclass left out of its record: the backend-native
+response, and llm-infer's back-reference to the request (its messages are the
+call's context, stored once as a vector)."""
 
 
 @dataclass(frozen=True)
@@ -98,13 +116,106 @@ class Record:
 
     @property
     def kind(self) -> str:
-        """What the record is of: ``step``, ``llm_call``, ``checkpoint``, ``run`` or a verb's own."""
+        """What the record is of: ``step``, ``llm_call``, ``checkpoint``, ``run`` or the caller's."""
         kind: str = self.meta["kind"]
         return kind
 
 
+@dataclass(frozen=True)
+class _Scope:
+    """Where an explicit record sits: its parent activity, its run, its role."""
+
+    parent: str | None = None
+    run: str | None = None
+    role: str | None = None
+
+
+class Activity:
+    """An activity in progress, opened by :meth:`VersionControl.activity`.
+
+    Records made through it (:meth:`commit`, :meth:`llm_call`,
+    :meth:`llm_calls`, :meth:`activity`) name it as their parent. Used as a
+    context manager it commits itself on exit, after the records made inside
+    it: with the inputs it was opened with, encoded then, :attr:`outputs` and
+    :attr:`facets` as they are on exit, and outcome ``ok``, ``failed`` (an
+    exception escaped) or ``interrupted`` (a cancellation or other
+    ``BaseException``).
+    """
+
+    def __init__(
+        self, vc: VersionControl, kind: str, scope: _Scope, actor: Actor, inputs: _Entities
+    ) -> None:
+        """Open activity ``kind`` in ``scope``; the root of a run when it has no parent."""
+        self._vc = vc
+        self.kind = kind
+        self.id = uuid.uuid4().hex
+        self.parent = scope.parent
+        self.run = scope.run or self.id
+        self.actor = actor
+        self.outputs: dict[str, Any] = {}
+        self.facets: dict[str, Any] = {}
+        self._inputs = inputs
+        self._role = scope.role
+
+    # --- records inside this activity ---
+
+    def commit(self, kind: str, **fields: Any) -> str:
+        """:meth:`VersionControl.commit` inside this activity."""
+        return self._vc.commit(kind, within=self, **fields)
+
+    def activity(self, kind: str, **fields: Any) -> Activity:
+        """:meth:`VersionControl.activity` inside this activity."""
+        return self._vc.activity(kind, within=self, **fields)
+
+    def llm_call(self, context: Any, response: Any, **fields: Any) -> str:
+        """:meth:`VersionControl.llm_call` inside this activity."""
+        return self._vc.llm_call(context, response, within=self, **fields)
+
+    def llm_calls(
+        self, conversation: Any, *, role: str | None = None
+    ) -> Callable[[int, Any], Awaitable[None]]:
+        """:meth:`VersionControl.llm_calls` inside this activity."""
+        return self._vc.llm_calls(conversation, role=role, within=self)
+
+    # --- context manager ---
+
+    def __enter__(self) -> Activity:
+        """Return the activity; it commits itself on exit."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Commit the activity with how it ended; an exception from its body propagates.
+
+        A record that fails to commit raises, unless the body raised: then it
+        is logged, so it does not replace the body's exception.
+        """
+        if exc is None:
+            outcome = "ok"
+        elif isinstance(exc, Exception):
+            outcome = "failed"
+        else:
+            outcome = "interrupted"
+        try:
+            self._vc._end(self, outcome, exc)
+        except Exception as e:
+            if exc is None:
+                raise
+            self._vc._lg.warning(
+                "activity record not committed", extra={"activity": self.kind, "exception": e}
+            )
+
+    def _scope(self) -> _Scope:
+        """The scope of records made inside this activity."""
+        return _Scope(parent=self.id, run=self.run, role=self.actor.role or self._role)
+
+
 class VersionControl(Hook):
-    """Commits a record of every step, model call, checkpoint and run to ``ref`` in ``repo``."""
+    """Commits records of what an agent did to ``ref`` in ``repo``: explicitly, or as a Flow hook."""
 
     def __init__(self, lg: Logger, repo: Repo, *, ref: str = REF) -> None:
         """Commit to ref ``ref`` of ``repo`` (``store.repo(name)``)."""
@@ -113,6 +224,105 @@ class VersionControl(Hook):
         self.ref = ref
         # Inputs of the steps running now, encoded before each ran; by activity id.
         self._received: dict[str, _Entities] = {}
+
+    # --- explicit records ---
+
+    def commit(
+        self,
+        kind: str,
+        *,
+        inputs: Mapping[str, Any] | None = None,
+        outputs: Mapping[str, Any] | None = None,
+        actor: Actor | None = None,
+        facets: Mapping[str, Any] | None = None,
+        trace: TraceIds | None = None,
+        within: Activity | Context[Any] | None = None,
+    ) -> str:
+        """Commit one record of ``kind``; return its commit id.
+
+        ``inputs`` / ``outputs`` map names to values (a :class:`Messages`
+        becomes a vector); ``facets`` are stored in the payload. ``within``
+        places the record: inside an :class:`Activity`, inside a Flow step
+        (its ``ctx``), or, when ``None``, on its own.
+        """
+        scope = _scope(within)
+        meta = _explicit_meta(kind, uuid.uuid4().hex, scope, _actor(actor, scope), facets, trace)
+        return self._commit(meta, dict(inputs or {}), dict(outputs or {}))
+
+    def activity(
+        self,
+        kind: str,
+        *,
+        inputs: Mapping[str, Any] | None = None,
+        actor: Actor | None = None,
+        within: Activity | Context[Any] | None = None,
+    ) -> Activity:
+        """Open an :class:`Activity` of ``kind``, placed like :meth:`commit`'s ``within``.
+
+        ``inputs`` are encoded now, so the activity's record holds them as
+        received. With no ``within`` it is the root of a run: its id is the
+        ``run`` of every record made inside it.
+        """
+        scope = _scope(within)
+        encoded = _entities(dict(inputs or {}), INPUTS)
+        return Activity(self, kind, scope, _actor(actor, scope), encoded)
+
+    def llm_call(
+        self,
+        context: Any,
+        response: Any,
+        *,
+        actor: Actor | None = None,
+        facets: Mapping[str, Any] | None = None,
+        within: Activity | Context[Any] | None = None,
+    ) -> str:
+        """Commit a model call: the ``context`` it was sent and its ``response``.
+
+        ``context`` is the message list (any JSON values, as sent), or a
+        conversation object: one whose ``to_dict()["messages"]`` is that list,
+        or SAIA's ``ConversationLike`` (``as_messages()``). It is stored as a
+        vector of its messages; one that cannot be read is named in
+        ``omitted``. ``response`` is any value with a JSON form, or a
+        dataclass (``raw`` and ``request`` left out). The actor's model
+        defaults to the response's ``model``.
+        """
+        scope = _scope(within)
+        actor = actor or Actor()
+        if actor.model is None:
+            actor = dataclasses.replace(actor, model=_response_model(response))
+        actor = _actor(actor, scope)
+        meta = _explicit_meta(
+            "llm_call", uuid.uuid4().hex, scope, actor, facets, _response_trace(response)
+        )
+        outputs = _response_entities(response)
+        return self._commit_entities(meta, _context_entities(context), outputs)
+
+    def llm_calls(
+        self,
+        conversation: Any,
+        *,
+        role: str | None = None,
+        within: Activity | Context[Any] | None = None,
+    ) -> Callable[[int, Any], Awaitable[None]]:
+        """SAIA's ``on_iteration`` callback: a :meth:`llm_call` per backend call.
+
+        SAIA calls it after each model response, before appending the
+        response to ``conversation``, so the context committed is what the
+        model was sent. The iteration number is a facet.
+
+        This holds for ``complete``, which appends to ``conversation`` as it
+        goes. ``complete_structured`` runs on its own copy and merges into
+        ``conversation`` only at the end, so its commits would miss the
+        current turn's messages.
+        """
+
+        async def on_iteration(iteration: int, response: Any) -> None:
+            actor = Actor(role=role, model=_response_model(response))
+            self.llm_call(
+                conversation, response, actor=actor, facets={"iteration": iteration}, within=within
+            )
+
+        return on_iteration
 
     # --- hooks ---
 
@@ -154,46 +364,15 @@ class VersionControl(Hook):
         so the context is what the model saw. A conversation that cannot be
         read is named in ``omitted``; the response is still recorded.
         """
-        try:
-            context = _messages(event.conversation)
-            inputs = _entities({} if context is None else {"context": context}, INPUTS)
-        except Exception:
-            inputs = _Entities(omitted=(f"{INPUTS}/context",))
-        outputs = _entities({"response": event.response}, OUTPUTS)
-        self._commit_entities(_meta("llm_call", event, {}), inputs, outputs)
+        outputs = _response_entities(event.response)
+        self._commit_entities(
+            _meta("llm_call", event, {}), _context_entities(event.conversation), outputs
+        )
 
     def after_checkpoint(self, event: CheckpointEvent) -> None:
         """Record that a checkpoint was written, naming its commit."""
         extra = {"checkpoint": event.commit_id, "outcome": event.outcome}
         self._commit(_meta("checkpoint", event, extra), {}, {})
-
-    # --- explicit records ---
-
-    def record(
-        self,
-        ctx: Context[Any],
-        kind: str,
-        *,
-        inputs: Mapping[str, Any] | None = None,
-        outputs: Mapping[str, Any] | None = None,
-        facets: Mapping[str, Any] | None = None,
-    ) -> str:
-        """Commit a record of a verb's own, as an activity inside its step; return its id.
-
-        ``inputs`` / ``outputs`` map names to values (a :class:`Messages`
-        becomes a vector); ``facets`` are stored in the payload.
-        """
-        role = None if ctx.role is None else ctx.role.name
-        meta = {
-            "kind": kind,
-            "activity": uuid.uuid4().hex,
-            "parent": ctx.activity_id,
-            "run": ctx.run_id,
-            "ts": datetime.now(UTC).isoformat(),
-            "actor": {"verb": None, "role": role, "model": None},
-            "facets": _facets(facets or {}),
-        }
-        return self._commit(meta, dict(inputs or {}), dict(outputs or {}))
 
     # --- reading ---
 
@@ -216,6 +395,15 @@ class VersionControl(Hook):
         return self._blob(entry.id)
 
     # --- internals ---
+
+    def _end(self, activity: Activity, outcome: str, error: BaseException | None) -> str:
+        """Commit ``activity`` itself, with how it ended."""
+        scope = _Scope(parent=activity.parent, run=activity.run)
+        meta = _explicit_meta(
+            activity.kind, activity.id, scope, activity.actor, activity.facets, None
+        )
+        meta |= {"outcome": outcome, "error": _error(error)}
+        return self._commit_entities(meta, activity._inputs, _entities(activity.outputs, OUTPUTS))
 
     def _commit(self, meta: dict[str, Any], inputs: dict[str, Any], outputs: dict[str, Any]) -> str:
         """Encode and store the entities, then commit the record; return its id."""
@@ -275,6 +463,50 @@ class VersionControl(Hook):
 # --- helpers ---
 
 
+def _scope(within: Activity | Context[Any] | None) -> _Scope:
+    """The scope ``within`` places a record in: an activity, a Flow step, or none."""
+    if within is None:
+        return _Scope()
+    if isinstance(within, Activity):
+        return within._scope()
+    role = None if within.role is None else within.role.name
+    return _Scope(parent=within.activity_id, run=within.run_id, role=role)
+
+
+def _actor(actor: Actor | None, scope: _Scope) -> Actor:
+    """``actor``, its role defaulting to the scope's."""
+    actor = actor or Actor()
+    if actor.role is None and scope.role is not None:
+        actor = dataclasses.replace(actor, role=scope.role)
+    return actor
+
+
+def _explicit_meta(
+    kind: str,
+    activity: str,
+    scope: _Scope,
+    actor: Actor,
+    facets: Mapping[str, Any] | None,
+    trace: TraceIds | None,
+) -> dict[str, Any]:
+    """The payload of an explicitly made record."""
+    return {
+        "kind": kind,
+        "activity": activity,
+        "parent": scope.parent,
+        "run": scope.run,
+        "ts": datetime.now(UTC).isoformat(),
+        "actor": dataclasses.asdict(actor),
+        "trace": None if trace is None else dataclasses.asdict(trace),
+        "facets": _facets(facets or {}),
+    }
+
+
+def _error(error: BaseException | None) -> str | None:
+    """An error as ``"<type>: <message>"``."""
+    return None if error is None else f"{type(error).__name__}: {error}"
+
+
 def _meta(
     kind: str, event: HookEvent, extra: dict[str, Any], error: BaseException | None = None
 ) -> dict[str, Any]:
@@ -289,7 +521,7 @@ def _meta(
         "where": _where(event.where),
         "trace": dataclasses.asdict(event.trace),
         "facets": _facets(event.facets),
-        "error": None if error is None else f"{type(error).__name__}: {error}",
+        "error": _error(error),
         **extra,
     }
 
@@ -317,17 +549,70 @@ def _facets(facets: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _messages(conversation: Any) -> Messages | None:
-    """A conversation's messages: a list, or the ``messages`` of its ``to_dict()``."""
+def _context_entities(conversation: Any) -> _Entities:
+    """A model call's context, encoded: its messages as a vector.
+
+    A conversation of no known shape is stored as a plain value; one whose
+    messages cannot be read (its ``to_dict()`` raises) is named in ``omitted``.
+    """
     if conversation is None:
-        return None
+        return _Entities()
+    try:
+        messages = _messages(conversation)
+    except Exception:
+        return _Entities(omitted=(f"{INPUTS}/context",))
+    return _entities({"context": conversation if messages is None else messages}, INPUTS)
+
+
+def _messages(conversation: Any) -> Messages | None:
+    """A conversation's messages: a list, the ``messages`` of its ``to_dict()``, or its
+    ``as_messages()`` (SAIA's ``ConversationLike``)."""
+    if isinstance(conversation, Messages):
+        return conversation
     if isinstance(conversation, list | tuple):
         return Messages(list(conversation))
     to_dict = getattr(conversation, "to_dict", None)
     data = to_dict() if callable(to_dict) else None
     if isinstance(data, dict) and isinstance(data.get("messages"), list):
         return Messages(data["messages"])
+    as_messages = getattr(conversation, "as_messages", None)
+    if callable(as_messages):
+        return Messages(list(as_messages()))
     return None
+
+
+def _response_model(response: Any) -> str | None:
+    """The model a response names: its ``model`` attribute or key."""
+    model = (
+        response.get("model") if isinstance(response, dict) else getattr(response, "model", None)
+    )
+    return model if isinstance(model, str) else None
+
+
+def _response_entities(response: Any) -> _Entities:
+    """A model response, encoded once: in the codec's form when it takes the response, else a
+    dataclass response as its fields without :data:`_NOT_STORED`."""
+    if not dataclasses.is_dataclass(response) or isinstance(response, type):
+        return _entities({"response": response}, OUTPUTS)
+    try:
+        blob = canonical_json(encode(response, "provenance record"))
+    except Exception:  # the codec does not take it: store its fields
+        fields = {
+            f.name: getattr(response, f.name)
+            for f in dataclasses.fields(response)
+            if f.name not in _NOT_STORED
+        }
+        return _entities({"response": fields}, OUTPUTS)
+    return _Entities({"response": _Encoded("blob", (blob,))})
+
+
+def _response_trace(response: Any) -> TraceIds | None:
+    """The ids a response carries: SAIA's ``call_id``, llm-infer's ``request.id``."""
+    call_id = getattr(response, "call_id", None) or None
+    request_id = getattr(getattr(response, "request", None), "id", None) or None
+    if call_id is None and request_id is None:
+        return None
+    return TraceIds(call_id=call_id, llm_request_id=request_id)
 
 
 @dataclass(frozen=True)
@@ -391,9 +676,6 @@ def _put_entities(batch: Batch, entities: _Entities) -> str:
 def _json(value: Any) -> Any:
     """The JSON form of ``value``: the checkpoint codec's, else a dataclass's fields.
 
-    A dataclass the codec does not take (a model response) is stored as its
-    fields, without ``raw``, the backend-native response.
-
     Raises:
         TypeError: ``value`` has no JSON form.
     """
@@ -401,11 +683,7 @@ def _json(value: Any) -> Any:
         return encode(value, "provenance record")
     except TypeError:
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            return {
-                f.name: _json(getattr(value, f.name))
-                for f in dataclasses.fields(value)
-                if f.name != "raw"
-            }
+            return {f.name: _json(getattr(value, f.name)) for f in dataclasses.fields(value)}
         if isinstance(value, list | tuple):
             return [_json(item) for item in value]
         if isinstance(value, dict):
