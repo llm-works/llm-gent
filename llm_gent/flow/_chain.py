@@ -222,9 +222,12 @@ class Chain:
         except Interrupted:
             if not is_halt_signaled(self.env):
                 label = self.flow._name or "<anonymous>"
-                raise RuntimeError(
+                error = RuntimeError(
                     f"Flow {label!r}: step {node_id!r} raised Interrupted while no halt is set"
-                ) from None
+                )
+                if step is not None:
+                    await step.finish("failed", error=error)
+                raise error from None
             if step is not None:
                 await step.finish("interrupted")
             return None, True

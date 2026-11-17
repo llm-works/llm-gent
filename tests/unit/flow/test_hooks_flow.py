@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import HALTED, Context, Factory, Flow, Loop, Role, verb
+from llm_gent.flow import HALTED, Context, Factory, Flow, Interrupted, Loop, Role, verb
 from llm_gent.flow.hooks import (
     CheckpointEvent,
     Hook,
@@ -168,6 +168,17 @@ class TestEvents:
         assert isinstance(run, RunEvent) and run.name == "after_run"
         assert run.outcome == "cancelled" and isinstance(run.error, asyncio.CancelledError)
 
+    async def test_a_step_interrupted_without_a_halt_ends_failed(self) -> None:
+        @verb
+        async def stray(ctx: Context[Any], x: int) -> int:
+            raise Interrupted()
+
+        rec = Recorder()
+        with pytest.raises(RuntimeError, match="while no halt is set") as raised:
+            await _flow().call(stray, name="s").with_hooks(rec).run(1)
+        (step,) = rec.steps()
+        assert step.outcome == "failed" and step.error is raised.value
+
     async def test_a_run_whose_finalization_raises_ends_failed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -263,6 +274,17 @@ class TestVerdicts:
         assert await flow.run(1) == -1
         (a,) = rec.steps()
         assert a.outcome == "denied" and a.result == -1
+
+    async def test_a_denied_step_whose_rescue_is_cancelled_ends_cancelled(self) -> None:
+        def cancel(_exc: Any, _pending: Any, _ctx: Any) -> int:
+            raise asyncio.CancelledError
+
+        rec, gate = Recorder(), Gate({"a": False})
+        flow = _flow().call(add_one, name="a", rescue=cancel).with_hooks(gate, rec)
+        with pytest.raises(asyncio.CancelledError):
+            await flow.run(1)
+        (a,) = rec.steps()
+        assert a.outcome == "cancelled" and a.decision is not None
 
     async def test_a_paused_step_halts_the_run_and_resume_asks_again(self) -> None:
         store, halt = memory_store(), asyncio.Event()

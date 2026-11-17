@@ -157,10 +157,13 @@ class StepHooks:
     async def finish(
         self, outcome: StepOutcome, result: Any = None, error: BaseException | None = None
     ) -> None:
-        """Call ``after_step``; a step a hook denied or paused ends ``denied`` / ``paused``."""
+        """Call ``after_step``; a step a hook denied or paused ends ``denied`` / ``paused``.
+
+        A cancelled step stays ``cancelled``; ``decision`` still records the verdict.
+        """
         if not self._hooks.has("after_step"):
             return
-        if self.decision is not None:
+        if self.decision is not None and outcome != "cancelled":
             outcome = "paused" if self.decision.verdict == "pause" else "denied"
         event = self._event("after_step", result=result, error=error, outcome=outcome)
         await self._hooks.after("after_step", event)

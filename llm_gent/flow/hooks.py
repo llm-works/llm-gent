@@ -179,7 +179,10 @@ class HookEvent:
     activity_id: str
     """Unique per invocation: each run, step execution or LLM call has its own."""
     parent_activity_id: str | None = None
-    """The invocation this one runs inside: the enclosing step, or the run."""
+    """The invocation this one runs inside: the nearest enclosing step hooks observe, else the run.
+
+    A step of a flow without hooks has no activity; ``where`` still locates it.
+    """
     actor: Actor = field(default_factory=Actor)
     trace: TraceIds = field(default_factory=TraceIds)
     ctx: Context[Any] | None = None
