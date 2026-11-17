@@ -388,6 +388,24 @@ class _SerializedResponse:
         return cls(data["content"])
 
 
+_SERIALIZED: list[str] = []
+
+
+@dataclass
+class _CountedResponse:
+    """A response with its own serialization that records each call to it."""
+
+    content: str
+
+    def to_dict(self) -> dict[str, Any]:
+        _SERIALIZED.append(self.content)
+        return {"content": self.content}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> _CountedResponse:
+        return cls(data["content"])
+
+
 class TestExplicit:
     """Records made without Flow: commit, activity, llm_call, llm_calls."""
 
@@ -488,6 +506,12 @@ class TestExplicit:
         (call,) = _oldest_first(vc)
         assert "omitted" not in call.meta
         assert vc.load(call.outputs["response"])["$data"] == {"content": "ok"}
+
+    async def test_a_response_with_its_own_serialization_is_serialized_once(self) -> None:
+        vc = _vc(memory_store())
+        _SERIALIZED.clear()
+        vc.llm_call([{"role": "user", "content": "hi"}], _CountedResponse("once"))
+        assert _SERIALIZED == ["once"]
 
     async def test_a_value_that_is_not_a_response_keeps_its_request_and_raw(self) -> None:
         @dataclass
