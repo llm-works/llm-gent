@@ -26,7 +26,7 @@ innermost first, as nested context managers would.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
@@ -84,6 +84,10 @@ class Pause:
     """A ``before_*`` verdict: stop the run here; resuming reaches the same hook again."""
 
     reason: str = ""
+
+
+Verdict = bool | str | Pause | None
+"""A ``before_*`` result: ``True`` / ``None`` allow, ``False`` / a str deny, ``Pause`` pauses."""
 
 
 @dataclass(frozen=True)
@@ -254,24 +258,24 @@ class Hook:
     hook. A method left as inherited from this class is never called.
     """
 
-    def before_run(self, event: RunEvent) -> bool | str | Pause | None:
+    def before_run(self, event: RunEvent) -> Verdict | Awaitable[Verdict]:
         """Before the run starts; a verdict other than allow stops it before any step."""
         return None
 
-    def after_run(self, event: RunEvent) -> None:
+    def after_run(self, event: RunEvent) -> None | Awaitable[None]:
         """After the run ended, however it ended."""
 
-    def before_step(self, event: StepEvent) -> bool | str | Pause | None:
+    def before_step(self, event: StepEvent) -> Verdict | Awaitable[Verdict]:
         """Before a chain step runs; a verdict other than allow keeps it from running."""
         return None
 
-    def after_step(self, event: StepEvent) -> None:
+    def after_step(self, event: StepEvent) -> None | Awaitable[None]:
         """After a chain step ended, however it ended (including denied or paused)."""
 
-    def after_llm_call(self, event: LLMCallEvent) -> None:
+    def after_llm_call(self, event: LLMCallEvent) -> None | Awaitable[None]:
         """After a model call of a Loop turn returned."""
 
-    def after_checkpoint(self, event: CheckpointEvent) -> None:
+    def after_checkpoint(self, event: CheckpointEvent) -> None | Awaitable[None]:
         """After a checkpoint commit was written."""
 
     def child(self, where: Where) -> Hook:
@@ -289,10 +293,10 @@ def hook_label(hook: object) -> str:
 
 def _method(hook: object, name: HookName) -> Any:
     """The bound method ``name`` of ``hook``, or ``None`` when absent or :class:`Hook`'s no-op."""
-    found = getattr(type(hook), name, None)
-    if found is None or found is getattr(Hook, name):
+    found = getattr(hook, name, None)
+    if found is None or getattr(found, "__func__", None) is getattr(Hook, name):
         return None
-    return getattr(hook, name)
+    return found
 
 
 def _child(hook: object, where: Where) -> object:

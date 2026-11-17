@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -172,6 +173,17 @@ class TestMethods:
 
         decision = await Hooks(_lg(), [_Plain()]).before("before_step", _event())
         assert decision.reason == "plain no"
+
+    async def test_a_method_set_on_the_instance_is_resolved(self) -> None:
+        hook = SimpleNamespace(before_step=lambda _event: "instance no")
+        decision = await Hooks(_lg(), [hook]).before("before_step", _event())
+        assert decision.reason == "instance no"
+
+    async def test_an_instance_method_replaces_the_inherited_no_op(self) -> None:
+        hook = Hook()
+        hook.before_step = lambda _event: "replaced no"  # type: ignore[method-assign]
+        decision = await Hooks(_lg(), [hook]).before("before_step", _event())
+        assert decision.reason == "replaced no"
 
 
 class TestAttachment:
