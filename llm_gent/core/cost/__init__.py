@@ -22,11 +22,10 @@ Public shape:
   scope-local budget and reports costs up to its parent (if any); trees
   of arbitrary depth are supported. Each level has independent halt
   and observer callback semantics.
-- :class:`Callback` — per-tracker hook consumers use to build
+- :class:`CostCallback` — per-tracker hook consumers use to build
   observability (aggregations, audit logs, dashboards).
 
-The top-level ``llm_gent`` package exports them as ``CostTracker`` and
-``CostCallback``.
+The top-level ``llm_gent`` package exports :class:`Tracker` as ``CostTracker``.
 """
 
 from .llm import (
@@ -37,11 +36,11 @@ from .llm import (
     load_pricing_config,
 )
 from .pricing import FixedOp, LLMOp, Op, PricingConfig, PricingProvider
-from .tracker import Callback, Tracker
+from .tracker import CostCallback, Tracker
 
 
 __all__ = [
-    "Callback",
+    "CostCallback",
     "FixedOp",
     "LLMOp",
     "LLMPricingProvider",

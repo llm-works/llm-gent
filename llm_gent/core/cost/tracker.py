@@ -39,7 +39,7 @@ from appinfra.log import Logger
 from .pricing import PricingProvider
 
 
-class Callback(Protocol):
+class CostCallback(Protocol):
     """Callback invoked on every cost recorded at a tracker."""
 
     def __call__(self, cost: float, context: dict[str, Any], *, overridden: bool) -> None:
@@ -93,7 +93,7 @@ class Tracker:
         budget: float | None = None,
         *,
         parent: Tracker | None = None,
-        on_cost: Callback | None = None,
+        on_cost: CostCallback | None = None,
         halt: asyncio.Event | None = None,
     ) -> None:
         """Initialize a tracker.
@@ -180,7 +180,7 @@ class Tracker:
         self,
         budget: float | None = None,
         *,
-        on_cost: Callback | None = None,
+        on_cost: CostCallback | None = None,
         halt: asyncio.Event | None = None,
     ) -> Tracker:
         """Create a child tracker whose costs report up to this one.
@@ -222,7 +222,7 @@ class Tracker:
         THIS call fires its halt event and latches its
         ``urgent_wrapup``.
 
-        ``context`` is passed through to :class:`Callback`s at
+        ``context`` is passed through to :class:`CostCallback`s at
         every level in the chain (defensively deep-copied per
         callback). Callers must treat ``context`` as immutable after
         ``track()`` returns. In an N-deep tree with a callback at
@@ -355,4 +355,4 @@ class Tracker:
             self._on_cost(cost, copy.deepcopy(context), overridden=overridden)
 
 
-__all__ = ["Callback", "Tracker"]
+__all__ = ["CostCallback", "Tracker"]

@@ -581,9 +581,9 @@ class LLMTrait(BaseTrait):
 
 
 class LLMTraitBackend:
-    """Adapter that wraps LLMTrait to satisfy the ``llm.Backend`` protocol.
+    """Adapter that wraps LLMTrait to satisfy LLMBackend protocol.
 
-    Provides an ``llm.Backend``-compatible interface for code that needs it.
+    Provides an LLMBackend-compatible interface for code that needs it.
 
     Example:
         llm_trait = agent.require_trait(LLMTrait)

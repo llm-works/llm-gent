@@ -3,22 +3,21 @@
 
 """LLM backend abstraction.
 
-The top-level ``llm_gent`` package exports :class:`Backend`, :class:`Error` and
-:class:`Caller` as ``LLMBackend``, ``LLMError`` and ``LLMCaller``.
+The top-level ``llm_gent`` package exports :class:`Caller` as ``LLMCaller``.
 """
 
-from .backend import Backend, Error, HTTPBackend, StructuredOutputError
+from .backend import HTTPBackend, LLMBackend, LLMError, StructuredOutputError
 from .caller import Caller, CallResult
 from .types import CompletionResult, Message
 
 
 __all__ = [
-    "Backend",
     "CallResult",
     "Caller",
     "CompletionResult",
-    "Error",
     "HTTPBackend",
+    "LLMBackend",
+    "LLMError",
     "Message",
     "StructuredOutputError",
 ]

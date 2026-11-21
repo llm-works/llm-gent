@@ -38,8 +38,7 @@ from .platform import Config as PlatformConfig
 from .platform import Context as PlatformContext
 from .platform import Factory as PlatformFactory
 from .runnable import Runnable
-from .task import Result as TaskResult
-from .task import Task
+from .task import Task, TaskResult
 from .tools.factory import Factory as ToolFactory
 from .traits.factory import Factory as TraitFactory
 
