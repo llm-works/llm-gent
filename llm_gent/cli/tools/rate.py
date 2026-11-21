@@ -378,7 +378,7 @@ class RateTool(Tool):
         """Create LLM client and run auto rating."""
         from llm_infer.client import Factory as LLMClientFactory
 
-        from ...core.llm import LLMCaller
+        from ...core.llm import Caller as LLMCaller
 
         llm_config = self.app.config.get("llm", {})
         router = LLMClientFactory(self.lg).from_config(llm_config)

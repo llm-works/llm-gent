@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Task execution models for agents."""
+"""Task execution models for agents.
+
+The top-level ``llm_gent`` package exports :class:`Status`, :class:`Completion`
+and :class:`Result` as ``TaskStatus``, ``TaskCompletion`` and ``TaskResult``.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ from pydantic import BaseModel, Field
 from .tools.base import ToolCallResult
 
 
-class TaskStatus(StrEnum):
+class Status(StrEnum):
     """Status of a completed task.
 
     The agent uses this to signal whether it reached a conclusion
@@ -27,14 +31,14 @@ class TaskStatus(StrEnum):
     """Agent cannot make progress and needs external help."""
 
 
-class TaskCompletion(BaseModel):
+class Completion(BaseModel):
     """Structured completion data from agent.
 
     Captured when agent calls complete_task() to signal it's done
     working on the current task.
     """
 
-    status: TaskStatus
+    status: Status
     """Whether agent reached a conclusion or is stuck."""
 
     conclusion: str
@@ -86,7 +90,7 @@ class Task(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
 
-class TaskResult(BaseModel):
+class Result(BaseModel):
     """Result of task execution.
 
     Contains the final response, any parsed structured output, and
@@ -102,7 +106,7 @@ class TaskResult(BaseModel):
     parsed: Any | None = None
     """Validated object when output_schema was provided."""
 
-    completion: TaskCompletion | None = None
+    completion: Completion | None = None
     """Structured completion when agent called complete_task()."""
 
     tool_calls: list[ToolCallResult] = Field(default_factory=list)

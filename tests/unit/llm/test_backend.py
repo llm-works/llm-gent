@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from llm_gent.core.llm import CompletionResult, HTTPBackend, LLMError, Message
+from llm_gent.core.llm import CompletionResult, HTTPBackend, Message
+from llm_gent.core.llm import Error as LLMError
 
 
 pytestmark = pytest.mark.unit

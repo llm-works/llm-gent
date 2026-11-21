@@ -19,7 +19,7 @@ from .models import BatchItem, BatchRequest, Criteria, ProviderType, Request, Re
 
 
 if TYPE_CHECKING:
-    from ...llm import LLMCaller
+    from ...llm import Caller as LLMCaller
 
 
 def stars_to_signal(stars: int) -> tuple[Literal["positive", "negative", "dismiss"], float]:
@@ -49,12 +49,12 @@ class Service:
 
     Example:
         from llm_infer.client import Factory as LLMClientFactory
-        from llm_gent.core.llm import LLMCaller
+        from llm_gent.core import llm
         from llm_gent.core.memory.rating import Service, AtomicFactsBackend
         from llm_gent.core.memory.rating import Request, Criteria
 
         router = LLMClientFactory(lg).from_config(config)
-        caller = LLMCaller(lg, router)
+        caller = llm.Caller(lg, router)
         service = Service(lg, caller)
         backend = AtomicFactsBackend(lg, database)
 

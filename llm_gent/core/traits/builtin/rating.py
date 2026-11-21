@@ -141,7 +141,7 @@ class RatingTrait(BaseTrait):
         Raises:
             TraitNotFoundError: If MemoryTrait or LLMTrait are not attached.
         """
-        from ...llm import LLMCaller
+        from ...llm import Caller as LLMCaller
         from .llm import LLMTrait
         from .memory import MemoryTrait
 

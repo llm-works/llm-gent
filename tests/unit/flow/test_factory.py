@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from llm_gent.core.cost import CostTracker
+from llm_gent.core.cost import Tracker as CostTracker
 from llm_gent.flow import Context, Factory, Flow, Role, SAIAFactory, verb
 
 from .conftest import ROLE_A, StubFactory, make_test_logger

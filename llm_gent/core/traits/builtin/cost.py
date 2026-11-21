@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ...cost import CostTracker
+from ...cost import Tracker as CostTracker
 from ..base import BaseTrait
 
 

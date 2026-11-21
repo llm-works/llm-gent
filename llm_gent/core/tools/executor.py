@@ -28,7 +28,7 @@ class ToolExecutionResult(BaseModel):
     """Result from tool execution loop.
 
     Note: This class is kept for backward compatibility. New code should
-    use TaskResult from llm_gent.core.task instead.
+    use Result from llm_gent.core.task instead.
     """
 
     content: str

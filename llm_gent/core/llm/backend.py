@@ -15,7 +15,7 @@ import httpx
 from .types import CompletionResult, Message
 
 
-class LLMBackend(Protocol):
+class Backend(Protocol):
     """Protocol for LLM backends.
 
     Implementations must provide completion and adapter management.
@@ -55,7 +55,7 @@ class LLMBackend(Protocol):
         ...
 
 
-class LLMError(Exception):
+class Error(Exception):
     """Error from LLM backend."""
 
 
@@ -178,9 +178,9 @@ class HTTPBackend:
             return cast(dict[str, Any], response.json())
         except httpx.HTTPStatusError as e:
             body = e.response.text if e.response else ""
-            raise LLMError(f"LLM request failed ({e.response.status_code}): {body}") from e
+            raise Error(f"LLM request failed ({e.response.status_code}): {body}") from e
         except httpx.RequestError as e:
-            raise LLMError(f"LLM connection failed: {e}") from e
+            raise Error(f"LLM connection failed: {e}") from e
 
     def _parse_response(self, response: dict[str, Any]) -> dict[str, Any]:
         """Parse the API response."""
@@ -204,4 +204,4 @@ class HTTPBackend:
                 "tool_calls": tool_calls,
             }
         except (KeyError, IndexError) as e:
-            raise LLMError(f"Invalid API response: {e}") from e
+            raise Error(f"Invalid API response: {e}") from e

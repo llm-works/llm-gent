@@ -3,10 +3,10 @@
 
 """Hierarchical cost accounting.
 
-:class:`CostTracker` is the sole accounting primitive. A tracker holds a
+:class:`Tracker` is the sole accounting primitive. A tracker holds a
 scope-local cap, `spent` counter, `costs_by_op` breakdown, and (when
 configured) a halt event that fires when this tracker's own cap
-crosses. Trackers form a tree via :meth:`CostTracker.child`: costs
+crosses. Trackers form a tree via :meth:`Tracker.child`: costs
 recorded at any level propagate up the parent chain, so an ancestor's
 `spent` reflects every descendant's activity and an ancestor's halt
 fires when *its* cap crosses.
@@ -39,20 +39,20 @@ from appinfra.log import Logger
 from .pricing import PricingProvider
 
 
-class CostCallback(Protocol):
+class Callback(Protocol):
     """Callback invoked on every cost recorded at a tracker."""
 
     def __call__(self, cost: float, context: dict[str, Any], *, overridden: bool) -> None:
         """Handle one recorded cost event.
 
         ``overridden`` is True when the cost came from an explicit
-        ``override_cost`` argument to :meth:`CostTracker.track` rather
+        ``override_cost`` argument to :meth:`Tracker.track` rather
         than being computed by the pricing provider.
         """
         ...
 
 
-class CostTracker:
+class Tracker:
     """Hierarchical cost accounting.
 
     A root tracker is constructed directly; children come from
@@ -72,7 +72,7 @@ class CostTracker:
     only one. Consumers pick depth and names to fit their model::
 
         outer_halt = asyncio.Event()
-        outer = CostTracker(lg, pricing, budget=10.0, halt=outer_halt)
+        outer = Tracker(lg, pricing, budget=10.0, halt=outer_halt)
 
         mid_halt = asyncio.Event()
         mid = outer.child(budget=3.0, halt=mid_halt)
@@ -92,8 +92,8 @@ class CostTracker:
         pricing: PricingProvider,
         budget: float | None = None,
         *,
-        parent: CostTracker | None = None,
-        on_cost: CostCallback | None = None,
+        parent: Tracker | None = None,
+        on_cost: Callback | None = None,
         halt: asyncio.Event | None = None,
     ) -> None:
         """Initialize a tracker.
@@ -138,7 +138,7 @@ class CostTracker:
         return self._budget
 
     @property
-    def parent(self) -> CostTracker | None:
+    def parent(self) -> Tracker | None:
         """The parent tracker if this is a child, else ``None``."""
         return self._parent
 
@@ -180,9 +180,9 @@ class CostTracker:
         self,
         budget: float | None = None,
         *,
-        on_cost: CostCallback | None = None,
+        on_cost: Callback | None = None,
         halt: asyncio.Event | None = None,
-    ) -> CostTracker:
+    ) -> Tracker:
         """Create a child tracker whose costs report up to this one.
 
         Pricing is inherited from this tracker; ``halt`` and
@@ -191,7 +191,7 @@ class CostTracker:
         and a child's callback observes only the costs recorded on
         that child or its descendants.
         """
-        return CostTracker(
+        return Tracker(
             self._lg,
             self._pricing,
             budget,
@@ -222,7 +222,7 @@ class CostTracker:
         THIS call fires its halt event and latches its
         ``urgent_wrapup``.
 
-        ``context`` is passed through to :class:`CostCallback`s at
+        ``context`` is passed through to :class:`Callback`s at
         every level in the chain (defensively deep-copied per
         callback). Callers must treat ``context`` as immutable after
         ``track()`` returns. In an N-deep tree with a callback at
@@ -355,4 +355,4 @@ class CostTracker:
             self._on_cost(cost, copy.deepcopy(context), overridden=overridden)
 
 
-__all__ = ["CostCallback", "CostTracker"]
+__all__ = ["Callback", "Tracker"]

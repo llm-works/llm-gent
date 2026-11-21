@@ -4,8 +4,8 @@
 """Framework-level LLM wrapper with logging and dry-run support.
 
 Sits between llm-infer client and the rest of the framework:
-    llm-infer/ChatClient -> llm-gent/LLMCaller -> llm-gent/LLMTrait (agents)
-                                                -> RatingService (CLI)
+    llm-infer/ChatClient -> llm-gent/Caller -> llm-gent/LLMTrait (agents)
+                                             -> RatingService (CLI)
 
 Provides:
 - Trace logging of full request/response
@@ -56,7 +56,7 @@ def log_response(lg: Logger, response: ChatResponse) -> None:
     )
 
 
-class LLMCaller:
+class Caller:
     """Framework wrapper for LLM calls with logging and dry-run.
 
     Wraps llm-infer's ChatClient to add framework-level concerns:
@@ -68,13 +68,13 @@ class LLMCaller:
         from llm_infer.client import Factory as LLMClientFactory
 
         router = LLMClientFactory(lg).from_config(config)
-        caller = LLMCaller(lg, router)
+        caller = Caller(lg, router)
 
         # Normal call
         result = caller.chat(messages=[{"role": "user", "content": "Hello"}])
 
         # Dry-run (logs but doesn't call LLM)
-        caller_dry = LLMCaller(lg, router, dry_run=True)
+        caller_dry = Caller(lg, router, dry_run=True)
         result = caller_dry.chat(messages=[{"role": "user", "content": "Hello"}])
     """
 
