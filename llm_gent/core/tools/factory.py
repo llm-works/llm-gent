@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from .builtin.web.fetch import WebFetchTool
 
 
-class ToolFactory:
+class Factory:
     """Factory for creating Tool instances from configuration.
 
     Supports built-in tool types and custom tool registration.

@@ -5,10 +5,17 @@
 
 import functools
 import os
+from collections.abc import Mapping
+from typing import Any
 from unittest.mock import MagicMock
 
 from appinfra.cas import FileStore, MemoryStore
 from appinfra.log import Logger, quick_console_logger
+
+from llm_gent.core.platform import Config, Context
+from llm_gent.core.tools.factory import Factory as ToolFactory
+from llm_gent.core.traits.factory import Factory as TraitFactory
+from llm_gent.core.traits.factory import MemoryResources
 
 
 @functools.cache
@@ -30,6 +37,37 @@ def memory_store() -> MemoryStore:
 def file_store(root: str | os.PathLike[str]) -> FileStore:
     """Return a checkpoint store under ``root``, without fsync: tests don't cut the power."""
     return FileStore(make_test_logger(), root, fsync=False)
+
+
+def make_platform(
+    lg: Logger,
+    *,
+    router: Any = None,
+    llm_config: Mapping[str, Any] | None = None,
+    memory_config: Mapping[str, Any] | None = None,
+    memory: MemoryResources | None = None,
+) -> Context:
+    """A platform context on stub clients, built directly: no config file read, no client built.
+
+    ``router`` defaults to a ``MagicMock``; ``llm_config`` is the router config
+    the trait factory hands LLM traits.
+    """
+    router = router if router is not None else MagicMock()
+    config = Config(
+        llm=dict(llm_config or {}), memory=dict(memory_config) if memory_config else None
+    )
+    trait_factory = TraitFactory(
+        lg, llm_config or {}, router, memory_config=memory_config, memory=memory
+    )
+    return Context(
+        lg,
+        config,
+        llm=router,
+        memory=memory,
+        trait_factory=trait_factory,
+        tool_factory=ToolFactory(lg),
+        owned=[],
+    )
 
 
 def create_mock_trait(trait_class, **mock_attrs):

@@ -34,20 +34,25 @@ Traits provide specific capabilities to agents:
 ### Lifecycle
 
 ```python
-from llm_gent import AgentFactory, LLMTrait
+from llm_gent import AgentFactory, LLMTrait, PlatformFactory
 
-agent = AgentFactory(lg).from_config(
-    {
-        "identity": {"name": "my-agent"},
-        "llm": llm_config,
-        "traits": {"required": ["llm"]},
-    }
-)
-agent.start()  # Initialize all traits
-llm = agent.require_trait(LLMTrait)
-result = llm.complete([{"role": "user", "content": "Hello!"}])
-agent.stop()  # Cleanup all traits
+with PlatformFactory(lg).from_config({"llm": llm_config}) as platform:  # Shared clients
+    agent = AgentFactory(platform).from_config(
+        {
+            "identity": {"name": "my-agent"},
+            "traits": {"required": ["llm"]},
+        }
+    )
+    agent.start()  # Initialize all traits
+    llm = agent.require_trait(LLMTrait)
+    result = llm.complete([{"role": "user", "content": "Hello!"}])
+    agent.stop()  # Cleanup all traits
 ```
+
+The platform holds what agents share (the model router, memory clients) and
+closes it at the end of the `with` block. Agents built on it use these clients;
+an agent whose config sets `llm` (another backend or adapter) gets a router of
+its own.
 
 For cycle-driven agents (`agent.run_once()`), use `RunnableAgent` — set
 `agent_class = RunnableAgent` on an `AgentFactory` subclass, or subclass

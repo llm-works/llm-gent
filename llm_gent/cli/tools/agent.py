@@ -13,7 +13,7 @@ from appinfra.app.tools import Tool, ToolConfig
 
 
 if TYPE_CHECKING:
-    from ...core.agent import AgentFactory
+    from ...core.agent import Factory as AgentFactory
 
 
 class AgentTool(Tool):

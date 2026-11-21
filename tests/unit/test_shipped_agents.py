@@ -9,12 +9,11 @@ from unittest.mock import MagicMock
 
 import pytest
 import yaml
-from appinfra import DotDict
 
 from llm_gent.agents.default import Factory
-from llm_gent.core.platform import PlatformContext
 from llm_gent.core.traits.builtin.saia import SAIATrait
 from llm_gent.runtime.server.config import AgentServerConfig
+from tests.helpers import make_platform
 
 
 pytestmark = pytest.mark.unit
@@ -32,8 +31,9 @@ def _build(path: Path, codebase: Path) -> Any:
     raw = yaml.safe_load(path.read_text())
     agent_config = AgentServerConfig.from_dict({"agents": {name: raw}}).agents[name]
     config = agent_config.factory_config(name)
-    platform = PlatformContext.from_config(lg=MagicMock(), llm_config=DotDict({}))
-    return Factory(platform=platform).create(config, variables={"CODEBASE_PATH": str(codebase)})
+    return Factory(platform=make_platform(MagicMock())).create(
+        config, variables={"CODEBASE_PATH": str(codebase)}
+    )
 
 
 def test_agents_are_shipped():

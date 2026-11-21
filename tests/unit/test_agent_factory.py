@@ -1,39 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Tests for AgentFactory tutorial-shape construction paths."""
+"""Tests for AgentFactory construction on a platform."""
 
 from unittest.mock import MagicMock
 
 import pytest
 from appinfra.log import Logger
 
-from llm_gent.core.agent import Agent, AgentFactory
-from llm_gent.core.platform import PlatformContext
+from llm_gent.core.agent import Agent
+from llm_gent.core.agent import Factory as AgentFactory
 from llm_gent.core.traits.builtin.directive import DirectiveTrait
+from llm_gent.core.traits.builtin.llm import LLMTrait
+from tests.helpers import make_platform
 
 
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture
+def mock_logger():
+    return MagicMock(spec=Logger)
+
+
+@pytest.fixture
+def platform(mock_logger):
+    return make_platform(mock_logger)
+
+
 class TestAgentFactoryConstruction:
-    """AgentFactory accepts either a bare Logger or a PlatformContext."""
+    """AgentFactory builds agents on the platform it is given."""
 
-    @pytest.fixture
-    def mock_logger(self):
-        return MagicMock(spec=Logger)
-
-    def test_bare_logger_synthesizes_platform(self, mock_logger):
-        factory = AgentFactory(mock_logger)
-
-        assert isinstance(factory._platform, PlatformContext)
-        assert factory._lg is mock_logger
-        assert factory._platform.llm_config() == {}
-        assert factory._platform.learn_config() is None
-
-    def test_platform_context_used_as_is(self, mock_logger):
-        platform = PlatformContext(lg=mock_logger, config={"llm": {"default": "x"}})
-
+    def test_uses_platform_and_its_logger(self, platform, mock_logger):
         factory = AgentFactory(platform)
 
         assert factory._platform is platform
@@ -43,15 +41,35 @@ class TestAgentFactoryConstruction:
         assert AgentFactory.agent_class is Agent
 
 
+class TestSharedClients:
+    """Agents built on one platform share its router."""
+
+    def test_agents_share_the_platform_router(self, platform):
+        factory = AgentFactory(platform)
+        config = {"traits": {"required": ["llm"]}}
+
+        first = factory.from_config({"identity": {"name": "a"}, **config})
+        second = factory.from_config({"identity": {"name": "b"}, **config})
+
+        assert first.require_trait(LLMTrait).router is platform.llm
+        assert second.require_trait(LLMTrait).router is platform.llm
+
+    def test_agent_does_not_close_the_shared_router(self, platform):
+        agent = AgentFactory(platform).from_config(
+            {"identity": {"name": "a"}, "traits": {"required": ["llm"]}}
+        )
+
+        agent.start()
+        agent.stop()
+
+        platform.llm.close.assert_not_called()
+
+
 class TestFromConfig:
     """AgentFactory.from_config wires a bare Agent from a dict, no subclass."""
 
-    @pytest.fixture
-    def mock_logger(self):
-        return MagicMock(spec=Logger)
-
-    def test_returns_bare_agent_without_traits(self, mock_logger):
-        factory = AgentFactory(mock_logger)
+    def test_returns_bare_agent_without_traits(self, platform):
+        factory = AgentFactory(platform)
 
         agent = factory.from_config({"identity": {"name": "hello"}})
 
@@ -59,8 +77,8 @@ class TestFromConfig:
         assert agent.name == "hello"
         assert agent.traits.count() == 0
 
-    def test_attaches_directive_via_required_list(self, mock_logger):
-        factory = AgentFactory(mock_logger)
+    def test_attaches_directive_via_required_list(self, platform):
+        factory = AgentFactory(platform)
 
         agent = factory.from_config(
             {
@@ -74,25 +92,25 @@ class TestFromConfig:
         assert directive is not None
         assert directive.directive.prompt == "You are a helpful assistant."
 
-    def test_accepts_dotdict_config(self, mock_logger):
+    def test_accepts_dotdict_config(self, platform):
         from appinfra import DotDict
 
-        factory = AgentFactory(mock_logger)
+        factory = AgentFactory(platform)
 
         agent = factory.from_config(DotDict(identity={"name": "hello"}))
 
         assert agent.name == "hello"
 
-    def test_missing_identity_raises(self, mock_logger):
+    def test_missing_identity_raises(self, platform):
         from llm_gent.core.errors import ConfigError
 
-        factory = AgentFactory(mock_logger)
+        factory = AgentFactory(platform)
 
         with pytest.raises(ConfigError, match="identity.name is required"):
             factory.from_config({"directive": "hi"})
 
-    def test_lifecycle_starts_attached_traits(self, mock_logger):
-        factory = AgentFactory(mock_logger)
+    def test_lifecycle_starts_attached_traits(self, platform):
+        factory = AgentFactory(platform)
 
         agent = factory.from_config(
             {
@@ -112,11 +130,7 @@ class TestFromConfig:
 class TestSubclassPathPreserved:
     """Existing subclass-based factory usage still works."""
 
-    @pytest.fixture
-    def mock_logger(self):
-        return MagicMock(spec=Logger)
-
-    def test_subclass_overrides_agent_class(self, mock_logger):
+    def test_subclass_overrides_agent_class(self, platform):
         class Custom(AgentFactory):
             pass
 
@@ -125,5 +139,5 @@ class TestSubclassPathPreserved:
 
         Custom.agent_class = CustomAgent
 
-        agent = Custom(mock_logger).from_config({"identity": {"name": "sub"}})
+        agent = Custom(platform).from_config({"identity": {"name": "sub"}})
         assert isinstance(agent, CustomAgent)

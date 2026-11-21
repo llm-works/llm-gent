@@ -353,7 +353,7 @@ class TestAgentExecution:
         """Create agent with SAIATrait attached."""
         from llm_gent.agents.default import Agent as DefaultAgent
         from llm_gent.agents.default.factory import Factory
-        from llm_gent.core.platform import PlatformContext
+        from tests.helpers import make_platform
 
         agent = DefaultAgent(
             lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="Test task")
@@ -361,10 +361,7 @@ class TestAgentExecution:
         agent._traits.register(mock_saia_trait)
 
         # Register event handlers using factory's method (handlers now live in factory)
-        # Create a minimal mock platform just for the logger
-        mock_platform = MagicMock(spec=PlatformContext)
-        mock_platform.logger = mock_logger
-        factory = Factory(mock_platform)
+        factory = Factory(make_platform(mock_logger))
         factory._configure_event_handlers(agent, {})  # Empty config = use defaults
 
         return agent
@@ -599,27 +596,10 @@ class TestFactorySystemPrompt:
 
     def _create_factory(self, mock_logger):
         """Create Factory instance."""
-        from unittest.mock import MagicMock
-
         from llm_gent.agents.default import Factory
-        from llm_gent.core.traits.factory import TraitFactory
+        from tests.helpers import make_platform
 
-        # Create mock platform context
-        mock_platform = MagicMock()
-        mock_platform.logger = mock_logger
-        mock_platform.llm_config.return_value = {
-            "default": "local",
-            "backends": {
-                "local": {
-                    "type": "openai_compatible",
-                    "base_url": "http://localhost:8000/v1",
-                    "model": "test",
-                }
-            },
-        }
-        # Create a real trait factory for the mock platform
-        mock_platform.trait_factory = TraitFactory(mock_platform)
-        return Factory(platform=mock_platform)
+        return Factory(platform=make_platform(mock_logger))
 
     def test_system_prompt_with_identity_only(self, mock_logger):
         """System prompt contains identity when only identity is configured."""

@@ -106,12 +106,11 @@ class TestName:
 class TestSetup:
     @patch("llm_gent.runtime.service.ManagedAgentRunner")
     @patch("llm_gent.runtime.service.AgentService._load_factory")
-    @patch("llm_gent.core.platform.PlatformContext.from_config")
+    @patch("llm_gent.runtime.service.PlatformFactory")
     def test_creates_platform_factory_agent_runner(
-        self, mock_from_config, mock_load_factory, mock_runner_cls, service
+        self, mock_platform_factory, mock_load_factory, mock_runner_cls, service
     ):
-        mock_platform = MagicMock()
-        mock_from_config.return_value = mock_platform
+        mock_platform = mock_platform_factory.return_value.from_config.return_value
 
         mock_factory = MagicMock()
         mock_agent = MagicMock()
@@ -120,10 +119,9 @@ class TestSetup:
 
         service.setup()
 
-        mock_from_config.assert_called_once_with(
-            lg=service._lg,
-            llm_config=service._llm_config,
-            learn_config=service._learn_config,
+        mock_platform_factory.assert_called_once_with(service._lg)
+        mock_platform_factory.return_value.from_config.assert_called_once_with(
+            {"llm": service._llm_config, "memory": service._learn_config}
         )
         mock_load_factory.assert_called_once_with(mock_platform)
         mock_factory.create.assert_called_once_with(service._config, variables=service._variables)
@@ -133,9 +131,41 @@ class TestSetup:
 
     @patch("llm_gent.runtime.service.ManagedAgentRunner")
     @patch("llm_gent.runtime.service.AgentService._load_factory")
-    @patch("llm_gent.core.platform.PlatformContext.from_config")
+    @patch("llm_gent.runtime.service.PlatformFactory")
+    def test_failed_agent_build_closes_platform(
+        self, mock_platform_factory, mock_load_factory, mock_runner_cls, service
+    ):
+        mock_platform = mock_platform_factory.return_value.from_config.return_value
+        mock_load_factory.return_value.create.side_effect = RuntimeError("bad config")
+
+        with pytest.raises(RuntimeError, match="bad config"):
+            service.setup()
+
+        mock_platform.close.assert_called_once()
+        mock_runner_cls.assert_not_called()
+
+    @patch("llm_gent.runtime.service.ManagedAgentRunner")
+    @patch("llm_gent.runtime.service.AgentService._load_factory")
+    @patch("llm_gent.runtime.service.PlatformFactory")
+    def test_failed_runner_build_stops_agent_then_closes_platform(
+        self, mock_platform_factory, mock_load_factory, mock_runner_cls, service
+    ):
+        order = MagicMock()
+        mock_platform_factory.return_value.from_config.return_value = order.platform
+        mock_load_factory.return_value.create.return_value = order.agent
+        mock_runner_cls.side_effect = RuntimeError("bad runner")
+
+        with pytest.raises(RuntimeError, match="bad runner"):
+            service.setup()
+
+        assert [c[0] for c in order.mock_calls] == ["agent.start", "agent.stop", "platform.close"]
+        assert service._runner is None
+
+    @patch("llm_gent.runtime.service.ManagedAgentRunner")
+    @patch("llm_gent.runtime.service.AgentService._load_factory")
+    @patch("llm_gent.runtime.service.PlatformFactory")
     def test_passes_schedule_interval(
-        self, mock_from_config, mock_load_factory, mock_runner_cls, lg, llm_config, bus_config
+        self, mock_platform_factory, mock_load_factory, mock_runner_cls, lg, llm_config, bus_config
     ):
         cfg = DotDict({"schedule": {"interval": "30"}})
         svc = AgentService(
@@ -155,23 +185,45 @@ class TestSetup:
 
 
 # =============================================================================
-# execute()
+# run()
 # =============================================================================
 
 
-class TestExecute:
+class TestRun:
     def test_raises_when_no_runner(self, service):
         with pytest.raises(RuntimeError, match="setup.*must be called"):
-            service.execute()
+            service.run()
 
     def test_calls_runner_run(self, service):
         runner = MagicMock()
         service._runner = runner
 
-        service.execute()
+        service.run()
 
         assert service._healthy is True
         runner.run.assert_called_once()
+
+    def test_closes_platform_after_runner_stops(self, service):
+        order = MagicMock()
+        service._runner = order.runner
+        service._platform = order.platform
+
+        service.run()
+
+        assert [c[0] for c in order.mock_calls] == ["runner.run", "platform.close"]
+        assert service._platform is None
+
+    def test_closes_platform_when_runner_raises(self, service):
+        runner = MagicMock()
+        runner.run.side_effect = RuntimeError("crashed")
+        platform = MagicMock()
+        service._runner = runner
+        service._platform = platform
+
+        with pytest.raises(RuntimeError, match="crashed"):
+            service.run()
+
+        platform.close.assert_called_once()
 
     def test_sets_healthy_before_run(self, service):
         """Healthy flag is set before runner.run() is called."""
@@ -185,7 +237,7 @@ class TestExecute:
         runner.run.side_effect = capture_healthy
         service._runner = runner
 
-        service.execute()
+        service.run()
 
         assert healthy_at_run_time is True
 
@@ -221,14 +273,14 @@ class TestIsHealthy:
     def test_initially_false(self, service):
         assert service.is_healthy() is False
 
-    def test_true_after_execute(self, service):
+    def test_true_after_run(self, service):
         service._runner = MagicMock()
-        service.execute()
+        service.run()
         assert service.is_healthy() is True
 
     def test_false_after_teardown(self, service):
         service._runner = MagicMock()
-        service.execute()
+        service.run()
         service.teardown()
         assert service.is_healthy() is False
 

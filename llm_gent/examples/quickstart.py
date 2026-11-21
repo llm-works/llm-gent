@@ -7,31 +7,27 @@
 
 """Quickstart for llm-gent.
 
-Tutorial-shape agent construction:
+- :class:`PlatformFactory` builds the platform: the model router every agent
+  shares, from the packaged ``etc/llm.yaml`` with ``--base-url`` / ``--model``
+  on its ``local`` backend.
+- :meth:`AgentFactory.from_config` builds a plain :class:`Agent` on that
+  platform, with the traits ``traits.required`` names.
+- ``DirectiveTrait`` prepends its directive as a system message on
+  ``LLMTrait.complete()``.
 
-- :class:`AgentFactory` takes a bare :class:`~appinfra.log.Logger`; no
-  :class:`~llm_gent.core.platform.PlatformContext` boilerplate.
-- :meth:`AgentFactory.from_config` builds and returns a plain concrete
-  :class:`Agent` with traits attached — no subclass required.
-- Config is a plain dict with a nested identity block plus per-trait keys and
-  ``traits.required`` selecting which traits to attach.
-- ``DirectiveTrait`` auto-prepends its directive as a system message on
-  ``LLMTrait.complete()`` — no manual wiring.
-
-Pass ``--smoke`` to swap in a stub router that returns a canned response
-without contacting a real backend.
+Pass ``--smoke`` to run on llm-infer's scripted client instead of a backend.
 """
 
 from __future__ import annotations
 
-import os
 import sys
-from typing import Any, cast
+from typing import Any
 
 from appinfra.app import AppBuilder
-from llm_infer.client import ChatClient, ChatResponse
+from llm_infer.client import ChatRequest, ChatResponse
+from llm_infer.client import Factory as LLMInferFactory
 
-from llm_gent import AgentFactory, LLMTrait
+from llm_gent import AgentFactory, LLMTrait, PlatformFactory
 
 
 app = (
@@ -45,63 +41,41 @@ app = (
 )
 
 
-class _StubRouter:
-    """Stub ChatClient used when --smoke is passed."""
-
-    def chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> ChatResponse:
-        return ChatResponse(content="Hello from smoke-mode stub!")
-
-    def close(self) -> None:
-        pass
+def _smoke_answer(request: ChatRequest) -> ChatResponse:
+    """The ``--smoke`` model's reply."""
+    return ChatResponse(content="Hello from the scripted model!")
 
 
-def _llm_config() -> dict[str, Any]:
-    """Point LLMTrait at a local OpenAI-compatible endpoint by default.
-
-    Override the endpoint and model with ``LLM_GENT_BASE_URL`` and
-    ``LLM_GENT_MODEL`` env vars; the openai_compatible backend picks up
-    ``OPENAI_API_KEY`` from the environment automatically.
-    """
-    return {
-        "default": "local",
-        "backends": {
-            "local": {
-                "type": "openai_compatible",
-                "base_url": os.getenv("LLM_GENT_BASE_URL", "http://localhost:8000/v1"),
-                "model": os.getenv("LLM_GENT_MODEL", "default"),
-            }
-        },
-    }
+def _llm_config(base_url: str | None, model: str | None) -> dict[str, Any]:
+    """``--base-url`` / ``--model`` on the packaged ``local`` backend."""
+    local = {k: v for k, v in (("base_url", base_url), ("model", model)) if v}
+    return {"backends": {"local": local}} if local else {}
 
 
 @app.tool(name="run", help="Run the hello-agent example")
-@app.argument(
-    "--smoke",
-    action="store_true",
-    help="Swap in a stub router (no real backend contacted)",
-)
+@app.argument("--base-url", help="OpenAI-compatible endpoint (default: etc/llm.yaml)")
+@app.argument("--model", help="Model name (default: etc/llm.yaml)")
+@app.argument("--smoke", action="store_true", help="Scripted model; no backend contacted")
 def run(self: Any) -> int:
-    agent = AgentFactory(self.lg).from_config(
-        {
-            "identity": {"name": "hello-agent"},
-            "llm": _llm_config(),
-            "directive": "You are a concise assistant.",
-            "traits": {"required": ["llm", "directive"]},
-        }
-    )
-    agent.start()
-
-    llm = agent.require_trait(LLMTrait)
+    factory = PlatformFactory(self.lg)
     if self.args.smoke:
-        # _StubRouter is a minimal duck-type stub; cast acknowledges the
-        # deliberate contract-narrowing for the smoke path.
-        agent.replace_trait(llm.with_router(cast(ChatClient, _StubRouter())))
-        llm = agent.require_trait(LLMTrait)
-
-    result = llm.complete([{"role": "user", "content": "Say hello."}])
+        factory = factory.with_llm(LLMInferFactory(self.lg).scripted(_smoke_answer))
+    with factory.from_config({"llm": _llm_config(self.args.base_url, self.args.model)}) as platform:
+        agent = AgentFactory(platform).from_config(
+            {
+                "identity": {"name": "hello-agent"},
+                "directive": "You are a concise assistant.",
+                "traits": {"required": ["llm", "directive"]},
+            }
+        )
+        agent.start()
+        try:
+            result = agent.require_trait(LLMTrait).complete(
+                [{"role": "user", "content": "Say hello."}]
+            )
+        finally:
+            agent.stop()
     print(f"agent said: {result.content}")
-
-    agent.stop()
     return 0
 
 

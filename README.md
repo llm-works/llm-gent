@@ -38,37 +38,29 @@ push. `requires-python = ">=3.11"`.
 ```python
 from appinfra.log import create_lg
 
-from llm_gent import AgentFactory, LLMTrait
+from llm_gent import AgentFactory, LLMTrait, PlatformFactory
 
 lg = create_lg("my-agent", "info")
 
-agent = AgentFactory(lg).from_config(
-    {
-        "identity": {"name": "my-agent"},
-        "llm": {
-            "default": "local",
-            "backends": {
-                "local": {
-                    "type": "openai_compatible",
-                    "base_url": "http://localhost:8000/v1",
-                    "model": "default",
-                }
-            },
-        },
-        "directive": "You are a helpful assistant.",
-        "traits": {"required": ["llm", "directive"]},
-    }
-)
-
-agent.start()
-llm = agent.require_trait(LLMTrait)
-result = llm.complete([{"role": "user", "content": "Hello!"}])
-print(result.content)
-agent.stop()
+llm = {"backends": {"local": {"base_url": "http://localhost:8000/v1", "model": "default"}}}
+with PlatformFactory(lg).from_config({"llm": llm}) as platform:
+    agent = AgentFactory(platform).from_config(
+        {
+            "identity": {"name": "my-agent"},
+            "directive": "You are a helpful assistant.",
+            "traits": {"required": ["llm", "directive"]},
+        }
+    )
+    agent.start()
+    result = agent.require_trait(LLMTrait).complete([{"role": "user", "content": "Hello!"}])
+    print(result.content)
+    agent.stop()
 ```
 
-A runnable version of this example lives at `llm_gent/examples/quickstart.py`. Pass
-`--smoke` to run it against a stub LLM router (no real backend contacted).
+The platform builds the model router once from the packaged `etc/llm.yaml`, with the `llm`
+settings merged on top, and every agent built on it shares that router. A runnable version of
+this example lives at `llm_gent/examples/quickstart.py`. Pass `--smoke` to run it on llm-infer's
+scripted model (no real backend contacted).
 
 ## Core Concepts
 

@@ -19,7 +19,7 @@ from .builtin import (
     WebSearchTool,
 )
 from .executor import SimpleToolExecutor, ToolExecutionResult
-from .factory import ToolFactory
+from .factory import Factory
 from .names import ALL_TOOLS, ToolName
 from .registry import Registry
 
@@ -35,7 +35,7 @@ __all__ = [
     "ToolName",
     "ALL_TOOLS",
     # Factory & Registry
-    "ToolFactory",
+    "Factory",
     "Registry",
     # Executor
     "SimpleToolExecutor",

@@ -3,57 +3,129 @@
 
 """Tests for agent infrastructure: platform, helpers, dispatcher, caller, factory."""
 
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from appinfra import DotDict
 
-from llm_gent.core.agent.factory import AgentFactory
+from llm_gent.core.agent.factory import Factory as AgentFactory
 from llm_gent.core.agent.helpers import _substitute_in_dict
 from llm_gent.core.dispatcher import Dispatcher
 from llm_gent.core.llm.caller import LLMCaller
-from llm_gent.core.platform import PlatformContext
+from llm_gent.core.platform import Config, Context
+from tests.helpers import make_platform
 
 
 pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
-# PlatformContext
+# Platform context
 # ---------------------------------------------------------------------------
 
 
+def _context(lg, owned):
+    """A context owning ``owned``, on stub clients and factories."""
+    return Context(
+        lg,
+        Config(),
+        llm=MagicMock(),
+        memory=None,
+        trait_factory=MagicMock(),
+        tool_factory=MagicMock(),
+        owned=owned,
+    )
+
+
 class TestPlatformContext:
-    def test_init(self):
+    def test_holds_what_it_was_given(self):
         lg = MagicMock()
-        ctx = PlatformContext(lg, config={"llm": {"model": "test"}})
+        router = MagicMock()
+
+        ctx = make_platform(lg, router=router)
 
         assert ctx.logger is lg
-        assert ctx.config == {"llm": {"model": "test"}}
+        assert ctx.llm is router
+        assert ctx.memory is None
         assert ctx.trait_factory is not None
         assert ctx.tool_factory is not None
 
-    def test_from_config(self):
+    def test_close_closes_owned_once(self):
+        owned = MagicMock()
+        ctx = _context(MagicMock(), [owned])
+
+        ctx.close()
+        ctx.close()
+
+        owned.close.assert_called_once()
+
+    def test_close_does_not_touch_injected_router(self):
+        ctx = _context(MagicMock(), [])
+
+        ctx.close()
+
+        ctx.llm.close.assert_not_called()
+
+    def test_close_continues_after_a_failure(self):
         lg = MagicMock()
-        ctx = PlatformContext.from_config(
-            lg, llm_config={"model": "test"}, learn_config={"db": "x"}
-        )
+        failing, other = MagicMock(), MagicMock()
+        failing.close.side_effect = RuntimeError("boom")
 
-        assert ctx.llm_config() == {"model": "test"}
-        assert ctx.learn_config() == {"db": "x"}
+        _context(lg, [failing, other]).close()
 
-    def test_llm_config_default(self):
-        ctx = PlatformContext(MagicMock(), config={})
-        assert ctx.llm_config() == {}
+        other.close.assert_called_once()
+        lg.warning.assert_called_once()
 
-    def test_learn_config_none(self):
-        ctx = PlatformContext(MagicMock(), config={})
-        assert ctx.learn_config() is None
+    def test_with_block_closes(self):
+        owned = MagicMock()
 
-    def test_cleanup(self):
-        lg = MagicMock()
-        ctx = PlatformContext(lg, config={})
-        ctx.cleanup()  # Should not raise
+        with _context(MagicMock(), [owned]):
+            owned.close.assert_not_called()
+
+        owned.close.assert_called_once()
+
+    async def test_async_with_closes_async_clients_then_sync(self):
+        owned = MagicMock()
+        owned.aclose = AsyncMock()
+
+        async with _context(MagicMock(), [owned]):
+            pass
+
+        owned.aclose.assert_awaited_once()
+        owned.close.assert_called_once()
+
+    async def test_concurrent_aclose_closes_once(self):
+        async def yield_once():
+            await asyncio.sleep(0)
+
+        owned = MagicMock()
+        owned.aclose = AsyncMock(side_effect=yield_once)
+        ctx = _context(MagicMock(), [owned])
+
+        await asyncio.gather(ctx.aclose(), ctx.aclose())
+
+        owned.aclose.assert_awaited_once()
+        owned.close.assert_called_once()
+
+    async def test_cancelled_aclose_still_closes_sync_side(self):
+        first, second = MagicMock(), MagicMock()
+        first.aclose = AsyncMock(side_effect=asyncio.CancelledError)
+        second.aclose = AsyncMock()
+        ctx = _context(MagicMock(), [first, second])
+
+        with pytest.raises(asyncio.CancelledError):
+            await ctx.aclose()
+
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+
+    async def test_aclose_skips_resources_without_aclose(self):
+        owned = MagicMock(spec=["close"])
+
+        await _context(MagicMock(), [owned]).aclose()
+
+        owned.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +316,7 @@ class TestLLMCaller:
 
 class TestCoreAgentFactory:
     def test_agent_class_not_set_raises(self):
-        platform = PlatformContext(MagicMock(), config={"llm": {}})
+        platform = make_platform(MagicMock())
 
         class BadFactory(AgentFactory):
             agent_class = None

@@ -1,29 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Trait factory for creating Trait instances from configuration.
+"""Trait factory: builds traits on the platform's shared clients.
 
 Dependency-inversion pattern
 ----------------------------
 
-Traits receive their external dependencies through the constructor; this
-factory owns the construction of those dependencies. Traits import no
-resource factory of their own.
+Traits receive their external dependencies through the constructor; they
+import no resource factory of their own. :class:`PlatformFactory` builds the
+shared clients once per platform (the model router, and the memory database,
+chat client and embedder) and gives them to this factory, which injects them
+into each trait it builds with ``owns_*=False``: the platform closes them,
+not the trait.
 
-Concretely:
-
-- ``_create_llm`` builds the ``ChatClient`` router (via
-  ``llm_infer.client.Factory``) and passes it to ``LLMTrait`` with
-  ``owns_router=True``.
-- ``_create_memory`` builds ``PG`` + ``Database`` + ``ChatClient`` +
-  ``EmbeddingClient`` and passes them to ``MemoryTrait`` with
-  ``owns_chat_client=True`` and ``owns_embedder=True`` (when configured).
-- ``_create_training`` leaves ``TrainFactory`` unbuilt — the trait builds
-  it lazily on first lookup to preserve the "no I/O in on_start" contract.
-
-The trait's ``on_stop`` closes each factory-built resource iff its
-``owns_*`` flag is True; injected resources keep their lifecycle with
-whoever passed them in.
+One exception builds a client here: an agent whose config overrides ``llm``
+(another default backend, or backend settings such as an adapter) gets a
+router of its own, built from the platform's router config with the
+override merged in, and owned by its trait (``owns_router=True``).
 
 Runtime override
 ----------------
@@ -38,54 +31,74 @@ persistent swap.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from appinfra import DotDict
+from appinfra.log import Logger
 from llm_infer.client import ChatClient, EmbeddingClient
-from llm_infer.client import Factory as LLMClientFactory
 from llm_kelt.core import Database
+
+from ..llm.config import merge_llm_config
+from .base import Trait
 
 
 if TYPE_CHECKING:
     from ..agent import Agent, Identity
-    from ..platform import PlatformContext
     from . import TraitName
     from .builtin.directive import Directive, DirectiveTrait, MethodTrait
     from .builtin.llm import LLMConfig, LLMTrait
     from .builtin.memory import MemoryConfig, MemoryTrait
     from .builtin.training import TrainingTrait
 
-from .base import Trait
+
+@dataclass(frozen=True)
+class MemoryResources:
+    """The memory clients a platform shares: its database, chat client and embedder."""
+
+    database: Database
+    chat_client: ChatClient
+    embedder: EmbeddingClient | None = None
 
 
-class TraitFactory:
-    """Factory for creating Trait instances from configuration.
+class Factory:
+    """Builds traits on the platform's shared clients.
 
-    Has reference to platform for accessing configs.
+    Built by :class:`PlatformFactory`; the platform owns the injected clients.
 
     Example:
-        trait_factory = TraitFactory(platform)
-
-        # Generic creation
-        trait = trait_factory.create(TraitName.LLM, agent)
-
-        # Or direct
-        llm_trait = trait_factory.create_llm_trait(agent, platform.llm_config())
+        platform = PlatformFactory(lg).from_config({})
+        llm_trait = platform.trait_factory.create(TraitName.LLM, agent)
     """
 
-    def __init__(self, platform: PlatformContext) -> None:
-        """Initialize factory.
+    def __init__(
+        self,
+        lg: Logger,
+        llm_config: Mapping[str, Any],
+        router: ChatClient,
+        *,
+        memory_config: Mapping[str, Any] | None = None,
+        memory: MemoryResources | None = None,
+    ) -> None:
+        """Initialize the factory with the platform's shared clients.
 
         Args:
-            platform: Platform context for accessing configs and logger.
+            lg: Logger instance.
+            llm_config: The platform's router config; the defaults LLM traits read.
+            router: The platform's shared router.
+            memory_config: The platform's memory settings, or None.
+            memory: The platform's shared memory clients, or None without a
+                memory database.
         """
         from . import TraitName
 
-        self._platform = platform
-        self._lg = platform.logger
+        self._lg = lg
+        self._llm_config = DotDict(llm_config)
+        self._router = router
+        self._memory_config = memory_config
+        self._memory = memory
 
-        # Map trait types to creator functions
         self._creators: dict[TraitName, Callable[..., Trait]] = {
             TraitName.DIRECTIVE: self._create_directive,
             TraitName.LLM: self._create_llm,
@@ -101,17 +114,17 @@ class TraitFactory:
         trait_name: TraitName,
         agent: Agent,
     ) -> Trait:
-        """Create a trait by name - uses mapping to route to specific creators.
+        """Create a trait by name.
 
         Args:
             trait_name: Trait type (TraitName enum).
-            agent: Agent instance that will own this trait (accesses agent.config and agent.identity).
+            agent: Agent the trait is for (its config and identity are read).
 
         Returns:
             Created trait instance.
 
         Raises:
-            ConfigError: If required configuration missing or trait type unknown.
+            ConfigError: If required configuration is missing or the trait type is unknown.
         """
         from ..errors import ConfigError
 
@@ -126,82 +139,45 @@ class TraitFactory:
         return self.create_directive_trait(agent, agent.config.get("directive"))
 
     def _create_llm(self, agent: Agent) -> LLMTrait:
-        """Route to create_llm_trait.
-
-        Merges agent-level llm config (from agent YAML) with global llm config.
+        """An LLM trait on the shared router, or on a router of its own when the agent overrides llm.
 
         Agent config formats:
             llm: anthropic                    # Select backend (simplest)
             llm: { default: anthropic }       # Explicit default
             llm: { default: local, backends: { local: { adapter: x } } }  # Select + override
         """
-        llm_config: DotDict = DotDict(self._platform.llm_config())
+        from .builtin.llm import LLMTrait
 
-        agent_llm_config = agent.config.get("llm")
-        if agent_llm_config:
-            # String shorthand: "llm: anthropic" -> select that backend
-            if isinstance(agent_llm_config, str):
-                llm_config = DotDict({**dict(llm_config), "default": agent_llm_config})
-            else:
-                llm_config = self._merge_llm_config(llm_config, agent_llm_config)
-
-        return self.create_llm_trait(agent, llm_config)
-
-    def _merge_llm_config(self, base: DotDict, override: dict[str, Any]) -> DotDict:
-        """Merge agent-level llm config into global config.
-
-        Performs deep merge at the backends level, so agent can override
-        specific backend settings (like adapter) without replacing
-        the entire backend config.
-        """
-        import copy
-
-        result = copy.deepcopy(dict(base))
-
-        # Merge backends
-        if "backends" in override and "backends" in result:
-            result_backends = cast(dict[str, Any], result["backends"])
-            for backend_name, backend_override in override["backends"].items():
-                if backend_name in result_backends:
-                    # Skip None backends (from YAML with all content commented out)
-                    if backend_override and result_backends[backend_name] is not None:
-                        result_backends[backend_name].update(backend_override)
-                else:
-                    result_backends[backend_name] = backend_override
-        elif "backends" in override:
-            result["backends"] = override["backends"]
-
-        # Merge top-level keys (except backends, already handled)
-        for key, value in override.items():
-            if key != "backends":
-                result[key] = value
-
-        return DotDict(result)
+        override = agent.config.get("llm")
+        if not override:
+            return LLMTrait(agent, self._router, self._llm_config, owns_router=False)
+        if isinstance(override, str):
+            override = {"default": override}
+        return self.create_llm_trait(agent, DotDict(merge_llm_config(self._llm_config, override)))
 
     def _create_memory(self, agent: Agent) -> MemoryTrait:
         """Route to create_memory_trait.
 
-        Merges platform learn config with agent-level kelt config (schema, identity overrides).
-        Platform config key is still ``learn`` (see PlatformContext.learn_config).
+        Merges the platform's memory settings with the agent's ``kelt`` config
+        (its schema override).
         """
-        learn_config_raw = self._platform.learn_config()
-        learn_config: DotDict | None = DotDict(learn_config_raw) if learn_config_raw else None
+        memory_config: DotDict | None = (
+            DotDict(dict(self._memory_config)) if self._memory_config else None
+        )
 
-        # Merge agent's kelt.schema config (dict with name/enforce)
         agent_kelt = agent.config.get("kelt", {})
-        if agent_kelt and learn_config and agent_kelt.get("schema"):
-            learn_config["schema"] = agent_kelt["schema"]
+        if agent_kelt and memory_config and agent_kelt.get("schema"):
+            memory_config["schema"] = agent_kelt["schema"]
 
-        return self.create_memory_trait(agent, agent.identity, learn_config)
+        return self.create_memory_trait(agent, agent.identity, memory_config)
 
     def _create_training(self, agent: Agent) -> TrainingTrait:
         """Route to create_training_trait.
 
-        Reads schema + adapters from platform learn config (kelt-side settings share
-        that block on disk). Agent-level kelt.schema overrides platform schema.
+        Reads schema and adapters from the platform's memory settings; the
+        agent's ``kelt.schema`` overrides the schema.
         """
-        learn_config_raw = self._platform.learn_config()
-        source: dict[str, Any] = dict(learn_config_raw) if learn_config_raw else {}
+        source: dict[str, Any] = dict(self._memory_config) if self._memory_config else {}
 
         agent_kelt = agent.config.get("kelt", {})
         if agent_kelt and agent_kelt.get("schema"):
@@ -228,22 +204,20 @@ class TraitFactory:
         return self.create_method_trait(agent, agent.config.get("method"))
 
     def create_llm_trait(self, agent: Agent, llm_config: LLMConfig | None) -> LLMTrait:
-        """Create LLMTrait with LLM backend configuration.
+        """Create an LLMTrait with a router of its own, built from ``llm_config``.
 
-        Builds the ``ChatClient`` here (owning its lifecycle) and injects it
-        into ``LLMTrait``. The trait itself imports no factory. See
-        ``LLMTrait`` docstring for the two seams (config-time build vs
-        direct injection).
+        The trait owns the router (``owns_router=True``) and closes it on stop.
+        Agents without an llm override use the platform's shared router instead.
 
         Args:
-            agent: Agent instance that will own this trait.
+            agent: Agent the trait is for.
             llm_config: LLM backend configuration dict.
 
         Returns:
-            Configured LLMTrait instance with a factory-owned router.
+            Configured LLMTrait instance with a trait-owned router.
 
         Raises:
-            ConfigError: If llm_config is None or invalid.
+            ConfigError: If llm_config is None or empty.
         """
         from llm_infer.client import Factory as LLMClientFactory
 
@@ -254,14 +228,10 @@ class TraitFactory:
             raise ConfigError("LLM configuration required but not provided")
 
         self._lg.trace(
-            "building LLM router...",
+            "building agent LLM router...",
             extra={"agent": agent.name, "default": llm_config.get("default")},
         )
         router = LLMClientFactory(agent.lg).from_config(llm_config)
-        self._lg.trace(
-            "LLM router built",
-            extra={"agent": agent.name, "owns_router": True},
-        )
         return LLMTrait(agent, router, llm_config, owns_router=True)
 
     def create_directive_trait(
@@ -270,7 +240,7 @@ class TraitFactory:
         """Create DirectiveTrait from string or dict config.
 
         Args:
-            agent: Agent instance that will own this trait.
+            agent: Agent the trait is for.
             config: Directive prompt string or dict with 'prompt' key.
 
         Returns:
@@ -301,46 +271,39 @@ class TraitFactory:
     def create_memory_trait(
         self, agent: Agent, identity: Identity | None, memory_config: MemoryConfig | None
     ) -> MemoryTrait:
-        """Create MemoryTrait with factory-owned database, chat client, and embedder.
+        """Create a MemoryTrait on the platform's shared memory clients.
 
-        Builds the three external clients here (owning their lifecycle) and
-        injects them into ``MemoryTrait``. The trait itself imports no factory.
-        See ``MemoryTrait`` docstring for the two seams (config-time build vs
-        direct injection via ``.with_*()``).
+        The database, chat client and embedder are the platform's; the trait
+        does not close them (``owns_chat_client=False``, ``owns_embedder=False``).
 
         Args:
-            agent: Agent instance that will own this trait.
+            agent: Agent the trait is for.
             identity: Agent's identity for memory addressing.
-            memory_config: Memory configuration dict (db, embedder_url, etc.).
+            memory_config: Memory settings (``db``, ``schema``, ``llm``, ...).
 
         Returns:
-            Configured MemoryTrait with factory-owned chat client and embedder
-            (``owns_chat_client=True``, ``owns_embedder=True`` when configured).
+            Configured MemoryTrait.
 
         Raises:
-            ConfigError: If memory_config is None or missing required fields.
+            ConfigError: If memory_config is None or missing required fields, or
+                the platform has no memory clients.
         """
+        from ..errors import ConfigError
         from .builtin.memory import MemoryTrait
 
         config = self._build_memory_config(identity, memory_config)
-        database = self._build_memory_database(agent, config)
-        chat_client, embedder = self._build_memory_clients(agent, config)
+        if self._memory is None:
+            raise ConfigError("Memory trait requires a platform built with memory configuration")
 
-        try:
-            return MemoryTrait(
-                agent,
-                config,
-                database=database,
-                chat_client=chat_client,
-                embedder=embedder,
-                owns_chat_client=True,
-                owns_embedder=embedder is not None,
-            )
-        except Exception:
-            chat_client.close()
-            if embedder is not None:
-                embedder.close()
-            raise
+        return MemoryTrait(
+            agent,
+            config,
+            database=self._memory.database,
+            chat_client=self._memory.chat_client,
+            embedder=self._memory.embedder,
+            owns_chat_client=False,
+            owns_embedder=False,
+        )
 
     def _build_memory_config(
         self, identity: Identity | None, memory_config: MemoryConfig | None
@@ -367,72 +330,13 @@ class TraitFactory:
             training=memory_config.get("training"),
         )
 
-    def _build_memory_database(self, agent: Agent, config: MemoryConfig) -> Database:
-        """Build the kelt Database wrapper from the memory config."""
-        from appinfra.db.pg import PG
-
-        self._lg.trace("building memory database...", extra={"agent": agent.name})
-        database = Database(agent.lg, PG(agent.lg, config.db))
-        self._lg.trace("memory database built", extra={"agent": agent.name})
-        return database
-
-    def _build_memory_clients(
-        self, agent: Agent, config: MemoryConfig
-    ) -> tuple[ChatClient, EmbeddingClient | None]:
-        """Build the chat client and (optional) embedder from the memory config."""
-        from llm_infer.client import Factory as LLMClientFactory
-
-        client_factory = LLMClientFactory(agent.lg)
-        self._lg.trace("building memory chat client...", extra={"agent": agent.name})
-        chat_client = client_factory.from_config(config.get("llm") or DotDict())
-        self._lg.trace(
-            "memory chat client built",
-            extra={"agent": agent.name, "owns_chat_client": True},
-        )
-
-        embedder: EmbeddingClient | None = None
-        if config.embedder_url:
-            embedder = self._build_memory_embedder(agent, config, client_factory, chat_client)
-        return chat_client, embedder
-
-    def _build_memory_embedder(
-        self,
-        agent: Agent,
-        config: MemoryConfig,
-        client_factory: LLMClientFactory,
-        chat_client: ChatClient,
-    ) -> EmbeddingClient:
-        """Build the memory embedder; close chat_client on failure to prevent leak."""
-        self._lg.trace(
-            "building memory embedder...",
-            extra={
-                "agent": agent.name,
-                "url": config.embedder_url,
-                "model": config.embedder_model,
-            },
-        )
-        try:
-            embedder: EmbeddingClient = client_factory.embeddings(
-                base_url=config.embedder_url,
-                model=config.embedder_model,
-                timeout=config.embedder_timeout,
-            )
-        except Exception:
-            chat_client.close()
-            raise
-        self._lg.trace(
-            "memory embedder built",
-            extra={"agent": agent.name, "owns_embedder": True},
-        )
-        return embedder
-
     def create_training_trait(
         self, agent: Agent, source_config: dict[str, Any] | None
     ) -> TrainingTrait:
         """Create TrainingTrait from a config with schema + adapters keys.
 
         Args:
-            agent: Agent instance that will own this trait.
+            agent: Agent the trait is for.
             source_config: Config dict; ``schema`` (name/enforce) and ``adapters``
                 (lora.base_path) are read. Missing keys yield an empty TrainingTrait
                 that falls back to the default schema for every lookup.
@@ -453,7 +357,7 @@ class TraitFactory:
         """Create MethodTrait from method string.
 
         Args:
-            agent: Agent instance that will own this trait.
+            agent: Agent the trait is for.
             method: Method/approach description.
 
         Returns:

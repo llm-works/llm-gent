@@ -7,7 +7,7 @@ Wraps agent creation and execution as an appinfra Service so it can
 be managed by ThreadRunner or ProcessRunner.
 
 For ProcessRunner: the service is pickled and sent to a subprocess.
-ProcessRunner injects ``_lg`` and ``_shutdown_event`` before execute().
+ProcessRunner injects ``_lg`` and ``_shutdown_event`` before run().
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 from appinfra import DotDict
 from appinfra.service import Service
 
+from ..core.platform import Context
+from ..core.platform import Factory as PlatformFactory
 from .runner import ManagedAgentRunner
 
 
@@ -34,12 +36,12 @@ class AgentService(Service):
 
     Lifecycle:
     - setup(): Create platform, factory, agent, start agent
-    - execute(): Run the AgentRunner (blocks until shutdown)
+    - run(): Run the AgentRunner (blocks until shutdown)
     - teardown(): Signal runner to stop
     - is_healthy(): True once runner is connected to bus
 
     For ProcessRunner, ``_lg`` and ``_shutdown_event`` are injected
-    before execute(). The shutdown watcher thread bridges the mp.Event
+    before run(). The shutdown watcher thread bridges the mp.Event
     to the runner's ``_running`` flag.
     """
 
@@ -63,8 +65,9 @@ class AgentService(Service):
         self._variables = variables or {}
         self._factory_module = factory_module
         self._runner: ManagedAgentRunner | None = None
+        self._platform: Context | None = None
         self._healthy = False
-        # Injected by ProcessRunner before execute()
+        # Injected by ProcessRunner before run()
         self._shutdown_event: MPEvent | None = None
 
     @property
@@ -73,32 +76,50 @@ class AgentService(Service):
 
     def setup(self) -> None:
         """Create platform, load factory, create and start agent."""
-        from ..core.platform import PlatformContext
-
-        platform = PlatformContext.from_config(
-            lg=self._lg,
-            llm_config=self._llm_config,
-            learn_config=self._learn_config,
+        self._platform = PlatformFactory(self._lg).from_config(
+            {"llm": self._llm_config or {}, "memory": self._learn_config}
         )
-        factory = self._load_factory(platform)
-        agent = factory.create(self._config, variables=self._variables)
-        agent.start()
-
-        self._runner = ManagedAgentRunner(
-            lg=self._lg,
-            agent=agent,
-            bus_config=self._bus_config,
-            schedule_interval=self._extract_schedule(),
-        )
+        agent: Any = None
+        try:
+            factory = self._load_factory(self._platform)
+            agent = factory.create(self._config, variables=self._variables)
+            agent.start()
+            self._runner = ManagedAgentRunner(
+                lg=self._lg,
+                agent=agent,
+                bus_config=self._bus_config,
+                schedule_interval=self._extract_schedule(),
+            )
+        except Exception:
+            self._abort_setup(agent)
+            raise
         self._lg.info("agent service setup complete", extra={"agent": self._agent_name})
 
-    def execute(self) -> None:
-        """Run the agent runner (blocks until shutdown)."""
+    def _abort_setup(self, agent: Any) -> None:
+        """Undo a failed setup: stop the agent (a no-op unless it started), then close the platform."""
+        if agent is not None:
+            try:
+                agent.stop()
+            except Exception as e:
+                self._lg.warning("agent stop failed", extra={"exception": e})
+        self._close_platform()
+
+    def run(self) -> None:
+        """Run the agent runner (blocks until shutdown); close the platform once it stops."""
         if self._runner is None:
-            raise RuntimeError("setup() must be called before execute()")
+            raise RuntimeError("setup() must be called before run()")
         self._healthy = True
         self._start_shutdown_watcher()
-        self._runner.run()
+        try:
+            self._runner.run()
+        finally:
+            self._close_platform()
+
+    def _close_platform(self) -> None:
+        """Close the platform's shared clients; the runner has stopped the agent by now."""
+        if self._platform is not None:
+            self._platform.close()
+            self._platform = None
 
     def teardown(self) -> None:
         """Signal the runner to stop."""
@@ -112,7 +133,7 @@ class AgentService(Service):
     def _start_shutdown_watcher(self) -> None:
         """Bridge ProcessRunner's shutdown_event to runner._running flag.
 
-        ProcessRunner injects _shutdown_event (mp.Event) before execute().
+        ProcessRunner injects _shutdown_event (mp.Event) before run().
         This watcher thread monitors it and stops the runner when set.
         For ThreadRunner, _shutdown_event is None so this is a no-op.
         """

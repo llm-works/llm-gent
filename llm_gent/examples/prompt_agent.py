@@ -43,16 +43,15 @@ import json
 from typing import Any
 
 import yaml
-from appinfra import DotDict
 from appinfra.log import Logger, create_lg
-from llm_infer.client import BackendError, ChatRequest, ChatResponse, SAIAAdapter
+from llm_infer.client import BackendError, ChatRequest, ChatResponse
 from llm_infer.client import Factory as LLMInferFactory
 from llm_infer.schemas.openai import FunctionCall, ToolCall
 
 import llm_gent
 from llm_gent.agents.default import Factory
-from llm_gent.core.platform import PlatformContext
-from llm_gent.core.traits.builtin.saia import SAIATrait
+from llm_gent.core.platform import Context
+from llm_gent.core.platform import Factory as PlatformFactory
 from llm_gent.runtime.server.config import AgentServerConfig
 
 
@@ -104,9 +103,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _llm_config(args: argparse.Namespace) -> dict[str, Any]:
-    """The shipped LLM config, with ``--base-url`` / ``--model`` on its local backend."""
-    llm: dict[str, Any] = yaml.safe_load((ETC / "llm.yaml").read_text())
-    local = llm["backends"]["local"]
+    """``--base-url`` / ``--model`` on the shipped ``local`` backend; the rest stays as shipped."""
+    local: dict[str, Any] = {}
     if args.base_url:
         # The OpenAI-compatible backend appends /chat/completions to
         # base_url verbatim, so a bare server root would 404.
@@ -114,20 +112,22 @@ def _llm_config(args: argparse.Namespace) -> dict[str, Any]:
         local["base_url"] = base_url if base_url.endswith("/v1") else base_url + "/v1"
     if args.model:
         local["model"] = args.model
+    return {"backends": {"local": local}} if local else {}
+
+
+def _platform(lg: Logger, args: argparse.Namespace) -> Context:
+    """The platform: the shipped backends, or llm-infer's scripted client with ``--smoke``."""
+    factory = PlatformFactory(lg)
     if args.smoke:
-        # Disable non-local backends so they don't initialize (the scripted
-        # model replaces local anyway, and CI may not have provider packages).
-        for name, backend in llm["backends"].items():
-            if name != "local":
-                backend["enabled"] = False
-    return llm
+        factory = factory.with_llm(LLMInferFactory(lg).scripted(_smoke_answer))
+        print("(smoke: llm-infer's scripted client, no backend contacted)\n")
+    return factory.from_config({"llm": _llm_config(args)})
 
 
-def _build(lg: Logger, args: argparse.Namespace) -> Any:
+def _build(platform: Context, args: argparse.Namespace) -> Any:
     """Agent ``args.agent``, built as ``llm-gent serve`` builds it."""
     raw = yaml.safe_load((ETC / "agents" / f"{args.agent}.yaml").read_text())
     agent_config = AgentServerConfig.from_dict({"agents": {args.agent: raw}}).agents[args.agent]
-    platform = PlatformContext.from_config(lg=lg, llm_config=DotDict(_llm_config(args)))
     variables = {"CODEBASE_PATH": str(Path(args.codebase).resolve())}
     return Factory(platform=platform).create(agent_config.factory_config(args.agent), variables)
 
@@ -135,20 +135,16 @@ def _build(lg: Logger, args: argparse.Namespace) -> Any:
 def main() -> int:
     args = _parse_args()
     lg = create_lg("prompt_agent", "warning")
-    agent = _build(lg, args)
-    if args.smoke:
-        saia = agent.require_trait(SAIATrait)
-        backend = SAIAAdapter(LLMInferFactory(lg).scripted(_smoke_answer))
-        agent.replace_trait(SAIATrait(agent, backend, saia.config))
-        print("(smoke: llm-infer's scripted client, no backend contacted)\n")
-    agent.start()
-    try:
-        result = agent.run_once()
-    except BackendError as e:
-        print(f"backend error: {e}", file=sys.stderr)
-        return 1
-    finally:
-        agent.stop()
+    with _platform(lg, args) as platform:
+        agent = _build(platform, args)
+        agent.start()
+        try:
+            result = agent.run_once()
+        except BackendError as e:
+            print(f"backend error: {e}", file=sys.stderr)
+            return 1
+        finally:
+            agent.stop()
     print(f"success: {result.success}  iterations: {result.iterations}")
     print(result.content)
     return 0 if result.success else 1
