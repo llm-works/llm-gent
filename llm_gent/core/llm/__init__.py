@@ -3,8 +3,8 @@
 
 """LLM backend abstraction.
 
-The top-level ``llm_gent`` package exports :class:`Backend` and :class:`Error`
-as ``LLMBackend`` and ``LLMError``.
+The top-level ``llm_gent`` package exports :class:`Backend`, :class:`Error` and
+:class:`Caller` as ``LLMBackend``, ``LLMError`` and ``LLMCaller``.
 """
 
 from .backend import Backend, Error, HTTPBackend, StructuredOutputError
