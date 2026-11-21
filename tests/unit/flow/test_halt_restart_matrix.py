@@ -842,11 +842,17 @@ def _flow(
         flow = flow.with_checkpoint_policy(**{probe.policy: True})
     if halt is not None:
         flow = flow.with_halt(halt)
-    if _has(shape, Cut):
-        flow = flow.with_signal("cut", probe.cut)
     for step in shape.children:
         _add(step, flow, probe, parallel)
     return flow
+
+
+def _run_kw(shape: Seq, probe: Probe) -> dict[str, Any]:
+    """The ``run()`` settings of ``shape``'s run: with a cut, its signal."""
+    kw: dict[str, Any] = {}
+    if _has(shape, Cut):
+        kw["signals"] = {"cut": probe.cut}
+    return kw
 
 
 async def _root_done(history: History, commit: Any) -> dict[str, int] | None:
@@ -1058,7 +1064,8 @@ async def test_uninterrupted_run_matches_model(shape_name: str, parallel: bool) 
     store = memory_store()
     probe = Probe()
 
-    assert await _flow(shape, probe, store, parallel=parallel).run(RUN_INPUT) == expected_result
+    flow = _flow(shape, probe, store, parallel=parallel)
+    assert await flow.run(RUN_INPUT, **_run_kw(shape, probe)) == expected_result
     assert sorted(probe.executed) == sorted(baseline)
     if _ordered(shape, parallel):
         assert probe.executed == list(baseline)
@@ -1089,7 +1096,7 @@ async def _run_stopping(
     flow = _flow(shape, probe, store, parallel=case.parallel, halt=halt)
     raised: BaseException | None = None
     try:
-        await flow.run(RUN_INPUT, resume="latest" if resume else "off")
+        await flow.run(RUN_INPUT, resume="latest" if resume else "off", **_run_kw(shape, probe))
     except (SimulatedCrash, LeafError) as e:
         raised = e
     expected = _RAISED_BY.get(stop) if probe.stopped is not None else None
@@ -1201,7 +1208,7 @@ async def check_resume_after_stop(case: Case, inner: Store) -> None:
     assert point is not None
     resumed = Probe(policy=case.policy)
     flow = _flow(shape, resumed, inner, parallel=case.parallel)
-    assert await flow.run(RUN_INPUT, resume="latest") == expected_result
+    assert await flow.run(RUN_INPUT, resume="latest", **_run_kw(shape, resumed)) == expected_result
     await _check_finished(history, baseline, merges)
     _check_rerun(resumed, point)
     missing = [k for k in baseline if k not in point.done]
@@ -1233,7 +1240,8 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
     expected_result, baseline, merges = model(shape)
     store = memory_store()
     first = Probe(policy="named")
-    assert await _flow(shape, first, store, parallel=False).run(RUN_INPUT) == expected_result
+    flow = _flow(shape, first, store, parallel=False)
+    assert await flow.run(RUN_INPUT, **_run_kw(shape, first)) == expected_result
 
     assert sorted(first.checkpointed) == sorted(_saving_keys(shape))
     name = first.checkpointed[leaf]
@@ -1245,7 +1253,7 @@ async def test_resume_from_a_named_checkpoint_matches_uninterrupted_run(
 
     resumed = Probe()
     flow = _flow(shape, resumed, store, parallel=False)
-    assert await flow.run(RUN_INPUT, resume=name) == expected_result
+    assert await flow.run(RUN_INPUT, resume=name, **_run_kw(shape, resumed)) == expected_result
     await _check_finished(history, baseline, merges)
     _check_rerun(resumed, _Point(captured, {name}, set()))
     assert set(resumed.executed) & set(captured) <= {name}, (
@@ -1339,7 +1347,8 @@ async def test_a_cut_run_matches_the_cut_model(
     shape = CUT_SHAPES[shape_name]
     store = memory_store()
     probe = Probe(cut_key=cut_key)
-    result = await _flow(shape, probe, store, parallel=parallel).run(RUN_INPUT)
+    flow = _flow(shape, probe, store, parallel=parallel)
+    result = await flow.run(RUN_INPUT, **_run_kw(shape, probe))
     assert len(probe.executed) == len(set(probe.executed)), "a leaf ran twice"
     assert await History(store, FLOW_NAME).is_complete()
     if parallel:
@@ -1389,7 +1398,8 @@ async def _cut_oracle(shape: Seq, case: CutCase) -> tuple[int, dict[str, int]]:
     if not case.parallel:
         return cut_model(shape, case.cut_key)
     store = memory_store()
-    result = await _flow(shape, Probe(cut_key=case.cut_key), store, parallel=True).run(RUN_INPUT)
+    probe = Probe(cut_key=case.cut_key)
+    result = await _flow(shape, probe, store, parallel=True).run(RUN_INPUT, **_run_kw(shape, probe))
     return result, await _head_done(store)
 
 
@@ -1409,7 +1419,8 @@ async def test_halt_around_a_shortcut_resumes_to_the_cut_run(case: CutCase) -> N
         store=store,
         cut_key=case.cut_key,
     )
-    result = await _flow(shape, probe, store, parallel=case.parallel, halt=halt).run(RUN_INPUT)
+    flow = _flow(shape, probe, store, parallel=case.parallel, halt=halt)
+    result = await flow.run(RUN_INPUT, **_run_kw(shape, probe))
     if await History(inner, FLOW_NAME).is_complete():
         assert result == expected
         assert await _head_done(inner) == expected_done
@@ -1418,7 +1429,7 @@ async def test_halt_around_a_shortcut_resumes_to_the_cut_run(case: CutCase) -> N
 
     resumed = Probe(cut_key=case.cut_key)
     flow = _flow(shape, resumed, inner, parallel=case.parallel)
-    result = await flow.run(RUN_INPUT, resume="latest")
+    result = await flow.run(RUN_INPUT, resume="latest", **_run_kw(shape, resumed))
     assert await History(inner, FLOW_NAME).is_complete()
     if case.parallel and not probe.cut_before_halt:
         # Halted before the cut, with items running at once: the halt stopped

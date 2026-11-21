@@ -749,8 +749,8 @@ class TestCostAcrossShortcut:
             return x
 
         region = _ff().create().with_budget(5.0).with_shortcut("cut").call(a).then(b)
-        flow = _ff().create().with_signal("cut", cut).with_cost_tracker(root).call(region)
-        assert await flow.then(after).run(1) == 1
+        flow = _ff().create().with_cost_tracker(root).call(region)
+        assert await flow.then(after).run(1, signals={"cut": cut}) == 1
         assert root.spent == pytest.approx(1.5)
 
     async def test_started_budgeted_items_end_with_their_spend(self) -> None:
@@ -779,8 +779,8 @@ class TestCostAcrossShortcut:
 
         region = _ff().create().with_shortcut("cut")
         region.map(item, items=lambda _p, _c: [0, 1], max_concurrency=2)
-        flow = _ff().create().with_signal("cut", cut).with_cost_tracker(root).call(region)
-        assert await flow.run() == [0, 1]
+        flow = _ff().create().with_cost_tracker(root).call(region)
+        assert await flow.run(signals={"cut": cut}) == [0, 1]
         assert root.spent == pytest.approx(2 * 0.2)
 
 

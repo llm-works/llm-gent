@@ -91,7 +91,7 @@ DONE = "done"
 """Cursor entry: a running map's completed items — index to result and whether it merged."""
 
 SIGNALS = "signals"
-"""Cursor entry at the root: the run's signals (``Flow.with_signal``) that are set."""
+"""Cursor entry at the root: the run's signals (``Flow.run(signals=)``) that are set."""
 
 RESOURCES = "resources"
 """Cursor entry: the resources a flow declares (``with_resource``, ``with_cost_tracker``) — name to ``snapshot()``."""

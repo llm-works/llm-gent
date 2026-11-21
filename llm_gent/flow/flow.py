@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from collections.abc import Mapping
 from typing import Any, Self, get_args
 
 from appinfra.cas import Store
@@ -77,7 +78,7 @@ from ._shortcut import (
     ShortcutRun,
     check_shortcut,
     check_shortcuts,
-    check_signal,
+    check_signals,
     region_run,
     run_signals,
 )
@@ -203,7 +204,6 @@ class Flow:
         self._traits = traits
         self._state_factory = state_factory
         self._halt_event: asyncio.Event | None = None
-        self._signals: dict[str, asyncio.Event] = {}
         self._shortcut: Shortcut | None = None
         self._resources: dict[ResourceKey[Any], Any] = {}
         self._resource_children: dict[ResourceKey[Any], dict[str, Any]] = {}
@@ -866,27 +866,12 @@ class Flow:
         self._halt_event = event
         return self
 
-    def with_signal(self, name: str, event: asyncio.Event) -> Self:
-        """Declare the run's signal ``name``: an event the app sets, for :meth:`with_shortcut`.
-
-        Signals belong to the run, like its halt: they are declared on the
-        top-level flow, and :meth:`run` raises when a nested flow declares
-        one. Which signals are set is recorded in every checkpoint the run
-        takes, and resume sets them again before the first step; a run that
-        finishes records none.
-
-        Returns ``self`` for chaining.
-        """
-        name, event = check_signal(name, event)
-        self._signals[name] = event
-        return self
-
     def with_shortcut(self, signal: str, *, drain: bool = False) -> Self:
         """Let the run's ``signal`` cut this flow short: it fast-forwards to its end.
 
-        ``signal`` names a signal the top-level flow declares with
-        :meth:`with_signal`. While it is set, this flow and every flow
-        under it fast-forward, skipping what they can:
+        ``signal`` names one of the run's signals (:meth:`run`
+        ``signals=``). While it is set, this flow and every flow under it
+        fast-forward, skipping what they can:
 
         - a chain starts no new step and ends with its last result (a
           chain that has not started passes its input through), except a
@@ -1202,6 +1187,7 @@ class Flow:
         self,
         *args: Any,
         state: Any = UNSET,
+        signals: Mapping[str, asyncio.Event] | None = None,
         resume: ResumeMode | str = "off",
         restart: str | None = None,
         extra: dict[str, Any] | None = None,
@@ -1219,6 +1205,10 @@ class Flow:
 
         Args:
             *args: Positional inputs to the first node.
+            signals: The run's signals by name, events the app sets for
+                :meth:`with_shortcut` regions. Which are set is recorded in
+                every checkpoint the run takes, and resume sets them again
+                before the first step; a run that finishes records none.
             state: The payload to expose on ``ctx.state`` for this run.
                 Framework wraps it as :class:`State` (``ctx.state.data``
                 reaches the payload; ``ctx.state.root()`` reaches the
@@ -1298,9 +1288,9 @@ class Flow:
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode or
                 a restart was requested without :meth:`with_checkpoint_store` wired, OR
-                a nested flow sets a halt other than this flow's or declares
-                a signal, OR a shortcut's signal is not declared or a flow
-                under it declares a shortcut on the same signal, OR
+                a nested flow sets a halt other than this flow's, OR a
+                shortcut's signal is not one of the run's ``signals`` or a
+                flow under it declares a shortcut on the same signal, OR
                 a flow in the tree has ``with_budget(...)`` with no cost
                 tracker on it or any flow enclosing it. Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
@@ -1310,10 +1300,14 @@ class Flow:
                 commit hash or a valid checkpoint name, or ``restart``
                 is not ``"latest"``, a commit hash or a valid checkpoint
                 name; both are given; either names a commit or checkpoint
-                the history does not have, or a commit without state.
+                the history does not have, or a commit without state; a
+                signal's name is not a non-empty str.
+            TypeError: ``signals`` is not a mapping, or a signal is not an
+                :class:`asyncio.Event`.
         """
-        self._check_run_args(resume, restart)
-        run = self._new_run()
+        run_signals_ = check_signals(signals)
+        self._check_run_args(resume, restart, run_signals_)
+        run = self._new_run(run_signals_)
         active_state, saved = await self._start_state(
             run, self._wrap_top_state(state), resume, restart
         )
@@ -1334,13 +1328,13 @@ class Flow:
         await hooks.after(outcome)
         return value
 
-    def _new_run(self) -> Run:
+    def _new_run(self, signals: dict[str, asyncio.Event]) -> Run:
         """The state of a new run of this flow, with its own history writer."""
         ctx = self._checkpoint_ctx
         return Run(
             flow=self,
             halt=self._halt_event,
-            signals=self._signals,
+            signals=signals,
             checkpoint_ctx=None if ctx is None else ctx.for_run(),
         )
 
@@ -1400,7 +1394,12 @@ class Flow:
         await hooks.after("denied")
         raise HookDenied("before_run", decision)
 
-    def _check_run_args(self, resume: ResumeMode | str, restart: str | None) -> None:
+    def _check_run_args(
+        self,
+        resume: ResumeMode | str,
+        restart: str | None,
+        signals: Mapping[str, asyncio.Event],
+    ) -> None:
         """Reject an empty flow, a bad start, misplaced wiring, a bad shortcut, a lone cap.
 
         Runs before anything is read or written, so a misconfigured run
@@ -1411,7 +1410,7 @@ class Flow:
         self._check_start(resume, restart)
         check_one_repo(self)
         check_one_halt(self)
-        check_shortcuts(self)
+        check_shortcuts(self, signals)
         check_budgets_have_a_tracker(self)
         check_resources(self)
 

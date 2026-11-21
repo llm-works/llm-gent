@@ -3,8 +3,8 @@
 
 """Shortcuts: on a signal, a flow fast-forwards to its end with what it has.
 
-A run's signals are named events the app sets, declared on its top-level
-flow with :meth:`Flow.with_signal`. :meth:`Flow.with_shortcut` makes a
+A run's signals are named events the app sets, given to the run with
+:meth:`Flow.run` ``signals=``. :meth:`Flow.with_shortcut` makes a
 flow F a region that one of them cuts short. While the signal is set, F
 and every flow under it fast-forward (:func:`is_fast_forward`): a chain
 starts no new step and ends with its last result, an iterate starts no
@@ -60,17 +60,23 @@ class Shortcut:
     """Started map items run to their end instead of fast-forwarding."""
 
 
-def check_signal(name: object, event: object) -> tuple[str, asyncio.Event]:
-    """``(name, event)`` when :meth:`Flow.with_signal` accepts them.
+def check_signals(signals: Mapping[str, asyncio.Event] | None) -> dict[str, asyncio.Event]:
+    """The run's signals as :meth:`Flow.run` ``signals=`` gives them, checked.
 
     Raises:
-        ValueError: ``name`` is not a non-empty str.
-        TypeError: ``event`` is not an :class:`asyncio.Event`.
+        ValueError: A name is not a non-empty str.
+        TypeError: ``signals`` is not a mapping, or an event is not an
+            :class:`asyncio.Event`.
     """
-    _check_name(name, ".with_signal(name)")
-    if not isinstance(event, asyncio.Event):
-        raise TypeError(f"with_signal takes an asyncio.Event; got {type(event).__name__}")
-    return name, event  # type: ignore[return-value]
+    if signals is None:
+        return {}
+    if not isinstance(signals, Mapping):
+        raise TypeError(f"run(signals=) takes a mapping; got {type(signals).__name__}")
+    for name, event in signals.items():
+        _check_name(name, "a signal's name")
+        if not isinstance(event, asyncio.Event):
+            raise TypeError(f"signal {name!r} must be an asyncio.Event; got {type(event).__name__}")
+    return dict(signals)
 
 
 def check_shortcut(signal: object, drain: object) -> Shortcut:
@@ -92,33 +98,28 @@ def _check_name(name: object, what: str) -> None:
         raise ValueError(f"{what} must be a non-empty str; got {name!r}")
 
 
-def check_shortcuts(root: Flow) -> None:
-    """Raise unless signals are on ``root`` alone, every region names one, and no region holds another on the same signal.
+def check_shortcuts(root: Flow, signals: Mapping[str, asyncio.Event]) -> None:
+    """Raise unless every region in ``root``'s run names one of ``signals`` and holds no other on it.
 
     Raises:
-        RuntimeError: A nested flow declares a signal; a shortcut's signal
-            is not one of ``root``'s; or a flow under a region declares a
-            shortcut on that region's signal.
+        RuntimeError: A shortcut's signal is not one of the run's
+            ``signals``, or a flow under a region declares a shortcut on
+            that region's signal.
     """
     from ._node_id import iter_flows
 
     for flow in iter_flows(root):
-        if flow is not root and flow._signals:
-            raise RuntimeError(
-                f"Flow {_label(flow)} declares a signal but runs inside {_label(root)}: "
-                f"a run's signals are declared on its top-level flow with with_signal()"
-            )
         if flow._shortcut is not None:
-            _check_one(flow, root)
+            _check_one(flow, signals)
 
 
-def _check_one(flow: Flow, root: Flow) -> None:
-    """Raise unless ``flow``'s shortcut is on one of ``root``'s signals and holds no other on it."""
+def _check_one(flow: Flow, signals: Mapping[str, asyncio.Event]) -> None:
+    """Raise unless ``flow``'s shortcut is on one of ``signals`` and holds no other on it."""
     signal = flow._shortcut.signal  # type: ignore[union-attr]
-    if signal not in root._signals:
+    if signal not in signals:
         raise RuntimeError(
-            f"Flow {_label(flow)} has with_shortcut({signal!r}) but the run declares no such "
-            f"signal: call with_signal({signal!r}, event) on {_label(root)}"
+            f"Flow {_label(flow)} has with_shortcut({signal!r}) but the run has no such "
+            f"signal: pass run(signals={{{signal!r}: event}})"
         )
     inner = _inner_region(flow, signal)
     if inner is not None:

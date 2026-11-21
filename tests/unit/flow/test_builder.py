@@ -122,6 +122,17 @@ class TestBuilderValidation:
         with pytest.raises(TypeError, match="reserved parameter 'restart'"):
             flow.call(bad)
 
+    def test_call_rejects_verb_declaring_signals_kwarg(self) -> None:
+        """A verb with a ``signals=`` parameter collides with ``Flow.run(signals=...)``."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def bad(ctx: Context, *, signals: dict[str, Any]) -> None:
+            """Verb tries to bind ``signals`` — would never receive it via .run()."""
+
+        with pytest.raises(TypeError, match="reserved parameter 'signals'"):
+            flow.call(bad)
+
     def test_rescue_before_any_call_raises(self) -> None:
         """.rescue requires a preceding node to attach to."""
         flow = make_ff().create()

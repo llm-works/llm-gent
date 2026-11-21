@@ -200,14 +200,8 @@ class TestMapOptionsApply:
         async def second(ctx: Context[Any], _x: Any = None) -> str:
             return "second"
 
-        flow = (
-            make_ff()
-            .create()
-            .with_signal("cut", cut)
-            .with_shortcut("cut")
-            .map([first, second], max_concurrency=1)
-        )
-        assert await flow.run() == ["first", Skipped(item=None)]
+        flow = make_ff().create().with_shortcut("cut").map([first, second], max_concurrency=1)
+        assert await flow.run(signals={"cut": cut}) == ["first", Skipped(item=None)]
 
 
 ROLE = Role(name="r", backend="openai", model="none")
