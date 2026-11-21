@@ -3,6 +3,7 @@
 
 """Tests for agent infrastructure: platform, helpers, dispatcher, caller, factory."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -90,6 +91,19 @@ class TestPlatformContext:
 
         async with _context(MagicMock(), [owned]):
             pass
+
+        owned.aclose.assert_awaited_once()
+        owned.close.assert_called_once()
+
+    async def test_concurrent_aclose_closes_once(self):
+        async def yield_once():
+            await asyncio.sleep(0)
+
+        owned = MagicMock()
+        owned.aclose = AsyncMock(side_effect=yield_once)
+        ctx = _context(MagicMock(), [owned])
+
+        await asyncio.gather(ctx.aclose(), ctx.aclose())
 
         owned.aclose.assert_awaited_once()
         owned.close.assert_called_once()

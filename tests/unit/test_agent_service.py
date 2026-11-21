@@ -147,6 +147,23 @@ class TestSetup:
     @patch("llm_gent.runtime.service.ManagedAgentRunner")
     @patch("llm_gent.runtime.service.AgentService._load_factory")
     @patch("llm_gent.runtime.service.PlatformFactory")
+    def test_failed_runner_build_stops_agent_then_closes_platform(
+        self, mock_platform_factory, mock_load_factory, mock_runner_cls, service
+    ):
+        order = MagicMock()
+        mock_platform_factory.return_value.from_config.return_value = order.platform
+        mock_load_factory.return_value.create.return_value = order.agent
+        mock_runner_cls.side_effect = RuntimeError("bad runner")
+
+        with pytest.raises(RuntimeError, match="bad runner"):
+            service.setup()
+
+        assert [c[0] for c in order.mock_calls] == ["agent.start", "agent.stop", "platform.close"]
+        assert service._runner is None
+
+    @patch("llm_gent.runtime.service.ManagedAgentRunner")
+    @patch("llm_gent.runtime.service.AgentService._load_factory")
+    @patch("llm_gent.runtime.service.PlatformFactory")
     def test_passes_schedule_interval(
         self, mock_platform_factory, mock_load_factory, mock_runner_cls, lg, llm_config, bus_config
     ):

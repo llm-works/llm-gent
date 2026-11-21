@@ -79,21 +79,30 @@ class AgentService(Service):
         self._platform = PlatformFactory(self._lg).from_config(
             {"llm": self._llm_config or {}, "memory": self._learn_config}
         )
+        agent: Any = None
         try:
             factory = self._load_factory(self._platform)
             agent = factory.create(self._config, variables=self._variables)
             agent.start()
+            self._runner = ManagedAgentRunner(
+                lg=self._lg,
+                agent=agent,
+                bus_config=self._bus_config,
+                schedule_interval=self._extract_schedule(),
+            )
         except Exception:
-            self._close_platform()
+            self._abort_setup(agent)
             raise
-
-        self._runner = ManagedAgentRunner(
-            lg=self._lg,
-            agent=agent,
-            bus_config=self._bus_config,
-            schedule_interval=self._extract_schedule(),
-        )
         self._lg.info("agent service setup complete", extra={"agent": self._agent_name})
+
+    def _abort_setup(self, agent: Any) -> None:
+        """Undo a failed setup: stop the agent (a no-op unless it started), then close the platform."""
+        if agent is not None:
+            try:
+                agent.stop()
+            except Exception as e:
+                self._lg.warning("agent stop failed", extra={"exception": e})
+        self._close_platform()
 
     def run(self) -> None:
         """Run the agent runner (blocks until shutdown); close the platform once it stops."""
