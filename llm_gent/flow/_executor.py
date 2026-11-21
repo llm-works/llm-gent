@@ -300,7 +300,8 @@ async def _run_subflow(
     child_state = await _enter_scope(env, path, state_fn, state_factory)
     with _live_scope(env, path, state_fn, child_state):
         result = await body._run_as_subflow(
-            *node_args,
+            node_args,
+            node_kwargs,
             state=child_state,
             run=env.run,
             parent_resources=env.resources,
@@ -313,7 +314,6 @@ async def _run_subflow(
             parent_shortcuts=env.shortcuts,
             parent_hooks=env.hooks,
             parent_activity=env.activity_id,
-            **node_kwargs,
         )
         await _merge_state(merge_fn, env.state, child_state)
     return result
@@ -513,7 +513,8 @@ async def _run_arm(
     path = env.owner_path(node_id)
     with _running(env, path, arm):
         return await chosen._run_as_subflow(
-            prev_result,
+            (prev_result,),
+            {},
             state=env.state,
             run=env.run,
             parent_resources=env.resources,

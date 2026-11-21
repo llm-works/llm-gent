@@ -1377,12 +1377,12 @@ class Flow:
         info = run.info
         with run_signals(run):
             return await self._run_as_subflow(
-                *args,
+                args,
+                kwargs,
                 state=state,
                 run=run,
                 parent_extra=extra,
                 parent_activity=None if info is None else info.run_id,
-                **kwargs,
             )
 
     async def _stopped_before_run(self, hooks: RunHooks, decision: Decision) -> Any:
@@ -1470,7 +1470,9 @@ class Flow:
 
     async def _run_as_subflow(
         self,
-        *args: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
         state: State[Any],
         run: Run,
         parent_resources: Resources = NO_RESOURCES,
@@ -1483,9 +1485,13 @@ class Flow:
         parent_shortcuts: tuple[ShortcutRun, ...] = (),
         parent_hooks: Hooks | None = None,
         parent_activity: str | None = None,
-        **kwargs: Any,
     ) -> Any:
         """Internal entry: walk nodes with caller-supplied ``State`` in ``run``.
+
+        ``args`` / ``kwargs`` are the first node's inputs. They are passed
+        as two values, not spread, so an input named like one of the
+        framework's own parameters (``run=``, ``parent_extra=``) reaches the
+        node instead of colliding with it.
 
         ``run`` is the execution of the top-level flow this walk belongs
         to: its halt, its history writer and its live scopes are the ones

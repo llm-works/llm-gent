@@ -413,7 +413,8 @@ class MapItemRunner:
         """
         env = self.env
         return await self.body._run_as_subflow(
-            self.item,
+            (self.item,),
+            {},
             state=child_state,
             run=env.run,
             parent_resources=env.resources,

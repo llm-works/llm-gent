@@ -49,7 +49,6 @@ def _validate_target(target: Any) -> None:
             f"verb target .role must be a Role instance or None; got {type(target.role).__name__}"
         )
     _reject_reserved_kwarg(target, "state")
-    _reject_reserved_kwarg(target, "runtime")
     _reject_reserved_kwarg(target, "resume")
     _reject_reserved_kwarg(target, "restart")
 

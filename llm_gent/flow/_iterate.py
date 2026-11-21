@@ -183,7 +183,8 @@ class IterateRunner:
         """
         env = self.env
         return await self.it.body._run_as_subflow(
-            prev_result,
+            (prev_result,),
+            {},
             state=child_state,
             run=env.run,
             parent_resources=env.resources,

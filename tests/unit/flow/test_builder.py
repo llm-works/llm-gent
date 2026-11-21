@@ -100,17 +100,6 @@ class TestBuilderValidation:
 
         flow.call(ok)  # no error
 
-    def test_call_rejects_verb_declaring_runtime_kwarg(self) -> None:
-        """A verb with a ``runtime=`` parameter collides with internal forwarding."""
-        flow = make_ff().create()
-
-        @verb(role=ROLE_A)
-        async def bad(ctx: Context, *, runtime: Any) -> None:
-            """Verb tries to bind ``runtime`` — would collide with internal kwarg."""
-
-        with pytest.raises(TypeError, match="reserved parameter 'runtime'"):
-            flow.call(bad)
-
     def test_call_rejects_verb_declaring_resume_kwarg(self) -> None:
         """A verb with a ``resume=`` parameter collides with ``Flow.run(resume=...)``."""
         flow = make_ff().create()
@@ -220,6 +209,23 @@ class TestExecutionShape:
 
         flow.call(head).then(tail)
         assert await flow.run(42, tag="v") == len("v=42")
+
+    @pytest.mark.asyncio
+    async def test_run_kwargs_named_like_framework_internals_reach_the_first_node(self) -> None:
+        """A first-node keyword input never collides with a name the framework uses inside."""
+
+        @verb(role=ROLE_A)
+        async def head(
+            ctx: Context, *, run: int, runtime: int, parent_extra: int, parent_activity: int
+        ) -> int:
+            """Sum the keyword inputs."""
+            return run + runtime + parent_extra + parent_activity
+
+        flow = make_ff().create().call(head)
+        assert await flow.run(run=1, runtime=2, parent_extra=3, parent_activity=4) == 10
+        # A subflow as the first node passes them on to its own first node.
+        outer = make_ff().create().call(make_ff().create().call(head))
+        assert await outer.run(run=1, runtime=2, parent_extra=3, parent_activity=4) == 10
 
     @pytest.mark.asyncio
     async def test_chain_verb_can_omit_prev_positional(self) -> None:
