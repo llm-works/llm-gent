@@ -64,13 +64,14 @@ from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext, check_one_repo
-from ._halt_observer import HaltPoint, check_one_halt
+from ._halt_observer import check_one_halt
 from ._hook_points import RunHooks
 from ._resume import (
     Resume,
     apply_clean_exit_retention,
     commit_halt,
 )
+from ._run import Run
 from ._shortcut import (
     Shortcut,
     ShortcutRun,
@@ -97,7 +98,7 @@ from .checkpoint import (
 )
 from .context import Context
 from .factory import SAIAFactory
-from .hooks import Decision, HookDenied, Hooks, RunInfo, RunOutcome, Where
+from .hooks import Decision, HookDenied, Hooks, RunOutcome, Where
 from .nodes import (
     HALTED,
     UNSET,
@@ -127,7 +128,7 @@ from .resource._runtime import Resources, check_resources, run_resources
 from .resource.cost import check_budget, check_budgets_have_a_tracker, check_cost_tracker
 from .role import Role
 from .state import State, StateFactory
-from .state.snapshot import ScopePath, ScopeRegistry, Snapshot, path_str
+from .state.snapshot import ScopePath, Snapshot, path_str
 from .structure import Structure
 
 
@@ -211,16 +212,9 @@ class Flow:
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
-        self._halt_at: HaltPoint | None = None
         self._checkpoint_policy: CheckpointPolicy | None = None
-        self._scopes: ScopeRegistry = ScopeRegistry()
         self._hooks: tuple[object, ...] = ()
         self._hooks_replace = False
-        # Per top-level run: the run's info when any flow in it has hooks, the
-        # top-level hooks' run events, and the commit the run checked out.
-        self._run_info: RunInfo | None = None
-        self._run_hooks: RunHooks | None = None
-        self._resumed_from: str | None = None
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -1111,11 +1105,6 @@ class Flow:
         self._checkpointer = Checkpointer(name)
         return self
 
-    def _begin_checkpoint_run(self) -> None:
-        """Reset the run's repo's run-scoped caches."""
-        if self._checkpoint_ctx is not None:
-            self._checkpoint_ctx.begin_run()
-
     def root_hash(self) -> str:
         """Structure hash of this flow's composition tree.
 
@@ -1324,17 +1313,18 @@ class Flow:
                 the history does not have, or a commit without state.
         """
         self._check_run_args(resume, restart)
-        self._begin_checkpoint_run()
-        active_state, saved = await self._start_state(self._wrap_top_state(state), resume, restart)
-        self._scopes.begin(active_state, saved)
-        self._halt_at = None
-        hooks = self._run_hooks = RunHooks(self, self._resumed_from)
-        self._run_info = hooks.info
+        run = self._new_run()
+        active_state, saved = await self._start_state(
+            run, self._wrap_top_state(state), resume, restart
+        )
+        run.scopes.begin(active_state, saved)
+        hooks = run.hooks = RunHooks(self, run.resumed_from)
+        run.info = hooks.info
         stopped = await hooks.before()
         if stopped is not None:
             return await self._stopped_before_run(hooks, stopped)
         try:
-            outcome, value = await self._walk_and_finalize(active_state, extra, args, kwargs)
+            outcome, value = await self._walk_and_finalize(run, active_state, extra, args, kwargs)
         except asyncio.CancelledError as e:
             await hooks.after("cancelled", e)
             raise
@@ -1344,8 +1334,19 @@ class Flow:
         await hooks.after(outcome)
         return value
 
+    def _new_run(self) -> Run:
+        """The state of a new run of this flow, with its own history writer."""
+        ctx = self._checkpoint_ctx
+        return Run(
+            flow=self,
+            halt=self._halt_event,
+            signals=self._signals,
+            checkpoint_ctx=None if ctx is None else ctx.for_run(),
+        )
+
     async def _walk_and_finalize(
         self,
+        run: Run,
         state: State[Any],
         extra: dict[str, Any] | None,
         args: tuple[Any, ...],
@@ -1356,31 +1357,32 @@ class Flow:
         Returns ``("halted", HALTED)`` when the halt stopped it, else ``("ok", result)``.
         """
         try:
-            result = await self._walk_top(state, extra, args, kwargs)
+            result = await self._walk_top(run, state, extra, args, kwargs)
         except Interrupted:
             # Everything has stopped, each part registered where it stopped.
-            await commit_halt(self)
+            await commit_halt(run)
             return "halted", HALTED
-        await apply_clean_exit_retention(self, state)
+        await apply_clean_exit_retention(run, state)
         return "ok", result
 
     async def _walk_top(
         self,
+        run: Run,
         state: State[Any],
         extra: dict[str, Any] | None,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
         """Walk this flow as the run's top level, with its signals set up."""
-        info = self._run_info
-        with run_signals(self):
+        info = run.info
+        with run_signals(run):
             return await self._run_as_subflow(
-                *args,
+                args,
+                kwargs,
                 state=state,
-                runtime=self,
+                run=run,
                 parent_extra=extra,
                 parent_activity=None if info is None else info.run_id,
-                **kwargs,
             )
 
     async def _stopped_before_run(self, hooks: RunHooks, decision: Decision) -> Any:
@@ -1447,34 +1449,33 @@ class Flow:
             raise ValueError(f"{what}; got {value!r} ({e})") from None
 
     async def _start_state(
-        self, fallback: State[Any], resume: ResumeMode | str, restart: str | None
+        self, run: Run, fallback: State[Any], resume: ResumeMode | str, restart: str | None
     ) -> tuple[State[Any], Snapshot | None]:
         """The run's initial state and the snapshot it starts from (``None`` for a fresh run).
 
-        Records the commit the run checked out (``None`` for a fresh run) for
-        the run's hook events.
+        Records on ``run`` the commit it checked out (``None`` for a fresh
+        run) for the run's hook events.
         """
-        self._resumed_from = None
         if resume == "off" and restart is None:
             return fallback, None
-        checkout = Resume(self)
+        checkout = Resume(run)
         if restart is not None:
             started = await checkout.restart(restart, fallback)
         elif resume == "latest":
             started = await checkout.checkout(fallback)
         else:
             started = await checkout.checkout_at(resume)
-        self._resumed_from = checkout.checked_out
+        run.resumed_from = checkout.checked_out
         return started
 
     async def _run_as_subflow(
         self,
-        *args: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
         state: State[Any],
-        runtime: Flow,
-        parent_halt: asyncio.Event | None = None,
+        run: Run,
         parent_resources: Resources = NO_RESOURCES,
-        parent_checkpoint_ctx: CheckpointContext | None = None,
         parent_checkpointer: Checkpointer | None = None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
@@ -1484,17 +1485,24 @@ class Flow:
         parent_shortcuts: tuple[ShortcutRun, ...] = (),
         parent_hooks: Hooks | None = None,
         parent_activity: str | None = None,
-        **kwargs: Any,
     ) -> Any:
-        """Internal entry: walk nodes with caller-supplied ``State`` and runtime.
+        """Internal entry: walk nodes with caller-supplied ``State`` in ``run``.
 
-        ``parent_hooks`` are the hooks in effect in the calling scope and
-        ``parent_activity`` the invocation entering this flow (the step, or
-        the run at the top level); see :attr:`_RunEnv.hooks`.
+        ``args`` / ``kwargs`` are the first node's inputs. They are passed
+        as two values, not spread, so an input named like one of the
+        framework's own parameters (``run=``, ``parent_extra=``) reaches the
+        node instead of colliding with it.
+
+        ``run`` is the execution of the top-level flow this walk belongs
+        to: its halt, its history writer and its live scopes are the ones
+        every flow of the run uses. ``parent_hooks`` are the hooks in
+        effect in the calling scope and ``parent_activity`` the invocation
+        entering this flow (the step, or the run at the top level); see
+        :attr:`_RunEnv.hooks`.
 
         The executor's subflow helpers (``.call`` targeting a Flow, and the
         ``.branch`` / ``.iterate`` / ``.map`` bodies) invoke this directly so
-        the outer runtime's factory and saia cache are shared with the
+        the top-level flow's factory and saia cache are shared with the
         subflow. State arrives pre-wrapped — top-level wrapping happens once
         in :meth:`run`.
 
@@ -1502,10 +1510,7 @@ class Flow:
         ambients from the calling scope — nested subflows fall back to them
         when they have no local ``.with_checkpointer()`` /
         ``.with_checkpoint_policy()``, preserving an intermediate layer's
-        ambient through arbitrarily deep nesting. ``parent_halt`` is the
-        run's halt. ``parent_checkpoint_ctx`` is the run's repo; repo and
-        halt are set on the top-level flow only, so a nested run observes
-        its parent's halt. ``parent_shortcuts`` are the regions the calling
+        ambient through arbitrarily deep nesting. ``parent_shortcuts`` are the regions the calling
         scope is in; a shortcut this flow declares adds its own
         (:func:`~llm_gent.flow._shortcut.region_run`).
         ``parent_resources`` are the calling scope's resources — the cost
@@ -1522,17 +1527,12 @@ class Flow:
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        scopes = runtime._scopes
-        # The run's halt is on the top-level flow (check_one_halt).
-        halt = self._halt_event if parent_halt is None else parent_halt
-        shortcut = region_run(self, runtime._signals)
-        with run_resources(self, parent_path, scopes, parent_resources) as resources:
+        shortcut = region_run(self, run.signals)
+        with run_resources(self, parent_path, run.scopes, parent_resources) as resources:
             env = self._make_run_env(
-                runtime=runtime,
+                run=run,
                 state=state,
-                halt=halt,
                 resources=resources,
-                parent_checkpoint_ctx=parent_checkpoint_ctx,
                 parent_checkpointer=parent_checkpointer,
                 parent_chain_context=parent_chain_context,
                 parent_ancestor_chain=parent_ancestor_chain,
@@ -1588,11 +1588,9 @@ class Flow:
     def _make_run_env(
         self,
         *,
-        runtime: Flow,
+        run: Run,
         state: State[Any],
-        halt: asyncio.Event | None,
         resources: Resources,
-        parent_checkpoint_ctx: CheckpointContext | None,
         parent_chain_context: str = "",
         parent_ancestor_chain: tuple[str, ...] = (),
         parent_extra: dict[str, Any] | None = None,
@@ -1606,22 +1604,18 @@ class Flow:
         Local ``.with_checkpointer`` / ``.with_checkpoint_policy`` wins over
         the caller's parent ambients; unset locals fall back to the parent
         so an intermediate layer's ambient survives arbitrarily deep
-        nesting. ``halt``, ``resources`` and ``shortcuts`` (the regions the
-        run is in) come resolved. The repo is the top-level flow's
-        (:func:`check_one_repo` keeps nested flows from setting one).
+        nesting. ``resources`` and ``shortcuts`` (the regions the run is
+        in) come resolved; the halt and the history writer are ``run``'s.
 
         ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
         verbatim: the descent sites in :mod:`._executor` are the ones
         that extend them when recursing into a subflow / arm / body.
         """
         policy = self._checkpoint_policy or parent_policy or CheckpointPolicy()
-        checkpoint_ctx = self._checkpoint_ctx or parent_checkpoint_ctx
         return _RunEnv(
-            runtime=runtime,
+            run=run,
             state=state,
-            lg=runtime._lg,
-            halt=halt,
-            checkpoint_ctx=checkpoint_ctx,
+            lg=run.lg,
             checkpointer=self._checkpointer or parent_checkpointer,
             chain_context=parent_chain_context,
             ancestor_chain=parent_ancestor_chain,

@@ -288,7 +288,7 @@ class Context(Generic[T]):
         """The id of the :meth:`Flow.run` call this step runs in; ``None`` without hooks."""
         if self._env is None:
             return None
-        info = self._env.runtime._run_info
+        info = self._env.run.info
         return None if info is None else info.run_id
 
     def hook(self, cls: type[H]) -> H | None:

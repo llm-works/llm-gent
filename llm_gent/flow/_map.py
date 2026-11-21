@@ -413,12 +413,11 @@ class MapItemRunner:
         """
         env = self.env
         return await self.body._run_as_subflow(
-            self.item,
+            (self.item,),
+            {},
             state=child_state,
-            runtime=env.runtime,
-            parent_halt=env.halt,
+            run=env.run,
             parent_resources=env.resources,
-            parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(self.node_id, f"map:{self.key}"),
             parent_ancestor_chain=env.ancestor_chain + (self.node_id,),

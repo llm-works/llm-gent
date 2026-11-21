@@ -487,16 +487,18 @@ class TestPausedCapture:
         convs: list[Any] = [_StubConversation(messages=["pass-1"]), _NoDictConversation()]
         factory = _CompleteFactory(result=_StubResult(paused=True))
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
+        run_scopes: list[Any] = []
 
         @verb(role=ROLE_A)
         async def body_verb(ctx: Context, _prev: Any = None) -> Any:
+            run_scopes.append(ctx._env.scopes)
             return await loop(ctx, "t", conversation=convs.pop(0))
 
         flow = make_ff(saia_factory=factory).create()
         flow.iterate(lambda body: body.call(body_verb), max_iters=2)
         await flow.run()
         assert not convs, "both passes should have dispatched"
-        assert not flow._scopes.holds_under((), TURN)
+        assert not run_scopes[-1].holds_under((), TURN)
 
     @pytest.mark.asyncio
     async def test_paused_bytes_reset_per_dispatch(self) -> None:
