@@ -185,10 +185,8 @@ class IterateRunner:
         return await self.it.body._run_as_subflow(
             prev_result,
             state=child_state,
-            runtime=env.runtime,
-            parent_halt=env.halt,
+            run=env.run,
             parent_resources=env.resources,
-            parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(self.node_id, "body"),
             parent_ancestor_chain=env.ancestor_chain + (self.node_id,),

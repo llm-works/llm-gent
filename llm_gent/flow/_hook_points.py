@@ -101,7 +101,7 @@ def _env_where(env: _RunEnv, node_id: str | None, flow: Flow | None = None) -> W
 
 
 def _run_info(env: _RunEnv) -> RunInfo:
-    info = env.runtime._run_info
+    info = env.run.info
     assert info is not None, "hooks are in effect, so the run built its RunInfo"
     return info
 

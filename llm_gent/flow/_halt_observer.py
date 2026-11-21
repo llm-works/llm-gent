@@ -83,14 +83,14 @@ def is_halt_signaled(env: _RunEnv) -> bool:
 
 
 def is_run_halted(env: _RunEnv) -> bool:
-    """True when the run's halt (the top-level flow's) is set."""
-    halt = env.runtime._halt_event
+    """True when the run's halt is set."""
+    halt = env.run.halt
     return halt is not None and halt.is_set()
 
 
 def note_halt(env: _RunEnv, iteration: int, node_id: str) -> None:
     """Record where the run's halt was observed, unless an earlier observation was recorded."""
-    runtime = env.runtime
-    halt = runtime._halt_event
-    if halt is not None and halt.is_set() and runtime._halt_at is None:
-        runtime._halt_at = HaltPoint(env.ancestor_chain, iteration, node_id, env.state)
+    run = env.run
+    halt = run.halt
+    if halt is not None and halt.is_set() and run.halt_at is None:
+        run.halt_at = HaltPoint(env.ancestor_chain, iteration, node_id, env.state)

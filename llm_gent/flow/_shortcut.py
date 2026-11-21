@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +46,7 @@ from .state.snapshot import SIGNALS
 
 
 if TYPE_CHECKING:
+    from ._run import Run
     from .flow import Flow
     from .nodes import _RunEnv
 
@@ -152,7 +153,7 @@ def _label(flow: Flow) -> str:
 class _SetSignals:
     """Cursor at the root: the names of the run's signals that are set."""
 
-    def __init__(self, signals: dict[str, asyncio.Event]) -> None:
+    def __init__(self, signals: Mapping[str, asyncio.Event]) -> None:
         self.signals = signals
 
     def cursor(self) -> dict[str, Any]:
@@ -162,21 +163,21 @@ class _SetSignals:
 
 
 @contextlib.contextmanager
-def run_signals(flow: Flow) -> Iterator[None]:
-    """Keep ``flow``'s set signals in the run's checkpoints while the run goes.
+def run_signals(run: Run) -> Iterator[None]:
+    """Keep ``run``'s set signals in its checkpoints while it goes.
 
     First sets the signals the checked-out snapshot recorded, so the run
     continues as it would have. The record is dropped when the run
     finishes — a later session starts with none set — and kept when the
     halt stops the run, for its halt checkpoint.
     """
-    scopes = flow._scopes
+    scopes = run.scopes
     _, recorded = scopes.take_cursor((), SIGNALS)
     for name in recorded or ():
-        event = flow._signals.get(name)
+        event = run.signals.get(name)
         if event is not None:
             event.set()
-    runner = _SetSignals(flow._signals)
+    runner = _SetSignals(run.signals)
     scopes.open_cursor((), runner)
     yield
     scopes.close_cursor((), runner)
@@ -258,7 +259,7 @@ def follow(source: asyncio.Event, target: asyncio.Event) -> asyncio.Task[None] |
     return asyncio.create_task(follow())
 
 
-def region_run(flow: Flow, signals: dict[str, asyncio.Event]) -> ShortcutRun | None:
+def region_run(flow: Flow, signals: Mapping[str, asyncio.Event]) -> ShortcutRun | None:
     """The region one run of ``flow`` makes; ``None`` when it declares no shortcut.
 
     ``signals`` are the run's.

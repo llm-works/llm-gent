@@ -302,10 +302,8 @@ async def _run_subflow(
         result = await body._run_as_subflow(
             *node_args,
             state=child_state,
-            runtime=env.runtime,
-            parent_halt=env.halt,
+            run=env.run,
             parent_resources=env.resources,
-            parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(node_id, "call"),
             parent_ancestor_chain=env.ancestor_chain + (node_id,),
@@ -517,10 +515,8 @@ async def _run_arm(
         return await chosen._run_as_subflow(
             prev_result,
             state=env.state,
-            runtime=env.runtime,
-            parent_halt=env.halt,
+            run=env.run,
             parent_resources=env.resources,
-            parent_checkpoint_ctx=env.checkpoint_ctx,
             parent_checkpointer=env.checkpointer,
             parent_chain_context=_descend_context(node_id, arm.arm),
             parent_ancestor_chain=env.ancestor_chain + (node_id,),
@@ -569,7 +565,7 @@ async def _save_scope_commit(
     )
     if checkpointer.name is not None:
         await ctx.put_tag(checkpoint_tag(checkpointer.name), commit.id)
-    await checkpoint_written(env.hooks, env, env.runtime._run_info, commit, node_id)
+    await checkpoint_written(env.hooks, env, env.run.info, commit, node_id)
     return commit
 
 

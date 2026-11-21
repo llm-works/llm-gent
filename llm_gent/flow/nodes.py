@@ -40,6 +40,7 @@ from .state.snapshot import ScopePath, ScopeRegistry
 
 if TYPE_CHECKING:
     from ._checkpoint_ctx import CheckpointContext
+    from ._run import Run
     from ._shortcut import ShortcutRun
     from .flow import Flow
 
@@ -303,17 +304,16 @@ class Checkpointer:
 class _RunEnv:
     """Per-run environment threaded through the execution helpers.
 
-    Bundles the runtime flow (factory + saia cache + logger source), the
-    currently active :class:`State`, any ambient halt event and the run's
-    resources so helpers do not each need to carry them as separate
-    positional arguments. ``lg`` is cached off ``runtime`` at the top of
-    :meth:`Flow.run` for brevity in the debug/warning call sites. ``halt``
-    is the ambient :class:`asyncio.Event` attached via :meth:`Flow.with_halt`
-    (or inherited from the outer runtime); ``None`` when no halt is in
-    scope. ``checkpoint_ctx`` is the run's repo (the top-level flow's
-    checkpoint store); ``checkpointer`` the innermost
-    :meth:`Flow.with_checkpointer` on this flow or above it — saves write
-    commits only under one.
+    Bundles the :class:`~llm_gent.flow._run.Run` (the state of this
+    execution of the top-level flow), the currently active :class:`State`
+    and the run's resources so helpers do not each need to carry them as
+    separate positional arguments. ``lg`` is cached off the top-level flow
+    for brevity in the debug/warning call sites. :attr:`runtime`,
+    :attr:`halt`, :attr:`checkpoint_ctx` and :attr:`scopes` read the run:
+    its top-level flow (factory + saia cache + logger source), its halt
+    event, its history writer and its live scopes. ``checkpointer`` is the
+    innermost :meth:`Flow.with_checkpointer` on this flow or above it —
+    saves write commits only under one.
 
     Composition-graph position is threaded via a pair of content-addressed
     hashes: ``chain_context`` is the hash used to compute this Flow's own
@@ -345,11 +345,9 @@ class _RunEnv:
     the top level.
     """
 
-    runtime: Flow
+    run: Run
     state: State[Any]
     lg: Logger
-    halt: asyncio.Event | None = None
-    checkpoint_ctx: CheckpointContext | None = None
     checkpointer: Checkpointer | None = None
     chain_context: str = ""
     ancestor_chain: tuple[str, ...] = ()
@@ -362,9 +360,24 @@ class _RunEnv:
     activity_id: str | None = None
 
     @property
+    def runtime(self) -> Flow:
+        """The run's top-level Flow."""
+        return self.run.flow
+
+    @property
+    def halt(self) -> asyncio.Event | None:
+        """The run's halt event; ``None`` when the run has none."""
+        return self.run.halt
+
+    @property
+    def checkpoint_ctx(self) -> CheckpointContext | None:
+        """The run's history writer; ``None`` without a checkpoint store."""
+        return self.run.checkpoint_ctx
+
+    @property
     def scopes(self) -> ScopeRegistry:
-        """The run's live-scope registry, owned by the top-level Flow."""
-        return self.runtime._scopes
+        """The run's live-scope registry."""
+        return self.run.scopes
 
     def owner_path(self, node_id: str) -> ScopePath:
         """Snapshot path of the step ``node_id`` of this Flow."""

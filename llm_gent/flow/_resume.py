@@ -40,13 +40,13 @@ from .state.snapshot import RESOURCES, Snapshot, path_str
 
 
 if TYPE_CHECKING:
-    from .flow import Flow
+    from ._run import Run
 
 
 class Resume:
     """Check out the snapshot a resuming ``run()`` continues from.
 
-    Constructed with a flow that has a checkpointer. :meth:`checkout` takes
+    Constructed with a run that has a history writer. :meth:`checkout` takes
     the fallback :class:`State` (the wrapped ``run(state=...)`` payload) and
     returns it unchanged when there is nothing to resume, so the caller
     falls through to a fresh run — whose commits still append to the same
@@ -54,10 +54,11 @@ class Resume:
     corrupt history rather than silently starting over from ``fallback``.
     """
 
-    def __init__(self, flow: Flow) -> None:
-        ctx = flow._checkpoint_ctx
+    def __init__(self, run: Run) -> None:
+        ctx = run.checkpoint_ctx
         assert ctx is not None
-        self.flow = flow
+        self.flow = run.flow
+        self._ctx = ctx
         self._history = History(ctx.store, ctx.client_flow_id)
         self.checked_out: str | None = None
         """The commit whose snapshot the run starts from, once one is checked out."""
@@ -91,9 +92,8 @@ class Resume:
                 if skipped:
                     self._warn_skipped(skipped, commit)
                 # Pass expect_head so a concurrent writer is detected at first commit.
-                ctx = self.flow._checkpoint_ctx
-                if ctx is not None and head is not None:
-                    await ctx.continue_from(head, expect_head=head)
+                if head is not None:
+                    await self._ctx.continue_from(head, expect_head=head)
                 self.checked_out = commit.id
                 return self._root_state(snapshot.root), snapshot
             skipped.append(commit.meta.node_path)
@@ -130,9 +130,7 @@ class Resume:
                 "holds no state to resume from"
             )
         root = self._root_state(snapshot.root)
-        ctx = self.flow._checkpoint_ctx
-        assert ctx is not None
-        await ctx.continue_from(commit.id)
+        await self._ctx.continue_from(commit.id)
         self.checked_out = commit.id
         return root, snapshot
 
@@ -216,7 +214,7 @@ def _restart_snapshot(snapshot: Snapshot) -> Snapshot:
     )
 
 
-async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> None:
+async def apply_clean_exit_retention(run: Run, final_state: State[Any]) -> None:
     """Apply the history's retention policy on the clean-exit path.
 
     Only a run that finished every step gets here: a halted run ends in its
@@ -232,17 +230,17 @@ async def apply_clean_exit_retention(flow: Flow, final_state: State[Any]) -> Non
     final commit holds the root scope and the top-level flow's resources
     alone.
     """
-    if flow._checkpoint_ctx is None:
+    ctx = run.checkpoint_ctx
+    if ctx is None:
         return
-    ctx = flow._checkpoint_ctx
-    _drop_unreached_scopes(flow, ctx.client_flow_id)
+    _drop_unreached_scopes(run, ctx.client_flow_id)
     if ctx.retention == "gc_on_success":
         await ctx.delete_history()
     else:
-        await _run_checkpoint_written(flow, await commit_completion(flow, final_state))
+        await _run_checkpoint_written(run, await commit_completion(run, final_state))
 
 
-def _drop_unreached_scopes(flow: Flow, client_flow_id: str) -> None:
+def _drop_unreached_scopes(run: Run, client_flow_id: str) -> None:
     """Forget saved scopes and cursors a finished run never reached, with a warning naming them.
 
     The run executed every step it was going to, so a saved entry nothing
@@ -251,15 +249,15 @@ def _drop_unreached_scopes(flow: Flow, client_flow_id: str) -> None:
     would ride along in every later snapshot and could be handed to a step
     that reuses its node id.
     """
-    dropped = flow._scopes.drop_saved()
+    dropped = run.scopes.drop_saved()
     if dropped:
-        flow._lg.warning(
+        run.lg.warning(
             "resumed run finished without reaching saved entries; dropped them",
             extra={"client_flow_id": client_flow_id, "paths": [path_str(p) for p in dropped]},
         )
 
 
-async def commit_completion(flow: Flow, final_state: State[Any]) -> FlowCommit:
+async def commit_completion(run: Run, final_state: State[Any]) -> FlowCommit:
     """Commit the run's final state at ``$end`` and move the ``complete`` tag to it.
 
     The commit holds the top-level state, so the history's head always
@@ -272,15 +270,15 @@ async def commit_completion(flow: Flow, final_state: State[Any]) -> FlowCommit:
     written with an empty tree, which still marks the history complete
     but carries no state.
     """
-    ctx = flow._checkpoint_ctx
+    ctx = run.checkpoint_ctx
     assert ctx is not None
-    tree = _put_root_tree(flow, final_state)
+    tree = _put_root_tree(run, final_state)
     commit = await ctx.save_completion_commit(tree)
     await ctx.put_tag(COMPLETE_TAG, commit.id)
     return commit
 
 
-async def commit_halt(flow: Flow) -> None:
+async def commit_halt(run: Run) -> None:
     """Commit the run's halt checkpoint, once everything the halt stopped has stopped.
 
     Every structure the halt stopped — at any depth, in every map item —
@@ -289,33 +287,32 @@ async def commit_halt(flow: Flow) -> None:
     commit's metadata records where the halt was first observed. A no-op
     without a checkpointer.
     """
-    ctx = flow._checkpoint_ctx
+    ctx = run.checkpoint_ctx
     if ctx is None:
         return
-    at = flow._halt_at
+    at = run.halt_at
     assert at is not None, "a halted run reached its end without observing the halt"
     try:
         commit = await ctx.save_scope_commit(
-            at.ancestor_chain, at.iteration, at.node_id, flow._scopes, at.state, "halted"
+            at.ancestor_chain, at.iteration, at.node_id, run.scopes, at.state, "halted"
         )
     except TypeError:
         # Serialization failed: no checkpoint exists, don't claim one does.
         raise
     except Exception as e:
         # Store/IO errors propagate: the caller expects the halt checkpoint to exist.
-        flow._lg.warning("halt commit could not be written", extra={"exception": e})
+        run.lg.warning("halt commit could not be written", extra={"exception": e})
         raise
-    await _run_checkpoint_written(flow, commit)
+    await _run_checkpoint_written(run, commit)
 
 
-async def _run_checkpoint_written(flow: Flow, commit: FlowCommit) -> None:
+async def _run_checkpoint_written(run: Run, commit: FlowCommit) -> None:
     """Call the top-level hooks' ``after_checkpoint`` for one of the run's own commits."""
-    run_hooks = flow._run_hooks
-    hooks = None if run_hooks is None else run_hooks.hooks
-    await checkpoint_written(hooks, None, flow._run_info, commit)
+    hooks = None if run.hooks is None else run.hooks.hooks
+    await checkpoint_written(hooks, None, run.info, commit)
 
 
-def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
+def _put_root_tree(run: Run, state: State[Any]) -> Tree:
     """Put the run's snapshot, or an empty tree when its root ``state`` cannot be serialized.
 
     At the end of a run every child scope has closed, so the snapshot
@@ -323,21 +320,21 @@ def _put_root_tree(flow: Flow, state: State[Any]) -> Tree:
     tracker among them — when it has any
     (:func:`~llm_gent.flow.resource._runtime.run_resources`).
     """
-    ctx = flow._checkpoint_ctx
+    ctx = run.checkpoint_ctx
     assert ctx is not None
-    if _serializable(flow, state):
-        return ctx.put_snapshot(flow._scopes)
+    if _serializable(run, state):
+        return ctx.put_snapshot(run.scopes)
     tree = Tree()
     ctx.put(tree)
     return tree
 
 
-def _serializable(flow: Flow, state: State[Any]) -> bool:
+def _serializable(run: Run, state: State[Any]) -> bool:
     """True when ``state`` can be checkpointed; warn and return False otherwise."""
     try:
         canonical_json(serialize_state_data(state.data))
     except (TypeError, ValueError) as e:
-        flow._lg.warning(
+        run.lg.warning(
             "run state is not serializable; framework commit carries no state",
             extra={"exception": e},
         )

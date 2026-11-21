@@ -94,7 +94,8 @@ class CheckpointContext:
     run's top-level flow. Absent when the run has no store — save sites
     check ``env.checkpoint_ctx is None`` and skip.
 
-    Caches the history's head within one run (:meth:`begin_run` drops it).
+    Caches the history's head within one run: each run writes through its
+    own copy (:meth:`for_run`).
     Exposes get_ref / move_ref, put_tag, delete_history,
     :meth:`append_commit`, and the compound :meth:`save_scope_commit` that
     puts a snapshot, commits it and moves ``HEAD`` to it.
@@ -143,18 +144,16 @@ class CheckpointContext:
         # content-identical, so their puts are skipped instead of repeated.
         self._written: set[str] = set()
 
-    def begin_run(self) -> None:
-        """Drop the cached head and structure, and create a fresh lock.
+    def for_run(self) -> CheckpointContext:
+        """A context on the same repository for one run, with nothing cached yet.
 
-        Called at the start of every top-level run so each run re-reads
-        the store: a history deleted (or advanced) by someone else between
-        runs is observed instead of written into under a stale head. A
-        fresh lock keeps a Flow reusable across event loops.
+        Each top-level run writes through its own: it reads the head from
+        the store on its first commit, so a history deleted or advanced by
+        someone else between runs is observed instead of written into under
+        a stale head; and runs of one flow at once keep their own head,
+        lock and written set. Its lock is created on the run's event loop.
         """
-        self._run_structure = None
-        self._forget_head()
-        self._commit_lock = asyncio.Lock()
-        self._written = set()
+        return CheckpointContext(self.store, self.client_flow_id, self._structure, self.retention)
 
     # --- objects and refs ---
 
