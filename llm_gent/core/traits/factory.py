@@ -62,7 +62,7 @@ class MemoryResources:
     embedder: EmbeddingClient | None = None
 
 
-class TraitFactory:
+class Factory:
     """Builds traits on the platform's shared clients.
 
     Built by :class:`PlatformFactory`; the platform owns the injected clients.

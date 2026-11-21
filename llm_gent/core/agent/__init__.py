@@ -4,7 +4,7 @@
 """Agent package - core agent abstractions and implementations."""
 
 from .agent import Agent
-from .factory import AgentFactory
+from .factory import Factory
 from .identity import Identity
 from .runnable import RunnableAgent
 from .types import ExecutionResult
@@ -12,7 +12,7 @@ from .types import ExecutionResult
 
 __all__ = [
     "Agent",
-    "AgentFactory",
+    "Factory",
     "ExecutionResult",
     "Identity",
     "RunnableAgent",

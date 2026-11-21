@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from appinfra import DotDict
 
-from llm_gent.core.agent.factory import AgentFactory
+from llm_gent.core.agent.factory import Factory as AgentFactory
 from llm_gent.core.agent.helpers import _substitute_in_dict
 from llm_gent.core.dispatcher import Dispatcher
 from llm_gent.core.llm.caller import LLMCaller

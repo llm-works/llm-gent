@@ -38,7 +38,7 @@ from .agent import Agent
 from .helpers import _substitute_in_dict
 
 
-class AgentFactory:
+class Factory:
     """Factory for creating :class:`Agent` instances from configuration.
 
     Default construction returns a plain :class:`Agent` — no subclass

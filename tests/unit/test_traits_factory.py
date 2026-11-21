@@ -15,7 +15,8 @@ from llm_gent.core.traits.builtin.directive import Directive, DirectiveTrait, Me
 from llm_gent.core.traits.builtin.llm import LLMTrait
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.training import TrainingTrait
-from llm_gent.core.traits.factory import MemoryResources, TraitFactory
+from llm_gent.core.traits.factory import Factory as TraitFactory
+from llm_gent.core.traits.factory import MemoryResources
 
 
 pytestmark = pytest.mark.unit

@@ -519,7 +519,7 @@ class TestToolFactoryWeb:
         with pytest.raises(TypeError, match="not a WebSearchBackendFactory subclass"):
             factory.create(
                 "web_search",
-                {"backend": {"factory": "llm_gent.core.tools.factory.ToolFactory"}},
+                {"backend": {"factory": "llm_gent.core.tools.factory.Factory"}},
             )
 
     def test_factory_backend_dict_valid_factory(self, mock_lg):

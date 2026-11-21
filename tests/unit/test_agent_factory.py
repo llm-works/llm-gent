@@ -8,7 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 from appinfra.log import Logger
 
-from llm_gent.core.agent import Agent, AgentFactory
+from llm_gent.core.agent import Agent
+from llm_gent.core.agent import Factory as AgentFactory
 from llm_gent.core.traits.builtin.directive import DirectiveTrait
 from llm_gent.core.traits.builtin.llm import LLMTrait
 from tests.helpers import make_platform

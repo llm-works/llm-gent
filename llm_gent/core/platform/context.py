@@ -12,8 +12,9 @@ from typing import Protocol
 from appinfra.log import Logger
 from llm_infer.client import ChatClient
 
-from ..tools.factory import ToolFactory
-from ..traits.factory import MemoryResources, TraitFactory
+from ..tools.factory import Factory as ToolFactory
+from ..traits.factory import Factory as TraitFactory
+from ..traits.factory import MemoryResources
 from .config import Config
 
 

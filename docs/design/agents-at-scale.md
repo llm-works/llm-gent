@@ -29,9 +29,10 @@ shared; agents and runs are state, cheap and many.
 
 ## 3. Construction
 
-Factories build; the context they produce is passed around and builds nothing. The platform's
-classes live in `llm_gent.core.platform` as `Factory`, `Context` and `Config`; the top-level
-package exports the factory as `PlatformFactory`.
+Factories build; the context they produce is passed around and builds nothing. A class is named
+without its package's name inside the package (`platform.Factory`, `platform.Context`,
+`agent.Factory`, `traits.Factory`); flat namespaces such as the top-level package export it with
+the prefix (`PlatformFactory`, `AgentFactory`, `TraitFactory`).
 
 | Object | Role |
 |---|---|

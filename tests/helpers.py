@@ -13,8 +13,9 @@ from appinfra.cas import FileStore, MemoryStore
 from appinfra.log import Logger, quick_console_logger
 
 from llm_gent.core.platform import Config, Context
-from llm_gent.core.tools.factory import ToolFactory
-from llm_gent.core.traits.factory import MemoryResources, TraitFactory
+from llm_gent.core.tools.factory import Factory as ToolFactory
+from llm_gent.core.traits.factory import Factory as TraitFactory
+from llm_gent.core.traits.factory import MemoryResources
 
 
 @functools.cache

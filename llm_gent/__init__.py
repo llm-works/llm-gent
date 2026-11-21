@@ -10,7 +10,8 @@ from importlib.metadata import PackageNotFoundError, version
 from llm_kelt.core.types import ScoredEntity
 from llm_kelt.memory.atomic import Fact
 
-from .core.agent import Agent, AgentFactory, Identity
+from .core.agent import Agent, Identity
+from .core.agent import Factory as AgentFactory
 from .core.errors import AgentError, ConfigError
 from .core.llm import (
     CompletionResult,
@@ -43,7 +44,7 @@ from .core.tools import (
     WebSearchBackendFactory,
     WebSearchTool,
 )
-from .core.tools.factory import ToolFactory
+from .core.tools.factory import Factory as ToolFactory
 from .core.traits import (
     BaseTrait,
     Directive,
@@ -63,7 +64,7 @@ from .core.traits import (
     TrainingTrait,
     Trait,
 )
-from .core.traits.factory import TraitFactory
+from .core.traits.factory import Factory as TraitFactory
 from .schema import (
     SchemaManager,
     SchemaMode,

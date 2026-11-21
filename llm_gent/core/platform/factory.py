@@ -15,8 +15,9 @@ from llm_infer.client import ChatClient, EmbeddingClient
 from llm_infer.client import Factory as LLMClientFactory
 from llm_kelt.core import Database
 
-from ..tools.factory import ToolFactory
-from ..traits.factory import MemoryResources, TraitFactory
+from ..tools.factory import Factory as ToolFactory
+from ..traits.factory import Factory as TraitFactory
+from ..traits.factory import MemoryResources
 from .config import Config
 from .context import Closeable, Context, close_resources
 
