@@ -454,8 +454,8 @@ class TestAcrossShortcut:
             return x
 
         region = _ff().create().with_resource(COUNTER, per="call").with_shortcut("cut")
-        flow = _ff().create().with_signal("cut", cut).with_resource(COUNTER, root)
-        assert await flow.call(region.call(a).then(b)).run(1) == 1
+        flow = _ff().create().with_resource(COUNTER, root)
+        assert await flow.call(region.call(a).then(b)).run(1, signals={"cut": cut}) == 1
         assert len(seen) == 1 and seen[0].count == 1
         assert root.count == 1
 
@@ -485,8 +485,8 @@ class TestAcrossShortcut:
 
         region = _ff().create().with_shortcut("cut")
         region.map(item, items=lambda *_: [0, 1], max_concurrency=2)
-        flow = _ff().create().with_signal("cut", cut).with_resource(COUNTER, root).call(region)
-        assert await flow.run() == [0, 1]
+        flow = _ff().create().with_resource(COUNTER, root).call(region)
+        assert await flow.run(signals={"cut": cut}) == [0, 1]
         assert root.count == 2
 
 

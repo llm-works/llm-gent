@@ -340,20 +340,21 @@ A halt pauses the run. A shortcut moves it forward: on a signal, a part
 of the flow is cut short — it skips what it can — and the run goes on
 after it, still ending with a result.
 
-Signals are named events the app sets, declared on the top-level flow
-with `with_signal(name, event)`. `with_shortcut(name)` makes a flow a
-region the signal cuts short:
+Signals are named events the app sets, passed per run as
+`run(signals={name: event})`. `with_shortcut(name)` makes a flow a
+region the signal cuts short; `run()` raises when a region names a
+signal the run was not given:
 
 ```python
 loop = ff.create().iterate(body, max_iters=20).with_shortcut("cut")
 flow = (
     ff.create(...)
     .with_halt(pause)
-    .with_signal("cut", cut)
     .call(prepare)
     .then(loop)  # the region: the cut ends it
     .then(finish)  # runs as usual after it
 )
+await flow.run(signals={"cut": cut})
 ```
 
 While the signal is set, the region and every flow under it

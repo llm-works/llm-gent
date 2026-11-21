@@ -620,17 +620,19 @@ class TestRestart:
                 return x
 
             flow = Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "sig")
-            flow = flow.with_checkpointer().with_signal("cut", cut)
+            flow = flow.with_checkpointer()
             if halt is not None:
                 flow = flow.with_halt(halt)
             return flow.call(step)
 
-        assert await build(asyncio.Event(), asyncio.Event(), []).run() is HALTED
+        cut = asyncio.Event()
+        assert await build(cut, asyncio.Event(), []).run(signals={"cut": cut}) is HALTED
         _, halted = await _head(store, "sig")
         assert halted.cursors[""][SIGNALS] == ["cut"]
 
         seen: list[bool] = []
-        await build(asyncio.Event(), None, seen).run(restart="latest")
+        cut = asyncio.Event()
+        await build(cut, None, seen).run(restart="latest", signals={"cut": cut})
         assert seen == [False]
 
     @pytest.mark.parametrize("by", ["name", "hash"])
