@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a checkpoint stores its snapshot as one batch.
 - `retention="gc_on_success"` deletes only the checkpoint history (`HEAD` and its tags) when the
   repository holds other refs, such as version-control records; otherwise the whole repository.
+- Breaking: `core.cost.CostTracker` is `core.cost.Tracker` and `core.llm.LLMCaller` is
+  `core.llm.Caller`; the `llm_gent` package exports them as `CostTracker` and `LLMCaller`.
 
 ## [0.4.1] - 2026-11-01
 

@@ -518,7 +518,7 @@ A fluent name of the app's own — `flow.with_stats(...)` for
 ### Cost and budgets
 
 Cost is what calls and operations cost; a cost tracker
-(`llm_gent.core.cost.CostTracker`) records it, and a budget is the limit
+(`llm_gent.CostTracker`) records it, and a budget is the limit
 it is checked against. Verbs reach the run's tracker as `ctx.cost`:
 `ctx.cost.spent` is the cost so far, `ctx.cost.budget` the limit.
 

@@ -18,7 +18,7 @@ from appinfra.log import Logger
 from llm_kelt.memory.atomic import Fact, FeedbackDetails
 from sqlalchemy import text
 
-from ...llm import LLMCaller
+from ...llm import Caller as LLMCaller
 from ...training import StarRatedItem
 from ..schema import validate_schema_name
 from .models import BatchItem, BatchRequest, Result

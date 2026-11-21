@@ -12,7 +12,10 @@ from llm_kelt.memory.atomic import Fact
 
 from .core.agent import Agent, Identity
 from .core.agent import Factory as AgentFactory
+from .core.cost import CostCallback
+from .core.cost import Tracker as CostTracker
 from .core.errors import AgentError, ConfigError
+from .core.llm import Caller as LLMCaller
 from .core.llm import (
     CompletionResult,
     HTTPBackend,
@@ -84,6 +87,9 @@ __all__ = [
     # Agents
     "Agent",
     "Identity",
+    # Cost
+    "CostCallback",
+    "CostTracker",
     # Errors
     "AgentError",
     "ConfigError",
@@ -134,6 +140,7 @@ __all__ = [
     "CompletionResult",
     "HTTPBackend",
     "LLMBackend",
+    "LLMCaller",
     "LLMError",
     "Message",
     "StructuredOutputError",

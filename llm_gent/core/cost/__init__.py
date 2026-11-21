@@ -10,7 +10,7 @@ multiplies rates by usage and returns the same unit.
 
 Public shape:
 
-- :class:`PricingProvider` — the plug seam :class:`CostTracker` calls on
+- :class:`PricingProvider` — the plug seam :class:`Tracker` calls on
   every recorded event. Downstream implementations own the pricing
   math (dynamic rates, provider-specific surcharges, negotiated
   contracts, invoice reconciliation).
@@ -18,12 +18,14 @@ Public shape:
   :class:`PricingProvider`; a name-indexed :class:`Op` registry.
 - :class:`Op` protocol + built-in :class:`LLMOp` and :class:`FixedOp`.
   Consumers can define their own Op shapes for domain-specific billing.
-- :class:`CostTracker` — single accounting primitive. A tracker holds a
+- :class:`Tracker` — single accounting primitive. A tracker holds a
   scope-local budget and reports costs up to its parent (if any); trees
   of arbitrary depth are supported. Each level has independent halt
   and observer callback semantics.
 - :class:`CostCallback` — per-tracker hook consumers use to build
   observability (aggregations, audit logs, dashboards).
+
+The top-level ``llm_gent`` package exports :class:`Tracker` as ``CostTracker``.
 """
 
 from .llm import (
@@ -34,7 +36,7 @@ from .llm import (
     load_pricing_config,
 )
 from .pricing import FixedOp, LLMOp, Op, PricingConfig, PricingProvider
-from .tracker import CostCallback, CostTracker
+from .tracker import CostCallback, Tracker
 
 
 __all__ = [
@@ -48,6 +50,6 @@ __all__ = [
     "PricingConfig",
     "PricingProvider",
     "ProviderCostExtractor",
-    "CostTracker",
+    "Tracker",
     "load_pricing_config",
 ]

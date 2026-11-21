@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, overload
 from appinfra.cas import Store
 from appinfra.log import Logger
 
-from ..core.cost import CostTracker
+from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
 from .nodes import UNSET
 from .resource import R, ResourceKey, check_resource, resource_method

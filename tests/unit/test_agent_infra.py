@@ -12,7 +12,7 @@ from appinfra import DotDict
 from llm_gent.core.agent.factory import Factory as AgentFactory
 from llm_gent.core.agent.helpers import _substitute_in_dict
 from llm_gent.core.dispatcher import Dispatcher
-from llm_gent.core.llm.caller import LLMCaller
+from llm_gent.core.llm.caller import Caller as LLMCaller
 from llm_gent.core.platform import Config, Context
 from tests.helpers import make_platform
 

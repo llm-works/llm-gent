@@ -42,7 +42,7 @@ from typing import Any, Generic, TypeVar, overload
 
 from appinfra.log import Logger
 
-from ..core.cost import CostTracker
+from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
 from ._shortcut import is_draining, is_fast_forward
 from .checkpoint import checkpoint_tag

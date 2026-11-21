@@ -9,7 +9,8 @@ import asyncio
 
 import pytest
 
-from llm_gent.core.cost import CostTracker, FixedOp, PricingConfig
+from llm_gent.core.cost import FixedOp, PricingConfig
+from llm_gent.core.cost import Tracker as CostTracker
 from llm_gent.flow import Context, Flow, verb
 
 from .conftest import ROLE_A, StubFactory, make_test_logger

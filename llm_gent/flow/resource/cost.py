@@ -5,7 +5,7 @@
 
 Cost is what calls and operations cost; a budget is the limit cost is
 checked against. Gent tracks cost; the agent decides how to keep to a
-budget. A :class:`~llm_gent.core.cost.CostTracker` implements the
+budget. A :class:`~llm_gent.core.cost.Tracker` implements the
 :class:`~llm_gent.flow.Resource` protocol (``snapshot()`` /
 ``restore(data)``, and ``child(budget)`` for a budget per run), and the
 cost API is sugar over :meth:`Flow.with_resource` with :data:`COST`:
@@ -30,7 +30,7 @@ The running cost is reconstructed across pause, resume and shortcut the
 way every resource's accounting is (:mod:`llm_gent.flow.resource._runtime`):
 the top-level flow's tracker through the completion commit, so a later
 session continues the total; a budgeted run's child while the run is in
-progress. A :class:`~llm_gent.core.cost.CostTracker` restores the saved
+progress. A :class:`~llm_gent.core.cost.Tracker` restores the saved
 spend as is, so its spend is cumulative over the whole history. What
 resume means for the spend is the tracker's: a subclass keeps keys of
 its own in ``snapshot()`` (a session's baseline, say) and decides in
@@ -44,7 +44,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from ...core.cost import CostTracker
+from ...core.cost import Tracker as CostTracker
 from .base import ResourceKey
 
 

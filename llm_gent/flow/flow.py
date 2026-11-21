@@ -60,7 +60,7 @@ from typing import Any, Self, get_args
 from appinfra.cas import Store
 from appinfra.log import Logger
 
-from ..core.cost import CostTracker
+from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext, check_one_repo

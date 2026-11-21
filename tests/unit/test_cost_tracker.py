@@ -10,7 +10,8 @@ from typing import Any
 
 import pytest
 
-from llm_gent.core.cost import CostTracker, FixedOp, LLMOp, PricingConfig, PricingProvider
+from llm_gent.core.cost import FixedOp, LLMOp, PricingConfig, PricingProvider
+from llm_gent.core.cost import Tracker as CostTracker
 from tests.helpers import make_test_logger
 
 

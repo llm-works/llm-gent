@@ -16,7 +16,8 @@ from typing import Any
 
 import pytest
 
-from llm_gent.core.cost import CostTracker, PricingConfig
+from llm_gent.core.cost import PricingConfig
+from llm_gent.core.cost import Tracker as CostTracker
 from llm_gent.flow import (
     COST,
     HALTED,
