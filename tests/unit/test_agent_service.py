@@ -155,20 +155,20 @@ class TestSetup:
 
 
 # =============================================================================
-# execute()
+# run()
 # =============================================================================
 
 
-class TestExecute:
+class TestRun:
     def test_raises_when_no_runner(self, service):
         with pytest.raises(RuntimeError, match="setup.*must be called"):
-            service.execute()
+            service.run()
 
     def test_calls_runner_run(self, service):
         runner = MagicMock()
         service._runner = runner
 
-        service.execute()
+        service.run()
 
         assert service._healthy is True
         runner.run.assert_called_once()
@@ -185,7 +185,7 @@ class TestExecute:
         runner.run.side_effect = capture_healthy
         service._runner = runner
 
-        service.execute()
+        service.run()
 
         assert healthy_at_run_time is True
 
@@ -221,14 +221,14 @@ class TestIsHealthy:
     def test_initially_false(self, service):
         assert service.is_healthy() is False
 
-    def test_true_after_execute(self, service):
+    def test_true_after_run(self, service):
         service._runner = MagicMock()
-        service.execute()
+        service.run()
         assert service.is_healthy() is True
 
     def test_false_after_teardown(self, service):
         service._runner = MagicMock()
-        service.execute()
+        service.run()
         service.teardown()
         assert service.is_healthy() is False
 
