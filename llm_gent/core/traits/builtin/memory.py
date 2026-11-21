@@ -61,33 +61,31 @@ class MemoryTrait(BaseTrait):
     Adapter-manifest-driven schema resolution lives in TrainingTrait (training.py).
 
     Dependency ownership: the trait imports no external factory. Database,
-    ChatClient, and EmbeddingClient are built by ``TraitFactory._create_memory``
-    and injected at construction. Two seams:
+    ChatClient, and EmbeddingClient are injected at construction. Two seams:
 
-    - Config-time (standard path): ``TraitFactory.create_memory_trait`` builds
-      the three clients from ``memory_config`` and passes them with
-      ``owns_chat_client=True`` and ``owns_embedder=True`` so the trait closes
-      them on ``on_stop``. Note: Database/PG lifecycle is not managed by this
-      trait — the underlying connection pool outlives the trait. This is
-      intentional for shared-pool scenarios; explicit pool shutdown belongs
-      at the application layer.
+    - Platform (standard path): the platform builds the three clients once
+      from its memory settings and closes them; ``TraitFactory`` injects them
+      into every agent's MemoryTrait with ``owns_chat_client=False`` and
+      ``owns_embedder=False``.
     - Direct injection (test / advanced): pass ``chat_client``, ``embedder``,
-      or ``database`` yourself with the corresponding ``owns_*=False``; caller
-      retains close responsibility. See ``.with_chat_client()``,
-      ``.with_embedder()``, and ``.with_database()`` for immutable-view
-      fluent overrides.
+      or ``database`` yourself; with ``owns_*=True`` the trait closes the
+      client on ``on_stop``, otherwise the caller does. See
+      ``.with_chat_client()``, ``.with_embedder()``, and ``.with_database()``
+      for immutable-view fluent overrides.
 
     Example:
-        from llm_gent.agent import AgentFactory
+        from llm_gent import AgentFactory, PlatformFactory
 
-        # Standard construction — TraitFactory builds the external clients.
-        agent = AgentFactory(lg).from_config({
-            "identity": "my-agent",
-            "llm": {"backends": {"local": {...}}},
+        # Standard construction — the platform builds the shared clients.
+        platform = PlatformFactory(lg).from_config({
             "memory": {
                 "db": {"url": "postgresql://localhost/kelt"},
                 "embedder_url": "http://localhost:8001/v1",
             },
+        })
+        agent = AgentFactory(platform).from_config({
+            "identity": {"name": "my-agent"},
+            "traits": {"required": ["llm", "memory"]},
         })
         agent.start()
 

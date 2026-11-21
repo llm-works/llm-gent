@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 from appinfra import DotDict
 from appinfra.service import Service
 
+from ..core.platform import Context
+from ..core.platform import Factory as PlatformFactory
 from .runner import ManagedAgentRunner
 
 
@@ -63,6 +65,7 @@ class AgentService(Service):
         self._variables = variables or {}
         self._factory_module = factory_module
         self._runner: ManagedAgentRunner | None = None
+        self._platform: Context | None = None
         self._healthy = False
         # Injected by ProcessRunner before run()
         self._shutdown_event: MPEvent | None = None
@@ -73,16 +76,16 @@ class AgentService(Service):
 
     def setup(self) -> None:
         """Create platform, load factory, create and start agent."""
-        from ..core.platform import PlatformContext
-
-        platform = PlatformContext.from_config(
-            lg=self._lg,
-            llm_config=self._llm_config,
-            learn_config=self._learn_config,
+        self._platform = PlatformFactory(self._lg).from_config(
+            {"llm": self._llm_config or {}, "memory": self._learn_config}
         )
-        factory = self._load_factory(platform)
-        agent = factory.create(self._config, variables=self._variables)
-        agent.start()
+        try:
+            factory = self._load_factory(self._platform)
+            agent = factory.create(self._config, variables=self._variables)
+            agent.start()
+        except Exception:
+            self._close_platform()
+            raise
 
         self._runner = ManagedAgentRunner(
             lg=self._lg,
@@ -93,12 +96,21 @@ class AgentService(Service):
         self._lg.info("agent service setup complete", extra={"agent": self._agent_name})
 
     def run(self) -> None:
-        """Run the agent runner (blocks until shutdown)."""
+        """Run the agent runner (blocks until shutdown); close the platform once it stops."""
         if self._runner is None:
             raise RuntimeError("setup() must be called before run()")
         self._healthy = True
         self._start_shutdown_watcher()
-        self._runner.run()
+        try:
+            self._runner.run()
+        finally:
+            self._close_platform()
+
+    def _close_platform(self) -> None:
+        """Close the platform's shared clients; the runner has stopped the agent by now."""
+        if self._platform is not None:
+            self._platform.close()
+            self._platform = None
 
     def teardown(self) -> None:
         """Signal the runner to stop."""

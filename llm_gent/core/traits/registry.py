@@ -41,11 +41,11 @@ class Registry:
         # Agent uses registry internally to manage its traits
         agent = MyAgent(lg, config)
 
-        # Traits are typically built via TraitFactory, which owns dependency
-        # construction (routers, clients) and injects them into the trait.
-        factory = TraitFactory(lg)
-        agent.add_trait(factory.create_llm_trait(agent, llm_config))
-        agent.add_trait(factory.create_memory_trait(agent, identity, memory_config))
+        # Traits are built by the platform's TraitFactory, which injects the
+        # platform's shared clients (router, memory clients) into each trait.
+        factory = platform.trait_factory
+        agent.add_trait(factory.create(TraitName.LLM, agent))
+        agent.add_trait(factory.create(TraitName.MEMORY, agent))
 
         # Access traits by type through agent
         llm_trait = agent.get_trait(LLMTrait)

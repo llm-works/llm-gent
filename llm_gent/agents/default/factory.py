@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ...core.agent import AgentFactory as BaseFactory
+from ...core.platform import Context
 from ...core.traits.builtin.saia import SAIAConfig, SAIATrait
 from .agent import Agent
 
@@ -26,7 +27,7 @@ class Factory(BaseFactory):
     Uses base Factory infrastructure for identity, traits, and tools.
 
     Example:
-        platform = PlatformContext.from_config(lg, llm_config, learn_config)
+        platform = PlatformFactory(lg).from_config({"llm": llm_config, "memory": memory_config})
         factory = Factory(platform)
 
         config = {
@@ -46,23 +47,21 @@ class Factory(BaseFactory):
     required_traits = []  # Let YAML config specify (directive, method, tools optional)
     default_tools = {}  # Tools specified in YAML config
 
-    def __init__(self, platform: Any) -> None:
+    def __init__(self, platform: Context) -> None:
         """Initialize factory.
 
         Args:
-            platform: Platform context with all resources.
+            platform: The platform whose shared router SAIA runs on.
         """
         super().__init__(platform)
         self._backend: Backend | None = None
 
     def _get_backend(self) -> Backend:
-        """Get or create SAIA backend from llm_config."""
+        """The SAIA backend over the platform's shared router, made on first use."""
         if self._backend is None:
-            from llm_infer.client import Factory as LLMClientFactory
             from llm_infer.client import SAIAAdapter
 
-            llm_router = LLMClientFactory(self._lg).from_config(self._platform.llm_config())
-            self._backend = SAIAAdapter(client=llm_router)
+            self._backend = SAIAAdapter(client=self._platform.llm)
         return self._backend
 
     def create(

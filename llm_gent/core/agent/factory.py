@@ -20,30 +20,22 @@ or the factory-class ``required_traits`` class variable. Each builtin trait
 reads its own top-level key from ``agent.config``; nesting under
 ``traits.<name>`` is NOT recognized.
 
-Two construction paths:
-
-- ``AgentFactory(lg)`` — bare-Logger tutorial path. Synthesizes an empty
-  ``PlatformContext(lg, {})``; platform-level ``llm`` / ``learn`` blocks are
-  empty, so the full trait configuration must live in the agent-config.
-- ``AgentFactory(platform)`` — advanced/multi-agent path. Uses the supplied
-  ``PlatformContext``; agent-config keys override platform-level defaults.
+The factory builds agents on a platform :class:`~llm_gent.core.platform.Context`:
+traits use the platform's shared clients, and agent-config keys override the
+platform's defaults (an ``llm`` override gives the agent a router of its own).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from appinfra import DotDict
-from appinfra.log import Logger
 
 from ..errors import ConfigError, TraitNotFoundError
+from ..platform import Context
 from ..traits import TraitName
 from .agent import Agent
 from .helpers import _substitute_in_dict
-
-
-if TYPE_CHECKING:
-    from ..platform import PlatformContext
 
 
 class AgentFactory:
@@ -62,31 +54,28 @@ class AgentFactory:
         1. Config: ``config["tools"] = {name: cfg, ...}``
         2. Class variable: ``default_tools = {name: cfg, ...}``
 
-    Tutorial-shape usage (bare Logger, no subclass, no PlatformContext)::
+    Usage::
 
-        from llm_gent import AgentFactory, LLMTrait
-        from appinfra.log import create_lg
+        from llm_gent import AgentFactory, LLMTrait, PlatformFactory
 
-        lg = create_lg("hello", "info")
-        agent = AgentFactory(lg).from_config({
-            "identity": {"name": "hello"},
-            "llm": {"default": "local", "backends": {...}},
-            "directive": "You are a helpful assistant.",
-            "traits": {"required": ["llm", "directive"]},
-        })
-        agent.start()
-        result = agent.require_trait(LLMTrait).complete(
-            [{"role": "user", "content": "Say hello."}]
-        )
-        agent.stop()
+        with PlatformFactory(lg).from_config({}) as platform:
+            agent = AgentFactory(platform).from_config({
+                "identity": {"name": "hello"},
+                "directive": "You are a helpful assistant.",
+                "traits": {"required": ["llm", "directive"]},
+            })
+            agent.start()
+            result = agent.require_trait(LLMTrait).complete(
+                [{"role": "user", "content": "Say hello."}]
+            )
+            agent.stop()
 
-    Advanced multi-agent usage::
+    Custom agent types::
 
         class CustomFactory(AgentFactory):
             agent_class = MyAgent
             required_traits = [TraitName.LLM, TraitName.MEMORY]
 
-        platform = PlatformContext.from_config(lg, llm_cfg, learn_cfg)
         agent = CustomFactory(platform).create(config)
     """
 
@@ -104,25 +93,14 @@ class AgentFactory:
     # When set, enables: ./llm-gent.py agent <agent-name> <command>
     cli_tool: ClassVar[type | None] = None
 
-    def __init__(self, platform: Logger | PlatformContext) -> None:
-        """Initialize factory with a Logger or PlatformContext.
+    def __init__(self, platform: Context) -> None:
+        """Initialize the factory on a platform.
 
         Args:
-            platform: Either a bare :class:`Logger` (tutorial path — an
-                empty :class:`PlatformContext` is synthesized, so all trait
-                config must live in agent-config) or a fully-configured
-                :class:`PlatformContext` (advanced path — platform-level
-                configs are exposed to trait creators). Parameter name
-                retained as ``platform`` for compatibility with existing
-                keyword callers.
+            platform: The platform whose shared clients the agents' traits use.
         """
-        from ..platform import PlatformContext
-
-        if isinstance(platform, Logger):
-            self._platform = PlatformContext(lg=platform, config={})
-        else:
-            self._platform = platform
-        self._lg = self._platform.logger
+        self._platform = platform
+        self._lg = platform.logger
 
     def from_config(self, config: dict[str, Any]) -> Agent:
         """Build and wire an agent from a plain dict config.

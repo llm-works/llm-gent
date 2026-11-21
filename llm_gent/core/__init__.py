@@ -34,7 +34,9 @@ from .errors import (
     TraitError,
     TraitNotFoundError,
 )
-from .platform import PlatformContext
+from .platform import Config as PlatformConfig
+from .platform import Context as PlatformContext
+from .platform import Factory as PlatformFactory
 from .runnable import Runnable
 from .task import Task, TaskResult
 from .tools.factory import ToolFactory
@@ -54,7 +56,9 @@ __all__ = [
     "TraitError",
     "TraitNotFoundError",
     # Platform
+    "PlatformConfig",
     "PlatformContext",
+    "PlatformFactory",
     # Factories
     "ToolFactory",
     "TraitFactory",

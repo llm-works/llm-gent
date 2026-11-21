@@ -20,6 +20,7 @@ from .core.llm import (
     Message,
     StructuredOutputError,
 )
+from .core.platform import Factory as PlatformFactory
 from .core.task import Task, TaskCompletion, TaskResult, TaskStatus
 from .core.tools import (
     BaseTool,
@@ -87,6 +88,7 @@ __all__ = [
     "ConfigError",
     # Factories
     "AgentFactory",
+    "PlatformFactory",
     "ToolFactory",
     "TraitFactory",
     # Tools

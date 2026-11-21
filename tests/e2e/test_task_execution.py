@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from llm_gent.agents.default import Factory
+from llm_gent.core.platform import Factory as PlatformFactory
 
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
@@ -71,30 +72,36 @@ class TestAgentExecutionE2E:
         }
 
     @pytest.fixture
-    def agent(self, mock_logger, llm_config):
+    def platform(self, mock_logger, llm_config):
+        """The platform on the test LLM server."""
+        with PlatformFactory(mock_logger).from_config({"llm": llm_config}) as platform:
+            yield platform
+
+    @pytest.fixture
+    def agent(self, platform):
         """Create agent with SAIATrait connected to LLM server."""
-        factory = Factory(lg=mock_logger, llm_config=llm_config)
         config = {
-            "name": "test-agent",
-            "identity": "You are a helpful assistant.",
+            "identity": {"name": "test-agent"},
+            "directive": "You are a helpful assistant.",
+            "traits": {"required": ["directive"]},
             "task": {"description": "Respond briefly."},
         }
-        agent = factory.create(config)
+        agent = Factory(platform).create(config)
         agent.start()
         yield agent
         agent.stop()
 
     @pytest.fixture
-    def agent_with_tools(self, mock_logger, llm_config):
+    def agent_with_tools(self, platform):
         """Create agent with SAIATrait and tools."""
-        factory = Factory(lg=mock_logger, llm_config=llm_config)
         config = {
-            "name": "test-agent-tools",
-            "identity": "You are a helpful assistant with shell access.",
+            "identity": {"name": "test-agent-tools"},
+            "directive": "You are a helpful assistant with shell access.",
+            "traits": {"required": ["directive"]},
             "tools": {"shell": {}, "read_file": {}},
             "task": {"description": "Help with tasks using available tools."},
         }
-        agent = factory.create(config)
+        agent = Factory(platform).create(config)
         agent.start()
         yield agent
         agent.stop()
