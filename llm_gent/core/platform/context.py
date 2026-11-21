@@ -112,24 +112,27 @@ class Context:
         """Close the owned resources' async clients on this event loop, then their sync side.
 
         Marked closed before the first ``await``, so a concurrent ``aclose()``
-        or ``close()`` does nothing.
+        or ``close()`` does nothing. The sync side closes even when the task is
+        cancelled during an async close; the cancellation then propagates.
         """
         if self._closed:
             return
         self._closed = True
-        for resource in self._owned:
-            aclose = getattr(resource, "aclose", None)
-            if aclose is None:
-                continue
-            try:
-                await aclose()
-            except Exception as e:
-                self._lg.warning(
-                    "platform resource aclose failed",
-                    extra={"resource": type(resource).__name__, "exception": e},
-                )
-        close_resources(self._lg, self._owned)
-        self._lg.debug("platform closed", extra={"closed": len(self._owned)})
+        try:
+            for resource in self._owned:
+                aclose = getattr(resource, "aclose", None)
+                if aclose is None:
+                    continue
+                try:
+                    await aclose()
+                except Exception as e:
+                    self._lg.warning(
+                        "platform resource aclose failed",
+                        extra={"resource": type(resource).__name__, "exception": e},
+                    )
+        finally:
+            close_resources(self._lg, self._owned)
+            self._lg.debug("platform closed", extra={"closed": len(self._owned)})
 
     def __enter__(self) -> Context:
         """Use the context in a ``with`` block; it closes at the end."""

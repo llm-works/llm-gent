@@ -23,6 +23,8 @@ def merge_llm_config(base: Mapping[str, Any], override: Mapping[str, Any]) -> di
     if backends is not None:
         merged: dict[str, Any] = result.get("backends") or {}
         for name, settings in backends.items():
+            if settings is None:
+                continue
             current = merged.get(name)
             if current is None:
                 merged[name] = copy.deepcopy(settings)

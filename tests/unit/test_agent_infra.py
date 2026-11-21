@@ -108,6 +108,18 @@ class TestPlatformContext:
         owned.aclose.assert_awaited_once()
         owned.close.assert_called_once()
 
+    async def test_cancelled_aclose_still_closes_sync_side(self):
+        first, second = MagicMock(), MagicMock()
+        first.aclose = AsyncMock(side_effect=asyncio.CancelledError)
+        second.aclose = AsyncMock()
+        ctx = _context(MagicMock(), [first, second])
+
+        with pytest.raises(asyncio.CancelledError):
+            await ctx.aclose()
+
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+
     async def test_aclose_skips_resources_without_aclose(self):
         owned = MagicMock(spec=["close"])
 

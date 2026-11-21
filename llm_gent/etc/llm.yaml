@@ -19,7 +19,7 @@ backends:
     # No API key needed for local
 
   anthropic:
-    enabled: true
+    enabled: false  # needs the anthropic package: pip install 'llm-infer[anthropic]'
     type: anthropic
     model: "claude-haiku-4-5"
     models:

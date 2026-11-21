@@ -214,6 +214,13 @@ class TestMergeLLMConfig:
 
         assert result["backends"]["anthropic"]["adapter"] == "openai"
 
+    def test_none_backend_absent_from_base_skipped(self):
+        base = {"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}}
+
+        result = merge_llm_config(base, {"backends": {"new": None}})
+
+        assert "new" not in result["backends"]
+
     def test_empty_override_keeps_base(self):
         base = {"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}}
 

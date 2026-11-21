@@ -3,6 +3,11 @@
 How llm-gent runs many agents in one process with nothing duplicated per agent: what is shared,
 what each agent holds, and how flows run for agents.
 
+Status: the target design, built in steps. Implemented: the platform package (`Config`,
+`Factory`, `Context`) with the shared clients injected into traits, and agents built on a
+platform. Not yet: the platform's `SAIAFactory`, shared trait instances with per-agent state,
+`platform.with_trait_registry`, the flow/run split, and the API in section 8.
+
 ## 1. Goals
 
 - An agent costs its own data and a few references: no per-agent model client, connection pool,
