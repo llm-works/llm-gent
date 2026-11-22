@@ -133,8 +133,8 @@ async def main() -> int:
 
     print("--- Run 1: halts once every document is fetched ---")
     stats1 = Stats()
-    run1 = build(ff, stats1, arm=True).run(halt=asyncio.Event(), history="docs")
-    assert await run1 is HALTED
+    result1 = await build(ff, stats1, arm=True).run(halt=asyncio.Event(), history="docs")
+    assert result1 is HALTED
     print(f"halted with tallies {dict(stats1.tallies)}")
 
     print("\n--- Run 2: fresh flow and Stats, resume='latest' ---")
