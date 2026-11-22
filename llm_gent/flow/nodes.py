@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Composition-graph node types and per-run environment.
+"""Composition-graph node types.
 
 Internal to :mod:`llm_gent.flow`: the private dataclasses (:class:`_Node`,
-:class:`_Branch`, :class:`_Iterate`, :class:`_Map`, :class:`_RunEnv`), and
+:class:`_Branch`, :class:`_Iterate`, :class:`_Map`), and
 the type aliases used by the fluent builder's callback slots. Public
 symbols are routed through this module as well: :class:`Failure`, the
 sentinel returned in place of a failed item by :meth:`Flow.map` when
@@ -350,7 +350,7 @@ class _Node:
 
     Identity is content-addressed but derived lazily, not stored: the
     executor computes each node's runtime ``node_id`` from the enclosing
-    :attr:`_RunEnv.chain_context` plus the node's local key
+    :attr:`Position.chain_context <llm_gent.flow.run.Position.chain_context>` plus the node's local key
     (kind + target qualname + occurrence among same-target steps) on
     descent. The hash chain from root gives every node in the
     composition tree a globally-unique identifier the checkpoint layer

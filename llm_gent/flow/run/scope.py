@@ -159,7 +159,7 @@ def _accumulated(
 
 
 @dataclass(frozen=True)
-class _RunEnv:
+class _Frame:
     """What the walk carries at one place in a run: the run, the scope, the position.
 
     ``run`` holds what is fixed for the whole run (its halt, signals,
@@ -206,7 +206,7 @@ class _RunEnv:
         state: State[Any],
         *,
         shortcuts: tuple[ShortcutRun, ...] | None = None,
-    ) -> _RunEnv:
+    ) -> _Frame:
         """What node ``node_id`` hands the flow it enters through ``boundary``.
 
         The position moves to ``path``; the scope takes the node's
@@ -223,7 +223,7 @@ class _RunEnv:
             self, scope=scope, position=self.position.descend(node_id, boundary, path)
         )
 
-    def at_activity(self, activity_id: str) -> _RunEnv:
+    def at_activity(self, activity_id: str) -> _Frame:
         """This place, with events raised here belonging to ``activity_id``."""
         return dataclasses.replace(
             self, position=dataclasses.replace(self.position, activity_id=activity_id)

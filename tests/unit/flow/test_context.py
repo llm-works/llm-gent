@@ -193,7 +193,7 @@ class TestCtxExtra:
 
 
 class TestCtxExtraPropagation:
-    """``ctx.extra`` reaches every dispatch site via env.extra threading."""
+    """``ctx.extra`` reaches every dispatch site via frame.extra threading."""
 
     @pytest.mark.asyncio
     async def test_extra_reaches_subflow_via_call(self) -> None:

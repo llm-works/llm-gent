@@ -29,7 +29,7 @@ from ._hook_points import RunHooks
 from ._resume import Resume, apply_clean_exit_retention, commit_halt
 from ._run import Run
 from ._shortcut import check_shortcuts, check_signals, run_signals
-from .scope import Position, Scope, _RunEnv
+from .scope import Position, Scope, _Frame
 
 
 async def run_flow(
@@ -126,7 +126,7 @@ async def _walk_top(
     declared yet) at the root position, whose activity is the run.
     """
     info = run.info
-    env = _RunEnv(
+    frame = _Frame(
         run=run,
         lg=run.lg,
         scope=Scope(state=state),
@@ -134,7 +134,7 @@ async def _walk_top(
         extra=extra if extra is not None else {},
     )
     with run_signals(run):
-        return await run_as_subflow(run.flow, args, kwargs, env)
+        return await run_as_subflow(run.flow, args, kwargs, frame)
 
 
 async def _stopped_before_run(hooks: RunHooks, decision: Decision) -> Any:

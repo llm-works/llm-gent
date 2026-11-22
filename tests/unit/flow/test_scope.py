@@ -27,7 +27,7 @@ from llm_gent.flow.nodes import Checkpointer
 from llm_gent.flow.run import Position, Scope
 from llm_gent.flow.run._run import Run
 from llm_gent.flow.run._shortcut import ShortcutRun
-from llm_gent.flow.run.scope import _RunEnv
+from llm_gent.flow.run.scope import _Frame
 
 from .conftest import make_ff, make_test_logger
 
@@ -163,36 +163,36 @@ class TestPosition:
         assert grandchild.activity_id == "run-1"
 
 
-def _env() -> _RunEnv:
+def _frame() -> _Frame:
     flow = make_ff().create("top")
     run = Run(flow=flow, halt=None, signals={}, checkpoint_ctx=None)
-    return _RunEnv(run=run, lg=LG, scope=Scope(state=State(data={"root": True})))
+    return _Frame(run=run, lg=LG, scope=Scope(state=State(data={"root": True})))
 
 
 class TestNodeStep:
     """The node's part of a descent: position, state, and the shortcuts a map item leaves."""
 
     def test_descend_hands_the_node_state_at_the_new_position(self) -> None:
-        env = _env()
+        frame = _frame()
         state = State(data={"child": True})
-        child = env.descend("n1", "call", env.owner_path("n1"), state)
+        child = frame.descend("n1", "call", frame.owner_path("n1"), state)
         assert child.scope.state is state
         assert child.position.path == ("n", "n1")
         assert child.position.ancestor_chain == ("n1",)
-        assert child.run is env.run
+        assert child.run is frame.run
 
     def test_descend_keeps_the_shortcuts_unless_the_node_changes_them(self) -> None:
         region = ShortcutRun(SIGNALS["a"], drain=True, left=False)
-        env = _env()
-        env = env.descend("n0", "call", (), env.scope.state, shortcuts=(region,))
-        kept = env.descend("n1", "call", (), env.scope.state)
-        left = env.descend("n1", "map:k", (), env.scope.state, shortcuts=())
+        frame = _frame()
+        frame = frame.descend("n0", "call", (), frame.scope.state, shortcuts=(region,))
+        kept = frame.descend("n1", "call", (), frame.scope.state)
+        left = frame.descend("n1", "map:k", (), frame.scope.state, shortcuts=())
         assert kept.scope.shortcuts == (region,)
         assert left.scope.shortcuts == ()
 
     def test_at_activity_moves_only_the_activity(self) -> None:
-        env = _env()
-        moved = env.at_activity("step-7")
+        frame = _frame()
+        moved = frame.at_activity("step-7")
         assert moved.position.activity_id == "step-7"
-        assert moved.position.path == env.position.path
-        assert moved.scope is env.scope
+        assert moved.position.path == frame.position.path
+        assert moved.scope is frame.scope

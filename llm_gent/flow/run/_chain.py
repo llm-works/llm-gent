@@ -13,8 +13,8 @@ it, past it when the step completed. The stopped chain stays registered
 at its position for the run's halt checkpoint.
 
 Constructed once per :func:`~._executor.run_as_subflow` entry:
-``Chain(flow, env)`` eagerly computes ``self.ids`` from
-``env.position.chain_context`` and the flow's nodes. Caller then invokes
+``Chain(flow, frame)`` eagerly computes ``self.ids`` from
+``frame.position.chain_context`` and the flow's nodes. Caller then invokes
 ``await chain.walk(args, kwargs)``.
 """
 
@@ -32,7 +32,7 @@ from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import is_halt_signaled, note_halt
 from ._hook_points import StepHooks
 from ._shortcut import is_fast_forward
-from .scope import _RunEnv
+from .scope import _Frame
 
 
 Inputs = tuple[tuple[Any, ...], dict[str, Any]]
@@ -58,14 +58,14 @@ class Chain:
     """A Flow's chain of composition steps at one execution level.
 
     Eagerly resolves node ids in ``__init__`` and holds the flow +
-    env for the walk. The chain is single-use — a fresh instance is
+    frame for the walk. The chain is single-use — a fresh instance is
     created for each subflow-run entry.
     """
 
-    def __init__(self, flow: Flow, env: _RunEnv) -> None:
+    def __init__(self, flow: Flow, frame: _Frame) -> None:
         self.flow = flow
-        self.env = env
-        self.ids: tuple[str, ...] = _compute_node_ids(env.position.chain_context, flow._nodes)
+        self.frame = frame
+        self.ids: tuple[str, ...] = _compute_node_ids(frame.position.chain_context, flow._nodes)
         # The cursor: the step running and the input it gets. Kept here, not
         # in _walk_steps' locals, so a checkpoint reads it. ``pending``: the
         # chain stopped past a completed step, before this one started;
@@ -104,7 +104,7 @@ class Chain:
         chain. The chain's cursor is in every snapshot taken while it walks.
         """
         saved = self._saved_step()
-        with _running(self.env, self.env.position.path, self):
+        with _running(self.frame, self.frame.position.path, self):
             return await self._walk_steps(saved, args, kwargs)
 
     def _saved_step(self) -> _Saved | None:
@@ -116,11 +116,11 @@ class Chain:
         Raises:
             RuntimeError: The saved step is no longer in this chain.
         """
-        found, step = self.env.scopes.take_cursor(self.env.position.path, CHAIN)
+        found, step = self.frame.scopes.take_cursor(self.frame.position.path, CHAIN)
         if not found:
             return None
         if step["step"] not in self.ids:
-            where = path_str((*self.env.position.path, CHAIN))
+            where = path_str((*self.frame.position.path, CHAIN))
             label = self.flow._name or "<anonymous>"
             raise RuntimeError(
                 f"Flow {label!r}: the checkpoint's cursor at {where!r} is at step "
@@ -156,11 +156,11 @@ class Chain:
         last = (True, saved.prev) if saved is not None and saved.pending else (False, None)
         while index < len(self.flow._nodes):
             node = self.flow._nodes[index]
-            if index != rerun and not node.conclude and is_fast_forward(self.env):
+            if index != rerun and not node.conclude and is_fast_forward(self.frame):
                 index += 1
                 continue
             if saved is not None and index == saved.index:
-                if saved.deferred and not is_fast_forward(self.env):
+                if saved.deferred and not is_fast_forward(self.frame):
                     inputs = _step_inputs(index, node, saved.prev, args, kwargs)
                 else:
                     inputs = saved.inputs
@@ -190,7 +190,7 @@ class Chain:
             raise Interrupted()
         # Past this step: a paused turn left under it was paused by a halt
         # that is not the run's, and belongs to no later snapshot.
-        self.env.scopes.close_under(self.env.owner_path(node_id))
+        self.frame.scopes.close_under(self.frame.owner_path(node_id))
         return result
 
     async def _run_step(
@@ -211,13 +211,13 @@ class Chain:
             RuntimeError: The step raised :class:`Interrupted` while no halt
                 was set.
         """
-        step = StepHooks.start(self.env, self.flow, node, node_id)
-        env = self.env if step is None else step.env
-        ctx = _build_ctx(node.target, env, node_id)
+        step = StepHooks.start(self.frame, self.flow, node, node_id)
+        frame = self.frame if step is None else step.frame
+        ctx = _build_ctx(node.target, frame, node_id)
         try:
-            result = await _execute_node(node, ctx, env, node_args, node_kwargs, node_id, step)
+            result = await _execute_node(node, ctx, frame, node_args, node_kwargs, node_id, step)
         except Interrupted:
-            if not is_halt_signaled(self.env):
+            if not is_halt_signaled(self.frame):
                 label = self.flow._name or "<anonymous>"
                 error = RuntimeError(
                     f"Flow {label!r}: step {node_id!r} raised Interrupted while no halt is set"
@@ -236,7 +236,7 @@ class Chain:
             if step is not None:
                 await step.finish("failed", error=e)
             raise
-        interrupted = self.env.scopes.holds_under(self.env.owner_path(node_id), TURN)
+        interrupted = self.frame.scopes.holds_under(self.frame.owner_path(node_id), TURN)
         if step is not None:
             await step.finish("interrupted" if interrupted else "ok", result=result)
         return result, interrupted
@@ -261,17 +261,17 @@ class Chain:
         The chain does not write the halt checkpoint: :meth:`Flow.run` writes
         it once everything has stopped, from the positions left registered.
         """
-        if not is_halt_signaled(self.env):
+        if not is_halt_signaled(self.frame):
             return False
         at = index
         if not interrupted:
             if index + 1 == len(self.flow._nodes):
                 return False
             at = index + 1
-        note_halt(self.env, 0, self.ids[at])
+        note_halt(self.frame, 0, self.ids[at])
         if not interrupted:
             next_node = self.flow._nodes[at]
-            skip_inputs = not next_node.conclude and is_fast_forward(self.env)
+            skip_inputs = not next_node.conclude and is_fast_forward(self.frame)
             self._move_to(at, result, args, kwargs, skip_inputs=skip_inputs)
         return True
 

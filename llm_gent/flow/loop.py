@@ -366,8 +366,8 @@ class Loop:
         """
         if self._halt is not None:
             return contextlib.nullcontext(self._halt)
-        env = ctx._env
-        return contextlib.nullcontext(ctx.halt) if env is None else env.turn_abort()
+        frame = ctx._frame
+        return contextlib.nullcontext(ctx.halt) if frame is None else frame.turn_abort()
 
     def _make_iter_bridge(
         self, ctx: Context[Any], conversation: Any
@@ -379,11 +379,11 @@ class Loop:
         after each model response, before appending it to ``conversation``.
         """
         hook = self._on_iteration
-        env = ctx._env
+        frame = ctx._frame
         llm_call = (
             None
-            if env is None
-            else env.llm_call_hook(ctx, conversation, type(self).__name__, self.role.name)
+            if frame is None
+            else frame.llm_call_hook(ctx, conversation, type(self).__name__, self.role.name)
         )
         if hook is None and llm_call is None:
             return None
@@ -556,20 +556,20 @@ class _LoopTurn:
 
     The path is ``<step>/t/<k>`` for the step's ``k``-th Loop call
     (:meth:`~llm_gent.flow.state.snapshot.ScopeRegistry.next_turn`). A
-    Loop dispatched outside a run (no executor env) has no path; every
+    Loop dispatched outside a run (no executor frame) has no path; every
     method is then a no-op.
     """
 
     def __init__(self, ctx: Context[Any]) -> None:
-        env, node_id = ctx._env, ctx._node_id
+        frame, node_id = ctx._frame, ctx._node_id
         self._runner = PausedTurn(None)
         self._scopes: ScopeRegistry | None = None
         self._path: ScopePath = ()
         self.used = TurnUsage()
         """What the turn used of its caps before this call: the saved turn's, once taken."""
-        if env is not None and node_id is not None:
-            self._scopes = env.scopes
-            self._path = env.scopes.next_turn(env.owner_path(node_id))
+        if frame is not None and node_id is not None:
+            self._scopes = frame.scopes
+            self._path = frame.scopes.next_turn(frame.owner_path(node_id))
 
     def take_saved(self) -> PausedTurnEnvelope | None:
         """The captured turn the checked-out snapshot saved at this path, held again; else ``None``."""
@@ -630,14 +630,14 @@ def _within_caps(saia: Any, used: TurnUsage) -> Any:
 
 def _fast_forward(ctx: Context[Any]) -> bool:
     """True when this call runs in a region whose signal is set."""
-    env = ctx._env
-    return env is not None and env.fast_forward()
+    frame = ctx._frame
+    return frame is not None and frame.fast_forward()
 
 
 def _cut_short(ctx: Context[Any]) -> bool:
     """True when this call fast-forwards and the run's halt is not set: a pause now is the cut's."""
-    env = ctx._env
-    return env is not None and env.fast_forward() and not env.run_halted()
+    frame = ctx._frame
+    return frame is not None and frame.fast_forward() and not frame.run_halted()
 
 
 # ----------------------------------------------------------------------------

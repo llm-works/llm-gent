@@ -898,8 +898,8 @@ class TestPausedTurnInSnapshot:
             State(data={}),
             Snapshot(has_state=True, root={}, cursors={f"n/{node_id}/t/0": {TURN: saved}}),
         )
-        env = SimpleNamespace(scopes=scopes, owner_path=lambda nid: ("n", nid))
-        ctx = SimpleNamespace(_env=env, _node_id=node_id)
+        frame = SimpleNamespace(scopes=scopes, owner_path=lambda nid: ("n", nid))
+        ctx = SimpleNamespace(_frame=frame, _node_id=node_id)
 
         turn = _LoopTurn(ctx)  # type: ignore[arg-type]
         task, conversation, is_resume = loop._consume_saved_turn(ctx, turn)  # type: ignore[arg-type]
@@ -978,7 +978,7 @@ class TestSaveOnHaltChain:
         ff = Factory(make_test_logger())
         flow = ff.create().call(a).then(b)
         # No .with_checkpointer — halt check fires between chain steps but
-        # _save_halt_checkpoint short-circuits at env.checkpoint_ctx is None.
+        # _save_halt_checkpoint short-circuits at frame.checkpoint_ctx is None.
         # Run should complete without raising.
         await flow.run(halt=halt)
 

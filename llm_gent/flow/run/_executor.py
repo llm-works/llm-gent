@@ -48,10 +48,10 @@ from ..state.cas import (
 )
 from ..state.snapshot import ARM, Cursor, ScopePath, path_str
 from ._hook_points import StepHooks, checkpoint_written
-from .scope import Position, _RunEnv
+from .scope import Position, _Frame
 
 
-def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context[Any]:
+def _build_ctx(target: Any, frame: _Frame, node_id: str | None = None) -> Context[Any]:
     """Build the Context passed to the node's verb (and to its hooks).
 
     Verb nodes get a role-bound ctx; ``ctx.saia`` resolves lazily on first
@@ -66,28 +66,28 @@ def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context
     (until predicates, on_error, on_item_complete) where no verb is
     running under a single node id.
     """
-    traits = env.runtime._traits
+    traits = frame.runtime._traits
     if isinstance(target, Flow | _Branch | _Iterate | _Map):
         return Context(
             role=None,
-            state=env.scope.state,
-            flow=env.runtime,
+            state=frame.scope.state,
+            flow=frame.runtime,
             traits=traits,
-            halt=env.halt,
-            extra=env.extra,
-            resources=env.scope.resources,
-            _env=env,
+            halt=frame.halt,
+            extra=frame.extra,
+            resources=frame.scope.resources,
+            _frame=frame,
             _node_id=node_id,
         )
     return Context(
         role=target.role,
-        state=env.scope.state,
-        flow=env.runtime,
+        state=frame.scope.state,
+        flow=frame.runtime,
         traits=traits,
-        halt=env.halt,
-        extra=env.extra,
-        resources=env.scope.resources,
-        _env=env,
+        halt=frame.halt,
+        extra=frame.extra,
+        resources=frame.scope.resources,
+        _frame=frame,
         _node_id=node_id,
     )
 
@@ -95,7 +95,7 @@ def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context
 async def _execute_node(
     node: _Node,
     ctx: Context[Any],
-    env: _RunEnv,
+    frame: _Frame,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
     node_id: str,
@@ -113,24 +113,24 @@ async def _execute_node(
     does (:class:`Interrupted` passes every rescue).
     """
     target_name = _target_label(node.target)
-    env.lg.debug("executing node", extra={"target": target_name})
+    frame.lg.debug("executing node", extra={"target": target_name})
     try:
         if step is not None:
             await step.check(ctx, node_args, node_kwargs)
-        result = await _invoke_target(node, ctx, env, node_args, node_kwargs, node_id)
+        result = await _invoke_target(node, ctx, frame, node_args, node_kwargs, node_id)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         if node.rescue is None:
             raise
-        env.lg.warning("rescue policy invoked", extra={"target": target_name, "exception": exc})
+        frame.lg.warning("rescue policy invoked", extra={"target": target_name, "exception": exc})
         pending_input = node_args[0] if node_args else UNSET
         fallback = node.rescue(exc, pending_input, ctx)
         if inspect.isawaitable(fallback):
             fallback = await fallback
         result = fallback
     if node.after is not None:
-        env.lg.debug("running after hook", extra={"target": target_name})
+        frame.lg.debug("running after hook", extra={"target": target_name})
         hook_result = node.after(result, ctx)
         if inspect.isawaitable(hook_result):
             await hook_result
@@ -140,7 +140,7 @@ async def _execute_node(
 async def _invoke_target(
     node: _Node,
     ctx: Context[Any],
-    env: _RunEnv,
+    frame: _Frame,
     node_args: tuple[Any, ...],
     node_kwargs: dict[str, Any],
     node_id: str,
@@ -150,7 +150,7 @@ async def _invoke_target(
     if isinstance(target, Flow):
         return await _run_subflow(
             target,
-            env,
+            frame,
             node.state_fn,
             node.merge_fn,
             node.state_factory,
@@ -159,15 +159,15 @@ async def _invoke_target(
             node_id,
         )
     if isinstance(target, _Branch):
-        return await _run_branch(target, ctx, env, node_args, node_id)
+        return await _run_branch(target, ctx, frame, node_args, node_id)
     if isinstance(target, _Iterate):
         from ._iterate import IterateRunner
 
-        return await IterateRunner(target, env, node_id).run(node_args)
+        return await IterateRunner(target, frame, node_id).run(node_args)
     if isinstance(target, _Map):
         from ._map import MapRunner
 
-        return await MapRunner(target, env, node_id).run(node_args)
+        return await MapRunner(target, frame, node_id).run(node_args)
     passed_args, passed_kwargs = _filter_verb_args(target, node_args, node_kwargs)
     return await target(ctx, *passed_args, **passed_kwargs)
 
@@ -273,7 +273,7 @@ def _filter_verb_args(
 
 async def _run_subflow(
     body: Flow,
-    env: _RunEnv,
+    frame: _Frame,
     state_fn: StateProject | None,
     merge_fn: StateMerge | None,
     state_factory: StateFactory[Any] | None,
@@ -284,29 +284,29 @@ async def _run_subflow(
     """Run a subflow node, honoring optional scoped-state projection/merge.
 
     The child Flow is entered through the node's ``"call"`` boundary
-    (:meth:`_RunEnv.descend`), with the projected state when there is one.
+    (:meth:`_Frame.descend`), with the projected state when there is one.
     """
-    path = env.owner_path(node_id)
-    child_state = await _enter_scope(env, path, state_fn, state_factory)
-    with _live_scope(env, path, state_fn, child_state):
-        child = env.descend(node_id, "call", path, child_state)
+    path = frame.owner_path(node_id)
+    child_state = await _enter_scope(frame, path, state_fn, state_factory)
+    with _live_scope(frame, path, state_fn, child_state):
+        child = frame.descend(node_id, "call", path, child_state)
         result = await run_as_subflow(body, node_args, node_kwargs, child)
-        await _merge_state(merge_fn, env.scope.state, child_state)
+        await _merge_state(merge_fn, frame.scope.state, child_state)
     return result
 
 
 async def run_as_subflow(
-    flow: Flow, args: tuple[Any, ...], kwargs: dict[str, Any], env: _RunEnv
+    flow: Flow, args: tuple[Any, ...], kwargs: dict[str, Any], frame: _Frame
 ) -> Any:
-    """Walk ``flow`` from ``env``: the place the walk enters it at.
+    """Walk ``flow`` from ``frame``: the place the walk enters it at.
 
     ``args`` / ``kwargs`` are the first node's inputs. They are passed
     as two values, not spread, so an input named like one of the
     framework's own parameters reaches the node instead of colliding
     with it.
 
-    ``env`` is what the node entering the flow hands it
-    (:meth:`_RunEnv.descend`; the root scope at the top level): the
+    ``frame`` is what the node entering the flow hands it
+    (:meth:`_Frame.descend`; the root scope at the top level): the
     run, the scope with the node's state, the position. The flow's
     declarations apply on top (:meth:`~llm_gent.flow.run.Scope.child`);
     its resources register with the run while it walks
@@ -316,21 +316,21 @@ async def run_as_subflow(
         raise RuntimeError(f"Flow {flow._name!r} has no nodes to run")
     decl = flow.decl
     with run_resources(
-        env.lg,
+        frame.lg,
         decl,
         flow._name or "<anonymous>",
-        env.position.path,
-        env.scopes,
-        env.scope.resources,
+        frame.position.path,
+        frame.scopes,
+        frame.scope.resources,
     ) as resources:
-        scope = env.scope.child(
+        scope = frame.scope.child(
             decl,
             resources=resources,
-            where=_entry_where(flow, env.position),
-            signals=env.run.signals,
-            lg=env.lg,
+            where=_entry_where(flow, frame.position),
+            signals=frame.run.signals,
+            lg=frame.lg,
         )
-        return await _walk(flow, dataclasses.replace(env, scope=scope), args, kwargs)
+        return await _walk(flow, dataclasses.replace(frame, scope=scope), args, kwargs)
 
 
 def _entry_where(flow: Flow, position: Position) -> Where:
@@ -345,24 +345,24 @@ def _entry_where(flow: Flow, position: Position) -> Where:
     )
 
 
-async def _walk(flow: Flow, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    """Walk ``flow``'s chain under ``env``."""
+async def _walk(flow: Flow, frame: _Frame, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """Walk ``flow``'s chain under ``frame``."""
     from ._chain import Chain
 
     label = flow._name or "<anonymous>"
-    is_subflow = env.runtime is not flow
-    env.lg.debug(
+    is_subflow = frame.runtime is not flow
+    frame.lg.debug(
         "starting flow run",
         extra={"flow": label, "nodes": len(flow._nodes), "subflow": is_subflow},
     )
-    result = await Chain(flow, env).walk(args, kwargs)
-    env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
+    result = await Chain(flow, frame).walk(args, kwargs)
+    frame.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
     return result
 
 
 @contextlib.contextmanager
 def _live_scope(
-    env: _RunEnv, path: ScopePath, state_fn: StateProject | None, scope: State[Any]
+    frame: _Frame, path: ScopePath, state_fn: StateProject | None, scope: State[Any]
 ) -> Iterator[None]:
     """Keep ``scope`` registered at ``path`` for the block when a ``state=`` projection made it.
 
@@ -375,13 +375,13 @@ def _live_scope(
     if state_fn is None:
         yield
         return
-    env.scopes.open(path, scope)
+    frame.scopes.open(path, scope)
     yield
-    env.scopes.close(path)
+    frame.scopes.close(path)
 
 
 @contextlib.contextmanager
-def _running(env: _RunEnv, path: ScopePath, runner: Cursor) -> Iterator[None]:
+def _running(frame: _Frame, path: ScopePath, runner: Cursor) -> Iterator[None]:
     """Keep ``runner``'s cursor in the run's snapshots at ``path`` while the block runs.
 
     Dropped once the block completes. A block that stops early — the halt
@@ -392,13 +392,13 @@ def _running(env: _RunEnv, path: ScopePath, runner: Cursor) -> Iterator[None]:
     enclosing chain moving past the step (e.g. after a rescue policy), a
     map item finishing, the next run's start.
     """
-    env.scopes.open_cursor(path, runner)
+    frame.scopes.open_cursor(path, runner)
     yield
-    env.scopes.close_cursor(path, runner)
+    frame.scopes.close_cursor(path, runner)
 
 
 async def _enter_scope(
-    env: _RunEnv,
+    frame: _Frame,
     path: ScopePath,
     state_fn: StateProject | None,
     state_factory: StateFactory[Any] | None,
@@ -411,11 +411,11 @@ async def _enter_scope(
     its parent's scope.
     """
     if state_fn is not None:
-        found, raw = env.scopes.take_saved(path)
+        found, raw = frame.scopes.take_saved(path)
         if found:
-            factory = state_factory if state_factory is not None else env.scope.state._factory
-            return _restore_scope_state(env.scope.state, raw, factory)
-    return await _project_state(state_fn, env.scope.state, state_factory)
+            factory = state_factory if state_factory is not None else frame.scope.state._factory
+            return _restore_scope_state(frame.scope.state, raw, factory)
+    return await _project_state(state_fn, frame.scope.state, state_factory)
 
 
 def _restore_scope_state(
@@ -477,7 +477,7 @@ async def _check_until(
     until_fn: UntilFn | None,
     result: Any,
     iterate_state: State[Any],
-    env: _RunEnv,
+    frame: _Frame,
     node_id: str,
 ) -> bool:
     """Evaluate the iterate node's until predicate with the last body result and scoped state."""
@@ -486,12 +486,12 @@ async def _check_until(
     ctx = Context(
         role=None,
         state=iterate_state,
-        flow=env.runtime,
-        traits=env.runtime._traits,
-        halt=env.halt,
-        extra=env.extra,
-        resources=env.scope.resources,
-        _env=env,
+        flow=frame.runtime,
+        traits=frame.runtime._traits,
+        halt=frame.halt,
+        extra=frame.extra,
+        resources=frame.scope.resources,
+        _frame=frame,
         _node_id=node_id,
     )
     verdict = until_fn(result, ctx)
@@ -503,7 +503,7 @@ async def _check_until(
 async def _run_branch(
     br: _Branch,
     ctx: Context[Any],
-    env: _RunEnv,
+    frame: _Frame,
     node_args: tuple[Any, ...],
     node_id: str,
 ) -> Any:
@@ -520,23 +520,23 @@ async def _run_branch(
     share a target Flow.
     """
     prev_result = node_args[0] if node_args else None
-    verdict = await _branch_verdict(br, ctx, env, node_id, prev_result)
+    verdict = await _branch_verdict(br, ctx, frame, node_id, prev_result)
     chosen = br.then_flow if verdict else br.else_flow
     if chosen is None:
         return prev_result
     arm = _BranchArm("then" if verdict else "else")
-    return await _run_arm(chosen, arm, env, node_id, prev_result)
+    return await _run_arm(chosen, arm, frame, node_id, prev_result)
 
 
 async def _branch_verdict(
-    br: _Branch, ctx: Context[Any], env: _RunEnv, node_id: str, prev_result: Any
+    br: _Branch, ctx: Context[Any], frame: _Frame, node_id: str, prev_result: Any
 ) -> bool:
     """True for the ``then`` arm: the arm a checkout saved at this branch, else ``when``'s verdict.
 
     A saved arm is taken as is: ``when`` is not evaluated again, since the
     state it reads may have changed since the branch chose.
     """
-    found, arm = env.scopes.take_cursor(env.owner_path(node_id), ARM)
+    found, arm = frame.scopes.take_cursor(frame.owner_path(node_id), ARM)
     if found:
         return bool(arm == "then")
     verdict = br.when(prev_result, ctx)
@@ -546,12 +546,12 @@ async def _branch_verdict(
 
 
 async def _run_arm(
-    chosen: Flow, arm: _BranchArm, env: _RunEnv, node_id: str, prev_result: Any
+    chosen: Flow, arm: _BranchArm, frame: _Frame, node_id: str, prev_result: Any
 ) -> Any:
     """Run the arm a branch took, with the branch's cursor in every snapshot meanwhile."""
-    path = env.owner_path(node_id)
-    with _running(env, path, arm):
-        child = env.descend(node_id, arm.arm, path, env.scope.state)
+    path = frame.owner_path(node_id)
+    with _running(frame, path, arm):
+        child = frame.descend(node_id, arm.arm, path, frame.scope.state)
         return await run_as_subflow(chosen, (prev_result,), {}, child)
 
 
@@ -567,7 +567,7 @@ class _BranchArm:
 
 
 async def _save_scope_commit(
-    env: _RunEnv,
+    frame: _Frame,
     iteration: int,
     node_id: str,
     current_state: State[Any],
@@ -578,26 +578,26 @@ async def _save_scope_commit(
 
     The save point of :class:`IterateRunner`, :class:`MapItemRunner` and
     :meth:`Context.checkpoint`. It writes only with a repo
-    (``env.checkpoint_ctx``) and a checkpointer on the saving flow or
-    above it (``env.scope.checkpointer``); the save belongs to that innermost
+    (``frame.checkpoint_ctx``) and a checkpointer on the saving flow or
+    above it (``frame.scope.checkpointer``); the save belongs to that innermost
     checkpointer, and a named one's tag moves to the commit. Delegates the
     persistence to :meth:`CheckpointContext.save_scope_commit`.
     """
-    ctx, checkpointer = env.checkpoint_ctx, env.scope.checkpointer
+    ctx, checkpointer = frame.checkpoint_ctx, frame.scope.checkpointer
     if ctx is None or checkpointer is None:
         return None
     commit = await ctx.save_scope_commit(
-        env.position.ancestor_chain,
+        frame.position.ancestor_chain,
         iteration,
         node_id,
-        env.scopes,
+        frame.scopes,
         current_state,
         outcome,
         trace_ref,
     )
     if checkpointer.name is not None:
         await ctx.put_tag(checkpoint_tag(checkpointer.name), commit.id)
-    await checkpoint_written(env.scope.hooks, env, env.run.info, commit, node_id)
+    await checkpoint_written(frame.scope.hooks, frame, frame.run.info, commit, node_id)
     return commit
 
 

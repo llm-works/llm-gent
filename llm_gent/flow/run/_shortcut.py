@@ -49,7 +49,7 @@ from ..state.snapshot import SIGNALS
 
 if TYPE_CHECKING:
     from ._run import Run
-    from .scope import _RunEnv
+    from .scope import _Frame
 
 
 def check_signals(signals: Mapping[str, asyncio.Event] | None) -> dict[str, asyncio.Event]:
@@ -170,28 +170,28 @@ class ShortcutRun:
     left: bool
 
 
-def is_fast_forward(env: _RunEnv) -> bool:
-    """True when the flow running under ``env`` is in a region whose signal is set."""
-    return any(s.signal.is_set() for s in env.scope.shortcuts if not s.left)
+def is_fast_forward(frame: _Frame) -> bool:
+    """True when the flow running under ``frame`` is in a region whose signal is set."""
+    return any(s.signal.is_set() for s in frame.scope.shortcuts if not s.left)
 
 
-def is_draining(env: _RunEnv) -> bool:
-    """True when ``env`` runs in a started map item of a drain region whose signal is set."""
-    return any(s.signal.is_set() for s in env.scope.shortcuts if s.left)
+def is_draining(frame: _Frame) -> bool:
+    """True when ``frame`` runs in a started map item of a drain region whose signal is set."""
+    return any(s.signal.is_set() for s in frame.scope.shortcuts if s.left)
 
 
 @contextlib.asynccontextmanager
-async def turn_abort(env: _RunEnv) -> AsyncIterator[asyncio.Event | None]:
-    """What a Loop turn under ``env`` aborts on, for the duration of the turn.
+async def turn_abort(frame: _Frame) -> AsyncIterator[asyncio.Event | None]:
+    """What a Loop turn under ``frame`` aborts on, for the duration of the turn.
 
     The run's halt, or the signal of any region the turn is in and has not
-    left (:func:`leave_drains`). Built per turn from ``env``, so a region a
+    left (:func:`leave_drains`). Built per turn from ``frame``, so a region a
     started map item left never reaches a turn in it, however the regions
     nest. One source is used as is; ``None`` when there is none.
     """
-    sources = [s.signal for s in env.scope.shortcuts if not s.left]
-    if env.halt is not None:
-        sources.append(env.halt)
+    sources = [s.signal for s in frame.scope.shortcuts if not s.left]
+    if frame.halt is not None:
+        sources.append(frame.halt)
     if len(sources) <= 1:
         yield sources[0] if sources else None
         return
