@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Self, get_args
 
 from appinfra.cas import Store
@@ -1264,7 +1264,7 @@ class Flow:
         self._check_run_args(resume, restart, run_signals_, history, retention)
         run = self._new_run(halt, run_signals_, history, retention)
         active_state, saved = await self._start_state(
-            run, self._wrap_top_state(state), resume, restart
+            run, lambda: self._wrap_top_state(state), resume, restart
         )
         run.scopes.begin(active_state, saved)
         hooks = run.hooks = RunHooks(run)
@@ -1427,15 +1427,24 @@ class Flow:
             raise ValueError(f"{what}; got {value!r} ({e})") from None
 
     async def _start_state(
-        self, run: Run, fallback: State[Any], resume: ResumeMode | str, restart: str | None
+        self,
+        run: Run,
+        fallback: Callable[[], State[Any]],
+        resume: ResumeMode | str,
+        restart: str | None,
     ) -> tuple[State[Any], Snapshot | None]:
         """The run's initial state and the snapshot it starts from (``None`` for a fresh run).
+
+        ``fallback`` builds the state of a run that checks nothing out: a
+        fresh run, or a resume on a history with no commit to continue. A
+        run that checks out a commit never calls it, so a state factory
+        whose ``new()`` needs inputs still resumes without ``state=``.
 
         Records on ``run`` the commit it checked out (``None`` for a fresh
         run) for the run's hook events.
         """
         if resume == "off" and restart is None:
-            return fallback, None
+            return fallback(), None
         checkout = Resume(run)
         if restart is not None:
             started = await checkout.restart(restart, fallback)

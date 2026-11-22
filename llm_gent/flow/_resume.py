@@ -27,6 +27,7 @@ its history's head is its last save, where resume continues.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from appinfra.cas import Tree, canonical_json
@@ -47,11 +48,13 @@ class Resume:
     """Check out the snapshot a resuming ``run()`` continues from.
 
     Constructed with a run that has a history writer. :meth:`checkout` takes
-    the fallback :class:`State` (the wrapped ``run(state=...)`` payload) and
-    returns it unchanged when there is nothing to resume, so the caller
-    falls through to a fresh run — whose commits still append to the same
-    history. It raises :class:`~llm_gent.flow.history.HistoryCorrupt` on a
-    corrupt history rather than silently starting over from ``fallback``.
+    a builder of the fallback :class:`State` (the wrapped ``run(state=...)``
+    payload, else a fresh state) and calls it only when there is nothing to
+    resume, so the caller falls through to a fresh run — whose commits still
+    append to the same history. A history with a commit to check out never
+    builds the fallback. It raises
+    :class:`~llm_gent.flow.history.HistoryCorrupt` on a corrupt history
+    rather than silently starting over from ``fallback``.
     """
 
     def __init__(self, run: Run) -> None:
@@ -63,7 +66,9 @@ class Resume:
         self.checked_out: str | None = None
         """The commit whose snapshot the run starts from, once one is checked out."""
 
-    async def checkout(self, fallback: State[Any]) -> tuple[State[Any], Snapshot | None]:
+    async def checkout(
+        self, fallback: Callable[[], State[Any]]
+    ) -> tuple[State[Any], Snapshot | None]:
         """Check out the snapshot of the newest commit that has state.
 
         Starts at the head — after a run that raised, its last save — and
@@ -74,7 +79,7 @@ class Resume:
 
         Skipping is logged: the restored state may predate the head by
         whole runs (a stateless ``$end`` sends the walk into the previous
-        run). Returns ``(fallback, None)`` when the history is empty or
+        run). Returns ``(fallback(), None)`` when the history is empty or
         holds no commit with state (warning in the latter case).
 
         Captures where ``HEAD`` points at the start of the walk: a writer
@@ -102,7 +107,7 @@ class Resume:
                 "no commit with usable state to resume from; starting from state=",
                 extra={"client_flow_id": self._history.client_flow_id, "skipped": skipped},
             )
-        return fallback, None
+        return fallback(), None
 
     async def checkout_at(self, target: str) -> tuple[State[Any], Snapshot]:
         """Check out the commit ``target`` names; the run's commits are parented on it.
@@ -135,7 +140,7 @@ class Resume:
         return root, snapshot
 
     async def restart(
-        self, target: str, fallback: State[Any]
+        self, target: str, fallback: Callable[[], State[Any]]
     ) -> tuple[State[Any], Snapshot | None]:
         """Check out ``target`` to start over from: its root state and top-level resources alone.
 

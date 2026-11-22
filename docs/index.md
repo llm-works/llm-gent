@@ -156,9 +156,11 @@ other than a single-hop hand-off:
   values in flight between steps: the input of the step a chain is at,
   the value an iterate carries into its pass. Those values must be plain
   JSON, pydantic models, or objects with `to_dict()` and a classmethod
-  `from_dict()`. The state type is declared via `state_type=` on the
-  factory; the initial payload comes from construction or from
-  `run(state=...)` override.
+  `from_dict()`. The state type is declared via `state_factory=` on the
+  factory (`TypeStateFactory(MyState)`); a run's state is
+  `run(state=...)`, and a run given none gets `state_factory.new()`
+  (else an empty `dict`). A resumed run takes its state from the
+  checkpoint.
 - Aggregation across concurrent items. Under `.map(state=proj, merge=fn)`
   each item projects an isolated child payload and folds back through
   `merge` — cross-item accumulation lives in state, not in the returned

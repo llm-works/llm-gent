@@ -93,6 +93,46 @@ class _Crash(BaseException):
     """The process died: not an ``Exception``, so nothing handles it on the way out."""
 
 
+class _NeedsInputs:
+    """A state factory that cannot build a state alone: ``new()`` raises, ``restore()`` works."""
+
+    def new(self) -> dict[str, int]:
+        raise TypeError("pass run(state=...)")
+
+    def restore(self, data: dict[str, Any]) -> dict[str, int]:
+        return dict(data)
+
+
+def _needs_inputs_flow(store: MemoryStore) -> Any:
+    """One step bumping ``n``, on a factory whose ``new()`` raises."""
+
+    @verb
+    async def bump(ctx: Context[dict[str, int]]) -> int:
+        ctx.state.data["n"] += 1
+        return ctx.state.data["n"]
+
+    ff = Factory(make_test_logger(), checkpoint_store=store, state_factory=_NeedsInputs())
+    return ff.create().with_checkpointer().call(bump)
+
+
+class TestFallbackState:
+    """A resumed run builds a fresh state only when the history has none to check out."""
+
+    async def test_resume_and_restart_do_not_build_a_state(self, store: MemoryStore) -> None:
+        flow = _needs_inputs_flow(store)
+        assert await flow.run(state={"n": 1}, history="h") == 2
+
+        assert await flow.run(history="h", resume="latest") == 3
+        assert await flow.run(history="h", restart="latest") == 4
+
+    async def test_an_empty_history_builds_the_state(self, store: MemoryStore) -> None:
+        flow = _needs_inputs_flow(store)
+        with pytest.raises(TypeError, match=r"pass run\(state=\.\.\.\)"):
+            await flow.run(history="empty", resume="latest")
+        with pytest.raises(TypeError, match=r"pass run\(state=\.\.\.\)"):
+            await flow.run(history="empty", restart="latest")
+
+
 class TestLatest:
     async def test_after_completion_continues_from_final_state(self, store: MemoryStore) -> None:
         """Terminal-extend: a finished run's final state is the next run's start."""
