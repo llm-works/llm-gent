@@ -862,10 +862,10 @@ class TestSubflow:
             return ctx.state.data
 
         sub = make_ff().create("inner").call(read_state)
-        main = make_ff(saia_factory=saia).create(state={"default": True}).call(sub)
+        main = make_ff(saia_factory=saia).create().call(sub)
 
-        assert await main.run(None) == {"default": True}
-        assert await main.run(None, state={"overridden": True}) == {"overridden": True}
+        assert await main.run(None) == {}
+        assert await main.run(None, state={"given": True}) == {"given": True}
 
 
 # -----------------------------------------------------------------------------

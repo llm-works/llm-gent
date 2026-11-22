@@ -206,26 +206,27 @@ class State(Generic[T]):
 
 
 class StateFactory(Protocol[T_co]):
-    """Framework-facing state construction on the checkpoint restore path.
+    """Framework-facing state construction: a fresh run's state, and restore from a checkpoint.
 
-    The framework calls :meth:`restore` at resume time (``run(resume=...)``
-    on a flow with a checkpoint store) to rebuild state from the serialized
-    dict. Runtime
-    handles that cannot be serialized (Logger, storage backends,
-    connections) are captured at factory construction and threaded
-    through :meth:`restore`; the framework passes no runtime context of
+    The framework calls :meth:`new` for a :meth:`~llm_gent.flow.Flow.run`
+    given no ``state=``: every run gets its own state, never one shared
+    with other runs of the flow. It calls :meth:`restore` at resume time
+    (``run(resume=...)`` on a run with a history) to rebuild state from the
+    serialized dict. Runtime handles that cannot be serialized (Logger,
+    storage backends, connections) are captured at factory construction
+    and threaded through both; the framework passes no runtime context of
     its own.
 
-    Fresh construction is user-owned — the protocol declares no method
-    for it. Implementations typically ship a ``new(**kwargs)`` alongside
-    for centralized construction (see :class:`TypeStateFactory`), but
-    the framework never calls it.
+    A factory that cannot build a state without inputs raises from
+    :meth:`new`; its callers pass ``run(state=...)``.
 
-    ``StateFactory[T]`` narrows the payload type; :meth:`restore` returns
-    ``T`` so the restore path in :class:`~llm_gent.flow.flow.Flow` is
-    statically typed against the caller's state class. ``T`` is
-    covariant here because it only appears in return position.
+    ``StateFactory[T]`` narrows the payload type; both methods return
+    ``T`` so the run's state is statically typed against the caller's
+    state class. ``T`` is covariant here because it only appears in
+    return position.
     """
+
+    def new(self) -> T_co: ...
 
     def restore(self, data: dict[str, Any]) -> T_co: ...
 
@@ -235,12 +236,11 @@ class TypeStateFactory(Generic[T]):
 
     Wraps a bare class satisfying :class:`StateData` in the factory shape
     for the common case where state carries no runtime handles. The
-    framework calls :meth:`restore` on resume, which delegates to
-    ``state_type.from_dict(data)``.
-
-    :meth:`new` is a user-facing convenience for fresh construction —
-    the framework never calls it. It forwards kwargs to the type
-    constructor, centralizing state construction alongside restore.
+    framework calls :meth:`new` with no arguments for a run given no
+    ``state=``, and :meth:`restore` on resume, which delegates to
+    ``state_type.from_dict(data)``. :meth:`new` forwards keyword arguments
+    to the type constructor, so callers building a run's state themselves
+    can go through it too.
 
     Usage::
 

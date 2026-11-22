@@ -117,14 +117,9 @@ class TestCorruptHistory:
         assert head is not None
         store.delete_objects("torn-resume", [head.id])
 
-        flow = build_canonical_flow(
-            make_test_logger(),
-            state=CanonicalCounter(n=100),
-            max_iters=4,
-            store=store,
-        )
+        flow = build_canonical_flow(make_test_logger(), max_iters=4, store=store)
         with pytest.raises(HistoryCorrupt):
-            await flow.run(history="torn-resume", resume="latest")
+            await flow.run(state=CanonicalCounter(n=100), history="torn-resume", resume="latest")
         # Nothing was written past the damage: the ref still names the missing commit.
         with pytest.raises(HistoryCorrupt):
             await History(store, "torn-resume").head()

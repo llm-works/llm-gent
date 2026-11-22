@@ -139,7 +139,7 @@ def _flow(lg: Logger, store: Store, backend: Backend, hooks: tuple[Hook, ...]) -
     loop = Loop(WRITER, conversation_factory=KeltConversationFactory(lg))
     ff = Factory(lg, saia_factory=_WriterFactory(lg, backend), checkpoint_store=store)
     return (
-        ff.create("publish-summary", state={})
+        ff.create("publish-summary")
         .call(_make_write(loop), name="write")
         .then(review, name="review")
         .then(publish, name="publish")

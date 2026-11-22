@@ -49,7 +49,7 @@ def _flow(store: Store, tag: str | None) -> Any:
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .call(a)
         .then(b)

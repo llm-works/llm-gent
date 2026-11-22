@@ -175,7 +175,7 @@ def _checkpointed(store: Any, *, stop: bool) -> Any:
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .call(first, name="prepare")
         .then(second, name="work")
@@ -222,12 +222,8 @@ class TestStoredStructure:
     async def test_a_commit_without_state_has_no_structure(self) -> None:
         """A final state that cannot be serialized commits an empty tree."""
         store = memory_store()
-        flow = (
-            Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={"handle": object()})
-            .call(prepare)
-        )
-        await flow.run(1, history="stateless")
+        flow = Factory(make_test_logger(), checkpoint_store=store).create().call(prepare)
+        await flow.run(1, state={"handle": object()}, history="stateless")
         history = History(store, "stateless")
         head = await history.head()
         assert head is not None

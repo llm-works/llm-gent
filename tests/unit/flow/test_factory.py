@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from llm_gent.core.cost import Tracker as CostTracker
-from llm_gent.flow import Context, Factory, Flow, Role, SAIAFactory, verb
+from llm_gent.flow import Context, Factory, Flow, Role, SAIAFactory, TypeStateFactory, verb
 from tests.helpers import memory_store
 
 from .conftest import ROLE_A, StubFactory, make_test_logger
@@ -82,25 +82,6 @@ class TestFlowFactory:
         # Reach into the private slot — this test's point is the wiring itself.
         assert flow._saia_factory is sf
 
-    def test_create_threads_state_default(self) -> None:
-        """The factory's state default is used unless overridden on create()."""
-        default_state = {"scope": "app"}
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state=default_state)
-        assert ff.create().state is default_state
-
-    def test_create_state_override(self) -> None:
-        """Passing state= on create() overrides the factory default for that Flow."""
-        default_state = {"scope": "app"}
-        per_flow = {"scope": "grade"}
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state=default_state)
-        assert ff.create(state=per_flow).state is per_flow
-
-    def test_create_state_override_with_none(self) -> None:
-        """state=None explicit is honored (distinct from the UNSET default)."""
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state={"x": 1})
-        flow = ff.create(state=None)
-        assert flow.state is None
-
     def test_with_saia_returns_new_factory(self) -> None:
         """with_saia_factory() derives a new Factory (immutable-style swap)."""
         a, b = StubFactory(), StubFactory()
@@ -111,12 +92,12 @@ class TestFlowFactory:
         # Original untouched.
         assert ff.create()._saia_factory is a
 
-    def test_with_saia_preserves_state(self) -> None:
-        """with_saia_factory() carries state and lg forward untouched."""
-        state = {"scope": "shared"}
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state=state)
+    def test_with_saia_preserves_the_state_factory(self) -> None:
+        """with_saia_factory() carries the state factory forward untouched."""
+        state_factory = TypeStateFactory(dict)
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state_factory=state_factory)
         derived = ff.with_saia_factory(StubFactory())
-        assert derived.create().state is state
+        assert derived.create()._state_factory is state_factory
 
 
 class TestCheckpointStore:

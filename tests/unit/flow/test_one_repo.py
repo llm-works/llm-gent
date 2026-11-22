@@ -71,7 +71,7 @@ def _nested(store: Any, ran: list[str], *, crash: bool, halt: bool = False) -> A
         return x + 3
 
     sub = _ff().create().with_checkpointer().call(a1).then(a2).then(b)
-    return _ff(store).create(state={}).call(sub).then(c)
+    return _ff(store).create().call(sub).then(c)
 
 
 class TestNestedCheckpointer:
@@ -109,7 +109,7 @@ class TestNestedCheckpointer:
             written.append(await ctx.checkpoint("x"))
             return x
 
-        await _ff(store).create(state={}).call(a).run(1, history=NAME)
+        await _ff(store).create().call(a).run(1, history=NAME)
         assert written == [None]
         history = History(store, NAME)
         assert await history.checkpoint_names() == []
@@ -123,7 +123,7 @@ class TestNestedCheckpointer:
             await ctx.checkpoint()
             return x
 
-        sub = _ff(store).create(state={}).with_checkpointer().call(a)
+        sub = _ff(store).create().with_checkpointer().call(a)
         await sub.run(1, history="sub")
         assert await History(store, "sub").head() is not None
         assert await History(store, NAME).head() is None
@@ -138,7 +138,7 @@ class TestNestedCheckpointer:
             return x
 
         sub = _ff(other).create().with_checkpointer().call(a)
-        await _ff(store).create(state={}).call(sub).run(1, history=NAME)
+        await _ff(store).create().call(sub).run(1, history=NAME)
         assert await History(store, NAME).head() is not None
         assert other.list_repos() == []
 
@@ -153,7 +153,7 @@ class TestOneHistoryRules:
             return x
 
         sub = _ff().create().with_checkpointer().call(a)
-        flow = _ff(memory_store()).create(state={}).call(a).call(sub)
+        flow = _ff(memory_store()).create().call(a).call(sub)
         with pytest.raises(RuntimeError, match="has no history"):
             await flow.run(1)
         assert ran == []
@@ -166,7 +166,7 @@ class TestOneHistoryRules:
             return x
 
         store = memory_store()
-        flow = _ff(store).create(state={}).with_checkpointer().call(a)
+        flow = _ff(store).create().with_checkpointer().call(a)
         with pytest.raises(InvalidNameError):
             await flow.run(1, history="..")
         assert store.list_repos() == []
@@ -191,7 +191,7 @@ class TestNamedCheckpointer:
 
             return (
                 _ff(store)
-                .create(state={})
+                .create()
                 .map(
                     lambda b: b.with_checkpointer("items").call(item),
                     items=lambda _p, _c: [1, 2, 3],
@@ -225,7 +225,7 @@ class TestNamedCheckpointer:
 
         inner = _ff().create().with_checkpointer("inner").call(inner_step)
         outer = _ff().create().with_checkpointer("outer").call(outer_step).call(inner)
-        await _ff(store).create(state={}).call(outer).run(1, history=NAME)
+        await _ff(store).create().call(outer).run(1, history=NAME)
         assert await History(store, NAME).checkpoint_names() == ["inner"]
 
     async def test_one_name_on_two_flows_is_one_tag(self) -> None:
@@ -238,7 +238,7 @@ class TestNamedCheckpointer:
 
         first = _ff().create().with_checkpointer("phase").call(save)
         second = _ff().create().with_checkpointer("phase").call(save)
-        flow = _ff(store).create(state={}).call(first).call(second)
+        flow = _ff(store).create().call(first).call(second)
         assert await flow.run(1, history=NAME) == 3
         history = History(store, NAME)
         assert await history.checkpoint_names() == ["phase"]

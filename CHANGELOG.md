@@ -32,10 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AgentFactory(lg)` and `PlatformContext.from_config(...)`. Agent, trait and tool factories are
   `Factory` in their subpackages; `llm_gent` exports them with the prefix.
 - Breaking: a Flow is a structure that runs many times at once. The checkpoint store is set on
-  `Flow(checkpoint_store=)` / `Factory(checkpoint_store=)`; halt, signals, history and retention
-  are `run()` arguments. Removed: `Flow.with_halt` / `with_signal` / `with_checkpoint_store`,
-  `Factory(halt=)`, `Factory.with_halt`, and `Factory.create()`'s `halt=`, `checkpointer=` and
-  `client_flow_id=`.
+  `Flow(checkpoint_store=)` / `Factory(checkpoint_store=)`; state, halt, signals, history and
+  retention are `run()` arguments, and a run given no state gets a fresh one (`StateFactory.new()`,
+  else `{}`). Removed: `Flow(state=)` / `Flow.state` / `with_halt` / `with_signal` /
+  `with_checkpoint_store`, `Factory(state=, halt=)`, `Factory.with_halt`, and `Factory.create()`'s
+  `state=`, `halt=`, `checkpointer=` and `client_flow_id=`.
 
 ## [0.4.1] - 2026-11-01
 

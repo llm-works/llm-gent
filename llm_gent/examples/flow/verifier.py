@@ -86,9 +86,9 @@ class VerifierState(StateDataclass):
 async def answer_query(ctx: Context[VerifierState]) -> str:
     """Primary produces the initial answer.
 
-    Reads the query from ``ctx.data.query`` — the same value the
-    :class:`VerifierState` was constructed with — so ``.run()`` does
-    not need to also pass it as a positional argument.
+    Reads the query from ``ctx.data.query`` — the run's
+    :class:`VerifierState` carries it — so ``.run()`` does not need to
+    also pass it as a positional argument.
     """
     saia: ExampleSAIA = ctx.saia
     prompt = f"Answer this question concisely:\n{ctx.data.query}"
@@ -207,7 +207,7 @@ async def main() -> int:
     ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(VerifierState))
 
     query = "What is the capital of France?"
-    flow = ff.create("verifier", state=VerifierState(query=query))
+    flow = ff.create("verifier")
     flow.call(answer_query).iterate(
         lambda body: body.call(self_review).call(external_review).call(judge).call(maybe_correct),
         max_iters=MAX_ROUNDS,
@@ -215,7 +215,7 @@ async def main() -> int:
     )
 
     print(f"Query: {query}\n")
-    final = await flow.run()
+    final = await flow.run(state=VerifierState(query=query))
     print("\n=== converged ===")
     print(f"final answer: {final}")
     print(f"rounds run:   {len(saia_factory.instance('judge').call_log)}")

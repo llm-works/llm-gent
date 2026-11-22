@@ -13,7 +13,7 @@ Exercises the Flow-level checkpointer end-to-end without touching an LLM:
    the next step sets ``ctx.halt`` when ``count == HALT_AFTER`` to request
    a cooperative halt. The framework writes a halt checkpoint at that step,
    preserves it on halt exit, and returns.
-2. **Run 2** — a fresh :class:`~llm_gent.flow.Flow`, on the same
+2. **Run 2** — the same :class:`~llm_gent.flow.Flow`, on the same
    ``history=`` and without a halt, is run with ``resume="latest"``. The
    framework checks out the latest checkpoint, reconstructs ``state.data``
    via :meth:`Counter.from_dict`, and continues where run 1 stopped: the
@@ -117,12 +117,13 @@ async def stop_at_limit(ctx: Context[Counter], count: int) -> int:
 
 
 def _build_flow(ff: Factory[Flow]) -> Flow:
-    """Assemble the flow on the factory's checkpoint store.
+    """Assemble the flow: structure only, built once and run twice.
 
-    Each run names its history and brings its own halt
-    (:meth:`~llm_gent.flow.Flow.run`).
+    The factory carries the checkpoint store and the state factory; each
+    run names its history, brings its own halt and starts from a fresh
+    ``Counter()`` (:meth:`~llm_gent.flow.Flow.run`).
     """
-    flow = ff.create("resume-demo", state=Counter())
+    flow = ff.create("resume-demo")
     flow.iterate(lambda body: body.call(tick).call(stop_at_limit), max_iters=MAX_ITERS)
     return flow
 
@@ -145,20 +146,19 @@ async def main() -> int:
         store = FileStore(lg, tmp_root)
         name = "resume-demo"
         ff = Factory(lg, state_factory=TypeStateFactory(Counter), checkpoint_store=store)
+        flow = _build_flow(ff)
 
         # Only run 1 gets a halt: run 2 resumes at the step that halted,
         # and without a halt that step passes through.
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
-        flow1 = _build_flow(ff)
-        result1 = await flow1.run(halt=asyncio.Event(), history=name)
+        result1 = await flow.run(halt=asyncio.Event(), history=name)
         history = History(store, name)
         assert result1 is HALTED
         print(f"run 1 returned: {result1} (its state is in the halt checkpoint)")
         print(f"history head: {await _describe_head(history)}")
 
         print(f"\n--- Run 2: resume=latest (cumulative max_iters={MAX_ITERS}) ---")
-        flow2 = _build_flow(ff)
-        result2 = await flow2.run(history=name, resume="latest")
+        result2 = await flow.run(history=name, resume="latest")
         print(f"run 2 returned: count={result2}")
         print(f"history head: {await _describe_head(history)}")
 

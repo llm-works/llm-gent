@@ -353,7 +353,7 @@ def _build_flow(lg: Logger, ff: Factory[Flow]) -> Flow:
     """
     conv_factory = KeltConversationFactory(lg)
     summarize = _make_summarize(Loop(SUMMARIZE_ROLE, conversation_factory=conv_factory))
-    flow = ff.create("durable-resume-demo", state=Digest(pending=list(TOPICS)))
+    flow = ff.create("durable-resume-demo")
     flow.iterate(
         lambda body: body.call(summarize),
         until=lambda _result, ctx: not ctx.data.pending,
@@ -401,8 +401,12 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     )
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
+    # A resumed run's state comes from the checkpoint; the given one starts a fresh run.
     result = await _build_flow(lg, ff).run(
-        halt=halt, history=CLIENT_FLOW_ID, resume="latest" if resuming else "off"
+        state=Digest(pending=list(TOPICS)),
+        halt=halt,
+        history=CLIENT_FLOW_ID,
+        resume="latest" if resuming else "off",
     )
     # A halted run returns HALTED; its state is in the halt checkpoint.
     halted = result is HALTED

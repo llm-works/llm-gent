@@ -108,8 +108,8 @@ async def execute(ctx: Context, _prev: Any) -> int:
 
 
 ff = Factory(lg)  # lg: Logger — elided for brevity
-flow = ff.create("run", state={}).call(plan).call(execute)
-assert await flow.run("ship it") == 3
+flow = ff.create("run").call(plan).call(execute)
+assert await flow.run("ship it") == 3  # the run gets a fresh {} as its state
 ```
 
 `execute` did not need a two-argument signature; it read what it needed from
@@ -156,9 +156,11 @@ other than a single-hop hand-off:
   values in flight between steps: the input of the step a chain is at,
   the value an iterate carries into its pass. Those values must be plain
   JSON, pydantic models, or objects with `to_dict()` and a classmethod
-  `from_dict()`. The state type is declared via `state_type=` on the
-  factory; the initial payload comes from construction or from
-  `run(state=...)` override.
+  `from_dict()`. The state type is declared via `state_factory=` on the
+  factory (`TypeStateFactory(MyState)`); a run's state is
+  `run(state=...)`, and a run given none gets `state_factory.new()`
+  (else an empty `dict`). A resumed run takes its state from the
+  checkpoint.
 - Aggregation across concurrent items. Under `.map(state=proj, merge=fn)`
   each item projects an isolated child payload and folds back through
   `merge` — cross-item accumulation lives in state, not in the returned
@@ -640,12 +642,8 @@ without a store, and on `resume=` / `restart=` without `history=`.
 
 ```python
 ff = Factory(lg, checkpoint_store=store)
-flow = (
-    ff.create(state=...)
-    .call(prepare)
-    .map(lambda b: b.with_checkpointer("items").call(item), items=...)
-)
-await flow.run(history="session-42")  # the run's repo
+flow = ff.create().call(prepare).map(lambda b: b.with_checkpointer("items").call(item), items=...)
+await flow.run(state=..., history="session-42")  # the run's state and repo
 ```
 
 ### Checkpoint cadence
@@ -680,12 +678,12 @@ wanted.
 
 ```python
 flow = (
-    ff.create(state=...)
+    ff.create()
     .with_checkpointer()
     .with_checkpoint_policy(on_iterate=True, on_map_item=True)
     .iterate(body, max_iters=10)
 )
-await flow.run(history="history-42")
+await flow.run(state=..., history="history-42")
 ```
 
 Halt-save and `ctx.checkpoint()` are unaffected by the policy — the

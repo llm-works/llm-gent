@@ -76,7 +76,7 @@ class TestAppTrackerAcrossResume:
 
         return (
             _ff(store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .with_cost_tracker(tracker)
             .call(a)
@@ -131,9 +131,7 @@ class TestAppTrackerAcrossResume:
             seen.append(1.0)
             return x
 
-        flow = (
-            _ff(store).create(state={}).with_cost_tracker(_tracker(1.5, halt=halt)).call(a).then(b)
-        )
+        flow = _ff(store).create().with_cost_tracker(_tracker(1.5, halt=halt)).call(a).then(b)
         assert await flow.run(1, halt=halt, history=NAME) is HALTED
         assert seen == []
         head = await History(store, NAME).head()
@@ -149,9 +147,7 @@ class TestAppTrackerAcrossResume:
             return x
 
         def flow(tracker: CostTracker) -> Any:
-            return (
-                _ff(store).create(state={}).with_checkpointer().with_cost_tracker(tracker).call(a)
-            )
+            return _ff(store).create().with_checkpointer().with_cost_tracker(tracker).call(a)
 
         await flow(_tracker()).run(1, history=NAME)
         history = History(store, NAME)
@@ -189,7 +185,7 @@ class TestAppTrackerAcrossResume:
                 return x
 
             inner = ff.create().call(b)
-            return ff.create(state={}).call(a).then(inner)
+            return ff.create().call(a).then(inner)
 
         assert (
             await build(_tracker(), arm=True).run(1, halt=asyncio.Event(), history=NAME) is HALTED
@@ -276,7 +272,7 @@ class TestTrackerSubclassAcrossResume:
 
         return (
             _ff(store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .with_cost_tracker(tracker)
             .call(a)
@@ -458,7 +454,7 @@ def _item_flow(
         _spend(ctx, costs[item][1])
         return item * 10
 
-    flow = _ff(store).create(state={})
+    flow = _ff(store).create()
     if store is not None:
         flow = flow.with_checkpointer()
     return flow.with_cost_tracker(root).map(
@@ -499,7 +495,7 @@ class TestItemBudgets:
 
         flow = (
             _ff()
-            .create(state={})
+            .create()
             .with_cost_tracker(root)
             .map(lambda b: b.call(step), items=lambda _p, _c: [0, 1])
         )
@@ -609,7 +605,7 @@ class TestLoopInABudgetedItem:
 
         flow = (
             _ff()
-            .create(state={})
+            .create()
             .with_cost_tracker(root)
             .map(
                 lambda b: b.with_budget(1.0).call(work),
@@ -636,7 +632,7 @@ class TestPassAndCallBudgets:
 
         flow = (
             _ff()
-            .create(state={})
+            .create()
             .with_cost_tracker(root)
             .iterate(lambda b: b.with_budget(1.0).call(step), max_iters=3)
         )
@@ -668,7 +664,7 @@ class TestPassAndCallBudgets:
             ran.append(f"after:{prev}")
             return prev
 
-        flow = _ff().create(state={}).with_cost_tracker(root).call(sub).then(after)
+        flow = _ff().create().with_cost_tracker(root).call(sub).then(after)
         assert await flow.run(0.5) == 0.5
         assert await flow.run(2.0) == 2.0
         assert ran == ["check", "after:0.5", "check", "after:2.0"]
@@ -694,7 +690,7 @@ class TestPassAndCallBudgets:
 
         inner = ff.create().call(spend).then(check)
         sub = ff.create().with_budget(1.0).call(inner)
-        flow = ff.create(state={}).with_cost_tracker(_tracker()).call(sub)
+        flow = ff.create().with_cost_tracker(_tracker()).call(sub)
         assert await flow.run(0.5, halt=halt) is HALTED
         assert ran == []
 
@@ -717,7 +713,7 @@ class TestPassAndCallBudgets:
             .with_budget(1.0)
             .map(lambda b: b.call(item), items=lambda _p, _c: [0, 1, 2, 3], max_concurrency=1)
         )
-        flow = _ff().create(state={}).with_cost_tracker(root).call(budgeted_map)
+        flow = _ff().create().with_cost_tracker(root).call(budgeted_map)
         assert await flow.run() == [0, 1, 2, 3]
         assert len({id(t) for t in trackers}) == 1 and trackers[0].exceeded
         assert root.spent == pytest.approx(1.6)
@@ -805,7 +801,7 @@ class TestCostAcrossCrash:
                 return x
 
             sub = _ff().create().with_budget(10.0).call(a).then(b)
-            return _ff(store).create(state={}).with_checkpointer().with_cost_tracker(root).call(sub)
+            return _ff(store).create().with_checkpointer().with_cost_tracker(root).call(sub)
 
         with pytest.raises(RuntimeError, match="process died"):
             await build(_tracker(), fail=True).run(1, history=NAME)
@@ -827,7 +823,7 @@ class TestValidation:
 
         flow = (
             _ff()
-            .create(state={})
+            .create()
             .call(step)
             .map(lambda b: b.with_budget(1.0).call(step), items=lambda _p, _c: [1])
         )
@@ -845,7 +841,7 @@ class TestValidation:
             _spend(ctx, 0.25)
             return x
 
-        flow = _ff().create(state={}).with_cost_tracker(own).with_budget(1.0).call(step)
+        flow = _ff().create().with_cost_tracker(own).with_budget(1.0).call(step)
         assert await flow.run(1) == 1
         assert seen[0].parent is own and seen[0].budget == 1.0
         assert own.spent == pytest.approx(0.25)

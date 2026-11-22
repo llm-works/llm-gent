@@ -37,7 +37,7 @@ async def double(ctx: Context[Any], x: int) -> int:
 
 
 def _flow(**kw: Any) -> Flow:
-    return Factory(make_test_logger(), **kw).create(state={})
+    return Factory(make_test_logger(), **kw).create()
 
 
 def _vc(store: MemoryStore) -> VersionControl:

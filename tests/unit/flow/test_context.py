@@ -79,7 +79,7 @@ class TestContextGeneric:
     async def test_context_generic_dispatch(self) -> None:
         """A verb annotated as ``Context[_Payload]`` runs without error."""
         payload = _Payload(turn=0)
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory(), state=payload)
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context[_Payload]) -> int:
@@ -88,7 +88,7 @@ class TestContextGeneric:
             return ctx.state.data.turn
 
         flow.register(bump)
-        assert await flow.dispatch("bump") == 1
+        assert await flow.dispatch("bump", scope_state=payload) == 1
         assert payload.turn == 1
 
 
@@ -99,7 +99,7 @@ class TestCtxData:
     async def test_ctx_data_returns_payload(self) -> None:
         """``ctx.data`` returns the same object as ``ctx.state.data``."""
         payload = _Payload(turn=7)
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory(), state=payload)
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def probe(ctx: Context[_Payload]) -> tuple[object, object]:
@@ -107,14 +107,14 @@ class TestCtxData:
             return ctx.state.data, ctx.data
 
         flow.register(probe)
-        via_state, via_alias = await flow.dispatch("probe")
+        via_state, via_alias = await flow.dispatch("probe", scope_state=payload)
         assert via_state is via_alias is payload
 
     @pytest.mark.asyncio
     async def test_ctx_data_mutation_is_visible(self) -> None:
         """Mutating through ``ctx.data`` is visible on ``ctx.state.data``."""
         payload = _Payload(turn=0)
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory(), state=payload)
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context[_Payload]) -> int:
@@ -123,7 +123,7 @@ class TestCtxData:
             return ctx.state.data.turn
 
         flow.register(bump)
-        assert await flow.dispatch("bump") == 1
+        assert await flow.dispatch("bump", scope_state=payload) == 1
         assert payload.turn == 1
 
     def test_ctx_data_reaches_scope_not_root(self) -> None:
@@ -320,17 +320,14 @@ class TestCtxExtraResume:
             """Build the outer flow bound to the shared store."""
             body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
             body.call(body_step)
-            outer = Flow(
-                lg=make_test_logger(),
-                saia_factory=StubFactory(),
-                state={"counter": 0},
-                checkpoint_store=store,
-            )
+            outer = Flow(lg=make_test_logger(), saia_factory=StubFactory(), checkpoint_store=store)
             outer.iterate(body, max_iters=5)
             return outer.with_checkpointer()
 
         pre_lock = threading.Lock()
-        await build().run(halt=halt, history="extra-resume-1", extra={"lock": pre_lock})
+        await build().run(
+            state={"counter": 0}, halt=halt, history="extra-resume-1", extra={"lock": pre_lock}
+        )
         # Pre-halt: 2 iterations, both observed the pre-halt lock.
         assert seen == [pre_lock, pre_lock]
 
