@@ -63,8 +63,9 @@ def _flow() -> Flow:
 
 
 def _store_flow(store: Any) -> Flow:
-    flow = Factory(make_test_logger()).create(state={})
-    return flow.with_checkpoint_store(store, NAME).with_checkpointer()
+    """Run it with ``history=NAME``."""
+    flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
+    return flow.with_checkpointer()
 
 
 @pytest.mark.asyncio
@@ -270,12 +271,12 @@ class TestResume:
         store = memory_store()
         halt = asyncio.Event()
         ran: list[str] = []
-        assert await _judges(store, _SAIA(halt), ran).run("x", halt=halt) is HALTED
+        assert await _judges(store, _SAIA(halt), ran).run("x", halt=halt, history=NAME) is HALTED
         assert ran == ["quick", "talk"]
 
         ran.clear()
         saia = _SAIA(None)
-        result = await _judges(store, saia, ran).run("x", resume="latest")
+        result = await _judges(store, saia, ran).run("x", history=NAME, resume="latest")
         assert ran == ["talk"]
         assert saia.calls == [("x", ["half:x"], True)]
         assert result == "quick:x + answer:x"
@@ -302,11 +303,11 @@ class TestResume:
             body.map(voters, aggregate=max, max_concurrency=1)
             return _store_flow(store).iterate(body, max_iters=3)
 
-        assert await build().run(0, halt=halt) is HALTED
+        assert await build().run(0, halt=halt, history=NAME) is HALTED
         assert [r for r in runs if r[0] == 2] == [(2, "a")]
 
         runs.clear()
-        assert await build().run(resume="latest") == 3
+        assert await build().run(history=NAME, resume="latest") == 3
         assert [r for r in runs if r[0] == 2] == [(2, "b"), (2, "c")]
         assert sorted(r for r in runs if r[0] == 3) == [(3, "a"), (3, "b"), (3, "c")]
 
@@ -329,13 +330,13 @@ class TestResume:
 
         first = [member("a"), member("b", halts=True), member("c")]
         halted = _store_flow(store).map(first, max_concurrency=1)
-        assert await halted.run(1, halt=halt) is HALTED
+        assert await halted.run(1, halt=halt, history=NAME) is HALTED
         assert ran == ["a", "b"]
 
         ran.clear()
         reordered = [member("c"), member("new"), member("a")]
         resumed = _store_flow(store).map(reordered, max_concurrency=1)
-        assert await resumed.run(resume="latest") == ["c:1", "new:1", "a:1"]
+        assert await resumed.run(history=NAME, resume="latest") == ["c:1", "new:1", "a:1"]
         assert ran == ["c", "new"]
 
     async def test_a_checkpoint_inside_a_member_writes_a_commit(self) -> None:
@@ -346,7 +347,8 @@ class TestResume:
             assert await ctx.checkpoint("in-member") is not None
             return x
 
-        assert await _store_flow(store).map([saves, double], aggregate=sum).run(3) == 9
+        flow = _store_flow(store).map([saves, double], aggregate=sum)
+        assert await flow.run(3, history=NAME) == 9
         commit = await History(store, NAME).checkpoint("in-member")
         assert commit is not None
         snapshot = await History(store, NAME).snapshot(commit)
@@ -368,7 +370,7 @@ class TestResume:
 
         flow = _store_flow(store).map([handle, stop])
         with pytest.raises(TypeError, match=r"cursor at '.*/done'"):
-            await flow.run(halt=halt)
+            await flow.run(halt=halt, history=NAME)
 
 
 @verb

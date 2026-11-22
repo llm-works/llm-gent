@@ -118,7 +118,7 @@ def build(ff: Factory[MyFlow], stats: Stats, arm: bool) -> MyFlow:
         body.with_stats(per_item=True).call(fetch).then(score)
 
     return (
-        ff.create("score-docs", client_flow_id="docs")
+        ff.create("score-docs")
         .with_checkpointer()
         .with_stats(stats)
         .map(per_document, items=lambda _prev, _ctx: DOCS)
@@ -133,12 +133,15 @@ async def main() -> int:
 
     print("--- Run 1: halts once every document is fetched ---")
     stats1 = Stats()
-    assert await build(ff, stats1, arm=True).run(halt=asyncio.Event()) is HALTED
+    result1 = await build(ff, stats1, arm=True).run(halt=asyncio.Event(), history="docs")
+    assert result1 is HALTED
     print(f"halted with tallies {dict(stats1.tallies)}")
 
     print("\n--- Run 2: fresh flow and Stats, resume='latest' ---")
     stats2 = Stats()
-    scores = await build(ff, stats2, arm=False).run(halt=asyncio.Event(), resume="latest")
+    scores = await build(ff, stats2, arm=False).run(
+        halt=asyncio.Event(), history="docs", resume="latest"
+    )
     print(f"scores {scores}, tallies {dict(stats2.tallies)}")
     assert stats2.tallies == Counter(fetched=len(DOCS), scored=len(DOCS))
     return 0

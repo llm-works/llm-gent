@@ -11,6 +11,7 @@ import pytest
 
 from llm_gent.core.cost import Tracker as CostTracker
 from llm_gent.flow import Context, Factory, Flow, Role, SAIAFactory, verb
+from tests.helpers import memory_store
 
 from .conftest import ROLE_A, StubFactory, make_test_logger
 
@@ -118,36 +119,24 @@ class TestFlowFactory:
         assert derived.create().state is state
 
 
-class TestCreateCheckpointer:
-    """Factory.create() accepts checkpointer= for per-flow wiring."""
+class TestCheckpointStore:
+    """The factory's checkpoint store reaches every flow it creates."""
 
-    def test_create_checkpointer_pair_binds_flow(self) -> None:
-        """``checkpointer=(store, id)`` binds the run's repo via .with_checkpoint_store, nothing more."""
-
-        from llm_gent.flow import Factory
-        from tests.helpers import memory_store
-
+    def test_create_gives_the_flow_the_factory_s_store(self) -> None:
+        """The store only: saves need an explicit with_checkpointer(), runs a history=."""
         store = memory_store()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory())
-        flow = ff.create(checkpointer=(store, "flow-1"))
-        assert flow._checkpoint_ctx is not None
-        assert flow._checkpoint_ctx.store is store
-        assert flow._checkpoint_ctx.client_flow_id == "flow-1"
-        assert flow._checkpointer is None  # saves need an explicit with_checkpointer()
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), checkpoint_store=store)
+        flow = ff.create("named")
+        assert flow._checkpoint_store is store
+        assert flow._checkpointer is None
 
-    def test_create_checkpointer_supersedes_factory_pair(self) -> None:
-        """``checkpointer=`` wins over the factory-level store + client_flow_id."""
-
-        from llm_gent.flow import Factory
-        from tests.helpers import memory_store
-
-        factory_store = memory_store()
-        create_store = memory_store()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), checkpoint_store=factory_store)
-        flow = ff.create(client_flow_id="ignored", checkpointer=(create_store, "flow-override"))
-        assert flow._checkpoint_ctx is not None
-        assert flow._checkpoint_ctx.store is create_store
-        assert flow._checkpoint_ctx.client_flow_id == "flow-override"
+    def test_with_checkpoint_store_swaps_it_on_a_new_factory(self) -> None:
+        first, second = memory_store(), memory_store()
+        ff = Factory(make_test_logger(), saia_factory=StubFactory(), checkpoint_store=first)
+        derived = ff.with_checkpoint_store(second)
+        assert derived is not ff
+        assert derived.create()._checkpoint_store is second
+        assert ff.create()._checkpoint_store is first
 
 
 class TestPricingProviderSwap:

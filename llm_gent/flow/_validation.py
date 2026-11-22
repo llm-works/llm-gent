@@ -51,8 +51,11 @@ def _validate_target(target: Any) -> None:
     _reject_reserved_kwarg(target, "state")
     _reject_reserved_kwarg(target, "halt")
     _reject_reserved_kwarg(target, "signals")
+    _reject_reserved_kwarg(target, "history")
+    _reject_reserved_kwarg(target, "retention")
     _reject_reserved_kwarg(target, "resume")
     _reject_reserved_kwarg(target, "restart")
+    _reject_reserved_kwarg(target, "extra")
 
 
 def _reject_reserved_kwarg(verb: Any, name: str) -> None:

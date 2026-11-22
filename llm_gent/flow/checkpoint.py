@@ -3,11 +3,11 @@
 
 """Checkpoint histories — the refs, names and policies of a flow's history.
 
-A *history* is the line of commits one flow instance writes. It lives in
-one repository of an :class:`appinfra.cas.Store` (``MemoryStore``,
-``FileStore``, or gent's :class:`~llm_gent.flow.stores.PgStore`), named by
-the agent's ``client_flow_id`` (``with_checkpoint_store(store,
-client_flow_id)``). The repository holds the history's objects — snapshot
+A *history* is the line of commits the runs given one name write. It
+lives in one repository of an :class:`appinfra.cas.Store` (``MemoryStore``,
+``FileStore``, or gent's :class:`~llm_gent.flow.stores.PgStore`) — the
+flow's ``checkpoint_store`` — named by the agent's ``client_flow_id``
+(``run(history=client_flow_id)``). The repository holds the history's objects — snapshot
 blobs and trees, and commits whose payload is
 :class:`~llm_gent.flow.state.cas.CommitMeta` — and its refs:
 
@@ -30,8 +30,8 @@ removes the whole history; the next save starts a new one.
 
 Retention policy
 ----------------
-``with_checkpoint_store(..., retention=...)`` decides what a fully
-successful :meth:`Flow.run` leaves behind:
+:meth:`Flow.run` ``retention=`` decides what a fully successful run
+leaves behind:
 
 - ``"retain"`` (default): the history stays, ending in the final-state
   commit. The successful record is the one most often needed for audit,

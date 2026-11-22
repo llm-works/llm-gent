@@ -10,12 +10,12 @@ store call. :class:`CheckpointContext` holds the history's
 :class:`appinfra.cas.Repo` and exposes the save operations the framework
 needs.
 
-A run has one context: its repo, set on the top-level flow with
-``.with_checkpoint_store(store, client_flow_id)``. Without one,
+A run has at most one context: the repository its ``run(history=...)``
+names in the top-level flow's checkpoint store. Without one,
 ``env.checkpoint_ctx is None`` and every save site skips; with one, saves
 inside the run also need a ``with_checkpointer()`` on the saving flow or
-above it (``env.checkpointer``). :func:`check_one_repo` rejects a store on
-a nested flow and a checkpointer in a run without a store.
+above it (``env.checkpointer``). :func:`check_checkpointers` rejects a
+checkpointer in a run without a history.
 
 The repository is named by ``client_flow_id``; store calls are
 synchronous, as :class:`appinfra.cas.Store` is.
@@ -50,32 +50,23 @@ if TYPE_CHECKING:
     from .state.cas import CommitOutcome, TraceRef
 
 
-def check_one_repo(root: Flow) -> None:
-    """Raise unless ``root``'s run has at most one repo, on ``root``, and checkpointers need one.
+def check_checkpointers(root: Flow, history: str | None) -> None:
+    """Raise when a flow in ``root``'s run declares a checkpointer but the run has no history.
 
     Raises:
-        RuntimeError: A flow inside the run sets a checkpoint store (a run
-            has one repo, on its top-level flow), or a flow declares
-            ``with_checkpointer()`` while the run has no store.
+        RuntimeError: A flow declares ``with_checkpointer()`` and the run
+            was given no ``history``: its saves would have nowhere to go.
     """
     from ._node_id import iter_flows
 
-    flows = iter_flows(root)
-    for flow in flows[1:]:
-        if flow._checkpoint_ctx is not None:
-            raise RuntimeError(
-                f"Flow {_label(flow)} sets a checkpoint store but runs inside "
-                f"{_label(root)}: a run has one repo, set on its top-level flow — "
-                f"use with_checkpointer() on the inner flow instead"
-            )
-    if root._checkpoint_ctx is None:
-        declaring = next((f for f in flows if f._checkpointer is not None), None)
-        if declaring is not None:
-            raise RuntimeError(
-                f"Flow {_label(declaring)} declares with_checkpointer() but the run has no "
-                f"checkpoint store: checkpointers require a checkpoint store — call "
-                f"with_checkpoint_store(store, client_flow_id) on {_label(root)}"
-            )
+    if history is not None:
+        return
+    declaring = next((f for f in iter_flows(root) if f._checkpointer is not None), None)
+    if declaring is not None:
+        raise RuntimeError(
+            f"Flow {_label(declaring)} declares with_checkpointer() but the run of "
+            f"{_label(root)} has no history: pass run(history=...) to keep its checkpoints"
+        )
 
 
 def _is_history_ref(name: str) -> bool:
@@ -90,12 +81,15 @@ def _label(flow: Flow) -> str:
 class CheckpointContext:
     """The run's history repository bundled with the save operations that consume it.
 
-    Constructed by ``.with_checkpoint_store(store, client_flow_id)`` on a
-    run's top-level flow. Absent when the run has no store — save sites
-    check ``env.checkpoint_ctx is None`` and skip.
+    Constructed by :meth:`Flow.run` for ``run(history=...)``, on the
+    top-level flow's checkpoint store. Absent when the run has no history —
+    save sites check ``env.checkpoint_ctx is None`` and skip.
 
-    Caches the history's head within one run: each run writes through its
-    own copy (:meth:`for_run`).
+    Each top-level run writes through its own, built at run start: it reads
+    the head from the store on its first commit, so a history deleted or
+    advanced by someone else between runs is observed instead of written
+    into under a stale head, and runs of one flow at once keep their own
+    head, lock and written set.
     Exposes get_ref / move_ref, put_tag, delete_history,
     :meth:`append_commit`, and the compound :meth:`save_scope_commit` that
     puts a snapshot, commits it and moves ``HEAD`` to it.
@@ -111,9 +105,8 @@ class CheckpointContext:
         """Bind the store's repository ``client_flow_id``; ``structure`` yields the flow's structure.
 
         ``structure`` is evaluated once per run, at the run's first commit,
-        so nodes added to the flow after ``with_checkpoint_store`` are
-        reflected and every commit of a run holds the same structure and
-        records its hash.
+        so every commit of a run holds the same structure and records its
+        hash.
 
         Raises:
             appinfra.cas.InvalidNameError: ``client_flow_id`` cannot name a
@@ -143,17 +136,6 @@ class CheckpointContext:
         # Scopes that did not change since the last commit are
         # content-identical, so their puts are skipped instead of repeated.
         self._written: set[str] = set()
-
-    def for_run(self) -> CheckpointContext:
-        """A context on the same repository for one run, with nothing cached yet.
-
-        Each top-level run writes through its own: it reads the head from
-        the store on its first commit, so a history deleted or advanced by
-        someone else between runs is observed instead of written into under
-        a stale head; and runs of one flow at once keep their own head,
-        lock and written set. Its lock is created on the run's event loop.
-        """
-        return CheckpointContext(self.store, self.client_flow_id, self._structure, self.retention)
 
     # --- objects and refs ---
 

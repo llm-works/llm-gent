@@ -36,13 +36,8 @@ async def _run(payload: dict[str, Any]) -> Any:
     store_factory = _resolve(payload["store_module"], payload["store_factory"])
     store = store_factory(lg, **payload["store_kwargs"])
     flow_builder = _resolve(payload["flow_module"], payload["flow_builder"])
-    flow = flow_builder(
-        lg,
-        store=store,
-        client_flow_id=payload["client_flow_id"],
-        **payload["flow_builder_kwargs"],
-    )
-    return await flow.run(resume=payload["resume"])
+    flow = flow_builder(lg, store=store, **payload["flow_builder_kwargs"])
+    return await flow.run(history=payload["history"], resume=payload["resume"])
 
 
 def main() -> None:

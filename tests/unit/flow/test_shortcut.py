@@ -43,8 +43,8 @@ from .conftest import make_test_logger
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
-def _ff() -> Factory:
-    return Factory(make_test_logger())
+def _ff(store: Any = None) -> Factory:
+    return Factory(make_test_logger(), checkpoint_store=store)
 
 
 def _top() -> Any:
@@ -363,24 +363,19 @@ class TestConclude:
                 return x + "!"
 
             region = _region().call(s["a"]).then(s["b"]).conclude(close).then(s["c"])
-            return (
-                _ff()
-                .create(state={})
-                .with_checkpoint_store(store, "conclude-halt")
-                .call(region)
-                .then(s["d"])
-            )
+            return _ff(store).create(state={}).call(region).then(s["d"])
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=True)
-        assert await flow.run("", halt=halt, **_cut(cut)) is HALTED
+        assert await flow.run("", halt=halt, history="conclude-halt", **_cut(cut)) is HALTED
         assert ran == ["a", "close"]
 
         ran.clear()
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=False)
-        assert await flow.run("", halt=halt, resume="latest", **_cut(cut)) == "a!d"
+        resumed = flow.run("", halt=halt, history="conclude-halt", resume="latest", **_cut(cut))
+        assert await resumed == "a!d"
         assert ran == ["close", "d"]
 
     async def test_it_does_not_enter_step_ids_or_the_root_hash(self) -> None:
@@ -425,11 +420,12 @@ class TestConclude:
                 return x + "b"
 
             region = _region().call(a).conclude(close).then(b, project=track_project)
-            return _ff().create(state={}).with_checkpoint_store(store, "halt-project").call(region)
+            return _ff(store).create(state={}).call(region)
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
-        result = await build(halt, cut, ran, arm=True).run("", halt=halt, **_cut(cut))
+        flow = build(halt, cut, ran, arm=True)
+        result = await flow.run("", halt=halt, history="halt-project", **_cut(cut))
         assert result is HALTED
         assert ran == ["a", "close"]
         assert project_calls == []
@@ -438,7 +434,7 @@ class TestConclude:
         ran.clear()
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=False)
-        result = await flow.run("", halt=halt, resume="latest", **_cut(cut))
+        result = await flow.run("", halt=halt, history="halt-project", resume="latest", **_cut(cut))
         assert result == "a!"
         assert ran == []
         assert project_calls == []
@@ -619,7 +615,7 @@ def _loop_flow(saia: Any, out: dict[str, list[Any]], **top: Any) -> Any:
 
     flow = _top()
     if "store" in top:
-        flow = _ff().create(state={}).with_checkpoint_store(top["store"], "loop-cut")
+        flow = _ff(top["store"]).create(state={})
     return flow.call(_region().call(turn)).then(after)
 
 
@@ -652,12 +648,14 @@ class TestLoop:
         saia = _CuttingSAIA(cut, halt)
         out = _out()
         flow = _loop_flow(saia, out, store=store)
-        assert await flow.run("x", halt=halt, **_cut(cut)) is HALTED
+        assert await flow.run("x", halt=halt, history="loop-cut", **_cut(cut)) is HALTED
         assert out["after"] == []
 
         resumed = _out()
         flow = _loop_flow(saia, resumed, store=store)
-        result = await flow.run("x", halt=asyncio.Event(), resume="latest", **_cut(asyncio.Event()))
+        result = await flow.run(
+            "x", halt=asyncio.Event(), history="loop-cut", resume="latest", **_cut(asyncio.Event())
+        )
         assert result == "done"
         assert saia.calls == 1  # the held turn was not continued
         assert resumed["after"] == [_Result(paused=True, text="partial:x")]
@@ -680,17 +678,12 @@ class TestPauseDuringFastForward:
 
             s = _steps(ran, cut)
             region = _region().call(a).then(s["b"]).then(s["c"])
-            return (
-                _ff()
-                .create(state={})
-                .with_checkpoint_store(store, "ff-pause")
-                .call(region)
-                .then(s["d"])
-            )
+            return _ff(store).create(state={}).call(region).then(s["d"])
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
-        assert await build(halt, cut, ran, arm=True).run("", halt=halt, **_cut(cut)) is HALTED
+        flow = build(halt, cut, ran, arm=True)
+        assert await flow.run("", halt=halt, history="ff-pause", **_cut(cut)) is HALTED
         assert ran == ["a"]
         head = await History(store, "ff-pause").head()
         assert head is not None and head.meta.outcome == "halted"
@@ -698,7 +691,8 @@ class TestPauseDuringFastForward:
         ran.clear()
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=False)
-        assert await flow.run("", halt=halt, resume="latest", **_cut(cut)) == "ad"
+        resumed = flow.run("", halt=halt, history="ff-pause", resume="latest", **_cut(cut))
+        assert await resumed == "ad"
         assert ran == ["a", "d"]  # the halted step runs again; b and c are skipped
         assert cut.is_set()
 
@@ -716,18 +710,12 @@ class TestPauseDuringFastForward:
 
             s = _steps(ran, cut)
             region = _region().call(s["b"]).then(s["c"])
-            return (
-                _ff()
-                .create(state={})
-                .with_checkpoint_store(store, "cut-before")
-                .call(a)
-                .then(region)
-                .then(s["d"])
-            )
+            return _ff(store).create(state={}).call(a).then(region).then(s["d"])
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
-        assert await build(halt, cut, ran, arm=True).run("", halt=halt, **_cut(cut)) is HALTED
+        flow = build(halt, cut, ran, arm=True)
+        assert await flow.run("", halt=halt, history="cut-before", **_cut(cut)) is HALTED
         head = await History(store, "cut-before").head()
         assert head is not None
         assert (await History(store, "cut-before").snapshot(head)).cursors[""][SIGNALS] == ["cut"]
@@ -735,7 +723,7 @@ class TestPauseDuringFastForward:
         ran.clear()
         cut = asyncio.Event()
         flow = build(asyncio.Event(), cut, ran, arm=False)
-        assert await flow.run("", resume="latest", **_cut(cut)) == "ad"
+        assert await flow.run("", history="cut-before", resume="latest", **_cut(cut)) == "ad"
         assert ran == ["d"]
 
     async def test_a_cut_writes_no_checkpoint_and_a_finished_run_records_no_signal(self) -> None:
@@ -743,13 +731,8 @@ class TestPauseDuringFastForward:
         cut = asyncio.Event()
         ran: list[str] = []
         s = _steps(ran, cut, cut_in="a")
-        flow = (
-            _ff()
-            .create(state={})
-            .with_checkpoint_store(store, "cut-done")
-            .call(_region().call(s["a"]).then(s["b"]))
-        )
-        assert await flow.run("", **_cut(cut)) == "a"
+        flow = _ff(store).create(state={}).call(_region().call(s["a"]).then(s["b"]))
+        assert await flow.run("", history="cut-done", **_cut(cut)) == "a"
         history = History(store, "cut-done")
         assert [c.meta.outcome async for c in history.commits()] == ["ok"]
         head = await history.head()
@@ -987,14 +970,8 @@ class TestSubtreeEndedEarly:
         region = _region().map(
             lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1
         )
-        flow = (
-            _ff()
-            .create(state={})
-            .with_checkpoint_store(store, "cut-map")
-            .with_checkpointer()
-            .call(region)
-        )
-        results = await flow.run(**_cut(cut))
+        flow = _ff(store).create(state={}).with_checkpointer().call(region)
+        results = await flow.run(history="cut-map", **_cut(cut))
         assert ran == [1]
         assert results[0] == 1 and all(isinstance(r, Skipped) for r in results[1:])
         assert await History(store, "cut-map").is_complete()
@@ -1021,16 +998,11 @@ class TestSubtreeEndedEarly:
                 return x
 
             region = _region().iterate(lambda b: b.call(step), max_iters=3)
-            return (
-                _ff()
-                .create(state={})
-                .with_checkpoint_store(store, "cut-sub")
-                .call(region)
-                .then(last)
-            )
+            return _ff(store).create(state={}).call(region).then(last)
 
         cut, halt = asyncio.Event(), asyncio.Event()
-        assert await build(halt, cut, arm=True).run(0, halt=halt, **_cut(cut)) is HALTED
+        flow = build(halt, cut, arm=True)
+        assert await flow.run(0, halt=halt, history="cut-sub", **_cut(cut)) is HALTED
         assert ran == ["step:0", "step:1", "last"]
         history = History(store, "cut-sub")
         head = await history.head()
@@ -1041,7 +1013,7 @@ class TestSubtreeEndedEarly:
         ran.clear()
         cut = asyncio.Event()
         flow = build(asyncio.Event(), cut, arm=False)
-        assert await flow.run(0, resume="latest", **_cut(cut)) == 2
+        assert await flow.run(0, history="cut-sub", resume="latest", **_cut(cut)) == 2
         assert ran == ["last"]
 
 
@@ -1199,8 +1171,8 @@ class TestDrain:
                 .iterate(lambda b: b.call(batch).then(_echo), max_iters=3)
             )
             return (
-                _top()
-                .with_checkpoint_store(store, "drain-pass")
+                _ff(store)
+                .create()
                 .with_checkpointer()
                 .with_checkpoint_policy(on_iterate=True, on_map_item=True)
                 .call(region)
@@ -1208,13 +1180,14 @@ class TestDrain:
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
-        assert await build(cut, halt, True, ran).run(halt=halt, **_cut(cut)) is HALTED
+        flow = build(cut, halt, True, ran)
+        assert await flow.run(halt=halt, history="drain-pass", **_cut(cut)) is HALTED
         assert ran == ["first:a"]
 
         ran.clear()
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(cut, halt, False, ran)
-        result = await flow.run(halt=halt, resume="latest", **_cut(cut))
+        result = await flow.run(halt=halt, history="drain-pass", resume="latest", **_cut(cut))
         assert result == ["a", Skipped("b")]
         assert ran == ["second:a"]
 
@@ -1226,7 +1199,7 @@ class TestDrain:
 def _drained_turns(saia: Any, out: dict[str, list[Any]], store: MemoryStore) -> Any:
     """A drain region over a map of two items, one at a time: a Loop ``turn``, then ``after``.
 
-    Run it with a halt and :func:`_cut`.
+    Run it with a halt, the history ``"drain-turn"`` and :func:`_cut`.
     """
     loop = Loop(ROLE, saia=saia, conversation_factory=_ConvFactory())
 
@@ -1246,8 +1219,7 @@ def _drained_turns(saia: Any, out: dict[str, list[Any]], store: MemoryStore) -> 
         .with_shortcut("cut", drain=True)
         .map(lambda b: b.call(turn).then(after), items=lambda *_: [0, 1], max_concurrency=1)
     )
-    flow = _ff().create(state={}).with_checkpoint_store(store, "drain-turn")
-    return flow.with_checkpointer().call(region)
+    return _ff(store).create(state={}).with_checkpointer().call(region)
 
 
 class TestDrainLoop:
@@ -1256,7 +1228,7 @@ class TestDrainLoop:
         out = _out()
         saia = _CuttingSAIA(cut)
         flow = _drained_turns(saia, out, memory_store())
-        results = await flow.run(halt=halt, **_cut(cut))
+        results = await flow.run(halt=halt, history="drain-turn", **_cut(cut))
 
         assert out["after"] == [_Result(paused=False, text="partial:t0")]  # not aborted
         assert isinstance(results[1], Skipped) and out["turn"] == [0]
@@ -1266,14 +1238,17 @@ class TestDrainLoop:
         cut, halt = asyncio.Event(), asyncio.Event()
         out = _out()
         saia = _CuttingSAIA(cut, halt)
-        assert await _drained_turns(saia, out, store).run(halt=halt, **_cut(cut)) is HALTED
+        flow = _drained_turns(saia, out, store)
+        assert await flow.run(halt=halt, history="drain-turn", **_cut(cut)) is HALTED
         assert out["after"] == []
 
         cut = asyncio.Event()
         resumed = _out()
         saia = _CuttingSAIA(cut)
         flow = _drained_turns(saia, resumed, store)
-        results = await flow.run(halt=asyncio.Event(), resume="latest", **_cut(cut))
+        results = await flow.run(
+            halt=asyncio.Event(), history="drain-turn", resume="latest", **_cut(cut)
+        )
 
         assert cut.is_set()  # the drain goes on
         assert saia.calls == 1  # the held turn continued

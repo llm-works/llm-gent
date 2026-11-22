@@ -102,11 +102,11 @@ run 2 is the one run 1 never got to make. Sequence:
 
 ## The on-disk store
 
-The history is one repository of an `appinfra.cas.FileStore`, named by `client_flow_id`. After
-both runs:
+The history is one repository of an `appinfra.cas.FileStore`, named by the run's `history=`
+(`CLIENT_FLOW_ID`). After both runs:
 
 ```
-durable-resume-demo/                     # the repository: client_flow_id
+durable-resume-demo/                     # the repository: the run's history
 ├── refs/
 │   ├── %48%45%41%44                     # "HEAD" -> final-state commit
 │   └── tags%2Fcomplete                  # "tags/complete" -> final-state commit
@@ -126,7 +126,7 @@ Only `refs/` is mutable. Everything under `objects/` is immutable and named by t
 type and bytes; identical content is stored once, so a value that did not change between commits
 is not written again. If resume finds an object missing, it raises `HistoryCorrupt`. Objects no ref
 reaches any more are deleted only by an explicit prune of the repository,
-`store.repo(client_flow_id).prune(expire)`.
+`store.repo(CLIENT_FLOW_ID).prune(expire)`.
 
 ### Refs
 
@@ -223,7 +223,7 @@ one). `HEAD` always holds the state the
 last run ended with, and `resume="latest"` on a finished history starts from its first step with
 that state. If the final state cannot be serialized, the commit is written with an empty tree and
 a warning is logged: the history is still complete, but carries no final state. With
-`with_checkpoint_store(..., retention="gc_on_success")` the history is deleted instead.
+`run(..., retention="gc_on_success")` the history is deleted instead.
 
 ## Where a run stops and continues
 

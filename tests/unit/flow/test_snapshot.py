@@ -373,9 +373,8 @@ class TestFlowSnapshots:
             return item
 
         await (
-            Factory(LG)
+            Factory(LG, checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "siblings")
             .with_checkpointer()
             .map(
                 lambda b: b.call(work),
@@ -383,7 +382,7 @@ class TestFlowSnapshots:
                 state=lambda _p: {},
                 merge=lambda _p, _c: None,
             )
-            .run()
+            .run(history="siblings")
         )
         history = History(store, "siblings")
         saved = [c async for c in history.commits() if c.meta.node_path != "$end"]
@@ -403,12 +402,11 @@ class TestFlowSnapshots:
             return prev + 10
 
         await (
-            Factory(LG)
+            Factory(LG, checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "passes")
             .with_checkpointer()
             .iterate(lambda b: b.call(step), max_iters=5)
-            .run(0)
+            .run(0, history="passes")
         )
         history = History(store, "passes")
         saved = [c async for c in history.commits() if c.meta.node_path != "$end"]
@@ -432,14 +430,13 @@ class TestFlowSnapshots:
             return x
 
         flow = (
-            Factory(LG)
+            Factory(LG, checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "chain")
             .with_checkpointer()
             .call(first)
             .call(second, project=lambda r: r * 10)
         )
-        await flow.run(1)
+        await flow.run(1, history="chain")
         history = History(store, "chain")
         (commit,) = [c async for c in history.commits() if c.meta.node_path != "$end"]
         snapshot = await history.snapshot(commit)
@@ -456,16 +453,15 @@ class TestFlowSnapshots:
             return x
 
         await (
-            Factory(LG)
+            Factory(LG, checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "arm")
             .with_checkpointer()
             .branch(
                 when=lambda prev, _c: prev > 0,
                 then=lambda b: b.call(save),
                 else_=lambda b: b.call(save),
             )
-            .run(-1)
+            .run(-1, history="arm")
         )
         history = History(store, "arm")
         (commit,) = [c async for c in history.commits() if c.meta.node_path != "$end"]
@@ -479,14 +475,13 @@ class TestFlowSnapshots:
             return x
 
         flow = (
-            Factory(LG)
+            Factory(LG, checkpoint_store=memory_store())
             .create(state={})
-            .with_checkpoint_store(memory_store(), "unstorable")
             .with_checkpointer()
             .call(save)
         )
         with pytest.raises(TypeError, match=r"cursor at 'chain': a value of type set cannot be"):
-            await flow.run({1, 2})
+            await flow.run({1, 2}, history="unstorable")
 
     async def test_a_blob_and_a_tree_with_the_same_bytes_are_both_stored(self) -> None:
         """The blob ``[]`` and the empty tree share a hash; neither put may skip the other."""
@@ -498,12 +493,11 @@ class TestFlowSnapshots:
 
         sub = Factory(LG).create().call(save)
         await (
-            Factory(LG)
+            Factory(LG, checkpoint_store=store)
             .create(state={"items": []})
-            .with_checkpoint_store(store, "same-bytes")
             .with_checkpointer()
             .call(sub, state=lambda _p: {}, merge=lambda _p, _c: None)
-            .run()
+            .run(history="same-bytes")
         )
         history = History(store, "same-bytes")
         snapshots = [await history.snapshot(c) async for c in history.commits()]
@@ -518,15 +512,14 @@ class TestFlowSnapshots:
             ctx.state.data["done"] = True
 
         await (
-            Factory(LG)
+            Factory(LG, checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "end")
             .with_checkpointer()
             .call(
                 Factory(LG).create().iterate(lambda b: b.call(step), max_iters=2),
                 state=lambda _p: {},
             )
-            .run()
+            .run(history="end")
         )
         history = History(store, "end")
         head = await history.head()

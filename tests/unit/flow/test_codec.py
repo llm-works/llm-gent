@@ -246,17 +246,16 @@ class TestInAFlow:
                 return Pairs(pairs=[*carry.pairs, (f"n{n}", "a")], fixed=carry.fixed)
 
             return (
-                Factory(make_test_logger())
+                Factory(make_test_logger(), checkpoint_store=store)
                 .create(state={})
-                .with_checkpoint_store(store, "tuples")
                 .iterate(lambda b: b.call(grow), max_iters=3)
             )
 
         start = Pairs(fixed=("x",))
-        assert await build(True, []).run(start, halt=asyncio.Event()) is HALTED
+        assert await build(True, []).run(start, halt=asyncio.Event(), history="tuples") is HALTED
 
         seen: list[Pairs] = []
-        result = await build(False, seen).run(start, resume="latest")
+        result = await build(False, seen).run(start, history="tuples", resume="latest")
         assert seen[0] == Pairs(pairs=[("n0", "a")], fixed=("x",))
         assert result == Pairs(pairs=[("n0", "a"), ("n1", "a"), ("n2", "a")], fixed=("x",))
 
@@ -284,7 +283,7 @@ class TestInAFlow:
                 seen.append(results)
                 return results
 
-            ff = Factory(make_test_logger())
+            ff = Factory(make_test_logger(), checkpoint_store=store)
             batch = (
                 ff.create()
                 .map(lambda b: b.call(work), items=lambda *_: ["a", "skip", "boom"], strict=False)
@@ -292,16 +291,15 @@ class TestInAFlow:
             )
             return (
                 ff.create(state={})
-                .with_checkpoint_store(store, "sentinels")
                 .with_checkpointer()
                 .with_checkpoint_policy(on_iterate=True)
                 .iterate(lambda b: b.call(batch).then(keep), max_iters=2)
             )
 
-        assert await build(True, []).run(halt=asyncio.Event()) is HALTED
+        assert await build(True, []).run(halt=asyncio.Event(), history="sentinels") is HALTED
 
         seen: list[Any] = []
-        result = await build(False, seen).run(resume="latest")
+        result = await build(False, seen).run(history="sentinels", resume="latest")
         assert seen == [result]
         item, skipped, failure = result
         assert item == "a" and skipped == Skipped("skip")

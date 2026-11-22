@@ -64,7 +64,7 @@ from appinfra.log import Logger
 from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
-from ._checkpoint_ctx import CheckpointContext, check_one_repo
+from ._checkpoint_ctx import CheckpointContext, check_checkpointers
 from ._hook_points import RunHooks
 from ._resume import (
     Resume,
@@ -157,6 +157,7 @@ class Flow:
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
         state_factory: StateFactory[Any] | None = None,
+        checkpoint_store: Store | None = None,
     ) -> None:
         """Initialize a flow.
 
@@ -195,6 +196,12 @@ class Flow:
                 :meth:`with_checkpointer` is wired. ``None`` (default)
                 treats ``ctx.state.data`` as a plain dict that round-trips
                 through the checkpointer as-is.
+            checkpoint_store: The :class:`appinfra.cas.Store` the runs of
+                this flow keep their histories in, when it runs as the
+                top-level flow: each :meth:`run` given a ``history=`` writes
+                the repository of that name. A flow running inside another
+                uses the top-level flow's store. ``None`` (default): runs
+                keep no history.
         """
         self._lg = lg
         self._name = name
@@ -202,10 +209,10 @@ class Flow:
         self._state = state
         self._traits = traits
         self._state_factory = state_factory
+        self._checkpoint_store = checkpoint_store
         self._shortcut: Shortcut | None = None
         self._resources: dict[ResourceKey[Any], Any] = {}
         self._resource_children: dict[ResourceKey[Any], dict[str, Any]] = {}
-        self._checkpoint_ctx: CheckpointContext | None = None
         self._checkpointer: Checkpointer | None = None
         self._verbs: dict[str, Any] = {}
         self._saia_by_role: dict[Role, Any] = {}
@@ -985,59 +992,6 @@ class Flow:
             self._resource_children[key] = dict(child_args)
         return self
 
-    def with_checkpoint_store(
-        self, store: Store, client_flow_id: str, *, retention: Retention = "retain"
-    ) -> Self:
-        """Set the run's repo: the repository ``client_flow_id`` of an :class:`appinfra.cas.Store`.
-
-        A run has one repo, set on its top-level flow: every commit the run
-        writes — wherever in the flow tree it is taken — holds the whole
-        run and goes here. A flow inside another run cannot set one
-        (:meth:`run` raises). With a store, the run writes its halt
-        checkpoint and, on a clean exit, its final state; saves inside the
-        run (``ctx.checkpoint()``, the checkpoint policy) need a
-        :meth:`with_checkpointer` on the saving flow or above it. On
-        :meth:`run` ``resume=...`` the repo is checked out at start,
-        restoring the run's scopes and cursors. On fully successful
-        :meth:`run` completion ``retention="gc_on_success"`` deletes the
-        repository; the default ``"retain"`` keeps the history for audit.
-        Cancellation, halt exits, and unhandled exceptions preserve the
-        history regardless of retention so a subsequent resume can pick up.
-
-        The ``client_flow_id`` names the repository and so identifies the
-        resumable history. It is agent-owned: the framework never assigns
-        one automatically.
-
-        Raises:
-            appinfra.cas.InvalidNameError: ``client_flow_id`` cannot name a
-                repository.
-
-        Resume semantics:
-
-        - **State** hydrates from the commit's snapshot (via
-          ``state_factory.restore`` if a ``state_factory`` is bound, else
-          passthrough for plain dicts).
-        - **Iteration counter** is restored with the iterate's cursor:
-          ``max_iters`` is a cumulative bound across resumes — saving in
-          pass N and resuming with ``max_iters=M`` runs passes N to M-1.
-          A counter that already meets the bound exits without running
-          the body.
-        - **Ambients** (halt, cost tracker, saia, traits, logger,
-          checkpointer itself) are never serialized — they reattach
-          from the current runtime, so a resumed run gets fresh
-          handles: the resuming run's ``halt=`` and whichever
-          ``.with_cost_tracker`` / ``.with_traits`` were wired at resume
-          time.
-        - **Deadline** is not restored — the wall clock starts fresh
-          each run.
-
-        Returns ``self`` for chaining.
-        """
-        self._checkpoint_ctx = CheckpointContext(
-            store, client_flow_id, lambda: Structure.of(self), retention
-        )
-        return self
-
     def with_checkpointer(self, name: str | None = None) -> Self:
         """Declare that saves inside this flow write commits.
 
@@ -1045,9 +999,9 @@ class Flow:
         flow and its subtree; in a part of the run with no checkpointer on
         it or above it they write nothing. Declared on any flow — the top
         level or a subflow, a map body, an iterate body — the commits go to
-        the run's repo (:meth:`with_checkpoint_store` on the top-level
-        flow) and hold the whole run; a checkpointer in a run without a
-        store makes :meth:`run` raise.
+        the run's history (:meth:`run` ``history=``) and hold the whole
+        run; a checkpointer in a run without a history makes :meth:`run`
+        raise.
 
         A save belongs to the innermost checkpointer enclosing the step
         that saves. With ``name``, each such save also moves the tag
@@ -1166,6 +1120,8 @@ class Flow:
         state: Any = UNSET,
         halt: asyncio.Event | None = None,
         signals: Mapping[str, asyncio.Event] | None = None,
+        history: str | None = None,
+        retention: Retention = "retain",
         resume: ResumeMode | str = "off",
         restart: str | None = None,
         extra: dict[str, Any] | None = None,
@@ -1178,8 +1134,9 @@ class Flow:
         transformed by its ``project`` callable.
 
         A flow is the structure of the work: it can run many times, at once
-        too. What belongs to one run — its halt, its signals and everything
-        it writes as it goes — is given here and kept per run.
+        too. What belongs to one run — its halt, its signals, its history
+        and everything it writes as it goes — is given here and kept per
+        run.
 
         Cancellation is honored end-to-end: :class:`asyncio.CancelledError`
         raised by any node (verb or subflow) propagates out of :meth:`run`
@@ -1198,6 +1155,20 @@ class Flow:
                 :meth:`with_shortcut` regions. Which are set is recorded in
                 every checkpoint the run takes, and resume sets them again
                 before the first step; a run that finishes records none.
+            history: The name of the run's history: the repository of the
+                flow's ``checkpoint_store`` its commits go to, and the one
+                ``resume`` / ``restart`` read. Owned by the caller; the
+                framework never assigns one. With a history the run writes
+                its halt checkpoint and, on a clean exit, its final state;
+                saves inside the run (``ctx.checkpoint()``, the checkpoint
+                policy) need a :meth:`with_checkpointer` on the saving flow
+                or above it. ``None`` (default): the run keeps no history.
+                One history has one writer at a time.
+            retention: What a fully successful run does with its history:
+                ``"retain"`` (default) keeps it and commits the final state
+                tagged ``complete``; ``"gc_on_success"`` deletes it.
+                Cancellation, a halt and an unhandled exception keep it
+                either way, for a later resume.
             state: The payload to expose on ``ctx.state`` for this run.
                 Framework wraps it as :class:`State` (``ctx.state.data``
                 reaches the payload; ``ctx.state.root()`` reaches the
@@ -1238,9 +1209,12 @@ class Flow:
                 the history's line and stay resumable by hash until a prune
                 of the repository deletes them; a run that fails before
                 its first commit leaves ``HEAD`` where it was.
-                Resuming requires
-                :meth:`with_checkpoint_store`. Bound parameter: not forwarded
-                to the first node.
+                Halt, signals' events, cost tracker, saia, traits and logger
+                are never serialized: the resumed run uses the ones it is
+                given and the flow has now. ``max_iters`` is cumulative
+                across resumes (the pass counter is restored); a deadline
+                starts fresh. Resuming requires ``history``. Bound
+                parameter: not forwarded to the first node.
             restart: Start over from a checkpointed commit's data:
                 ``"latest"`` (the commit ``resume="latest"`` would check
                 out), a commit hash or a checkpoint name. The run takes the
@@ -1256,8 +1230,8 @@ class Flow:
                 brings its resources back as they were then: spend recorded
                 after it is not counted. On an empty history ``"latest"``
                 runs from ``state`` as given. Not together with ``resume``;
-                needs :meth:`with_checkpoint_store`. Bound parameter: not
-                forwarded to the first node.
+                needs ``history``. Bound parameter: not forwarded to the
+                first node.
             **kwargs: Keyword inputs to the first node.
 
         Returns the last step's result, or :data:`HALTED` when the halt
@@ -1268,17 +1242,20 @@ class Flow:
         set during the last step, which completed, does not stop the run: it
         finishes and returns that step's result (``None`` included).
 
-        With a checkpointer wired, a fully successful run under
+        With a history, a fully successful run under
         ``retention="retain"`` commits its final state (tagged
         ``complete``); ``"gc_on_success"`` deletes the history instead. A
         run that raises (or is cancelled) writes no commit: its history's
         head stays its last save, which ``resume="latest"`` continues from.
 
         Raises:
-            RuntimeError: The flow has no nodes to run, OR a resume mode or
-                a restart was requested without :meth:`with_checkpoint_store` wired, OR a
-                shortcut's signal is not one of the run's ``signals`` or a
-                flow under it declares a shortcut on the same signal, OR
+            RuntimeError: The flow has no nodes to run, OR a ``history``
+                was given to a flow without a ``checkpoint_store``, OR a
+                resume mode or a restart was requested without a
+                ``history``, OR a flow declares :meth:`with_checkpointer`
+                in a run without a ``history``, OR a shortcut's signal is
+                not one of the run's ``signals`` or a flow under it
+                declares a shortcut on the same signal, OR
                 a flow in the tree has ``with_budget(...)`` with no cost
                 tracker on it or any flow enclosing it. Missing :class:`SAIAFactory` no longer raises at run
                 start — the error surfaces at the first ``ctx.saia``
@@ -1289,18 +1266,21 @@ class Flow:
                 is not ``"latest"``, a commit hash or a valid checkpoint
                 name; both are given; either names a commit or checkpoint
                 the history does not have, or a commit without state; a
-                signal's name is not a non-empty str.
+                signal's name is not a non-empty str; ``retention`` is not
+                ``"retain"`` or ``"gc_on_success"``.
             TypeError: ``signals`` is not a mapping, or a signal is not an
                 :class:`asyncio.Event`.
+            appinfra.cas.InvalidNameError: ``history`` cannot name a
+                repository.
         """
         run_signals_ = check_signals(signals)
-        self._check_run_args(resume, restart, run_signals_)
-        run = self._new_run(halt, run_signals_)
+        self._check_run_args(resume, restart, run_signals_, history, retention)
+        run = self._new_run(halt, run_signals_, history, retention)
         active_state, saved = await self._start_state(
             run, self._wrap_top_state(state), resume, restart
         )
         run.scopes.begin(active_state, saved)
-        hooks = run.hooks = RunHooks(self, run.resumed_from)
+        hooks = run.hooks = RunHooks(run)
         run.info = hooks.info
         stopped = await hooks.before()
         if stopped is not None:
@@ -1316,15 +1296,25 @@ class Flow:
         await hooks.after(outcome)
         return value
 
-    def _new_run(self, halt: asyncio.Event | None, signals: dict[str, asyncio.Event]) -> Run:
-        """The state of a new run of this flow, with its own history writer."""
-        ctx = self._checkpoint_ctx
-        return Run(
-            flow=self,
-            halt=halt,
-            signals=signals,
-            checkpoint_ctx=None if ctx is None else ctx.for_run(),
-        )
+    def _new_run(
+        self,
+        halt: asyncio.Event | None,
+        signals: dict[str, asyncio.Event],
+        history: str | None,
+        retention: Retention,
+    ) -> Run:
+        """The state of a new run of this flow, with its own writer on ``history``.
+
+        Raises:
+            appinfra.cas.InvalidNameError: ``history`` cannot name a repository.
+        """
+        ctx = None
+        if history is not None:
+            assert self._checkpoint_store is not None  # _check_history
+            ctx = CheckpointContext(
+                self._checkpoint_store, history, lambda: Structure.of(self), retention
+            )
+        return Run(flow=self, halt=halt, signals=signals, checkpoint_ctx=ctx)
 
     async def _walk_and_finalize(
         self,
@@ -1387,22 +1377,37 @@ class Flow:
         resume: ResumeMode | str,
         restart: str | None,
         signals: Mapping[str, asyncio.Event],
+        history: str | None,
+        retention: Retention,
     ) -> None:
-        """Reject an empty flow, a bad start, misplaced wiring, a bad shortcut, a lone cap.
+        """Reject an empty flow, a bad start, a history without a store, a bad shortcut, a lone cap.
 
         Runs before anything is read or written, so a misconfigured run
         leaves no new history behind.
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        self._check_start(resume, restart)
-        check_one_repo(self)
+        if retention not in get_args(Retention):
+            raise ValueError(f"retention must be 'retain' or 'gc_on_success'; got {retention!r}")
+        self._check_history(history)
+        self._check_start(resume, restart, history)
+        check_checkpointers(self, history)
         check_shortcuts(self, signals)
         check_budgets_have_a_tracker(self)
         check_resources(self)
 
-    def _check_start(self, resume: ResumeMode | str, restart: str | None) -> None:
-        """Reject a bad ``resume`` or ``restart``, both together, or either without a store."""
+    def _check_history(self, history: str | None) -> None:
+        """Reject a ``history`` on a flow without a checkpoint store."""
+        if history is not None and self._checkpoint_store is None:
+            raise RuntimeError(
+                f"Flow {self._name or '<anonymous>'!r} was run with history={history!r} but has "
+                f"no checkpoint store: build it with checkpoint_store= (Flow or Factory)"
+            )
+
+    def _check_start(
+        self, resume: ResumeMode | str, restart: str | None, history: str | None
+    ) -> None:
+        """Reject a bad ``resume`` or ``restart``, both together, or either without a history."""
         if resume not in get_args(ResumeMode) and not is_commit_hash(resume):
             self._require_checkpoint_name(
                 resume,
@@ -1419,11 +1424,11 @@ class Flow:
                     restart, "restart must be 'latest', a commit hash or a checkpoint name"
                 )
         start = f"resume={resume!r}" if restart is None else f"restart={restart!r}"
-        if (resume != "off" or restart is not None) and self._checkpoint_ctx is None:
+        if (resume != "off" or restart is not None) and history is None:
             label = self._name or "<anonymous>"
             raise RuntimeError(
-                f"Flow {label!r} was run with {start} but has no checkpoint "
-                f"store — call .with_checkpoint_store(store, client_flow_id) first"
+                f"Flow {label!r} was run with {start} but no history: pass "
+                f"run(history=...) to name the history to start from"
             )
 
     @staticmethod

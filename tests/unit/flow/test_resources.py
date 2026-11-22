@@ -93,8 +93,8 @@ class Structural:
 COUNTER = ResourceKey[Counter]("counter")
 
 
-def _ff() -> Factory[Flow]:
-    return Factory(make_test_logger())
+def _ff(store: Any = None) -> Factory[Flow]:
+    return Factory(make_test_logger(), checkpoint_store=store)
 
 
 @verb
@@ -245,9 +245,8 @@ class TestAcrossResume:
             return x
 
         return (
-            _ff()
+            _ff(store)
             .create(state={})
-            .with_checkpoint_store(store, NAME)
             .with_checkpointer()
             .with_resource(COUNTER, counter)
             .call(a)
@@ -257,17 +256,18 @@ class TestAcrossResume:
 
     async def test_the_count_comes_back_after_a_halt(self) -> None:
         store = memory_store()
-        assert await self._flow(store, Counter(), True).run(1, halt=asyncio.Event()) is HALTED
+        flow = self._flow(store, Counter(), True)
+        assert await flow.run(1, halt=asyncio.Event(), history=NAME) is HALTED
 
         fresh = Counter()
         flow = self._flow(store, fresh, False)
-        assert await flow.run(resume="latest", halt=asyncio.Event()) == 1
+        assert await flow.run(history=NAME, resume="latest", halt=asyncio.Event()) == 1
         assert fresh.restored == [{"count": 3}]
         assert fresh.count == 3 + 4
 
     async def test_a_finished_run_s_count_carries_into_the_next_run(self) -> None:
         store = memory_store()
-        await self._flow(store, Counter(), False).run(1, halt=asyncio.Event())
+        await self._flow(store, Counter(), False).run(1, halt=asyncio.Event(), history=NAME)
         history = History(store, NAME)
         head = await history.head()
         assert head is not None and await history.is_complete()
@@ -275,7 +275,8 @@ class TestAcrossResume:
         assert snapshot.cursors[""][RESOURCES] == {"counter": {"count": 7}}
 
         fresh = Counter()
-        await self._flow(store, fresh, False).run(1, resume="latest", halt=asyncio.Event())
+        flow = self._flow(store, fresh, False)
+        await flow.run(1, history=NAME, resume="latest", halt=asyncio.Event())
         assert fresh.count == 7 + 7
 
     async def test_one_every_flow_inherits_is_kept_once_at_the_top(self) -> None:
@@ -284,7 +285,7 @@ class TestAcrossResume:
         halt = asyncio.Event()
 
         def build(counter: Counter, arm: bool) -> Any:
-            ff = _ff().with_resource(COUNTER, counter)
+            ff = _ff(store).with_resource(COUNTER, counter)
 
             @verb
             async def b(ctx: Context[Any], x: int) -> int:
@@ -295,15 +296,15 @@ class TestAcrossResume:
                 return x
 
             inner = ff.create().call(b)
-            return ff.create(state={}).with_checkpoint_store(store, NAME).call(tick).then(inner)
+            return ff.create(state={}).call(tick).then(inner)
 
-        assert await build(Counter(), arm=True).run(1, halt=halt) is HALTED
+        assert await build(Counter(), arm=True).run(1, halt=halt, history=NAME) is HALTED
         history = History(store, NAME)
         snapshot = await history.snapshot(await history.head())
         assert [p for p, c in snapshot.cursors.items() if RESOURCES in c] == [""]
 
         fresh = Counter()
-        assert await build(fresh, arm=False).run(1, resume="latest", halt=halt) == 1
+        assert await build(fresh, arm=False).run(1, history=NAME, resume="latest", halt=halt) == 1
         assert fresh.count == 3 + 2  # 3 restored, b again: 2
 
     async def test_items_halted_mid_way_resume_with_their_children_s_counts(self) -> None:
@@ -331,9 +332,8 @@ class TestAcrossResume:
                 return n
 
             return (
-                _ff()
+                _ff(store)
                 .create(state={})
-                .with_checkpoint_store(store, NAME)
                 .with_checkpointer()
                 .with_resource(COUNTER, root)
                 .map(
@@ -343,13 +343,13 @@ class TestAcrossResume:
             )
 
         root1 = Counter()
-        assert await build(root1, arm=True, before={}).run(halt=halt) is HALTED
+        assert await build(root1, arm=True, before={}).run(halt=halt, history=NAME) is HALTED
         assert root1.count == 3
 
         root2, before = Counter(), {}
         halt.clear()
         flow = build(root2, arm=False, before=before)
-        assert await flow.run(resume="latest", halt=halt) == [1, 2]
+        assert await flow.run(history=NAME, resume="latest", halt=halt) == [1, 2]
         assert before == {1: 1, 2: 2}  # each item's child came back with its own count
         # 3 restored at the root; the items' restored counts do not roll up again.
         assert root2.count == 3 + 20
@@ -365,17 +365,16 @@ class TestAcrossResume:
 
         def build(key: ResourceKey[Counter], counter: Counter) -> Any:
             return (
-                _ff()
+                _ff(store)
                 .create(state={})
-                .with_checkpoint_store(store, NAME)
                 .with_checkpointer()
                 .with_resource(key, counter)
                 .call(step)
             )
 
-        await build(COUNTER, Counter()).run(1)
+        await build(COUNTER, Counter()).run(1, history=NAME)
         fresh = Counter()
-        assert await build(other, fresh).run(1, resume="latest") == 1
+        assert await build(other, fresh).run(1, history=NAME, resume="latest") == 1
         assert fresh.restored == []
 
 
@@ -383,10 +382,13 @@ class TestRestart:
     async def test_declared_resources_come_back_and_every_step_runs(self) -> None:
         store = memory_store()
         build = TestAcrossResume._flow
-        assert await build(store, Counter(), True).run(1, halt=asyncio.Event()) is HALTED
+        assert (
+            await build(store, Counter(), True).run(1, halt=asyncio.Event(), history=NAME) is HALTED
+        )
 
         fresh = Counter()
-        assert await build(store, fresh, False).run(1, restart="latest", halt=asyncio.Event()) == 1
+        flow = build(store, fresh, False)
+        assert await flow.run(1, history=NAME, restart="latest", halt=asyncio.Event()) == 1
         assert fresh.restored == [{"count": 3}]
         assert fresh.count == 3 + 1 + 2 + 4  # a, b and c run again; resume would run c alone
 
@@ -405,23 +407,23 @@ class TestRestart:
                 return x
 
             return (
-                _ff()
+                _ff(store)
                 .create(state={})
-                .with_checkpoint_store(store, NAME)
                 .with_checkpointer()
                 .with_resource(COUNTER, root)
                 .with_resource(COUNTER, per="run")
                 .call(step)
             )
 
-        assert await build(Counter(), arm=True, seen=[]).run(1, halt=halt) is HALTED
+        assert await build(Counter(), arm=True, seen=[]).run(1, halt=halt, history=NAME) is HALTED
         history = History(store, NAME)
         halted = await history.snapshot(await history.head())
         assert halted.cursors[""][RUN_RESOURCES] == {"counter": {"count": 5}}
 
         root, seen = Counter(), []
         halt.clear()
-        assert await build(root, arm=False, seen=seen).run(1, restart="latest", halt=halt) == 1
+        flow = build(root, arm=False, seen=seen)
+        assert await flow.run(1, history=NAME, restart="latest", halt=halt) == 1
         assert seen == [0]  # the per-run child was not restored; resume would hand it 5
         assert root.restored == [{"count": 5}]
 
@@ -495,17 +497,16 @@ class TestProtocol:
 
         def build(resource: Structural) -> Any:
             return (
-                _ff()
+                _ff(store)
                 .create(state={})
-                .with_checkpoint_store(store, NAME)
                 .with_checkpointer()
                 .with_resource(key, resource)
                 .call(step)
             )
 
-        await build(Structural()).run(0)
+        await build(Structural()).run(0, history=NAME)
         fresh = Structural()
-        await build(fresh).run(0, resume="latest")
+        await build(fresh).run(0, history=NAME, resume="latest")
         assert fresh.restored == [{"n": 1}]
 
     def test_a_subclass_that_leaves_a_method_out_cannot_be_made(self) -> None:

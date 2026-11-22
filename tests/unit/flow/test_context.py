@@ -324,12 +324,13 @@ class TestCtxExtraResume:
                 lg=make_test_logger(),
                 saia_factory=StubFactory(),
                 state={"counter": 0},
+                checkpoint_store=store,
             )
             outer.iterate(body, max_iters=5)
-            return outer.with_checkpoint_store(store, "extra-resume-1").with_checkpointer()
+            return outer.with_checkpointer()
 
         pre_lock = threading.Lock()
-        await build().run(halt=halt, extra={"lock": pre_lock})
+        await build().run(halt=halt, history="extra-resume-1", extra={"lock": pre_lock})
         # Pre-halt: 2 iterations, both observed the pre-halt lock.
         assert seen == [pre_lock, pre_lock]
 
@@ -337,7 +338,7 @@ class TestCtxExtraResume:
         # the post-halt iterations by identity.
         resume_lock = threading.Lock()
         assert resume_lock is not pre_lock
-        await build().run(resume="latest", extra={"lock": resume_lock})
+        await build().run(history="extra-resume-1", resume="latest", extra={"lock": resume_lock})
         # Every post-resume iteration observed the resume lock, never the
         # pre-halt one (which would prove extra leaked through a blob).
         assert len(seen) == 5, f"expected 5 iterations total, got {len(seen)}"

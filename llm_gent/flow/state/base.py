@@ -24,9 +24,9 @@ because it doesn't know the payload's concrete type. Consumers call
 ``state.data.to_dict()`` in their save hook and
 ``PayloadClass.from_dict(checkpoint["data"])`` in their resume hook.
 
-The contract only surfaces when the run has a checkpoint store
-(``.with_checkpoint_store(...)`` on its top-level flow). Consumers who
-never checkpoint don't need to conform.
+The contract only surfaces when the run keeps a history
+(``run(history=...)``). Consumers who never checkpoint don't need to
+conform.
 """
 
 from __future__ import annotations

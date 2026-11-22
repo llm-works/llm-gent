@@ -830,10 +830,10 @@ def _add_map(node: Map, flow: Flow, probe: Probe, parallel: bool) -> Flow:
 def _flow(shape: Seq, probe: Probe, store: Any, *, parallel: bool) -> Flow:
     """Build the top-level flow for ``shape`` under ``probe.policy``.
 
-    It carries the run's store; it declares the checkpointer itself unless
+    It carries the runs' store; it declares the checkpointer itself unless
     the shape declares its own in a ``Ckpt``.
     """
-    flow = Factory(LG).create(state={}).with_checkpoint_store(store, FLOW_NAME)
+    flow = Factory(LG, checkpoint_store=store).create(state={})
     if not _has(shape, Ckpt):
         flow = flow.with_checkpointer()
     if probe.policy in ("on_iterate", "on_map_item"):
@@ -844,8 +844,8 @@ def _flow(shape: Seq, probe: Probe, store: Any, *, parallel: bool) -> Flow:
 
 
 def _run_kw(shape: Seq, probe: Probe, halt: asyncio.Event | None = None) -> dict[str, Any]:
-    """The ``run()`` settings of ``shape``'s run: its halt and, with a cut, its signal."""
-    kw: dict[str, Any] = {"halt": halt}
+    """The ``run()`` settings of ``shape``'s run: its history, halt and, with a cut, its signal."""
+    kw: dict[str, Any] = {"history": FLOW_NAME, "halt": halt}
     if _has(shape, Cut):
         kw["signals"] = {"cut": probe.cut}
     return kw

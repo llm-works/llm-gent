@@ -251,10 +251,8 @@ class TestCheckpointsAndRepo:
             await ctx.checkpoint()
             return x
 
-        flow = (
-            _flow().with_checkpoint_store(store, REPO).with_checkpointer().call(save).with_hooks(vc)
-        )
-        await flow.run(1)
+        flow = _flow(checkpoint_store=store).with_checkpointer().call(save).with_hooks(vc)
+        await flow.run(1, history=REPO)
         checkpoints = [r for r in _oldest_first(vc) if r.kind == "checkpoint"]
         head = store.repo(REPO).get_ref(HEAD_REF)
         assert checkpoints[-1].meta["checkpoint"] == head  # the final-state commit
@@ -263,13 +261,8 @@ class TestCheckpointsAndRepo:
     async def test_gc_on_success_keeps_the_records(self) -> None:
         store = memory_store()
         vc = _vc(store)
-        flow = (
-            _flow()
-            .with_checkpoint_store(store, REPO, retention="gc_on_success")
-            .call(add_one)
-            .with_hooks(vc)
-        )
-        await flow.run(1)
+        flow = _flow(checkpoint_store=store).call(add_one).with_hooks(vc)
+        await flow.run(1, history=REPO, retention="gc_on_success")
         assert set(store.repo(REPO).refs()) == {REF}
         assert [r.kind for r in _oldest_first(vc)] == ["step", "run"]
 
