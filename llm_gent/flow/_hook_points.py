@@ -46,6 +46,7 @@ from .structure import Structure
 
 
 if TYPE_CHECKING:
+    from ._run import Run
     from .flow import Flow
 
 
@@ -267,17 +268,18 @@ class RunHooks:
     go to the top-level flow's hooks.
     """
 
-    def __init__(self, flow: Flow, resumed_from: str | None) -> None:
+    def __init__(self, run: Run) -> None:
+        flow = run.flow
         self.hooks: Hooks | None = Hooks(flow._lg, flow._hooks) if flow._hooks else None
         self.info: RunInfo | None = None
         if any(f._hooks for f in iter_flows(flow)):
-            ctx = flow._checkpoint_ctx
+            ctx = run.checkpoint_ctx
             self.info = RunInfo(
                 run_id=new_activity_id(),
                 flow_name=flow._name,
                 structure_hash=Structure.of(flow).hash,
                 repo=None if ctx is None else ctx.client_flow_id,
-                resumed_from=resumed_from,
+                resumed_from=run.resumed_from,
             )
         self._where = Where(flow=flow)
 

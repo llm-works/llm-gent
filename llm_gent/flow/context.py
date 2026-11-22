@@ -365,9 +365,8 @@ class Context(Generic[T]):
         commit's metadata records the current node, iteration ``0`` and
         ``outcome="ok"``.
 
-        The commit goes to the run's repo (the top-level flow's
-        :meth:`~llm_gent.flow.Flow.with_checkpoint_store`), wherever in the
-        flow tree this step runs. Returns the commit's hash:
+        The commit goes to the run's history (:meth:`~llm_gent.flow.Flow.run`
+        ``history=``), wherever in the flow tree this step runs. Returns the commit's hash:
         ``run(resume=<hash>)`` checks it out later, even after a later run
         leaves it off the history's line. With ``name``, the checkpoint is also
         tagged ``tags/<name>``: ``run(resume=name)`` checks it out. Taking

@@ -50,7 +50,6 @@ def store() -> MemoryStore:
 
 def _counting_flow(
     store: MemoryStore,
-    name: str,
     *,
     max_iters: int,
     fail_at: int | None = None,
@@ -67,9 +66,8 @@ def _counting_flow(
         return ctx.state.data["n"]
 
     flow = (
-        Factory(lg or make_test_logger())
+        Factory(lg or make_test_logger(), checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, name)
         .with_checkpointer()
         .with_checkpoint_policy(on_iterate=on_iterate)
     )
@@ -98,17 +96,13 @@ class _Crash(BaseException):
 class TestLatest:
     async def test_after_completion_continues_from_final_state(self, store: MemoryStore) -> None:
         """Terminal-extend: a finished run's final state is the next run's start."""
-        await build_canonical_flow(
-            make_test_logger(), max_iters=2, store=store, client_flow_id="extend"
-        ).run()
+        await build_canonical_flow(make_test_logger(), max_iters=2, store=store).run(
+            history="extend"
+        )
 
         result = await build_canonical_flow(
-            make_test_logger(),
-            state=CanonicalCounter(n=100),
-            max_iters=2,
-            store=store,
-            client_flow_id="extend",
-        ).run(resume="latest")
+            make_test_logger(), state=CanonicalCounter(n=100), max_iters=2, store=store
+        ).run(history="extend", resume="latest")
 
         # Restored 2 iterations + 2 more; the fallback state (n=100) is unused.
         assert result["iterations_completed"] == 4
@@ -118,37 +112,35 @@ class TestLatest:
         """The halted pass continues; max_iters is a bound across runs."""
         baseline = await build_canonical_flow(make_test_logger(), max_iters=5).run()
         await build_canonical_flow(
-            make_test_logger(),
-            max_iters=5,
-            halt_after_iteration=2,
-            store=store,
-            client_flow_id="halted",
-        ).run(halt=asyncio.Event())
+            make_test_logger(), max_iters=5, halt_after_iteration=2, store=store
+        ).run(halt=asyncio.Event(), history="halted")
 
-        result = await build_canonical_flow(
-            make_test_logger(), max_iters=5, store=store, client_flow_id="halted"
-        ).run(resume="latest")
+        result = await build_canonical_flow(make_test_logger(), max_iters=5, store=store).run(
+            history="halted", resume="latest"
+        )
         assert result == baseline
 
     async def test_after_failure_continues_from_last_save_point(self, store: MemoryStore) -> None:
         """A run that raises writes nothing: the head is its last save, where resume continues."""
         with pytest.raises(RuntimeError, match="boom at 3"):
-            await _counting_flow(store, "failed", max_iters=5, fail_at=3, on_iterate=True).run()
+            await _counting_flow(store, max_iters=5, fail_at=3, on_iterate=True).run(
+                history="failed"
+            )
 
         lg, warnings = _capturing_logger()
-        result = await _counting_flow(store, "failed", max_iters=5, lg=lg).run(
-            state={"n": 100}, resume="latest"
+        result = await _counting_flow(store, max_iters=5, lg=lg).run(
+            state={"n": 100}, history="failed", resume="latest"
         )
         assert result == 5  # the save point after pass 2 (n=2), then passes 2-4
         assert not warnings
 
     async def test_failure_before_any_save_point_uses_given_state(self, store: MemoryStore) -> None:
         with pytest.raises(RuntimeError):
-            await _counting_flow(store, "failed-early", max_iters=5, fail_at=2).run()
+            await _counting_flow(store, max_iters=5, fail_at=2).run(history="failed-early")
         assert await History(store, "failed-early").head() is None
 
-        result = await _counting_flow(store, "failed-early", max_iters=1).run(
-            state={"n": 10}, resume="latest"
+        result = await _counting_flow(store, max_iters=1).run(
+            state={"n": 10}, history="failed-early", resume="latest"
         )
         assert result == 11
 
@@ -156,18 +148,18 @@ class TestLatest:
         self, store: MemoryStore
     ) -> None:
         """A run that raised after a finished one leaves the finished run's final state as head."""
-        await _counting_flow(store, "end-then-fail", max_iters=2).run()
+        await _counting_flow(store, max_iters=2).run(history="end-then-fail")
         history = History(store, "end-then-fail")
         finished = await history.head()
         with pytest.raises(RuntimeError):
-            await _counting_flow(store, "end-then-fail", max_iters=5, fail_at=1).run()
+            await _counting_flow(store, max_iters=5, fail_at=1).run(history="end-then-fail")
 
         head = await history.head()
         assert head is not None and finished is not None
         assert head.id == finished.id
 
-        result = await _counting_flow(store, "end-then-fail", max_iters=1).run(
-            state={"n": 10}, resume="latest"
+        result = await _counting_flow(store, max_iters=1).run(
+            state={"n": 10}, history="end-then-fail", resume="latest"
         )
         assert result == 3  # n=2 from the first run's $end, then one pass
 
@@ -190,22 +182,21 @@ class TestLatest:
 
         def _flow(lg: Any = None) -> Any:
             return (
-                Factory(lg or make_test_logger())
+                Factory(lg or make_test_logger(), checkpoint_store=store)
                 .create(state={})
-                .with_checkpoint_store(store, "stateless-end")
                 .with_checkpointer()
                 .with_checkpoint_policy(on_iterate=True)
                 .iterate(lambda body: body.call(bump), max_iters=2)
                 .call(attach)
             )
 
-        await _flow().run()
+        await _flow().run(history="stateless-end")
         head, snapshot = await _head(store, "stateless-end")
         assert History.is_final_state(head) and not snapshot.has_state
 
         ran.clear()
         lg, warnings = _capturing_logger()
-        result = await _flow(lg).run(state={"n": 100}, resume="latest")
+        result = await _flow(lg).run(state={"n": 100}, history="stateless-end", resume="latest")
         # The last iterate commit: both passes done, so only the step after it runs.
         assert (result, ran) == (2, ["attach"])
         skipped = [extra for msg, extra in warnings if msg.startswith("resume skipped")]
@@ -214,31 +205,29 @@ class TestLatest:
         assert skipped[0]["restored_node_path"] != "$end"
 
     async def test_newest_commit_restores_without_warning(self, store: MemoryStore) -> None:
-        await _counting_flow(store, "quiet", max_iters=2).run()
+        await _counting_flow(store, max_iters=2).run(history="quiet")
         lg, warnings = _capturing_logger()
-        await _counting_flow(store, "quiet", max_iters=1, lg=lg).run(resume="latest")
+        await _counting_flow(store, max_iters=1, lg=lg).run(history="quiet", resume="latest")
         assert warnings == []
 
     async def test_corrupt_history_raises(self, store: MemoryStore) -> None:
         from llm_gent.flow import HistoryCorrupt
 
-        await _counting_flow(store, "corrupt", max_iters=2).run()
+        await _counting_flow(store, max_iters=2).run(history="corrupt")
         head, _ = await _head(store, "corrupt")
         store.delete_objects("corrupt", [head.id])
 
         with pytest.raises(HistoryCorrupt):
-            await _counting_flow(store, "corrupt", max_iters=1).run(resume="latest")
+            await _counting_flow(store, max_iters=1).run(history="corrupt", resume="latest")
 
     async def test_empty_history_uses_given_state(self, store: MemoryStore) -> None:
-        result = await _counting_flow(store, "empty", max_iters=1).run(
-            state={"n": 10}, resume="latest"
+        result = await _counting_flow(store, max_iters=1).run(
+            state={"n": 10}, history="empty", resume="latest"
         )
         assert result == 11
 
 
-def _adding_flow(
-    store: Any, name: str, log: list[Any], *, wrap: str, crash_after: int | None
-) -> Any:
+def _adding_flow(store: Any, log: list[Any], *, wrap: str, crash_after: int | None) -> Any:
     """An iterate of 4 passes each returning ``prev + 10``, optionally nested; crashes on request."""
 
     @verb
@@ -252,9 +241,8 @@ def _adding_flow(
         return f.iterate(lambda b: b.call(step), max_iters=4)
 
     flow = (
-        Factory(make_test_logger())
+        Factory(make_test_logger(), checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, name)
         .with_checkpointer()
         .with_checkpoint_policy(on_iterate=True)
     )
@@ -283,9 +271,8 @@ class TestCursors:
                 return x
 
             return (
-                Factory(make_test_logger())
+                Factory(make_test_logger(), checkpoint_store=store)
                 .create(state={})
-                .with_checkpoint_store(store, "until")
                 .with_checkpointer()
                 .with_checkpoint_policy(on_iterate=True)
                 .iterate(lambda b: b.call(step), max_iters=5, until=lambda r, _c: r == 2)
@@ -293,11 +280,11 @@ class TestCursors:
             )
 
         with pytest.raises(_Crash):
-            await build(crash=True).run(0)
+            await build(crash=True).run(0, history="until")
         assert passes == [0, 1]
         passes.clear()
 
-        assert await build(crash=False).run(0, resume="latest") == 2
+        assert await build(crash=False).run(0, history="until", resume="latest") == 2
         assert passes == []
 
     @pytest.mark.parametrize("wrap", ["top", "call", "outer-iterate"])
@@ -306,10 +293,10 @@ class TestCursors:
     ) -> None:
         """Each pass builds on the last; a crash in pass 3 resumes it with pass 2's result."""
         with pytest.raises(_Crash):
-            await _adding_flow(store, "carry", [], wrap=wrap, crash_after=3).run(0)
+            await _adding_flow(store, [], wrap=wrap, crash_after=3).run(0, history="carry")
         log: list[Any] = []
-        resumed = _adding_flow(store, "carry", log, wrap=wrap, crash_after=None)
-        assert await resumed.run(0, resume="latest") == 40
+        resumed = _adding_flow(store, log, wrap=wrap, crash_after=None)
+        assert await resumed.run(0, history="carry", resume="latest") == 40
         assert log == [20, 30]  # passes 3 and 4 only
 
     @pytest.mark.parametrize(
@@ -335,19 +322,15 @@ class TestCursors:
                         raise Interrupted()
                 return prev + 10
 
-            flow = (
-                Factory(make_test_logger())
-                .create(state={})
-                .with_checkpoint_store(store, "h")
-                .with_checkpointer()
-            )
+            flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
+            flow = flow.with_checkpointer()
             if shape == "chain":
                 return flow.call(step).call(step).call(step).call(step)
             return flow.iterate(lambda b: b.call(step), max_iters=4)
 
-        assert await build(True, []).run(0, halt=asyncio.Event()) is HALTED
+        assert await build(True, []).run(0, halt=asyncio.Event(), history="h") is HALTED
         seen: list[Any] = []
-        assert await build(False, seen).run(0, resume="latest") == 40
+        assert await build(False, seen).run(0, history="h", resume="latest") == 40
         assert seen == resumed
 
     async def test_interrupted_without_a_halt_is_an_error(self, store: MemoryStore) -> None:
@@ -355,14 +338,10 @@ class TestCursors:
         async def step(ctx: Context[dict[str, Any]], prev: Any = None) -> Any:
             raise Interrupted()
 
-        flow = (
-            Factory(make_test_logger())
-            .create(state={})
-            .with_checkpoint_store(store, "no-halt")
-            .with_checkpointer()
-        )
+        flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
+        flow = flow.with_checkpointer()
         with pytest.raises(RuntimeError, match="raised Interrupted while no halt is set"):
-            await flow.call(step).run(0)
+            await flow.call(step).run(0, history="no-halt")
 
     async def test_branch_takes_its_saved_arm(self, store: MemoryStore) -> None:
         """``when`` is not evaluated again: the state it read has changed since."""
@@ -384,9 +363,8 @@ class TestCursors:
                 return x
 
             return (
-                Factory(make_test_logger())
+                Factory(make_test_logger(), checkpoint_store=store)
                 .create(state={})
-                .with_checkpoint_store(store, "arm")
                 .with_checkpointer()
                 .branch(
                     when=lambda _p, ctx: not ctx.state.data.get("flipped"),
@@ -396,22 +374,20 @@ class TestCursors:
             )
 
         with pytest.raises(_Crash):
-            await build(crash=True).run(0)
+            await build(crash=True).run(0, history="arm")
         calls.clear()
-        await build(crash=False).run(0, resume="latest")
+        await build(crash=False).run(0, history="arm", resume="latest")
         assert calls == ["then"]
 
     async def test_a_removed_step_fails_the_resume(self, store: MemoryStore) -> None:
         """A deploy removed the step the chain was at: there is nowhere to continue."""
         with pytest.raises(_Crash):
-            await _scoped_step_flow(store, "deploy", make_test_logger()).run()
+            await _scoped_step_flow(store, make_test_logger()).run(history="deploy")
         with pytest.raises(RuntimeError, match="which this chain no longer has"):
-            await _plain_step_flow(store, "deploy", make_test_logger()).run(resume="latest")
+            await _plain_step_flow(store, make_test_logger()).run(history="deploy", resume="latest")
 
 
-def _scoped_map_flow(
-    store: MemoryStore, name: str, seen: list[dict[str, Any]], *, crash: bool
-) -> Any:
+def _scoped_map_flow(store: MemoryStore, seen: list[dict[str, Any]], *, crash: bool) -> Any:
     """``.map(state=)`` item → ``.call(state=)`` → a leaf recording the scope it runs under.
 
     With ``crash``, the leaf marks its scope, checkpoints, and the process dies.
@@ -433,9 +409,8 @@ def _scoped_map_flow(
         .call(sub, state=lambda _p: {"tag": "call"}, merge=lambda _p, _c: None)
     )
     return (
-        Factory(make_test_logger())
+        Factory(make_test_logger(), checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, name)
         .with_checkpointer()
         .map(
             lambda b: b.call(item),
@@ -461,25 +436,19 @@ async def _plain(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
     return x
 
 
-def _scoped_step_flow(store: MemoryStore, name: str, lg: Any) -> Any:
+def _scoped_step_flow(store: MemoryStore, lg: Any) -> Any:
     """``.call(sub, state=)`` whose leaf checkpoints its scope and crashes."""
-    flow = Factory(lg).create(state={}).with_checkpoint_store(store, name).with_checkpointer()
+    flow = Factory(lg, checkpoint_store=store).create(state={}).with_checkpointer()
     sub = Factory(lg).create().call(_work_then_crash)
     return flow.call(sub, state=lambda _p: {}, merge=lambda p, c: p.update(c))
 
 
-def _plain_step_flow(store: MemoryStore, name: str, lg: Any) -> Any:
+def _plain_step_flow(store: MemoryStore, lg: Any) -> Any:
     """The same history after a deploy that replaced the scoped step with a plain one."""
-    return (
-        Factory(lg)
-        .create(state={})
-        .with_checkpoint_store(store, name)
-        .with_checkpointer()
-        .call(_plain)
-    )
+    return Factory(lg, checkpoint_store=store).create(state={}).with_checkpointer().call(_plain)
 
 
-def _bounded_iterate_flow(store: MemoryStore, name: str, lg: Any, max_iters: int) -> Any:
+def _bounded_iterate_flow(store: MemoryStore, lg: Any, max_iters: int) -> Any:
     """``.iterate`` over a ``.call(state=)`` pass; the pass that gets 2 checkpoints and crashes.
 
     Run with ``0``: passes 0 and 1 complete, pass 2 saves its scope and
@@ -496,7 +465,7 @@ def _bounded_iterate_flow(store: MemoryStore, name: str, lg: Any, max_iters: int
         return x + 1
 
     body = Factory(lg).create().call(work)
-    flow = Factory(lg).create(state={}).with_checkpoint_store(store, name).with_checkpointer()
+    flow = Factory(lg, checkpoint_store=store).create(state={}).with_checkpointer()
     return flow.iterate(
         lambda b: b.call(body, state=lambda _p: {}, merge=lambda _p, _c: None),
         max_iters=max_iters,
@@ -507,22 +476,22 @@ class TestScopesFromSnapshot:
     async def test_scope_under_map_item_gets_its_own_payload(self, store: MemoryStore) -> None:
         """Each saved scope comes back to the block that owns it, not to the one above it."""
         with pytest.raises(_Crash):
-            await _scoped_map_flow(store, "nested", [], crash=True).run()
+            await _scoped_map_flow(store, [], crash=True).run(history="nested")
 
         seen: list[dict[str, Any]] = []
-        await _scoped_map_flow(store, "nested", seen, crash=False).run(resume="latest")
+        await _scoped_map_flow(store, seen, crash=False).run(history="nested", resume="latest")
         assert seen == [{"tag": "call", "hit": True}]
 
     async def test_finished_run_drops_entries_it_never_reached(self, store: MemoryStore) -> None:
         """The iterate's bound dropped below the saved pass: its scope and cursors go, with a warning."""
         with pytest.raises(_Crash):
-            await _bounded_iterate_flow(store, "shrink", make_test_logger(), 5).run(0)
+            await _bounded_iterate_flow(store, make_test_logger(), 5).run(0, history="shrink")
         history = History(store, "shrink")
         head = await history.head()
         assert head is not None and (await history.snapshot(head)).scopes
 
         lg, warnings = _capturing_logger()
-        await _bounded_iterate_flow(store, "shrink", lg, 2).run(resume="latest")
+        await _bounded_iterate_flow(store, lg, 2).run(history="shrink", resume="latest")
 
         head = await history.head()
         assert head is not None and await history.is_complete()
@@ -534,12 +503,12 @@ class TestScopesFromSnapshot:
     async def test_halted_run_keeps_entries_it_has_not_reached(self, store: MemoryStore) -> None:
         """A run that halts before reaching a saved scope keeps it for the next resume."""
         with pytest.raises(_Crash):
-            await _bounded_iterate_flow(store, "halt-early", make_test_logger(), 5).run(0)
+            await _bounded_iterate_flow(store, make_test_logger(), 5).run(0, history="halt-early")
 
         halt = asyncio.Event()
         halt.set()
-        flow = _bounded_iterate_flow(store, "halt-early", make_test_logger(), 5)
-        await flow.run(resume="latest", halt=halt)
+        flow = _bounded_iterate_flow(store, make_test_logger(), 5)
+        await flow.run(history="halt-early", resume="latest", halt=halt)
 
         history = History(store, "halt-early")
         head = await history.head()
@@ -560,7 +529,7 @@ def _counting_chain(store: MemoryStore, arm: bool, seen: list[Any]) -> Any:
             raise Interrupted()
         return prev + 10
 
-    flow = Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "session")
+    flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
     return flow.with_checkpointer().call(step).call(step).call(step).call(step)
 
 
@@ -576,22 +545,26 @@ class TestRestart:
     async def test_a_removed_step_does_not_stop_it(self, store: MemoryStore) -> None:
         """Where resume fails on the step the chain was at, a restart starts at the top."""
         with pytest.raises(_Crash):
-            await _scoped_step_flow(store, "deploy", make_test_logger()).run()
+            await _scoped_step_flow(store, make_test_logger()).run(history="deploy")
 
         lg, warnings = _capturing_logger()
-        await _plain_step_flow(store, "deploy", lg).run(restart="latest")
+        await _plain_step_flow(store, lg).run(history="deploy", restart="latest")
         _, snapshot = await _head(store, "deploy")
         assert await History(store, "deploy").is_complete()
         assert snapshot.root == {"plain": True}
         assert warnings == []  # the crashed run's scope and cursors were never handed out
 
     async def test_starts_at_the_top_on_the_saved_state(self, store: MemoryStore) -> None:
-        assert await _counting_chain(store, True, []).run(0, halt=asyncio.Event()) is HALTED
+        halted_run = _counting_chain(store, True, []).run(
+            0, halt=asyncio.Event(), history="session"
+        )
+        assert await halted_run is HALTED
         _, halted = await _head(store, "session")
         assert halted.root == {"n": 2}
 
         seen: list[Any] = []
-        assert await _counting_chain(store, False, seen).run(0, restart="latest") == 40
+        restarted = _counting_chain(store, False, seen).run(0, history="session", restart="latest")
+        assert await restarted == 40
         assert seen == [0, 10, 20, 30]  # resume would run the 2nd step on: [10, 20, 30]
         _, done = await _head(store, "session")
         assert done.root == {"n": 6}
@@ -609,18 +582,20 @@ class TestRestart:
                     raise Interrupted()
                 return x
 
-            flow = Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "sig")
+            flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
             return flow.with_checkpointer().call(step)
 
         cut = asyncio.Event()
-        halted_run = build(cut, True, []).run(halt=asyncio.Event(), signals={"cut": cut})
+        halted_run = build(cut, True, []).run(
+            halt=asyncio.Event(), signals={"cut": cut}, history="sig"
+        )
         assert await halted_run is HALTED
         _, halted = await _head(store, "sig")
         assert halted.cursors[""][SIGNALS] == ["cut"]
 
         seen: list[bool] = []
         cut = asyncio.Event()
-        await build(cut, False, seen).run(restart="latest", signals={"cut": cut})
+        await build(cut, False, seen).run(history="sig", restart="latest", signals={"cut": cut})
         assert seen == [False]
 
     @pytest.mark.parametrize("by", ["name", "hash"])
@@ -641,21 +616,21 @@ class TestRestart:
             return x
 
         def build() -> Any:
-            return Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "pick")
+            return Factory(make_test_logger(), checkpoint_store=store).create(state={})
 
-        await build().with_checkpointer().call(mark).then(later).run()
+        await build().with_checkpointer().call(mark).then(later).run(history="pick")
         assert marks[0] is not None
         target = "mark" if by == "name" else marks[0]
 
-        await build().with_checkpointer().call(_record_state).run(restart=target)
+        await build().with_checkpointer().call(_record_state).run(history="pick", restart=target)
         head, snapshot = await _head(store, "pick")
         assert snapshot.root["seen"] == [{"at": "mark"}]
         assert head.parents == (marks[0],)
 
     async def test_an_empty_history_runs_from_the_given_state(self, store: MemoryStore) -> None:
-        flow = Factory(make_test_logger()).create().with_checkpoint_store(store, "empty")
+        flow = Factory(make_test_logger(), checkpoint_store=store).create()
         flow = flow.with_checkpointer().call(_record_state)
-        await flow.run(state={"given": 1}, restart="latest")
+        await flow.run(state={"given": 1}, history="empty", restart="latest")
         _, snapshot = await _head(store, "empty")
         assert snapshot.root["seen"] == [{"given": 1}]
 
@@ -688,12 +663,14 @@ class TestRestart:
 class TestFailure:
     async def test_failure_writes_no_commit_and_reraises(self, store: MemoryStore) -> None:
         with pytest.raises(RuntimeError, match="boom at 2"):
-            await _counting_flow(store, "fail", max_iters=5, fail_at=2).run()
+            await _counting_flow(store, max_iters=5, fail_at=2).run(history="fail")
         assert await History(store, "fail").head() is None
 
     async def test_failure_leaves_the_last_save_as_head(self, store: MemoryStore) -> None:
         with pytest.raises(RuntimeError, match="boom at 2"):
-            await _counting_flow(store, "fail-saved", max_iters=5, fail_at=2, on_iterate=True).run()
+            await _counting_flow(store, max_iters=5, fail_at=2, on_iterate=True).run(
+                history="fail-saved"
+            )
 
         head, snapshot = await _head(store, "fail-saved")
         assert head.meta.outcome == "ok"
@@ -706,25 +683,20 @@ class TestFailure:
             raise asyncio.CancelledError()
 
         flow = (
-            Factory(make_test_logger())
+            Factory(make_test_logger(), checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "cancelled")
             .with_checkpointer()
             .call(cancel)
         )
         with pytest.raises(asyncio.CancelledError):
-            await flow.run()
+            await flow.run(history="cancelled")
         assert await History(store, "cancelled").head() is None
 
     async def test_empty_flow_leaves_no_history(self, store: MemoryStore) -> None:
-        flow = (
-            Factory(make_test_logger())
-            .create(state={})
-            .with_checkpoint_store(store, "empty")
-            .with_checkpointer()
-        )
+        flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
+        flow = flow.with_checkpointer()
         with pytest.raises(RuntimeError, match="no nodes to run"):
-            await flow.run()
+            await flow.run(history="empty")
         assert "empty" not in store.list_repos()
 
 
@@ -734,36 +706,64 @@ class TestResumeModeValidation:
         self, store: MemoryStore, mode: Any
     ) -> None:
         with pytest.raises(ValueError, match="resume must be one of"):
-            await _counting_flow(store, "bad-mode", max_iters=1).run(resume=mode)
+            await _counting_flow(store, max_iters=1).run(history="bad-mode", resume=mode)
 
     @pytest.mark.parametrize("mode", ["replay", "restart"])
     async def test_removed_modes_name_missing_checkpoints(
         self, store: MemoryStore, mode: str
     ) -> None:
         with pytest.raises(ValueError, match=f"no checkpoint named {mode!r}"):
-            await _counting_flow(store, "bad-mode", max_iters=1).run(resume=mode)
+            await _counting_flow(store, max_iters=1).run(history="bad-mode", resume=mode)
 
-    async def test_resume_requires_checkpointer(self) -> None:
+    async def test_resume_requires_a_history(self, store: MemoryStore) -> None:
         @verb
         async def noop(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
             return None
 
-        flow = Factory(make_test_logger()).create(state={}).call(noop)
-        with pytest.raises(RuntimeError, match="resume='latest'"):
+        flow = Factory(make_test_logger(), checkpoint_store=store).create(state={}).call(noop)
+        with pytest.raises(RuntimeError, match="resume='latest' but no history"):
             await flow.run(resume="latest")
-        with pytest.raises(RuntimeError, match="restart='latest'"):
+        with pytest.raises(RuntimeError, match="restart='latest' but no history"):
             await flow.run(restart="latest")
+        assert store.list_repos() == []
+
+    async def test_a_history_needs_a_checkpoint_store(self) -> None:
+        @verb
+        async def noop(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            return None
+
+        flow = Factory(make_test_logger()).create("plain", state={}).call(noop)
+        with pytest.raises(RuntimeError, match="history='h' but has no checkpoint store"):
+            await flow.run(history="h")
+
+    async def test_a_checkpointer_needs_a_history(self, store: MemoryStore) -> None:
+        @verb
+        async def noop(ctx: Context[dict[str, Any]], _prev: Any = None) -> None:
+            return None
+
+        inner = Factory(make_test_logger()).create("inner").with_checkpointer().call(noop)
+        flow = Factory(make_test_logger(), checkpoint_store=store).create(state={}).call(inner)
+        with pytest.raises(RuntimeError, match="'inner' declares with_checkpointer.*no history"):
+            await flow.run()
+
+    async def test_a_bad_retention_is_rejected(self, store: MemoryStore) -> None:
+        flow = _counting_flow(store, max_iters=1)
+        with pytest.raises(ValueError, match="retention must be 'retain' or 'gc_on_success'"):
+            await flow.run(history="bad-retention", retention="keep")  # type: ignore[arg-type]
+        assert store.list_repos() == []
 
     async def test_resume_and_restart_are_not_taken_together(self, store: MemoryStore) -> None:
         with pytest.raises(ValueError, match="resume or restart, not both"):
-            await _counting_flow(store, "both", max_iters=1).run(resume="latest", restart="latest")
+            await _counting_flow(store, max_iters=1).run(
+                history="both", resume="latest", restart="latest"
+            )
 
     @pytest.mark.parametrize("target", ["off", "", "complete"])
     async def test_restart_needs_latest_a_hash_or_a_checkpoint_name(
         self, store: MemoryStore, target: str
     ) -> None:
         with pytest.raises(ValueError, match="restart must be 'latest'"):
-            await _counting_flow(store, "bad-target", max_iters=1).run(restart=target)
+            await _counting_flow(store, max_iters=1).run(history="bad-target", restart=target)
 
 
 class TestResumeInSubprocess:

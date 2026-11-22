@@ -106,13 +106,15 @@ class TestCheckpointedRun:
         """A run halts into Postgres and a new flow resumes it to the uninterrupted result."""
         baseline = await build_canonical_flow(pg_test_logger, max_iters=4).run()
 
-        common: dict[str, Any] = {"max_iters": 4, "store": store, "client_flow_id": "pg-run"}
+        common: dict[str, Any] = {"max_iters": 4, "store": store}
         await build_canonical_flow(pg_test_logger, halt_after_iteration=2, **common).run(
-            halt=asyncio.Event()
+            halt=asyncio.Event(), history="pg-run"
         )
         head = await History(store, "pg-run").head()
         assert head is not None and head.meta.outcome == "halted"
 
-        resumed = await build_canonical_flow(pg_test_logger, **common).run(resume="latest")
+        resumed = await build_canonical_flow(pg_test_logger, **common).run(
+            history="pg-run", resume="latest"
+        )
         assert resumed == baseline
         assert await History(store, "pg-run").is_complete()

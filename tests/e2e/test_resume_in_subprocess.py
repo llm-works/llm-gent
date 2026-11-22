@@ -20,12 +20,8 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.e2e]
 
 async def _halt_at_two(store: FileStore) -> None:
     await build_canonical_flow(
-        make_test_logger(),
-        max_iters=4,
-        halt_after_iteration=2,
-        store=store,
-        client_flow_id="xproc",
-    ).run(halt=asyncio.Event())
+        make_test_logger(), max_iters=4, halt_after_iteration=2, store=store
+    ).run(halt=asyncio.Event(), history="xproc")
 
 
 async def test_matches_in_process_resume(tmp_path: Path) -> None:
@@ -33,15 +29,15 @@ async def test_matches_in_process_resume(tmp_path: Path) -> None:
     await _halt_at_two(in_proc)
     await _halt_at_two(file_store(tmp_path / "xproc"))
 
-    expected = await build_canonical_flow(
-        make_test_logger(), max_iters=4, store=in_proc, client_flow_id="xproc"
-    ).run(resume="latest")
+    expected = await build_canonical_flow(make_test_logger(), max_iters=4, store=in_proc).run(
+        history="xproc", resume="latest"
+    )
     result = resume_in_subprocess(
         store_module="appinfra.cas",
         store_factory="FileStore",
         store_kwargs={"root": str(tmp_path / "xproc"), "fsync": False},
         flow_builder_kwargs={"max_iters": 4},
-        client_flow_id="xproc",
+        history="xproc",
         resume="latest",
     )
     assert result == dict(expected)

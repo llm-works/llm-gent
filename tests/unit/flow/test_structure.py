@@ -174,9 +174,8 @@ def _checkpointed(store: Any, *, stop: bool) -> Any:
         return x
 
     return (
-        Factory(make_test_logger())
+        Factory(make_test_logger(), checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, "structure")
         .with_checkpointer()
         .call(first, name="prepare")
         .then(second, name="work")
@@ -188,8 +187,8 @@ class TestStoredStructure:
     async def test_every_commit_holds_the_structure_it_records(self) -> None:
         store = memory_store()
         flow = _checkpointed(store, stop=True)
-        assert await flow.run(1, halt=asyncio.Event()) is HALTED
-        await _checkpointed(store, stop=False).run(resume="latest")
+        assert await flow.run(1, halt=asyncio.Event(), history="structure") is HALTED
+        await _checkpointed(store, stop=False).run(history="structure", resume="latest")
 
         history = History(store, "structure")
         commits = [c async for c in history.commits()]
@@ -201,7 +200,7 @@ class TestStoredStructure:
 
     async def test_the_snapshot_does_not_read_it(self) -> None:
         store = memory_store()
-        await _checkpointed(store, stop=True).run(1, halt=asyncio.Event())
+        await _checkpointed(store, stop=True).run(1, halt=asyncio.Event(), history="structure")
         history = History(store, "structure")
         head = await history.head()
         assert head is not None
@@ -212,8 +211,8 @@ class TestStoredStructure:
     async def test_collecting_unreachable_objects_keeps_it(self) -> None:
         """A resume to an earlier checkpoint leaves objects behind; the structure is reachable."""
         store = memory_store()
-        await _checkpointed(store, stop=True).run(1, halt=asyncio.Event())
-        await _checkpointed(store, stop=False).run(resume="saved")
+        await _checkpointed(store, stop=True).run(1, halt=asyncio.Event(), history="structure")
+        await _checkpointed(store, stop=False).run(history="structure", resume="saved")
         assert store.repo("structure").prune(0) > 0
 
         history = History(store, "structure")
@@ -224,12 +223,11 @@ class TestStoredStructure:
         """A final state that cannot be serialized commits an empty tree."""
         store = memory_store()
         flow = (
-            Factory(make_test_logger())
+            Factory(make_test_logger(), checkpoint_store=store)
             .create(state={"handle": object()})
-            .with_checkpoint_store(store, "stateless")
             .call(prepare)
         )
-        await flow.run(1)
+        await flow.run(1, history="stateless")
         history = History(store, "stateless")
         head = await history.head()
         assert head is not None

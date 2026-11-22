@@ -41,8 +41,9 @@ Public surface:
   pause/resume via the framework halt-save site
 - :class:`LoopFactory` — app-scoped :class:`Loop` builder; its
   ``with_halt`` gives its Loops a halt of their own, over the run's
-- Checkpoints — ``Flow.with_checkpoint_store(store, client_flow_id)`` keeps
-  a run's history in one repository of an :class:`appinfra.cas.Store`
+- Checkpoints — a flow built with ``checkpoint_store=`` (on :class:`Flow`
+  or :class:`Factory`) keeps each run's history, ``run(history=...)``, in
+  one repository of an :class:`appinfra.cas.Store`
   (``MemoryStore``, ``FileStore``, :class:`~llm_gent.flow.stores.PgStore`):
   snapshots of the run — every scope and running structure's position,
   paused SAIA turns included — at save points and when the halt stops it

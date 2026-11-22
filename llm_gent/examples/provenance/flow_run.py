@@ -135,12 +135,11 @@ async def publish(ctx: Context[Any], text: str) -> str:
 
 
 def _flow(lg: Logger, store: Store, backend: Backend, hooks: tuple[Hook, ...]) -> Flow:
-    """The flow, checkpointing to ``REPO`` in ``store``; run it with a halt, for a gate's pause."""
+    """The flow, keeping its runs' histories in ``store``; run it with a halt, for a gate's pause."""
     loop = Loop(WRITER, conversation_factory=KeltConversationFactory(lg))
-    ff = Factory(lg, saia_factory=_WriterFactory(lg, backend))
+    ff = Factory(lg, saia_factory=_WriterFactory(lg, backend), checkpoint_store=store)
     return (
         ff.create("publish-summary", state={})
-        .with_checkpoint_store(store, REPO)
         .call(_make_write(loop), name="write")
         .then(review, name="review")
         .then(publish, name="publish")
@@ -153,10 +152,12 @@ async def _run(lg: Logger, backend: Backend) -> tuple[Any, Any, VersionControl, 
     store = MemoryStore(lg)
     vc = VersionControl(lg, store.repo(REPO))
     flow = _flow(lg, store, backend, (EditorApproval(vc, None), vc))
-    first = await flow.run(TOPIC, halt=asyncio.Event())
+    first = await flow.run(TOPIC, halt=asyncio.Event(), history=REPO)
     print(f"--- run 1: {'halted, waiting for approval' if first is HALTED else first}")
     gate = EditorApproval(vc, approved_by="editor-1")
-    second = await _flow(lg, store, backend, (gate, vc)).run(halt=asyncio.Event(), resume="latest")
+    second = await _flow(lg, store, backend, (gate, vc)).run(
+        halt=asyncio.Event(), history=REPO, resume="latest"
+    )
     print(f"--- run 2 (resumed, approved): {second}")
     return first, second, vc, store
 

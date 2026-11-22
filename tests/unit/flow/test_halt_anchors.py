@@ -34,7 +34,7 @@ def store() -> MemoryStore:
     return memory_store()
 
 
-def _two_steps(store: Any, name: str, calls: list[str], mode: str) -> Any:
+def _two_steps(store: Any, calls: list[str], mode: str) -> Any:
     """``s1 → s2``; in a run with a halt, s2 sets it, then completes (``finish``) or not (``bail``)."""
 
     @verb
@@ -52,9 +52,8 @@ def _two_steps(store: Any, name: str, calls: list[str], mode: str) -> Any:
         ctx.state.data["s2"] = ctx.state.data.get("s2", 0) + 1
 
     return (
-        Factory(make_test_logger())
+        Factory(make_test_logger(), checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, name)
         .with_checkpointer()
         .call(s1)
         .call(s2)
@@ -64,8 +63,8 @@ def _two_steps(store: Any, name: str, calls: list[str], mode: str) -> Any:
 class TestHaltInLastStep:
     async def test_completed_last_step_finishes_the_run(self, store: MemoryStore) -> None:
         calls: list[str] = []
-        flow = _two_steps(store, "finish", calls, "finish")
-        assert await flow.run(halt=asyncio.Event()) is None
+        flow = _two_steps(store, calls, "finish")
+        assert await flow.run(halt=asyncio.Event(), history="finish") is None
         history = History(store, "finish")
         assert await history.is_complete()
         head = await history.head()
@@ -74,7 +73,7 @@ class TestHaltInLastStep:
 
     async def test_interrupted_last_step_runs_again_on_resume(self, store: MemoryStore) -> None:
         calls: list[str] = []
-        await _two_steps(store, "bail", calls, "bail").run(halt=asyncio.Event())
+        await _two_steps(store, calls, "bail").run(halt=asyncio.Event(), history="bail")
         history = History(store, "bail")
         assert not await history.is_complete()
         head = await history.head()
@@ -83,7 +82,7 @@ class TestHaltInLastStep:
         assert (snapshot.root, snapshot.scopes) == ({"s1": 1}, {})
 
         calls.clear()
-        await _two_steps(store, "bail", calls, "bail").run(resume="latest")
+        await _two_steps(store, calls, "bail").run(history="bail", resume="latest")
         assert calls == ["s2"]
         head = await history.head()
         assert head is not None and await history.is_complete()
@@ -101,13 +100,12 @@ class TestHaltInLastStep:
             raise Interrupted()
 
         flow = (
-            Factory(make_test_logger())
+            Factory(make_test_logger(), checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "gc-late-halt", retention="gc_on_success")
             .with_checkpointer()
             .call(s1)
         )
-        await flow.run(halt=halt)
+        await flow.run(halt=halt, history="gc-late-halt", retention="gc_on_success")
 
         history = History(store, "gc-late-halt")
         head = await history.head()
@@ -128,13 +126,12 @@ class TestHaltInLastStep:
             return x
 
         flow = (
-            Factory(make_test_logger())
+            Factory(make_test_logger(), checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "map-last")
             .with_checkpointer()
             .map(lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1)
         )
-        await flow.run(halt=halt)
+        await flow.run(halt=halt, history="map-last")
 
         assert ran == [1]
         history = History(store, "map-last")

@@ -30,12 +30,8 @@ async def _run(store: MemoryStore, name: str, *, halt_at: int | None = None) -> 
     """Run the canonical flow (4 iterations) under ``name``; halt after ``halt_at`` if given."""
     halt = asyncio.Event() if halt_at is not None else None
     await build_canonical_flow(
-        make_test_logger(),
-        max_iters=4,
-        halt_after_iteration=halt_at,
-        store=store,
-        client_flow_id=name,
-    ).run(halt=halt, resume="latest")
+        make_test_logger(), max_iters=4, halt_after_iteration=halt_at, store=store
+    ).run(halt=halt, history=name, resume="latest")
 
 
 async def _all(history: History) -> list[FlowCommit]:
@@ -126,10 +122,9 @@ class TestCorruptHistory:
             state=CanonicalCounter(n=100),
             max_iters=4,
             store=store,
-            client_flow_id="torn-resume",
         )
         with pytest.raises(HistoryCorrupt):
-            await flow.run(resume="latest")
+            await flow.run(history="torn-resume", resume="latest")
         # Nothing was written past the damage: the ref still names the missing commit.
         with pytest.raises(HistoryCorrupt):
             await History(store, "torn-resume").head()

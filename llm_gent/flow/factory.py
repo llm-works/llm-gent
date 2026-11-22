@@ -164,13 +164,11 @@ class Factory(Generic[F]):
                 :class:`TypeStateFactory`; implement :class:`StateFactory`
                 directly for state that binds runtime handles. ``None``
                 (default) treats the payload as a plain dict.
-            checkpoint_store: Optional :class:`appinfra.cas.Store` captured for
-                subsequent :meth:`create` calls. Only bound to a built
-                :class:`Flow` (:meth:`Flow.with_checkpoint_store`) when
-                :meth:`create` is passed a ``client_flow_id=`` — the id
-                scopes the history and is agent-owned per Flow instance.
-                Saves inside the run also need
-                :meth:`Flow.with_checkpointer`.
+            checkpoint_store: Optional :class:`appinfra.cas.Store` every
+                built :class:`Flow` keeps its runs' histories in (its
+                ``checkpoint_store=``). Each run names its history:
+                :meth:`Flow.run` ``history=``. Saves inside the run also
+                need :meth:`Flow.with_checkpointer`.
             flow_class: A :class:`Flow` subclass to build instead of
                 :class:`Flow`; it keeps :class:`Flow`'s constructor
                 signature. ``None`` (default) builds :class:`Flow`.
@@ -187,18 +185,12 @@ class Factory(Generic[F]):
         self._resource_methods: dict[str, ResourceKey[Any]] = {}
         self._built_class: type[F] | None = None
 
-    def create(
-        self,
-        name: str = "",
-        *,
-        state: Any = UNSET,
-        client_flow_id: str | None = None,
-        checkpointer: tuple[Store, str] | None = None,
-    ) -> F:
+    def create(self, name: str = "", *, state: Any = UNSET) -> F:
         """Return a :class:`Flow` (``flow_class``) using this factory's captured environment.
 
-        The run's halt is not the flow's: pass it to :meth:`Flow.run`
-        ``halt=``.
+        The flow is structure: it can run many times, at once too. What
+        belongs to one run — its halt, signals and history — goes to
+        :meth:`Flow.run`.
 
         Args:
             name: Optional identifier — used in error messages and traces.
@@ -208,24 +200,6 @@ class Factory(Generic[F]):
                 :data:`UNSET` (default) inherits the factory's ``state``;
                 passing ``None`` explicitly is honored as "payload is
                 ``None``"; any other value replaces the factory default.
-            client_flow_id: Per-Flow history identifier for the
-                captured checkpoint store. Required to bind the
-                store — the built Flow gets
-                :meth:`Flow.with_checkpoint_store` called with
-                ``(store, client_flow_id)`` only when both this argument
-                is supplied AND the factory carries a store.
-                ``None`` (default) leaves the built Flow unwired even
-                when the factory carries a store. Ignored when
-                ``checkpointer=`` is passed (that argument carries its
-                own id).
-            checkpointer: Per-Flow ``(store, client_flow_id)`` pair —
-                atomically binds both via :meth:`Flow.with_checkpoint_store`.
-                Supersedes the factory's captured ``checkpoint_store`` and
-                the ``client_flow_id`` argument above; use when the
-                store differs from the factory's default or when a
-                shared factory hands each flow its own history id.
-                ``None`` (default) inherits the factory's store paired
-                with ``client_flow_id``.
         """
         resolved_state = self._state if state is UNSET else state
         flow = self._class()(
@@ -235,23 +209,13 @@ class Factory(Generic[F]):
             state=resolved_state,
             traits=self._traits,
             state_factory=self._state_factory,
+            checkpoint_store=self._checkpoint_store,
         )
         if self._cost_tracker is not None:
             flow.with_cost_tracker(self._cost_tracker)
         for key, value in self._resources.items():
             flow.with_resource(key, value)
-        self._bind_store(flow, client_flow_id, checkpointer)
         return flow
-
-    def _bind_store(
-        self, flow: F, client_flow_id: str | None, checkpointer: tuple[Store, str] | None
-    ) -> None:
-        """Bind ``flow``'s repo per :meth:`create`'s ``client_flow_id`` / ``checkpointer``."""
-        if checkpointer is not None:
-            store, name = checkpointer
-            flow.with_checkpoint_store(store, name)
-        elif self._checkpoint_store is not None and client_flow_id is not None:
-            flow.with_checkpoint_store(self._checkpoint_store, client_flow_id)
 
     def _class(self) -> type[F]:
         """The class :meth:`create` builds: ``flow_class``, with this factory's resource methods.
@@ -356,11 +320,9 @@ class Factory(Generic[F]):
     def with_checkpoint_store(self, store: Store) -> Factory[F]:
         """Return a new :class:`Factory` whose checkpoint store is swapped.
 
-        Every other captured slot carries over. The store binds to each
-        built :class:`Flow` only when :meth:`create` is called with a
-        ``client_flow_id=`` — the history identifier is agent-owned
-        per Flow instance, so the factory captures the store once and
-        the id is chosen at construction time.
+        Every other captured slot carries over. Every subsequently created
+        :class:`Flow` keeps its runs' histories in ``store``; each run
+        names its own (:meth:`Flow.run` ``history=``).
         """
         return self._replace(checkpoint_store=store)
 

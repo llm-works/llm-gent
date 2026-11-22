@@ -215,15 +215,14 @@ async def test_real_saia_pause_resume_round_trip(store: FileStore) -> None:
     body = body_ff.create()
     body.call(run_loop)
 
-    ff1 = Factory(make_test_logger(), saia_factory=_SaiaFactory(backend1))
-    flow1 = (
-        ff1.create(state={})
-        .with_checkpoint_store(store, "real-saia-resume")
-        .with_checkpointer()
-        .iterate(body, max_iters=2)
-    )
+    ff1 = Factory(make_test_logger(), saia_factory=_SaiaFactory(backend1), checkpoint_store=store)
+    flow1 = ff1.create(state={}).with_checkpointer().iterate(body, max_iters=2)
     saved_conv = _SerializableConv(messages=[Message(role="user", content="SAVED_CONV_MARKER")])
-    await flow1.run(halt=halt1, extra={"task": "please answer", "conv": saved_conv})
+    await flow1.run(
+        halt=halt1,
+        history="real-saia-resume",
+        extra={"task": "please answer", "conv": saved_conv},
+    )
 
     # SAIA's real complete() was called exactly once — it hit PauseRequested and
     # returned paused before the second turn could start.
@@ -244,16 +243,12 @@ async def test_real_saia_pause_resume_round_trip(store: FileStore) -> None:
     # exactly one non-structured call recorded.
     backend2.calls.append({"messages": [], "response_schema": None})
 
-    ff2 = Factory(make_test_logger(), saia_factory=_SaiaFactory(backend2))
-    flow2 = (
-        ff2.create(state={})
-        .with_checkpoint_store(store, "real-saia-resume")
-        .with_checkpointer()
-        .iterate(body, max_iters=2)
-    )
+    ff2 = Factory(make_test_logger(), saia_factory=_SaiaFactory(backend2), checkpoint_store=store)
+    flow2 = ff2.create(state={}).with_checkpointer().iterate(body, max_iters=2)
     caller_conv = _SerializableConv(messages=[Message(role="user", content="CALLER_CONV_MARKER")])
     await flow2.run(
         halt=halt2,
+        history="real-saia-resume",
         resume="latest",
         # Caller supplies a DIFFERENT task + conv to prove the resume path
         # forwards the SAVED values from the envelope, not the caller's.
@@ -307,13 +302,12 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
     body = Factory(make_test_logger()).create().call(run_loop)
     saia_factory = _HaltingSaiaFactory(_ToolThenPauseBackend(), halt)
     flow = (
-        Factory(make_test_logger(), saia_factory=saia_factory)
+        Factory(make_test_logger(), saia_factory=saia_factory, checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, "no-caller-conv")
         .with_checkpointer()
         .iterate(body, max_iters=2)
     )
-    await flow.run(halt=halt)
+    await flow.run(halt=halt, history="no-caller-conv")
 
     [(_path, turn)] = (await _saved_turns(store, "no-caller-conv")).items()
     assert turn["task"] == "look up cas"

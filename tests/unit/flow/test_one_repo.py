@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""One repo per run: the store on the top-level flow, checkpointers declared anywhere.
+"""One history per run: the top-level flow's store, checkpointers declared anywhere.
 
-``with_checkpoint_store(store, client_flow_id)`` on the top-level flow is
-the run's repo; ``with_checkpointer(name=None)`` on any flow makes saves
-inside it write commits there, each holding the whole run. A save belongs
-to the innermost checkpointer; a named one moves its repo-global tag.
+``run(history=...)`` names the run's history in the top-level flow's
+``checkpoint_store``; ``with_checkpointer(name=None)`` on any flow makes
+saves inside it write commits there, each holding the whole run. A save
+belongs to the innermost checkpointer; a named one moves its
+history-global tag.
 """
 
 from __future__ import annotations
@@ -31,8 +32,8 @@ class Crash(BaseException):
     """The process died."""
 
 
-def _ff() -> Factory:
-    return Factory(make_test_logger())
+def _ff(store: Any = None) -> Factory:
+    return Factory(make_test_logger(), checkpoint_store=store)
 
 
 def _nested(store: Any, ran: list[str], *, crash: bool, halt: bool = False) -> Any:
@@ -70,7 +71,7 @@ def _nested(store: Any, ran: list[str], *, crash: bool, halt: bool = False) -> A
         return x + 3
 
     sub = _ff().create().with_checkpointer().call(a1).then(a2).then(b)
-    return _ff().create(state={}).with_checkpoint_store(store, NAME).call(sub).then(c)
+    return _ff(store).create(state={}).call(sub).then(c)
 
 
 class TestNestedCheckpointer:
@@ -78,25 +79,25 @@ class TestNestedCheckpointer:
         store = memory_store()
         ran: list[str] = []
         with pytest.raises(Crash):
-            await _nested(store, ran, crash=True).run(1)
+            await _nested(store, ran, crash=True).run(1, history=NAME)
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "ok"
         assert (await History(store, NAME).snapshot(head)).root == {"a1": 1}
 
         ran.clear()
-        assert await _nested(store, ran, crash=False).run(1, resume="latest") == 33
+        assert await _nested(store, ran, crash=False).run(1, history=NAME, resume="latest") == 33
         assert ran == ["a2", "b", "c"]  # a1's checkpointed work does not run again
 
     async def test_halt_inside_a_checkpointed_subtree_resumes_as_uninterrupted(self) -> None:
         store = memory_store()
         ran: list[str] = []
         flow = _nested(store, ran, crash=False, halt=True)
-        assert await flow.run(1, halt=asyncio.Event()) is HALTED
+        assert await flow.run(1, halt=asyncio.Event(), history=NAME) is HALTED
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "halted"
 
         ran.clear()
-        assert await _nested(store, ran, crash=False).run(1, resume="latest") == 33
+        assert await _nested(store, ran, crash=False).run(1, history=NAME, resume="latest") == 33
         assert ran == ["b", "c"]
 
     async def test_without_a_checkpointer_a_save_writes_nothing(self) -> None:
@@ -108,13 +109,13 @@ class TestNestedCheckpointer:
             written.append(await ctx.checkpoint("x"))
             return x
 
-        await _ff().create(state={}).with_checkpoint_store(store, NAME).call(a).run(1)
+        await _ff(store).create(state={}).call(a).run(1, history=NAME)
         assert written == [None]
         history = History(store, NAME)
         assert await history.checkpoint_names() == []
         assert [c.meta.node_path async for c in history.commits()] == ["$end"]
 
-    async def test_a_flow_run_on_its_own_uses_its_own_repo(self) -> None:
+    async def test_a_flow_run_on_its_own_uses_its_run_s_history(self) -> None:
         store = memory_store()
 
         @verb
@@ -122,14 +123,28 @@ class TestNestedCheckpointer:
             await ctx.checkpoint()
             return x
 
-        sub = _ff().create(state={}).with_checkpoint_store(store, "sub").with_checkpointer().call(a)
-        await sub.run(1)
+        sub = _ff(store).create(state={}).with_checkpointer().call(a)
+        await sub.run(1, history="sub")
         assert await History(store, "sub").head() is not None
         assert await History(store, NAME).head() is None
 
+    async def test_a_nested_flow_s_store_is_not_used(self) -> None:
+        """Every flow a Factory builds carries its store; the run uses the top-level flow's."""
+        store, other = memory_store(), memory_store()
 
-class TestOneRepoRules:
-    async def test_checkpointer_without_a_store_raises_at_run_start(self) -> None:
+        @verb
+        async def a(ctx: Context[Any], x: int) -> int:
+            await ctx.checkpoint()
+            return x
+
+        sub = _ff(other).create().with_checkpointer().call(a)
+        await _ff(store).create(state={}).call(sub).run(1, history=NAME)
+        assert await History(store, NAME).head() is not None
+        assert other.list_repos() == []
+
+
+class TestOneHistoryRules:
+    async def test_a_checkpointer_without_a_history_raises_at_run_start(self) -> None:
         ran: list[str] = []
 
         @verb
@@ -138,23 +153,23 @@ class TestOneRepoRules:
             return x
 
         sub = _ff().create().with_checkpointer().call(a)
-        flow = _ff().create(state={}).call(a).call(sub)
-        with pytest.raises(RuntimeError, match="checkpointers require a checkpoint store"):
+        flow = _ff(memory_store()).create(state={}).call(a).call(sub)
+        with pytest.raises(RuntimeError, match="has no history"):
             await flow.run(1)
         assert ran == []
 
-    async def test_store_on_a_nested_flow_raises_at_run_start(self) -> None:
-        store = memory_store()
+    async def test_a_history_must_name_a_repository(self) -> None:
+        from appinfra.cas import InvalidNameError
 
         @verb
         async def a(ctx: Context[Any], x: int) -> int:
             return x
 
-        sub = _ff().create().with_checkpoint_store(store, "sub").call(a)
-        flow = _ff().create(state={}).with_checkpoint_store(store, NAME).call(sub)
-        with pytest.raises(RuntimeError, match="a run has one repo"):
-            await flow.run(1)
-        assert NAME not in store.list_repos()  # nothing was written
+        store = memory_store()
+        flow = _ff(store).create(state={}).with_checkpointer().call(a)
+        with pytest.raises(InvalidNameError):
+            await flow.run(1, history="..")
+        assert store.list_repos() == []
 
     @pytest.mark.parametrize("bad", ["latest", "complete", "a" * 64, ""])
     async def test_checkpointer_name_follows_checkpoint_name_rules(self, bad: str) -> None:
@@ -175,9 +190,8 @@ class TestNamedCheckpointer:
                 return n * 2
 
             return (
-                _ff()
+                _ff(store)
                 .create(state={})
-                .with_checkpoint_store(store, NAME)
                 .map(
                     lambda b: b.with_checkpointer("items").call(item),
                     items=lambda _p, _c: [1, 2, 3],
@@ -185,7 +199,7 @@ class TestNamedCheckpointer:
                 )
             )
 
-        assert await flow().run() == [2, 4, 6]
+        assert await flow().run(history=NAME) == [2, 4, 6]
         history = History(store, NAME)
         tagged = await history.checkpoint("items")
         assert tagged is not None
@@ -194,7 +208,7 @@ class TestNamedCheckpointer:
         assert sorted(done) == ["0", "1"]  # the third item's own checkpoint: items 0 and 1 done
 
         ran.clear()
-        assert await flow().run(resume="items") == [2, 4, 6]
+        assert await flow().run(history=NAME, resume="items") == [2, 4, 6]
         assert ran == [3]
 
     async def test_a_save_moves_only_its_innermost_checkpointer_tag(self) -> None:
@@ -211,7 +225,7 @@ class TestNamedCheckpointer:
 
         inner = _ff().create().with_checkpointer("inner").call(inner_step)
         outer = _ff().create().with_checkpointer("outer").call(outer_step).call(inner)
-        await _ff().create(state={}).with_checkpoint_store(store, NAME).call(outer).run(1)
+        await _ff(store).create(state={}).call(outer).run(1, history=NAME)
         assert await History(store, NAME).checkpoint_names() == ["inner"]
 
     async def test_one_name_on_two_flows_is_one_tag(self) -> None:
@@ -224,8 +238,8 @@ class TestNamedCheckpointer:
 
         first = _ff().create().with_checkpointer("phase").call(save)
         second = _ff().create().with_checkpointer("phase").call(save)
-        flow = _ff().create(state={}).with_checkpoint_store(store, NAME).call(first).call(second)
-        assert await flow.run(1) == 3
+        flow = _ff(store).create(state={}).call(first).call(second)
+        assert await flow.run(1, history=NAME) == 3
         history = History(store, NAME)
         assert await history.checkpoint_names() == ["phase"]
         tagged = await history.checkpoint("phase")

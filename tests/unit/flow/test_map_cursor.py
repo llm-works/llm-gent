@@ -80,9 +80,8 @@ def _map_flow(
         counts.completed.append(item)
 
     return (
-        Factory(make_test_logger())
+        Factory(make_test_logger(), checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, "map")
         .with_checkpointer()
         .map(
             lambda b: b.call(work),
@@ -104,22 +103,24 @@ def store() -> MemoryStore:
 class TestMapCursor:
     async def test_completed_items_do_not_run_or_merge_again(self, store: MemoryStore) -> None:
         first = _Counts()
-        assert await _map_flow(store, first, halt_at=2).run(halt=asyncio.Event()) is HALTED
+        flow = _map_flow(store, first, halt_at=2)
+        assert await flow.run(halt=asyncio.Event(), history="map") is HALTED
         assert (first.bodies, first.merges, first.completed) == ([1, 2], [10, 20], [1, 2])
 
         resumed = _Counts()
-        assert await _map_flow(store, resumed).run(resume="latest", halt=asyncio.Event()) == 60
+        flow = _map_flow(store, resumed)
+        assert await flow.run(history="map", resume="latest", halt=asyncio.Event()) == 60
         assert (resumed.bodies, resumed.merges, resumed.completed) == ([3], [30], [3])
         head = await History(store, "map").head()
         assert head is not None
         assert (await History(store, "map").snapshot(head)).root["merged"] == [10, 20, 30]
 
     async def test_items_are_not_evaluated_again(self, store: MemoryStore) -> None:
-        await _map_flow(store, _Counts(), halt_at=1).run(halt=asyncio.Event())
+        await _map_flow(store, _Counts(), halt_at=1).run(halt=asyncio.Event(), history="map")
 
         resumed = _Counts()
         flow = _map_flow(store, resumed, items=[7, 8])
-        result = await flow.run(resume="latest", halt=asyncio.Event())
+        result = await flow.run(history="map", resume="latest", halt=asyncio.Event())
         assert resumed.items_fn == 0
         assert resumed.bodies == [2, 3]
         assert result == 60
@@ -127,7 +128,7 @@ class TestMapCursor:
     async def test_halt_checkpoint_holds_items_and_completed_results(
         self, store: MemoryStore
     ) -> None:
-        await _map_flow(store, _Counts(), halt_at=2).run(halt=asyncio.Event())
+        await _map_flow(store, _Counts(), halt_at=2).run(halt=asyncio.Event(), history="map")
 
         history = History(store, "map")
         head = await history.head()
@@ -141,11 +142,12 @@ class TestMapCursor:
 
     async def test_next_run_of_the_map_runs_all_items(self, store: MemoryStore) -> None:
         """Once the map completed, its cursor is gone: running it again runs every item."""
-        await _map_flow(store, _Counts(), halt_at=2).run(halt=asyncio.Event())
-        await _map_flow(store, _Counts()).run(resume="latest", halt=asyncio.Event())
+        await _map_flow(store, _Counts(), halt_at=2).run(halt=asyncio.Event(), history="map")
+        await _map_flow(store, _Counts()).run(history="map", resume="latest", halt=asyncio.Event())
 
         again = _Counts()
-        assert await _map_flow(store, again).run(resume="latest", halt=asyncio.Event()) == 60
+        flow = _map_flow(store, again)
+        assert await flow.run(history="map", resume="latest", halt=asyncio.Event()) == 60
         assert again.bodies == [1, 2, 3]
 
 
@@ -181,9 +183,8 @@ class TestUnmergedItem:
                 parent.setdefault("merged", []).append(child["out"])
 
             return (
-                Factory(make_test_logger())
+                Factory(make_test_logger(), checkpoint_store=store)
                 .create(state={})
-                .with_checkpoint_store(store, "unmerged")
                 .with_checkpointer()
                 .map(
                     lambda b: b.call(work),
@@ -195,11 +196,11 @@ class TestUnmergedItem:
             )
 
         with pytest.raises(_Crash):
-            await build(crash=True).run()
+            await build(crash=True).run(history="unmerged")
         bodies.clear()
         merges.clear()
 
-        await build(crash=False).run(resume="latest")
+        await build(crash=False).run(history="unmerged", resume="latest")
         assert bodies == [2]
         assert sorted(merges) == [1, 2]
         head = await History(store, "unmerged").head()
@@ -226,9 +227,8 @@ class TestLenientParallelMap:
                 return item * 2
 
             return (
-                Factory(make_test_logger())
+                Factory(make_test_logger(), checkpoint_store=store)
                 .create(state={})
-                .with_checkpoint_store(store, "lenient-map")
                 .with_checkpointer()
                 .map(
                     lambda b: b.call(work),
@@ -240,11 +240,12 @@ class TestLenientParallelMap:
                 .guard(lambda item, _ctx: item != 5)
             )
 
-        assert await build(halt_on=1).run(halt=asyncio.Event()) is HALTED
+        assert await build(halt_on=1).run(halt=asyncio.Event(), history="lenient-map") is HALTED
         first = sorted(ran)
         ran.clear()
 
-        result = await build(halt_on=None).run(resume="latest", halt=asyncio.Event())
+        flow = build(halt_on=None)
+        result = await flow.run(history="lenient-map", resume="latest", halt=asyncio.Event())
         assert not set(first) & set(ran), f"finished items ran again: {set(first) & set(ran)}"
         assert sorted(first + ran) == [0, 1, 2, 3, 4]  # item 5 is Skipped by the guard
         assert result == sum(i * 2 for i in range(5))
@@ -292,9 +293,8 @@ def _mixed_flow(
         return 1
 
     return (
-        Factory(make_test_logger())
+        Factory(make_test_logger(), checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, "mixed")
         .with_checkpointer()
         .map(
             lambda b: b.call(work),
@@ -313,12 +313,13 @@ class TestFailedAndSkippedItemsStayDone:
 
     async def test_they_do_not_run_again_and_keep_their_outcome(self, store: MemoryStore) -> None:
         first = _Seen()
-        assert await _mixed_flow(store, first, halt_at=3).run(halt=asyncio.Event()) is HALTED
+        flow = _mixed_flow(store, first, halt_at=3)
+        assert await flow.run(halt=asyncio.Event(), history="mixed") is HALTED
         assert (first.bodies, first.guards) == ([1, 3], [1, 2, 3])
 
         resumed = _Seen()
         result = await _mixed_flow(store, resumed, halt_at=None).run(
-            resume="latest", halt=asyncio.Event()
+            history="mixed", resume="latest", halt=asyncio.Event()
         )
         assert (resumed.bodies, resumed.guards) == ([4], [4])
         assert (resumed.errors, resumed.completed) == ([], [4])
@@ -334,7 +335,7 @@ class TestFailedAndSkippedItemsStayDone:
         assert rest == [30, 40]
 
     async def test_the_halt_checkpoint_records_them(self, store: MemoryStore) -> None:
-        await _mixed_flow(store, _Seen(), halt_at=3).run(halt=asyncio.Event())
+        await _mixed_flow(store, _Seen(), halt_at=3).run(halt=asyncio.Event(), history="mixed")
 
         history = History(store, "mixed")
         head = await history.head()
@@ -348,9 +349,9 @@ class TestFailedAndSkippedItemsStayDone:
 
     async def test_a_restored_failure_is_stored_again_unchanged(self, store: MemoryStore) -> None:
         """A checkpoint the resumed run takes holds the first run's failure as it was."""
-        await _mixed_flow(store, _Seen(), halt_at=3).run(halt=asyncio.Event())
+        await _mixed_flow(store, _Seen(), halt_at=3).run(halt=asyncio.Event(), history="mixed")
         await _mixed_flow(store, _Seen(), halt_at=None, save_at=4).run(
-            resume="latest", halt=asyncio.Event()
+            history="mixed", resume="latest", halt=asyncio.Event()
         )
 
         history = History(store, "mixed")
@@ -361,9 +362,11 @@ class TestFailedAndSkippedItemsStayDone:
 
     async def test_the_computed_cap_is_computed_again_on_resume(self, store: MemoryStore) -> None:
         first = _Seen()
-        await _mixed_flow(store, first, halt_at=3).run(halt=asyncio.Event())
+        await _mixed_flow(store, first, halt_at=3).run(halt=asyncio.Event(), history="mixed")
         resumed = _Seen()
-        await _mixed_flow(store, resumed, halt_at=None).run(resume="latest", halt=asyncio.Event())
+        await _mixed_flow(store, resumed, halt_at=None).run(
+            history="mixed", resume="latest", halt=asyncio.Event()
+        )
         assert first.caps == resumed.caps == [[1, 2, 3, 4]]
 
     async def test_a_strict_failure_runs_again(self, store: MemoryStore) -> None:
@@ -376,13 +379,15 @@ class TestFailedAndSkippedItemsStayDone:
         flow = _mixed_flow(store, seen, halt_at=None, strict=True)
         flow.with_checkpoint_policy(on_map_item=True)
         with pytest.raises(ValueError, match="bad item 1"):
-            await flow.run()
+            await flow.run(history="mixed")
         assert seen.bodies == [1, 3, 4]
 
         resumed = _Seen()
         flow = _mixed_flow(store, resumed, halt_at=None, strict=True)
         with pytest.raises(ValueError, match="bad item 1"):
-            await flow.with_checkpoint_policy(on_map_item=True).run(resume="latest")
+            await flow.with_checkpoint_policy(on_map_item=True).run(
+                history="mixed", resume="latest"
+            )
         assert resumed.bodies == [1]
         # Item 1 continues from its saved positions, admitted already; the skip
         # of item 2 is recorded in strict maps too.
@@ -407,9 +412,8 @@ class TestFailedAndSkippedItemsStayDone:
                 parent.setdefault("merged", []).append(child["out"])
 
             return (
-                Factory(make_test_logger())
+                Factory(make_test_logger(), checkpoint_store=store)
                 .create(state={})
-                .with_checkpoint_store(store, "merge-fails")
                 .with_checkpointer()
                 .map(
                     lambda b: b.call(work),
@@ -421,9 +425,11 @@ class TestFailedAndSkippedItemsStayDone:
                 )
             )
 
-        assert await build(halt_at=2).run(halt=asyncio.Event()) is HALTED
+        assert await build(halt_at=2).run(halt=asyncio.Event(), history="merge-fails") is HALTED
         bodies.clear()
-        failure, *rest = await build(halt_at=None).run(resume="latest", halt=asyncio.Event())
+        failure, *rest = await build(halt_at=None).run(
+            history="merge-fails", resume="latest", halt=asyncio.Event()
+        )
         assert bodies == [3]
         assert isinstance(failure, Failure)
         assert isinstance(failure.exception, RestoredError)
@@ -457,9 +463,8 @@ def _guarded_flow(store: Any, admit: bool, seen: _Seen) -> Any:
         return gate["admit"]
 
     return (
-        Factory(make_test_logger())
+        Factory(make_test_logger(), checkpoint_store=store)
         .create(state={})
-        .with_checkpoint_store(store, "guarded")
         .with_checkpointer()
         .map(lambda b: b.call(first).then(second), items=lambda *_: [1, 2], max_concurrency=1)
         .guard(guard)
@@ -470,12 +475,13 @@ class TestAStartedItem:
     async def test_is_not_asked_the_guard_again(self, store: MemoryStore) -> None:
         """The guard admitted it before the halt; on resume it continues though the guard would refuse."""
         first = _Seen()
-        assert await _guarded_flow(store, True, first).run(halt=asyncio.Event()) is HALTED
+        flow = _guarded_flow(store, True, first)
+        assert await flow.run(halt=asyncio.Event(), history="guarded") is HALTED
         assert (first.guards, first.bodies, first.completed) == ([1, 2], [1, 2], [1])
 
         resumed = _Seen()
         flow = _guarded_flow(store, False, resumed)
-        result = await flow.run(resume="latest", halt=asyncio.Event())
+        result = await flow.run(history="guarded", resume="latest", halt=asyncio.Event())
         assert (resumed.guards, resumed.bodies, resumed.completed) == ([], [], [2])
         assert result == [10, 20]
 
@@ -493,11 +499,10 @@ class TestSerialization:
             return 1
 
         flow = (
-            Factory(make_test_logger())
+            Factory(make_test_logger(), checkpoint_store=store)
             .create(state={})
-            .with_checkpoint_store(store, "opaque")
             .with_checkpointer()
             .map(lambda b: b.call(work), items=lambda _p, _c: [_Opaque()])
         )
         with pytest.raises(TypeError, match=r"/items'.*_Opaque"):
-            await flow.run()
+            await flow.run(history="opaque")

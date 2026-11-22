@@ -605,17 +605,18 @@ The session's spend is then `spent - baseline`. Budgeted runs' children
 come from `tracker.child()`; a subclass overriding it puts them on its
 own class.
 
-### One repo per run
+### One history per run
 
-A run has one repo: the checkpoint store and history name set once, on
-its top-level flow, with `with_checkpoint_store(store, client_flow_id)`
-(or `Factory(checkpoint_store=store)` with `create(client_flow_id=...)`).
-Every commit the run writes holds the whole run and goes there, wherever
-in the flow tree it was taken — committing in a subdirectory commits the
-repo. A flow inside a run cannot set a store of its own; `run()` raises.
+The checkpoint store is the flow's: `Flow(lg, checkpoint_store=store)`,
+or `Factory(lg, checkpoint_store=store)` for every flow it creates. The
+history is the run's: `run(history="session-42")` names it, so one flow
+runs many histories, one per run, at once. Every commit the run writes
+holds the whole run and goes to that history, wherever in the flow tree
+it was taken — committing in a subdirectory commits the repo. A run uses
+its top-level flow's store; a nested flow's is not looked at.
 
 The store is an `appinfra.cas.Store`, and the history is its repository
-named `client_flow_id`:
+named by `history=`:
 
 | Store | For |
 |---|---|
@@ -633,16 +634,18 @@ policy write commits; elsewhere they write nothing. A save belongs to the
 innermost checkpointer enclosing the step; `with_checkpointer("items")`
 also moves the tag `tags/items` to each of its saves, so
 `run(resume="items")` goes back to that part's latest checkpoint. Tag
-names are repo-global, shared with `ctx.checkpoint(name)`. A checkpointer
-in a run without a store makes `run()` raise.
+names are repo-global, shared with `ctx.checkpoint(name)`. `run()`
+raises on a checkpointer in a run without `history=`, on `history=`
+without a store, and on `resume=` / `restart=` without `history=`.
 
 ```python
+ff = Factory(lg, checkpoint_store=store)
 flow = (
     ff.create(state=...)
-    .with_checkpoint_store(store, "session-42")  # the run's repo
     .call(prepare)
     .map(lambda b: b.with_checkpointer("items").call(item), items=...)
 )
+await flow.run(history="session-42")  # the run's repo
 ```
 
 ### Checkpoint cadence
@@ -678,11 +681,11 @@ wanted.
 ```python
 flow = (
     ff.create(state=...)
-    .with_checkpoint_store(store, "history-42")
     .with_checkpointer()
     .with_checkpoint_policy(on_iterate=True, on_map_item=True)
     .iterate(body, max_iters=10)
 )
+await flow.run(history="history-42")
 ```
 
 Halt-save and `ctx.checkpoint()` are unaffected by the policy — the
@@ -690,8 +693,7 @@ policy governs only implicit auto-saves.
 
 On a clean exit under the default `retain` retention, the framework also
 commits the run's final state and moves the `complete` tag to it
-(`with_checkpoint_store(..., retention="gc_on_success")` deletes the
-history instead). A
+(`run(..., retention="gc_on_success")` deletes the history instead). A
 history whose head is that commit is complete; the tag stays on the last
 finished run's final state when a later run halts past it. A final state
 that cannot be serialized is committed without state (and a warning is
@@ -704,7 +706,7 @@ running then run again.
 
 ### Resume
 
-`run(resume=...)` selects how a run starts from the history:
+`run(history=..., resume=...)` selects how a run starts from the history:
 
 - `"off"` (default) — start from `state=` as given; commits still append
   to the history.
@@ -736,7 +738,7 @@ step.
 
 ### Reading a history
 
-A history is the chain of commits one `client_flow_id` accumulates across
+A history is the chain of commits one `history=` name accumulates across
 runs: each commit's parent is the previous head, in time order. A run
 ends in a `halted` commit (halt), the `$end` final-state commit (clean
 exit), or at its last save when it raised; the next run's commits pick

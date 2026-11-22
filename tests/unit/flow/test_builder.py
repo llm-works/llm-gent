@@ -144,6 +144,29 @@ class TestBuilderValidation:
         with pytest.raises(TypeError, match="reserved parameter 'halt'"):
             flow.call(bad)
 
+    def test_call_rejects_verbs_declaring_history_retention_or_extra(self) -> None:
+        """Each collides with a ``Flow.run`` argument of that name."""
+
+        @verb(role=ROLE_A)
+        async def takes_history(ctx: Context, *, history: str) -> None:
+            """Would never receive ``run(history=...)``."""
+
+        @verb(role=ROLE_A)
+        async def takes_retention(ctx: Context, retention: str) -> None:
+            """Would never receive ``run(retention=...)``."""
+
+        @verb(role=ROLE_A)
+        async def takes_extra(ctx: Context, *, extra: dict[str, Any]) -> None:
+            """Would never receive ``run(extra=...)``."""
+
+        for name, bad in [
+            ("history", takes_history),
+            ("retention", takes_retention),
+            ("extra", takes_extra),
+        ]:
+            with pytest.raises(TypeError, match=f"reserved parameter '{name}'"):
+                make_ff().create().call(bad)
+
     def test_rescue_before_any_call_raises(self) -> None:
         """.rescue requires a preceding node to attach to."""
         flow = make_ff().create()
