@@ -5,7 +5,8 @@ what each agent holds, and how flows run for agents.
 
 Status: the target design, built in steps. Implemented: the platform package (`Config`,
 `Factory`, `Context`) with the shared clients injected into traits, and agents built on a
-platform. Not yet: the platform's `SAIAFactory`, shared trait instances with per-agent state,
+platform; the scope a flow runs in as a fold of its declarations (section 6). Not yet: the
+platform's `SAIAFactory`, shared trait instances with per-agent state,
 `platform.with_trait_registry`, the flow/run split, and the API in section 8.
 
 ## 1. Goals
@@ -93,6 +94,23 @@ SAIA is not a trait: the platform's `SAIAFactory` builds one SAIA per role, with
 from the agent's directive and the tools from the agent's tool names. HTTP is not a trait: the
 runtime runs one server per worker, routed by agent name.
 
+### Conversations
+
+A SAIA holds configuration only (backend, tools and their executor, system prompt, guards) and is
+shared by every run that uses its role. A SAIA call keeps its messages in the conversation it is
+passed, or in a throwaway one; nothing of the call stays on the SAIA. Its tool executor is shared
+by every run too, so it holds no run's data: it is stateless, or keys per-run data by the ids the
+call carries, as a trait does.
+
+A conversation belongs to a call site in a run, not to the SAIA or the agent: a `map` over 100
+items in one run holds 100. A `Loop` takes the conversation from its step or, with a
+`ConversationFactory` wired, creates one per dispatch; a turn the run's halt paused is saved in
+the run's snapshot at the call's path and continued from there on resume. A conversation that
+continues across steps is kept in the run's state, so it is checkpointed with the run.
+
+The Conversation trait's per-agent history is the agent's own chat: one sequence per agent, for
+an agent that holds one conversation at a time.
+
 ### Thread-safety contract
 
 A trait instance is shared by every thread and event loop in its process:
@@ -177,11 +195,57 @@ Hooks follow the trait model: one shared instance, per-run data keyed by the eve
 identity read from the event. Events carry `ctx`, so a hook reads `ctx.agent.identity`: the "who"
 for provenance and authorization. Hooks are attached to the flow (`Flow.with_hooks`).
 
+### Scopes: the fold
+
+The scope in effect at a node (state, resources, checkpointer, checkpoint policy, hooks, shortcut
+regions) is the root scope folded along the path to it. Each descent has two parts: the node the
+walk goes through (a subflow call, a branch arm, an iterate pass, a map item) takes a step, then
+the flow it enters applies its declarations:
+
+```
+scope(node) = root · step(n₁) ⊕ decl(f₁) · step(n₂) ⊕ decl(f₂) · … · step(nₖ) ⊕ decl(fₖ)
+```
+
+`n₁ … nₖ` are the nodes and `f₁ … fₖ` the flows on the path from the root to `node`. A step moves
+the walk's position (snapshot path, chain context, ancestor chain) and may change the scope: it
+hands the flow its state, projected or the enclosing one, and a map item leaves its drain regions
+(a started item runs to its end).
+
+A declaration (`Decl`, read off a flow by `Flow.decl`) is a partial scope: what one flow declares
+for its subtree, any field unset. Each field defines its own `⊕`:
+
+| Combine | Fields | Rule |
+|---|---|---|
+| Override | checkpointer, checkpoint policy | the inner declaration wins; unset inherits |
+| Accumulate | shortcuts | the inner regions add to the enclosing ones |
+| Derive | resources, hooks | the inner value is the enclosing value's `child()`, then the flow's own |
+
+Two fields combine rules. Resources are overridden by key with the flow's own, then derived: the
+per-run children the flow asks for are made from what is in scope. Hooks derive, unless the flow
+replaces them: then its own hooks override the inherited ones.
+
+State is the exception to `⊕`: a subflow projects its state from the enclosing state on the way in
+and merges it back on the way out.
+
+The values are pure: the scope at a node is a function of the root scope, the structure and the
+path, the same rule at every depth, and rebuilt from the structure on resume. Entering a scope
+also has effects, kept apart from the values: the resources a flow runs with are restored from the
+checked-out snapshot and registered with the run while the flow walks, so its checkpoints hold
+their accounting. A field that fits none of the rules is either fixed for the whole run (as
+`extra` is) or needs a rule of its own named here.
+
 ## 7. Runtime
 
 Each agent is an appinfra `AsyncService` on its worker's `LoopHost`: one task per agent, no thread
 held while it waits. All agents in a worker share one platform `Context`; the hub maps an agent
 name to its runner.
+
+Measured with `tests/performance/test_flow_runs.py` at 10,000 and 100,000 concurrent runs of a
+small flow (a scripted model answering in 50-500 ms): one event loop handles about 2,200-2,800
+model calls per second at about 50 KB per run in flight, linear in the number of runs. SAIA and
+llm-infer take about three quarters of the CPU, the flow walk about an eighth. More event loops on
+threads of one process add no throughput under the GIL; more processes do, so a host scales by
+running one worker process per core.
 
 ## 8. API
 
