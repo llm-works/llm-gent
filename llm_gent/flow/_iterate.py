@@ -29,7 +29,6 @@ from ._executor import (
     _save_scope_commit,
 )
 from ._halt_observer import is_halt_signaled, note_halt
-from ._node_id import _descend_context
 from ._shortcut import is_fast_forward
 from .nodes import Interrupted
 from .state import State
@@ -37,7 +36,8 @@ from .state.snapshot import CARRY, PASS, UNTIL, ScopePath
 
 
 if TYPE_CHECKING:
-    from .nodes import _Iterate, _RunEnv
+    from ._scope import _RunEnv
+    from .nodes import _Iterate
 
 
 class IterateRunner:
@@ -85,7 +85,7 @@ class IterateRunner:
         child_state = await _enter_scope(env, path, self.it.state_fn, self.it.state_factory)
         with _live_scope(env, path, self.it.state_fn, child_state), _running(env, path, self):
             result = await self._loop(path, child_state)
-            await _merge_state(self.it.merge_fn, env.state, child_state)
+            await _merge_state(self.it.merge_fn, env.scope.state, child_state)
         return result
 
     def _take_saved_position(self, path: ScopePath) -> None:
@@ -146,7 +146,7 @@ class IterateRunner:
             result = await self._dispatch_body(child_state, self.carry, pass_path)
             self.carry, self.iteration, self.done = result, self.iteration + 1, None
             self.done = await self._until_holds(child_state)
-            if self.env.policy.on_iterate:
+            if self.env.scope.policy.on_iterate:
                 await _save_scope_commit(self.env, self.iteration, self.node_id, child_state, "ok")
             if self.done:
                 break
@@ -181,20 +181,5 @@ class IterateRunner:
         (``pass_path``), so scopes and cursors in different passes have
         different paths.
         """
-        env = self.env
-        return await self.it.body._run_as_subflow(
-            (prev_result,),
-            {},
-            state=child_state,
-            run=env.run,
-            parent_resources=env.resources,
-            parent_checkpointer=env.checkpointer,
-            parent_chain_context=_descend_context(self.node_id, "body"),
-            parent_ancestor_chain=env.ancestor_chain + (self.node_id,),
-            parent_extra=env.extra,
-            parent_policy=env.policy,
-            parent_path=pass_path,
-            parent_shortcuts=env.shortcuts,
-            parent_hooks=env.hooks,
-            parent_activity=env.activity_id,
-        )
+        child = self.env.descend(self.node_id, "body", pass_path, child_state)
+        return await self.it.body._run_as_subflow((prev_result,), {}, child)

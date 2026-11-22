@@ -17,7 +17,7 @@ Extracted from :mod:`._executor`. Two classes:
   strict/non-strict exception fan-out, then merges the child state
   back into the parent under a shared lock and fires the
   ``on_item_complete`` hook. Per-item merges serialize on
-  ``merge_lock`` so concurrent items don't race on ``env.state``.
+  ``merge_lock`` so concurrent items don't race on ``env.scope.state``.
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ from ._executor import (
     _save_scope_commit,
 )
 from ._halt_observer import is_halt_signaled
-from ._node_id import _descend_context
 from ._shortcut import is_fast_forward, leave_drains
 from ._validation import check_concurrency
 from .context import Context
@@ -46,7 +45,8 @@ from .state.snapshot import DONE, ITEMS, ScopePath
 
 
 if TYPE_CHECKING:
-    from .nodes import _Map, _RunEnv
+    from ._scope import _RunEnv
+    from .nodes import _Map
     from .state import State
 
 
@@ -197,12 +197,12 @@ class MapRunner:
         env = self.env
         return Context(
             role=None,
-            state=env.state,
+            state=env.scope.state,
             flow=env.runtime,
             traits=env.runtime._traits,
             halt=env.halt,
             extra=env.extra,
-            resources=env.resources,
+            resources=env.scope.resources,
             _env=env,
             _node_id=self.node_id,
         )
@@ -324,7 +324,7 @@ class MapItemRunner:
         if self._shortcut_skips():
             skipped = Skipped(item=self.item)
             self.owner.done[self.key] = _Done(skipped, merged=True)
-            await self._fire_on_item_complete(skipped, self._ctx(self.env.state))
+            await self._fire_on_item_complete(skipped, self._ctx(self.env.scope.state))
             return skipped
         try:
             outcome = await self._run_item()
@@ -361,8 +361,8 @@ class MapItemRunner:
         if not found:
             self.owner.done.pop(self.key, None)
             return await self.run()
-        factory = self.mp.state_factory or self.env.state._factory
-        child_state = _restore_scope_state(self.env.state, raw, factory)
+        factory = self.mp.state_factory or self.env.scope.state._factory
+        child_state = _restore_scope_state(self.env.scope.state, raw, factory)
         # Registered until it merges, like the scope of an item that runs.
         self.env.scopes.open(self.path, child_state)
         try:
@@ -377,7 +377,7 @@ class MapItemRunner:
         not asked the guard again: the guard admitted it before the
         checkpoint, and it continues where it was.
         """
-        item_ctx = self._ctx(self.env.state)
+        item_ctx = self._ctx(self.env.scope.state)
         guard = None if self.env.scopes.has_saved_under(self.path) else self.mp.guard
         try:
             child_state = await _enter_scope(
@@ -412,23 +412,15 @@ class MapItemRunner:
         are distinct in every snapshot.
         """
         env = self.env
-        return await self.body._run_as_subflow(
-            (self.item,),
-            {},
-            state=child_state,
-            run=env.run,
-            parent_resources=env.resources,
-            parent_checkpointer=env.checkpointer,
-            parent_chain_context=_descend_context(self.node_id, f"map:{self.key}"),
-            parent_ancestor_chain=env.ancestor_chain + (self.node_id,),
-            parent_extra=env.extra,
-            parent_policy=env.policy,
-            parent_path=self.path,
+        child = env.descend(
+            self.node_id,
+            f"map:{self.key}",
+            self.path,
+            child_state,
             # A started item runs to its end however its drain regions are cut.
-            parent_shortcuts=leave_drains(env.shortcuts),
-            parent_hooks=env.hooks,
-            parent_activity=env.activity_id,
+            shortcuts=leave_drains(env.scope.shortcuts),
         )
+        return await self.body._run_as_subflow((self.item,), {}, child)
 
     async def _on_success(
         self, result: Any, child_state: State[Any], item_ctx: Context[Any]
@@ -467,7 +459,7 @@ class MapItemRunner:
         except Exception as exc:
             self.owner.done.pop(self.key, None)
             if rollback:
-                _restore_state_data(self.env.state.data, rollback[0])
+                _restore_state_data(self.env.scope.state.data, rollback[0])
             if self.mp.on_error is not None:
                 await self._run_on_error(exc, item_ctx)
             failure = Failure(exception=exc, item=self.item)
@@ -488,16 +480,16 @@ class MapItemRunner:
         merge or the save fails.
         """
         async with self.merge_lock:
-            if self.env.policy.on_map_item and scoped:
+            if self.env.scope.policy.on_map_item and scoped:
                 # serialize_state_data passes a dict through as-is: copy it,
                 # or the merge mutates the snapshot the rollback restores from.
-                rollback.append(copy.deepcopy(serialize_state_data(self.env.state.data)))
-            await _merge_state(self.mp.merge_fn, self.env.state, child_state)
+                rollback.append(copy.deepcopy(serialize_state_data(self.env.scope.state.data)))
+            await _merge_state(self.mp.merge_fn, self.env.scope.state, child_state)
             self.owner.done[self.key].merged = True
             self.env.scopes.close(self.path)
-            if self.env.policy.on_map_item:
+            if self.env.scope.policy.on_map_item:
                 await _save_scope_commit(
-                    self.env, self.item_index, self.node_id, self.env.state, "ok"
+                    self.env, self.item_index, self.node_id, self.env.scope.state, "ok"
                 )
 
     async def _run_on_error(self, exc: BaseException, ctx: Context[Any]) -> None:
@@ -553,7 +545,7 @@ class MapItemRunner:
             traits=env.runtime._traits,
             halt=env.halt,
             extra=env.extra,
-            resources=env.resources,
+            resources=env.scope.resources,
             _env=env,
             _node_id=self.node_id,
         )
