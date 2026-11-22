@@ -344,7 +344,7 @@ class TestIterateExecution:
     @pytest.mark.asyncio
     async def test_deadline_stops_between_iterations(self, fake_clock: FakeClock) -> None:
         """A running body is not interrupted, but no new iteration starts past deadline."""
-        fake_clock.patch("llm_gent.flow._iterate")
+        fake_clock.patch("llm_gent.flow.run._iterate")
 
         @verb(role=ROLE_A)
         async def slow(ctx: Context, x: int) -> int:

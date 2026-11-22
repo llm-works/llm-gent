@@ -32,12 +32,12 @@ from typing import TYPE_CHECKING, Any
 
 from appinfra.cas import Tree, canonical_json
 
+from ..checkpoint import COMPLETE_TAG, is_commit_hash
+from ..history import History
+from ..state import State, restore_state_data, serialize_state_data
+from ..state.cas import FlowCommit
+from ..state.snapshot import RESOURCES, Snapshot, path_str
 from ._hook_points import checkpoint_written
-from .checkpoint import COMPLETE_TAG, is_commit_hash
-from .history import History
-from .state import State, restore_state_data, serialize_state_data
-from .state.cas import FlowCommit
-from .state.snapshot import RESOURCES, Snapshot, path_str
 
 
 if TYPE_CHECKING:

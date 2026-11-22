@@ -28,26 +28,27 @@ import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .._validation import check_concurrency
+from ..context import Context
+from ..nodes import Failure, Interrupted, ItemsFn, RestoredError, Skipped
+from ..state import serialize_state_data
+from ..state.snapshot import DONE, ITEMS, ScopePath
 from ._executor import (
     _enter_scope,
     _merge_state,
     _restore_scope_state,
     _running,
     _save_scope_commit,
+    run_as_subflow,
 )
 from ._halt_observer import is_halt_signaled
 from ._shortcut import is_fast_forward, leave_drains
-from ._validation import check_concurrency
-from .context import Context
-from .nodes import Failure, Interrupted, ItemsFn, RestoredError, Skipped
-from .state import serialize_state_data
-from .state.snapshot import DONE, ITEMS, ScopePath
 
 
 if TYPE_CHECKING:
-    from ._scope import _RunEnv
-    from .nodes import _Map
-    from .state import State
+    from ..nodes import _Map
+    from ..state import State
+    from .scope import _RunEnv
 
 
 _INTERRUPTED = object()
@@ -420,7 +421,7 @@ class MapItemRunner:
             # A started item runs to its end however its drain regions are cut.
             shortcuts=leave_drains(env.scope.shortcuts),
         )
-        return await self.body._run_as_subflow((self.item,), {}, child)
+        return await run_as_subflow(self.body, (self.item,), {}, child)
 
     async def _on_success(
         self, result: Any, child_state: State[Any], item_ctx: Context[Any]

@@ -31,7 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 from appinfra.cas import Blob, Repo, Store, Tree
 
-from .checkpoint import (
+from .._node_id import iter_flows
+from ..checkpoint import (
     COMPLETION_PRODUCER,
     END_NODE_PATH,
     HEAD_REF,
@@ -39,15 +40,15 @@ from .checkpoint import (
     ConcurrentWriteError,
     Retention,
 )
-from .state.cas import CommitMeta, FlowCommit, ProducedBy
-from .state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
-from .structure import Structure
+from ..flow import Flow
+from ..state.cas import CommitMeta, FlowCommit, ProducedBy
+from ..state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
+from ..structure import Structure
 
 
 if TYPE_CHECKING:
-    from .flow import Flow
-    from .state import State
-    from .state.cas import CommitOutcome, TraceRef
+    from ..state import State
+    from ..state.cas import CommitOutcome, TraceRef
 
 
 def check_checkpointers(root: Flow, history: str | None) -> None:
@@ -57,8 +58,6 @@ def check_checkpointers(root: Flow, history: str | None) -> None:
         RuntimeError: A flow declares ``with_checkpointer()`` and the run
             was given no ``history``: its saves would have nowhere to go.
     """
-    from ._node_id import iter_flows
-
     if history is not None:
         return
     declaring = next((f for f in iter_flows(root) if f._checkpointer is not None), None)

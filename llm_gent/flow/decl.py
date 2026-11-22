@@ -4,7 +4,7 @@
 """What one flow declares for its subtree: a scope with every field optional.
 
 A run applies it as the walk enters the flow (``Scope.child`` in
-:mod:`llm_gent.flow._scope`).
+:mod:`llm_gent.flow.run.scope`).
 """
 
 from __future__ import annotations

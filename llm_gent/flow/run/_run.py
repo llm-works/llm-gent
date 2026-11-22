@@ -18,17 +18,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .state.snapshot import ScopeRegistry
+from ..flow import Flow
+from ..state.snapshot import ScopeRegistry
 
 
 if TYPE_CHECKING:
     from appinfra.log import Logger
 
+    from ..hooks import RunInfo
     from ._checkpoint_ctx import CheckpointContext
     from ._halt_observer import HaltPoint
     from ._hook_points import RunHooks
-    from .flow import Flow
-    from .hooks import RunInfo
 
 
 @dataclass(eq=False)

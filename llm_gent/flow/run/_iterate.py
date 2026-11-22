@@ -20,6 +20,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
+from ..nodes import Interrupted
+from ..state import State
+from ..state.snapshot import CARRY, PASS, UNTIL, ScopePath
 from ._executor import (
     _check_until,
     _enter_scope,
@@ -27,17 +30,15 @@ from ._executor import (
     _merge_state,
     _running,
     _save_scope_commit,
+    run_as_subflow,
 )
 from ._halt_observer import is_halt_signaled, note_halt
 from ._shortcut import is_fast_forward
-from .nodes import Interrupted
-from .state import State
-from .state.snapshot import CARRY, PASS, UNTIL, ScopePath
 
 
 if TYPE_CHECKING:
-    from ._scope import _RunEnv
-    from .nodes import _Iterate
+    from ..nodes import _Iterate
+    from .scope import _RunEnv
 
 
 class IterateRunner:
@@ -182,4 +183,4 @@ class IterateRunner:
         different paths.
         """
         child = self.env.descend(self.node_id, "body", pass_path, child_state)
-        return await self.it.body._run_as_subflow((prev_result,), {}, child)
+        return await run_as_subflow(self.it.body, (prev_result,), {}, child)

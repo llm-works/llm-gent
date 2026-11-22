@@ -5,7 +5,7 @@
 
 A run's inputs travel through the walk in three ways:
 
-- fixed for the whole run: the :class:`~llm_gent.flow._run.Run` (halt,
+- fixed for the whole run: the :class:`~llm_gent.flow.run._run.Run` (halt,
   signals, history writer, live scopes) and ``extra``;
 - layered: the :class:`Scope` (state, resources, checkpointer, checkpoint
   policy, hooks, shortcut regions), derived at every flow the walk enters;
@@ -16,7 +16,8 @@ The scope in effect at a place is a fold over the path to it. A node the
 walk descends through (a subflow call, a branch arm, an iterate pass, a map
 item) moves the position and may change the scope: it hands the child its
 state, and a map item leaves its drain regions. The flow entered then
-applies its :class:`Decl` with :meth:`Scope.child`, one rule per field:
+applies its :class:`~llm_gent.flow.decl.Decl` with :meth:`Scope.child`, one
+rule per field:
 
 - override: the checkpointer and the checkpoint policy; the inner
   declaration wins, an unset one inherits;
@@ -32,29 +33,32 @@ applies its :class:`Decl` with :meth:`Scope.child`, one rule per field:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
 
+from .._node_id import _descend_context
+from ..checkpoint import CheckpointPolicy
+from ..decl import Decl
+from ..flow import Flow
+from ..hooks import Hooks, Where
+from ..nodes import Checkpointer
+from ..resource import NO_RESOURCES, ResourceKey
+from ..state import State
+from ..state.snapshot import ScopePath, ScopeRegistry
 from ._checkpoint_ctx import CheckpointContext
-from ._node_id import _descend_context
+from ._halt_observer import is_run_halted
 from ._run import Run
-from ._shortcut import ShortcutRun, region_run
-from .checkpoint import CheckpointPolicy
-from .decl import Decl
-from .hooks import Hooks, Where
-from .nodes import Checkpointer
-from .resource import NO_RESOURCES, ResourceKey
-from .state import State
-from .state.snapshot import ScopePath, ScopeRegistry
+from ._shortcut import ShortcutRun, is_draining, is_fast_forward, region_run, turn_abort
 
 
 if TYPE_CHECKING:
-    # flow.py imports this module to walk; Flow is only named in annotations here.
-    from .flow import Flow
+    from ..context import Context
+    from ..state.cas import CommitOutcome, FlowCommit
 
 
 @dataclass(frozen=True)
@@ -224,3 +228,37 @@ class _RunEnv:
         return dataclasses.replace(
             self, position=dataclasses.replace(self.position, activity_id=activity_id)
         )
+
+    # What a step reaches of its run, through ``ctx`` (the structure never imports the engine).
+
+    def fast_forward(self) -> bool:
+        """This place is in a region whose signal is set."""
+        return is_fast_forward(self)
+
+    def draining(self) -> bool:
+        """This place is in a started map item of a drain region whose signal is set."""
+        return is_draining(self)
+
+    def run_halted(self) -> bool:
+        """The run's halt is set."""
+        return is_run_halted(self)
+
+    def turn_abort(self) -> contextlib.AbstractAsyncContextManager[asyncio.Event | None]:
+        """What a Loop turn here aborts on, for the duration of the turn."""
+        return turn_abort(self)
+
+    def llm_call_hook(
+        self, ctx: Context[Any], conversation: Any, verb: str, role: str | None
+    ) -> Callable[[Any], Awaitable[None]] | None:
+        """An ``after_llm_call`` caller for one Loop call here, or ``None`` when no hook wants it."""
+        from ._hook_points import llm_call_hook
+
+        return llm_call_hook(ctx, conversation, verb, role)
+
+    async def save_commit(
+        self, node_id: str, state: State[Any], outcome: CommitOutcome
+    ) -> FlowCommit | None:
+        """Save the whole run as a commit from step ``node_id``; ``None`` when nothing saves here."""
+        from ._executor import _save_scope_commit
+
+        return await _save_scope_commit(self, 0, node_id, state, outcome)

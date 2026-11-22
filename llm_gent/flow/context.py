@@ -44,7 +44,6 @@ from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
-from ._shortcut import is_draining, is_fast_forward
 from .checkpoint import checkpoint_tag
 from .resource import COST, NO_RESOURCES, R, ResourceKey
 from .role import Role
@@ -313,7 +312,7 @@ class Context(Generic[T]):
         step stopping for the run's :attr:`halt` raises
         :class:`Interrupted` instead.) ``False`` outside a run.
         """
-        return self._env is not None and is_fast_forward(self._env)
+        return self._env is not None and self._env.fast_forward()
 
     @property
     def draining(self) -> bool:
@@ -324,7 +323,7 @@ class Context(Generic[T]):
         long LLM turn, a search — finishes what it has now and lets the
         item's remaining steps run. ``False`` outside a run.
         """
-        return self._env is not None and is_draining(self._env)
+        return self._env is not None and self._env.draining()
 
     @property
     def cost(self) -> CostTracker | None:
@@ -390,12 +389,11 @@ class Context(Generic[T]):
         node_id = self._node_id
         if env is None or node_id is None:
             return None
-        from ._executor import _save_scope_commit
-
-        commit = await _save_scope_commit(env, 0, node_id, self.state, "ok")
+        commit = await env.save_commit(node_id, self.state, "ok")
         if commit is None:
             return None
         if tag is not None:
             assert env.checkpoint_ctx is not None  # a commit was written to it
             await env.checkpoint_ctx.put_tag(tag, commit.id)
-        return commit.id
+        commit_id: str = commit.id
+        return commit_id

@@ -23,13 +23,13 @@ import contextlib
 import dataclasses
 import inspect
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from ._hook_points import StepHooks, checkpoint_written
-from ._scope import _RunEnv
-from .checkpoint import checkpoint_tag
-from .context import Context
-from .nodes import (
+from ..checkpoint import checkpoint_tag
+from ..context import Context
+from ..flow import Flow
+from ..hooks import Where
+from ..nodes import (
     UNSET,
     StateMerge,
     StateProject,
@@ -39,17 +39,16 @@ from .nodes import (
     _Map,
     _Node,
 )
-from .state import State, StateFactory
-from .state.cas import (
+from ..resource._runtime import run_resources
+from ..state import State, StateFactory
+from ..state.cas import (
     CommitOutcome,
     FlowCommit,
     TraceRef,
 )
-from .state.snapshot import ARM, Cursor, ScopePath
-
-
-if TYPE_CHECKING:
-    from .flow import Flow
+from ..state.snapshot import ARM, Cursor, ScopePath, path_str
+from ._hook_points import StepHooks, checkpoint_written
+from .scope import Position, _RunEnv
 
 
 def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context[Any]:
@@ -67,8 +66,6 @@ def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context
     (until predicates, on_error, on_item_complete) where no verb is
     running under a single node id.
     """
-    from .flow import Flow
-
     traits = env.runtime._traits
     if isinstance(target, Flow | _Branch | _Iterate | _Map):
         return Context(
@@ -149,8 +146,6 @@ async def _invoke_target(
     node_id: str,
 ) -> Any:
     """Dispatch a node's target: verb, subflow, or control-flow primitive."""
-    from .flow import Flow
-
     target = node.target
     if isinstance(target, Flow):
         return await _run_subflow(
@@ -295,8 +290,73 @@ async def _run_subflow(
     child_state = await _enter_scope(env, path, state_fn, state_factory)
     with _live_scope(env, path, state_fn, child_state):
         child = env.descend(node_id, "call", path, child_state)
-        result = await body._run_as_subflow(node_args, node_kwargs, child)
+        result = await run_as_subflow(body, node_args, node_kwargs, child)
         await _merge_state(merge_fn, env.scope.state, child_state)
+    return result
+
+
+async def run_as_subflow(
+    flow: Flow, args: tuple[Any, ...], kwargs: dict[str, Any], env: _RunEnv
+) -> Any:
+    """Walk ``flow`` from ``env``: the place the walk enters it at.
+
+    ``args`` / ``kwargs`` are the first node's inputs. They are passed
+    as two values, not spread, so an input named like one of the
+    framework's own parameters reaches the node instead of colliding
+    with it.
+
+    ``env`` is what the node entering the flow hands it
+    (:meth:`_RunEnv.descend`; the root scope at the top level): the
+    run, the scope with the node's state, the position. The flow's
+    declarations apply on top (:meth:`~llm_gent.flow.run.Scope.child`);
+    its resources register with the run while it walks
+    (:func:`~llm_gent.flow.resource._runtime.run_resources`).
+    """
+    if not flow._nodes:
+        raise RuntimeError(f"Flow {flow._name!r} has no nodes to run")
+    decl = flow.decl
+    with run_resources(
+        env.lg,
+        decl,
+        flow._name or "<anonymous>",
+        env.position.path,
+        env.scopes,
+        env.scope.resources,
+    ) as resources:
+        scope = env.scope.child(
+            decl,
+            resources=resources,
+            where=_entry_where(flow, env.position),
+            signals=env.run.signals,
+            lg=env.lg,
+        )
+        return await _walk(flow, dataclasses.replace(env, scope=scope), args, kwargs)
+
+
+def _entry_where(flow: Flow, position: Position) -> Where:
+    """Where ``flow`` starts in the run: the step that entered it and its snapshot path."""
+    path = position.ancestor_chain
+    return Where(
+        flow=flow,
+        node_id=path[-1] if path else None,
+        node_path=path,
+        scope_path=path_str(position.path),
+        step_name=flow._name or None,
+    )
+
+
+async def _walk(flow: Flow, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """Walk ``flow``'s chain under ``env``."""
+    from ._chain import Chain
+
+    label = flow._name or "<anonymous>"
+    is_subflow = env.runtime is not flow
+    env.lg.debug(
+        "starting flow run",
+        extra={"flow": label, "nodes": len(flow._nodes), "subflow": is_subflow},
+    )
+    result = await Chain(flow, env).walk(args, kwargs)
+    env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
     return result
 
 
@@ -492,7 +552,7 @@ async def _run_arm(
     path = env.owner_path(node_id)
     with _running(env, path, arm):
         child = env.descend(node_id, arm.arm, path, env.scope.state)
-        return await chosen._run_as_subflow((prev_result,), {}, child)
+        return await run_as_subflow(chosen, (prev_result,), {}, child)
 
 
 class _BranchArm:
@@ -543,8 +603,6 @@ async def _save_scope_commit(
 
 def _target_label(target: Any) -> str:
     """Return a human-readable label for a node target."""
-    from .flow import Flow
-
     if isinstance(target, Flow):
         return f"Flow({target.name!r})" if target.name else "Flow(<anonymous>)"
     if isinstance(target, _Branch):

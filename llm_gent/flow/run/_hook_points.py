@@ -21,10 +21,10 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from ._node_id import iter_flows
-from ._scope import _RunEnv
-from .context import Context
-from .hooks import (
+from .._node_id import iter_flows
+from ..context import Context
+from ..flow import Flow
+from ..hooks import (
     Actor,
     CheckpointEvent,
     Decision,
@@ -40,15 +40,16 @@ from .hooks import (
     TraceIds,
     Where,
 )
-from .nodes import Interrupted, _Branch, _Iterate, _Map, _Node, step_name
-from .state.cas import FlowCommit
-from .state.snapshot import path_str
-from .structure import Structure
+from ..loop import Loop
+from ..nodes import Interrupted, _Branch, _Iterate, _Map, _Node, step_name
+from ..state.cas import FlowCommit
+from ..state.snapshot import path_str
+from ..structure import Structure
+from .scope import _RunEnv
 
 
 if TYPE_CHECKING:
     from ._run import Run
-    from .flow import Flow
 
 
 def new_activity_id() -> str:
@@ -62,9 +63,6 @@ def _now() -> datetime:
 
 def step_kind(target: Any) -> StepKind:
     """What a chain step's target is."""
-    from .flow import Flow
-    from .loop import Loop
-
     if isinstance(target, Flow):
         return "subflow"
     if isinstance(target, _Branch):

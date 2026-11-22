@@ -12,7 +12,7 @@ when set, stops: with the cursor on that step when the halt interrupted
 it, past it when the step completed. The stopped chain stays registered
 at its position for the run's halt checkpoint.
 
-Constructed once per :meth:`Flow._run_as_subflow` entry:
+Constructed once per :func:`~._executor.run_as_subflow` entry:
 ``Chain(flow, env)`` eagerly computes ``self.ids`` from
 ``env.position.chain_context`` and the flow's nodes. Caller then invokes
 ``await chain.walk(args, kwargs)``.
@@ -22,20 +22,17 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from .._node_id import _compute_node_ids
+from ..flow import Flow
+from ..nodes import Interrupted
+from ..state.snapshot import CHAIN, TURN, path_str
 from ._executor import _build_ctx, _execute_node, _running, _step_inputs
 from ._halt_observer import is_halt_signaled, note_halt
 from ._hook_points import StepHooks
-from ._node_id import _compute_node_ids
 from ._shortcut import is_fast_forward
-from .nodes import Interrupted
-from .state.snapshot import CHAIN, TURN, path_str
-
-
-if TYPE_CHECKING:
-    from ._scope import _RunEnv
-    from .flow import Flow
+from .scope import _RunEnv
 
 
 Inputs = tuple[tuple[Any, ...], dict[str, Any]]
