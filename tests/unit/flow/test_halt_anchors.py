@@ -9,8 +9,6 @@
   halt commit keeps the cursor on it: the history is not complete, is
   never deleted under ``gc_on_success``, and resume runs that step again.
 - A map as the last step with items the halt stopped is interrupted.
-- A subflow's own ``.with_halt`` does not count as the run's halt: the
-  run completes normally.
 """
 
 from __future__ import annotations
@@ -36,14 +34,8 @@ def store() -> MemoryStore:
     return memory_store()
 
 
-def _with_halt(flow: Any, halt: asyncio.Event | None) -> Any:
-    return flow.with_halt(halt) if halt is not None else flow
-
-
-def _two_steps(
-    store: Any, name: str, halt: asyncio.Event | None, calls: list[str], mode: str
-) -> Any:
-    """``s1 → s2``; with ``halt``, s2 sets it — then completes (``finish``) or not (``bail``)."""
+def _two_steps(store: Any, name: str, calls: list[str], mode: str) -> Any:
+    """``s1 → s2``; in a run with a halt, s2 sets it, then completes (``finish``) or not (``bail``)."""
 
     @verb
     async def s1(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
@@ -53,13 +45,13 @@ def _two_steps(
     @verb
     async def s2(ctx: Context[dict[str, Any]], _p: Any = None) -> None:
         calls.append("s2")
-        if halt is not None:
-            halt.set()
+        if ctx.halt is not None:
+            ctx.halt.set()
             if mode == "bail":
                 raise Interrupted()
         ctx.state.data["s2"] = ctx.state.data.get("s2", 0) + 1
 
-    flow = (
+    return (
         Factory(make_test_logger())
         .create(state={})
         .with_checkpoint_store(store, name)
@@ -67,13 +59,13 @@ def _two_steps(
         .call(s1)
         .call(s2)
     )
-    return _with_halt(flow, halt)
 
 
 class TestHaltInLastStep:
     async def test_completed_last_step_finishes_the_run(self, store: MemoryStore) -> None:
         calls: list[str] = []
-        assert await _two_steps(store, "finish", asyncio.Event(), calls, "finish").run() is None
+        flow = _two_steps(store, "finish", calls, "finish")
+        assert await flow.run(halt=asyncio.Event()) is None
         history = History(store, "finish")
         assert await history.is_complete()
         head = await history.head()
@@ -82,7 +74,7 @@ class TestHaltInLastStep:
 
     async def test_interrupted_last_step_runs_again_on_resume(self, store: MemoryStore) -> None:
         calls: list[str] = []
-        await _two_steps(store, "bail", asyncio.Event(), calls, "bail").run()
+        await _two_steps(store, "bail", calls, "bail").run(halt=asyncio.Event())
         history = History(store, "bail")
         assert not await history.is_complete()
         head = await history.head()
@@ -91,7 +83,7 @@ class TestHaltInLastStep:
         assert (snapshot.root, snapshot.scopes) == ({"s1": 1}, {})
 
         calls.clear()
-        await _two_steps(store, "bail", None, calls, "bail").run(resume="latest")
+        await _two_steps(store, "bail", calls, "bail").run(resume="latest")
         assert calls == ["s2"]
         head = await history.head()
         assert head is not None and await history.is_complete()
@@ -113,10 +105,9 @@ class TestHaltInLastStep:
             .create(state={})
             .with_checkpoint_store(store, "gc-late-halt", retention="gc_on_success")
             .with_checkpointer()
-            .with_halt(halt)
             .call(s1)
         )
-        await flow.run()
+        await flow.run(halt=halt)
 
         history = History(store, "gc-late-halt")
         head = await history.head()
@@ -141,10 +132,9 @@ class TestHaltInLastStep:
             .create(state={})
             .with_checkpoint_store(store, "map-last")
             .with_checkpointer()
-            .with_halt(halt)
             .map(lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1)
         )
-        await flow.run()
+        await flow.run(halt=halt)
 
         assert ran == [1]
         history = History(store, "map-last")

@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository holds other refs, such as version-control records; otherwise the whole repository.
 - Breaking: `core.cost.CostTracker` is `core.cost.Tracker` and `core.llm.LLMCaller` is
   `core.llm.Caller`; the `llm_gent` package exports them as `CostTracker` and `LLMCaller`.
-- Breaking: a Flow is a structure that runs many times at once. Signals are `run(signals=)`
-  arguments. Removed: `Flow.with_signal`.
+- Breaking: a Flow is a structure that runs many times at once. Halt and signals are
+  `run(halt=, signals=)` arguments. Removed: `Flow.with_halt` / `with_signal`,
+  `Factory(halt=)`, `Factory.with_halt` and `Factory.create(halt=)`.
 
 ## [0.4.1] - 2026-11-01
 

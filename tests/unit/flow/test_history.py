@@ -32,11 +32,10 @@ async def _run(store: MemoryStore, name: str, *, halt_at: int | None = None) -> 
     await build_canonical_flow(
         make_test_logger(),
         max_iters=4,
-        halt=halt,
         halt_after_iteration=halt_at,
         store=store,
         client_flow_id=name,
-    ).run(resume="latest")
+    ).run(halt=halt, resume="latest")
 
 
 async def _all(history: History) -> list[FlowCommit]:

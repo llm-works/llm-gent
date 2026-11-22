@@ -39,9 +39,8 @@ Public surface:
 - :class:`Loop` — Flow-body primitive wrapping one ``saia.complete()``
   invocation with lifecycle hooks + halt bridging; CAS-native
   pause/resume via the framework halt-save site
-- :class:`LoopFactory` — app-scoped :class:`Loop` builder (mirrors the
-  flow :class:`Factory` for ``with_halt``); pair on the same halt event to
-  thread it across a mixed Loop-and-Flow tree
+- :class:`LoopFactory` — app-scoped :class:`Loop` builder; its
+  ``with_halt`` gives its Loops a halt of their own, over the run's
 - Checkpoints — ``Flow.with_checkpoint_store(store, client_flow_id)`` keeps
   a run's history in one repository of an :class:`appinfra.cas.Store`
   (``MemoryStore``, ``FileStore``, :class:`~llm_gent.flow.stores.PgStore`):

@@ -108,24 +108,25 @@ async def _snapshot(ctx: Context[CanonicalCounter], _prev: Any = None) -> dict[s
     return ctx.state.data.to_dict()
 
 
-def _make_halt_check(halt: asyncio.Event | None, halt_after_iteration: int | None) -> Any:
-    """Return a body-tail verb that fires ``halt`` once ``iterations_completed`` hits the threshold.
+def _make_halt_check(halt_after_iteration: int | None) -> Any:
+    """Return a body-tail verb that sets the run's halt once ``iterations_completed`` hits the threshold.
 
-    Both arguments are captured in the closure so a resume flow (called
-    with ``halt=None``) yields a no-op halt-check — the composition graph
-    stays identical between interrupt and resume, but only the interrupt
-    run's copy of the verb can trip halt.
+    The threshold is captured in the closure so a resume flow (built with
+    ``halt_after_iteration=None``) yields a no-op halt-check — the
+    composition graph stays identical between interrupt and resume, but
+    only the interrupt run's copy of the verb can trip the halt. A run
+    without a halt (``run(halt=...)`` not given) is never stopped.
     """
 
     @verb
     async def _halt_check(ctx: Context[CanonicalCounter], _prev: Any = None) -> Any:
-        """Fire the captured halt event once the iteration threshold is met; passthrough otherwise."""
+        """Set the run's halt once the iteration threshold is met; passthrough otherwise."""
         if (
-            halt is not None
+            ctx.halt is not None
             and halt_after_iteration is not None
             and ctx.state.data.iterations_completed >= halt_after_iteration
         ):
-            halt.set()
+            ctx.halt.set()
         return _prev
 
     return _halt_check
@@ -141,7 +142,6 @@ def build_canonical_flow(
     *,
     state: CanonicalCounter | None = None,
     max_iters: int = 5,
-    halt: asyncio.Event | None = None,
     halt_after_iteration: int | None = None,
     store: Store | None = None,
     client_flow_id: str = "canonical-multi-stage",
@@ -165,27 +165,18 @@ def build_canonical_flow(
         max_iters: Iterate cap (cumulative across resumes — the resume
             of an interrupt saved in pass N runs passes N to
             ``max_iters - 1``).
-        halt: Optional ambient halt event. When paired with
-            ``halt_after_iteration``, the body's last step sets it once
-            the threshold is reached; the run writes a halt checkpoint
-            at that step and stops, and the checkpoint is preserved
-            (halt-set exit skips the delete-on-success path). The step
-            passes its input through, so it can run again on resume.
-        halt_after_iteration: Iteration count at which to fire ``halt``.
-            Requires ``halt``.
+        halt_after_iteration: Iteration count at which the body's last
+            step sets the run's halt (pass one with ``run(halt=...)``);
+            the run writes a halt checkpoint at that step and stops, and
+            the checkpoint is preserved (halt-set exit skips the
+            delete-on-success path). The step passes its input through,
+            so it can run again on resume. ``None`` (default): no halt.
         store: Optional :class:`appinfra.cas.Store`. Wires
             ``.with_checkpoint_store(store, client_flow_id).with_checkpointer()`` when present.
         client_flow_id: Checkpoint history identifier.
         retention: What a fully successful run leaves of the history
             (:data:`~llm_gent.flow.checkpoint.Retention`).
-
-    Raises:
-        ValueError: When exactly one of ``halt`` / ``halt_after_iteration``
-            is provided (they must be paired or both absent).
     """
-    if (halt is None) != (halt_after_iteration is None):
-        raise ValueError("halt and halt_after_iteration must be provided together (or neither)")
-
     ff = Factory(lg, state_factory=TypeStateFactory(CanonicalCounter))
     flow = ff.create(state=state if state is not None else CanonicalCounter())
     if store is not None:
@@ -193,10 +184,8 @@ def build_canonical_flow(
         # Canonical fixture opts into per-iteration saves: the determinism
         # assertions and resume tests need each boundary as a resumable anchor.
         flow.with_checkpoint_policy(on_iterate=True)
-    if halt is not None:
-        flow.with_halt(halt)
 
-    halt_check = _make_halt_check(halt, halt_after_iteration)
+    halt_check = _make_halt_check(halt_after_iteration)
 
     def _body(f: Flow) -> None:
         f.call(_add_one).then(_times_two).then(_minus_three).then(halt_check)
@@ -251,15 +240,13 @@ async def assert_resume_determinism(
 
     baseline = await build_canonical_flow(lg, max_iters=max_iters).run()
 
-    halt = asyncio.Event()
     await build_canonical_flow(
         lg,
         max_iters=max_iters,
-        halt=halt,
         halt_after_iteration=halt_after_iteration,
         store=store,
         client_flow_id=client_flow_id,
-    ).run()
+    ).run(halt=asyncio.Event())
 
     resumed = await build_canonical_flow(
         lg,

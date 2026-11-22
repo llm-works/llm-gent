@@ -62,10 +62,9 @@ def _flow() -> Flow:
     return Flow(make_test_logger())
 
 
-def _store_flow(store: Any, halt: asyncio.Event | None = None) -> Flow:
+def _store_flow(store: Any) -> Flow:
     flow = Factory(make_test_logger()).create(state={})
-    flow.with_checkpoint_store(store, NAME).with_checkpointer()
-    return flow.with_halt(halt) if halt is not None else flow
+    return flow.with_checkpoint_store(store, NAME).with_checkpointer()
 
 
 @pytest.mark.asyncio
@@ -126,7 +125,7 @@ class TestRunsEachMemberOnTheInput:
             seen.append(ctx.halt)
 
         inner = make_ff().create().map([capture, capture])
-        await make_ff().create().with_halt(halt).call(inner).run()
+        await make_ff().create().call(inner).run(halt=halt)
         assert seen == [halt, halt]
 
 
@@ -248,7 +247,7 @@ class _SAIA:
         return _Result(paused=False, text=f"answer:{task}")
 
 
-def _judges(store: Any, halt: asyncio.Event | None, saia: _SAIA, ran: list[str]) -> Flow:
+def _judges(store: Any, saia: _SAIA, ran: list[str]) -> Flow:
     """A map over ``quick`` (a plain verb) and ``talk`` (a Loop turn), joined."""
     loop = Loop(ROLE, saia=saia, conversation_factory=_ConvFactory())
 
@@ -262,7 +261,7 @@ def _judges(store: Any, halt: asyncio.Event | None, saia: _SAIA, ran: list[str])
         ran.append("talk")
         return str((await loop(ctx, topic)).text)
 
-    return _store_flow(store, halt).map([quick, talk], aggregate=" + ".join)
+    return _store_flow(store).map([quick, talk], aggregate=" + ".join)
 
 
 @pytest.mark.asyncio
@@ -271,12 +270,12 @@ class TestResume:
         store = memory_store()
         halt = asyncio.Event()
         ran: list[str] = []
-        assert await _judges(store, halt, _SAIA(halt), ran).run("x") is HALTED
+        assert await _judges(store, _SAIA(halt), ran).run("x", halt=halt) is HALTED
         assert ran == ["quick", "talk"]
 
         ran.clear()
         saia = _SAIA(None)
-        result = await _judges(store, None, saia, ran).run("x", resume="latest")
+        result = await _judges(store, saia, ran).run("x", resume="latest")
         assert ran == ["talk"]
         assert saia.calls == [("x", ["half:x"], True)]
         assert result == "quick:x + answer:x"
@@ -297,18 +296,17 @@ class TestResume:
             vote.__qualname__ = vote.__name__ = f"voter_{name}"
             return vote
 
-        def build(with_halt: bool) -> Flow:
+        def build() -> Flow:
             voters = [voter("a", 2), voter("b", None), voter("c", None)]
             body = Flow(make_test_logger()).call(_next_pass)
             body.map(voters, aggregate=max, max_concurrency=1)
-            flow = _store_flow(store, halt if with_halt else None)
-            return flow.iterate(body, max_iters=3)
+            return _store_flow(store).iterate(body, max_iters=3)
 
-        assert await build(with_halt=True).run(0) is HALTED
+        assert await build().run(0, halt=halt) is HALTED
         assert [r for r in runs if r[0] == 2] == [(2, "a")]
 
         runs.clear()
-        assert await build(with_halt=False).run(resume="latest") == 3
+        assert await build().run(resume="latest") == 3
         assert [r for r in runs if r[0] == 2] == [(2, "b"), (2, "c")]
         assert sorted(r for r in runs if r[0] == 3) == [(3, "a"), (3, "b"), (3, "c")]
 
@@ -330,7 +328,8 @@ class TestResume:
             return run
 
         first = [member("a"), member("b", halts=True), member("c")]
-        assert await _store_flow(store, halt).map(first, max_concurrency=1).run(1) is HALTED
+        halted = _store_flow(store).map(first, max_concurrency=1)
+        assert await halted.run(1, halt=halt) is HALTED
         assert ran == ["a", "b"]
 
         ran.clear()
@@ -367,9 +366,9 @@ class TestResume:
             halt.set()
             raise Interrupted()
 
-        flow = _store_flow(store, halt).map([handle, stop])
+        flow = _store_flow(store).map([handle, stop])
         with pytest.raises(TypeError, match=r"cursor at '.*/done'"):
-            await flow.run()
+            await flow.run(halt=halt)
 
 
 @verb

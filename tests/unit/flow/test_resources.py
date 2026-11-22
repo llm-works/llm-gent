@@ -222,8 +222,8 @@ class TestPerRunChild:
 
 class TestAcrossResume:
     @staticmethod
-    def _flow(store: Any, counter: Counter, halt: asyncio.Event, arm: bool) -> Any:
-        """``a`` counts 1, ``b`` counts 2 and (armed) sets the halt, ``c`` counts 4."""
+    def _flow(store: Any, counter: Counter, arm: bool) -> Any:
+        """``a`` counts 1, ``b`` counts 2 and (armed) sets the run's halt, ``c`` counts 4."""
 
         @verb
         async def a(ctx: Context[Any], x: int) -> int:
@@ -234,7 +234,7 @@ class TestAcrossResume:
         async def b(ctx: Context[Any], x: int) -> int:
             ctx.resource(COUNTER).add(2)
             if arm:
-                halt.set()
+                ctx.halt.set()  # type: ignore[union-attr]
             return x
 
         @verb
@@ -249,7 +249,6 @@ class TestAcrossResume:
             .create(state={})
             .with_checkpoint_store(store, NAME)
             .with_checkpointer()
-            .with_halt(halt)
             .with_resource(COUNTER, counter)
             .call(a)
             .then(b)
@@ -258,16 +257,17 @@ class TestAcrossResume:
 
     async def test_the_count_comes_back_after_a_halt(self) -> None:
         store = memory_store()
-        assert await self._flow(store, Counter(), asyncio.Event(), True).run(1) is HALTED
+        assert await self._flow(store, Counter(), True).run(1, halt=asyncio.Event()) is HALTED
 
         fresh = Counter()
-        assert await self._flow(store, fresh, asyncio.Event(), False).run(resume="latest") == 1
+        flow = self._flow(store, fresh, False)
+        assert await flow.run(resume="latest", halt=asyncio.Event()) == 1
         assert fresh.restored == [{"count": 3}]
         assert fresh.count == 3 + 4
 
     async def test_a_finished_run_s_count_carries_into_the_next_run(self) -> None:
         store = memory_store()
-        await self._flow(store, Counter(), asyncio.Event(), False).run(1)
+        await self._flow(store, Counter(), False).run(1, halt=asyncio.Event())
         history = History(store, NAME)
         head = await history.head()
         assert head is not None and await history.is_complete()
@@ -275,7 +275,7 @@ class TestAcrossResume:
         assert snapshot.cursors[""][RESOURCES] == {"counter": {"count": 7}}
 
         fresh = Counter()
-        await self._flow(store, fresh, asyncio.Event(), False).run(1, resume="latest")
+        await self._flow(store, fresh, False).run(1, resume="latest", halt=asyncio.Event())
         assert fresh.count == 7 + 7
 
     async def test_one_every_flow_inherits_is_kept_once_at_the_top(self) -> None:
@@ -295,21 +295,15 @@ class TestAcrossResume:
                 return x
 
             inner = ff.create().call(b)
-            return (
-                ff.create(state={})
-                .with_checkpoint_store(store, NAME)
-                .with_halt(halt)
-                .call(tick)
-                .then(inner)
-            )
+            return ff.create(state={}).with_checkpoint_store(store, NAME).call(tick).then(inner)
 
-        assert await build(Counter(), arm=True).run(1) is HALTED
+        assert await build(Counter(), arm=True).run(1, halt=halt) is HALTED
         history = History(store, NAME)
         snapshot = await history.snapshot(await history.head())
         assert [p for p, c in snapshot.cursors.items() if RESOURCES in c] == [""]
 
         fresh = Counter()
-        assert await build(fresh, arm=False).run(1, resume="latest") == 1
+        assert await build(fresh, arm=False).run(1, resume="latest", halt=halt) == 1
         assert fresh.count == 3 + 2  # 3 restored, b again: 2
 
     async def test_items_halted_mid_way_resume_with_their_children_s_counts(self) -> None:
@@ -341,7 +335,6 @@ class TestAcrossResume:
                 .create(state={})
                 .with_checkpoint_store(store, NAME)
                 .with_checkpointer()
-                .with_halt(halt)
                 .with_resource(COUNTER, root)
                 .map(
                     lambda b: b.with_resource(COUNTER, per="item").call(first).then(second),
@@ -350,12 +343,13 @@ class TestAcrossResume:
             )
 
         root1 = Counter()
-        assert await build(root1, arm=True, before={}).run() is HALTED
+        assert await build(root1, arm=True, before={}).run(halt=halt) is HALTED
         assert root1.count == 3
 
         root2, before = Counter(), {}
         halt.clear()
-        assert await build(root2, arm=False, before=before).run(resume="latest") == [1, 2]
+        flow = build(root2, arm=False, before=before)
+        assert await flow.run(resume="latest", halt=halt) == [1, 2]
         assert before == {1: 1, 2: 2}  # each item's child came back with its own count
         # 3 restored at the root; the items' restored counts do not roll up again.
         assert root2.count == 3 + 20
@@ -389,10 +383,10 @@ class TestRestart:
     async def test_declared_resources_come_back_and_every_step_runs(self) -> None:
         store = memory_store()
         build = TestAcrossResume._flow
-        assert await build(store, Counter(), asyncio.Event(), True).run(1) is HALTED
+        assert await build(store, Counter(), True).run(1, halt=asyncio.Event()) is HALTED
 
         fresh = Counter()
-        assert await build(store, fresh, asyncio.Event(), False).run(1, restart="latest") == 1
+        assert await build(store, fresh, False).run(1, restart="latest", halt=asyncio.Event()) == 1
         assert fresh.restored == [{"count": 3}]
         assert fresh.count == 3 + 1 + 2 + 4  # a, b and c run again; resume would run c alone
 
@@ -415,20 +409,19 @@ class TestRestart:
                 .create(state={})
                 .with_checkpoint_store(store, NAME)
                 .with_checkpointer()
-                .with_halt(halt)
                 .with_resource(COUNTER, root)
                 .with_resource(COUNTER, per="run")
                 .call(step)
             )
 
-        assert await build(Counter(), arm=True, seen=[]).run(1) is HALTED
+        assert await build(Counter(), arm=True, seen=[]).run(1, halt=halt) is HALTED
         history = History(store, NAME)
         halted = await history.snapshot(await history.head())
         assert halted.cursors[""][RUN_RESOURCES] == {"counter": {"count": 5}}
 
         root, seen = Counter(), []
         halt.clear()
-        assert await build(root, arm=False, seen=seen).run(1, restart="latest") == 1
+        assert await build(root, arm=False, seen=seen).run(1, restart="latest", halt=halt) == 1
         assert seen == [0]  # the per-run child was not restored; resume would hand it 5
         assert root.restored == [{"count": 5}]
 
@@ -678,7 +671,7 @@ class TestFluentNames:
         ff = (
             Factory(make_test_logger(), flow_class=MyFlow)
             .with_resource_method("with_counter", COUNTER)
-            .with_halt(asyncio.Event())
+            .with_traits(None)
         )
         flow = ff.create()
         assert isinstance(flow, MyFlow) and hasattr(flow, "with_counter")

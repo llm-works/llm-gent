@@ -53,12 +53,11 @@ class _Counts:
 def _map_flow(
     store: Any,
     counts: _Counts,
-    halt: asyncio.Event,
     *,
     halt_at: int | None = None,
     items: list[int] | None = None,
 ) -> Any:
-    """Sequential ``.map(state=, merge=)``; the item equal to ``halt_at`` sets the halt."""
+    """Sequential ``.map(state=, merge=)``; the item equal to ``halt_at`` sets the run's halt."""
     values = [1, 2, 3] if items is None else items
 
     @verb
@@ -66,7 +65,7 @@ def _map_flow(
         counts.bodies.append(item)
         ctx.state.data["out"] = item * 10
         if item == halt_at:
-            halt.set()  # completes: the items after it do not start
+            ctx.halt.set()  # type: ignore[union-attr]  # completes: later items do not start
         return item * 10
 
     def items_fn(_prev: Any, _ctx: Any) -> list[int]:
@@ -85,7 +84,6 @@ def _map_flow(
         .create(state={})
         .with_checkpoint_store(store, "map")
         .with_checkpointer()
-        .with_halt(halt)
         .map(
             lambda b: b.call(work),
             items=items_fn,
@@ -106,21 +104,22 @@ def store() -> MemoryStore:
 class TestMapCursor:
     async def test_completed_items_do_not_run_or_merge_again(self, store: MemoryStore) -> None:
         first = _Counts()
-        assert await _map_flow(store, first, asyncio.Event(), halt_at=2).run() is HALTED
+        assert await _map_flow(store, first, halt_at=2).run(halt=asyncio.Event()) is HALTED
         assert (first.bodies, first.merges, first.completed) == ([1, 2], [10, 20], [1, 2])
 
         resumed = _Counts()
-        assert await _map_flow(store, resumed, asyncio.Event()).run(resume="latest") == 60
+        assert await _map_flow(store, resumed).run(resume="latest", halt=asyncio.Event()) == 60
         assert (resumed.bodies, resumed.merges, resumed.completed) == ([3], [30], [3])
         head = await History(store, "map").head()
         assert head is not None
         assert (await History(store, "map").snapshot(head)).root["merged"] == [10, 20, 30]
 
     async def test_items_are_not_evaluated_again(self, store: MemoryStore) -> None:
-        await _map_flow(store, _Counts(), asyncio.Event(), halt_at=1).run()
+        await _map_flow(store, _Counts(), halt_at=1).run(halt=asyncio.Event())
 
         resumed = _Counts()
-        result = await _map_flow(store, resumed, asyncio.Event(), items=[7, 8]).run(resume="latest")
+        flow = _map_flow(store, resumed, items=[7, 8])
+        result = await flow.run(resume="latest", halt=asyncio.Event())
         assert resumed.items_fn == 0
         assert resumed.bodies == [2, 3]
         assert result == 60
@@ -128,7 +127,7 @@ class TestMapCursor:
     async def test_halt_checkpoint_holds_items_and_completed_results(
         self, store: MemoryStore
     ) -> None:
-        await _map_flow(store, _Counts(), asyncio.Event(), halt_at=2).run()
+        await _map_flow(store, _Counts(), halt_at=2).run(halt=asyncio.Event())
 
         history = History(store, "map")
         head = await history.head()
@@ -142,11 +141,11 @@ class TestMapCursor:
 
     async def test_next_run_of_the_map_runs_all_items(self, store: MemoryStore) -> None:
         """Once the map completed, its cursor is gone: running it again runs every item."""
-        await _map_flow(store, _Counts(), asyncio.Event(), halt_at=2).run()
-        await _map_flow(store, _Counts(), asyncio.Event()).run(resume="latest")
+        await _map_flow(store, _Counts(), halt_at=2).run(halt=asyncio.Event())
+        await _map_flow(store, _Counts()).run(resume="latest", halt=asyncio.Event())
 
         again = _Counts()
-        assert await _map_flow(store, again, asyncio.Event()).run(resume="latest") == 60
+        assert await _map_flow(store, again).run(resume="latest", halt=asyncio.Event()) == 60
         assert again.bodies == [1, 2, 3]
 
 
@@ -215,7 +214,7 @@ class TestLenientParallelMap:
         """``.map(strict=False).guard(...)`` in parallel: halt mid-map, then resume."""
         ran: list[int] = []
 
-        def build(halt: asyncio.Event, halt_on: int | None) -> Any:
+        def build(halt_on: int | None) -> Any:
             @verb
             async def work(ctx: Context[dict[str, Any]], item: int) -> int:
                 await asyncio.sleep(0)
@@ -223,7 +222,7 @@ class TestLenientParallelMap:
                     raise Interrupted()
                 ran.append(item)
                 if item == halt_on:
-                    halt.set()
+                    ctx.halt.set()  # type: ignore[union-attr]
                 return item * 2
 
             return (
@@ -231,7 +230,6 @@ class TestLenientParallelMap:
                 .create(state={})
                 .with_checkpoint_store(store, "lenient-map")
                 .with_checkpointer()
-                .with_halt(halt)
                 .map(
                     lambda b: b.call(work),
                     items=lambda _p, _c: list(range(6)),
@@ -242,11 +240,11 @@ class TestLenientParallelMap:
                 .guard(lambda item, _ctx: item != 5)
             )
 
-        assert await build(asyncio.Event(), halt_on=1).run() is HALTED
+        assert await build(halt_on=1).run(halt=asyncio.Event()) is HALTED
         first = sorted(ran)
         ran.clear()
 
-        result = await build(asyncio.Event(), halt_on=None).run(resume="latest")
+        result = await build(halt_on=None).run(resume="latest", halt=asyncio.Event())
         assert not set(first) & set(ran), f"finished items ran again: {set(first) & set(ran)}"
         assert sorted(first + ran) == [0, 1, 2, 3, 4]  # item 5 is Skipped by the guard
         assert result == sum(i * 2 for i in range(5))
@@ -264,7 +262,6 @@ class _Seen:
 def _mixed_flow(
     store: Any,
     seen: _Seen,
-    halt: asyncio.Event,
     *,
     halt_at: int | None,
     strict: bool = False,
@@ -283,7 +280,7 @@ def _mixed_flow(
         if item == save_at:
             await ctx.checkpoint("saved")
         if item == halt_at:
-            halt.set()  # completes: the items after it do not start
+            ctx.halt.set()  # type: ignore[union-attr]  # completes: later items do not start
         return item * 10
 
     def guard(item: int, _ctx: Any) -> bool:
@@ -299,7 +296,6 @@ def _mixed_flow(
         .create(state={})
         .with_checkpoint_store(store, "mixed")
         .with_checkpointer()
-        .with_halt(halt)
         .map(
             lambda b: b.call(work),
             items=lambda _p, _c: [1, 2, 3, 4],
@@ -317,12 +313,12 @@ class TestFailedAndSkippedItemsStayDone:
 
     async def test_they_do_not_run_again_and_keep_their_outcome(self, store: MemoryStore) -> None:
         first = _Seen()
-        assert await _mixed_flow(store, first, asyncio.Event(), halt_at=3).run() is HALTED
+        assert await _mixed_flow(store, first, halt_at=3).run(halt=asyncio.Event()) is HALTED
         assert (first.bodies, first.guards) == ([1, 3], [1, 2, 3])
 
         resumed = _Seen()
-        result = await _mixed_flow(store, resumed, asyncio.Event(), halt_at=None).run(
-            resume="latest"
+        result = await _mixed_flow(store, resumed, halt_at=None).run(
+            resume="latest", halt=asyncio.Event()
         )
         assert (resumed.bodies, resumed.guards) == ([4], [4])
         assert (resumed.errors, resumed.completed) == ([], [4])
@@ -338,7 +334,7 @@ class TestFailedAndSkippedItemsStayDone:
         assert rest == [30, 40]
 
     async def test_the_halt_checkpoint_records_them(self, store: MemoryStore) -> None:
-        await _mixed_flow(store, _Seen(), asyncio.Event(), halt_at=3).run()
+        await _mixed_flow(store, _Seen(), halt_at=3).run(halt=asyncio.Event())
 
         history = History(store, "mixed")
         head = await history.head()
@@ -352,9 +348,9 @@ class TestFailedAndSkippedItemsStayDone:
 
     async def test_a_restored_failure_is_stored_again_unchanged(self, store: MemoryStore) -> None:
         """A checkpoint the resumed run takes holds the first run's failure as it was."""
-        await _mixed_flow(store, _Seen(), asyncio.Event(), halt_at=3).run()
-        await _mixed_flow(store, _Seen(), asyncio.Event(), halt_at=None, save_at=4).run(
-            resume="latest"
+        await _mixed_flow(store, _Seen(), halt_at=3).run(halt=asyncio.Event())
+        await _mixed_flow(store, _Seen(), halt_at=None, save_at=4).run(
+            resume="latest", halt=asyncio.Event()
         )
 
         history = History(store, "mixed")
@@ -365,9 +361,9 @@ class TestFailedAndSkippedItemsStayDone:
 
     async def test_the_computed_cap_is_computed_again_on_resume(self, store: MemoryStore) -> None:
         first = _Seen()
-        await _mixed_flow(store, first, asyncio.Event(), halt_at=3).run()
+        await _mixed_flow(store, first, halt_at=3).run(halt=asyncio.Event())
         resumed = _Seen()
-        await _mixed_flow(store, resumed, asyncio.Event(), halt_at=None).run(resume="latest")
+        await _mixed_flow(store, resumed, halt_at=None).run(resume="latest", halt=asyncio.Event())
         assert first.caps == resumed.caps == [[1, 2, 3, 4]]
 
     async def test_a_strict_failure_runs_again(self, store: MemoryStore) -> None:
@@ -377,14 +373,14 @@ class TestFailedAndSkippedItemsStayDone:
         commit holds no record of item 1.
         """
         seen = _Seen()
-        flow = _mixed_flow(store, seen, asyncio.Event(), halt_at=None, strict=True)
+        flow = _mixed_flow(store, seen, halt_at=None, strict=True)
         flow.with_checkpoint_policy(on_map_item=True)
         with pytest.raises(ValueError, match="bad item 1"):
             await flow.run()
         assert seen.bodies == [1, 3, 4]
 
         resumed = _Seen()
-        flow = _mixed_flow(store, resumed, asyncio.Event(), halt_at=None, strict=True)
+        flow = _mixed_flow(store, resumed, halt_at=None, strict=True)
         with pytest.raises(ValueError, match="bad item 1"):
             await flow.with_checkpoint_policy(on_map_item=True).run(resume="latest")
         assert resumed.bodies == [1]
@@ -396,13 +392,13 @@ class TestFailedAndSkippedItemsStayDone:
         """A merge that raises in a ``strict=False`` map: the item failed, and stays failed."""
         bodies: list[int] = []
 
-        def build(halt: asyncio.Event, halt_at: int | None) -> Any:
+        def build(halt_at: int | None) -> Any:
             @verb
             async def work(ctx: Context[dict[str, Any]], item: int) -> int:
                 bodies.append(item)
                 ctx.state.data["out"] = item
                 if item == halt_at:
-                    halt.set()
+                    ctx.halt.set()  # type: ignore[union-attr]
                 return item
 
             def merge(parent: dict[str, Any], child: dict[str, Any]) -> None:
@@ -415,7 +411,6 @@ class TestFailedAndSkippedItemsStayDone:
                 .create(state={})
                 .with_checkpoint_store(store, "merge-fails")
                 .with_checkpointer()
-                .with_halt(halt)
                 .map(
                     lambda b: b.call(work),
                     items=lambda _p, _c: [1, 2, 3],
@@ -426,9 +421,9 @@ class TestFailedAndSkippedItemsStayDone:
                 )
             )
 
-        assert await build(asyncio.Event(), halt_at=2).run() is HALTED
+        assert await build(halt_at=2).run(halt=asyncio.Event()) is HALTED
         bodies.clear()
-        failure, *rest = await build(asyncio.Event(), halt_at=None).run(resume="latest")
+        failure, *rest = await build(halt_at=None).run(resume="latest", halt=asyncio.Event())
         assert bodies == [3]
         assert isinstance(failure, Failure)
         assert isinstance(failure.exception, RestoredError)
@@ -436,7 +431,7 @@ class TestFailedAndSkippedItemsStayDone:
         assert rest == [2, 3]
 
 
-def _guarded_flow(store: Any, halt: asyncio.Event, admit: bool, seen: _Seen) -> Any:
+def _guarded_flow(store: Any, admit: bool, seen: _Seen) -> Any:
     """Items 1-2, one at a time, each ``first`` then ``second``; item 2's ``first`` sets the halt.
 
     The guard admits an item while ``admit`` holds; item 2's ``first``
@@ -449,7 +444,7 @@ def _guarded_flow(store: Any, halt: asyncio.Event, admit: bool, seen: _Seen) -> 
         seen.bodies.append(item)
         if item == 2:
             gate["admit"] = False
-            halt.set()  # completes: the chain stops before second
+            ctx.halt.set()  # type: ignore[union-attr]  # completes: the chain stops before second
         return item
 
     @verb
@@ -466,7 +461,6 @@ def _guarded_flow(store: Any, halt: asyncio.Event, admit: bool, seen: _Seen) -> 
         .create(state={})
         .with_checkpoint_store(store, "guarded")
         .with_checkpointer()
-        .with_halt(halt)
         .map(lambda b: b.call(first).then(second), items=lambda *_: [1, 2], max_concurrency=1)
         .guard(guard)
     )
@@ -476,11 +470,12 @@ class TestAStartedItem:
     async def test_is_not_asked_the_guard_again(self, store: MemoryStore) -> None:
         """The guard admitted it before the halt; on resume it continues though the guard would refuse."""
         first = _Seen()
-        assert await _guarded_flow(store, asyncio.Event(), True, first).run() is HALTED
+        assert await _guarded_flow(store, True, first).run(halt=asyncio.Event()) is HALTED
         assert (first.guards, first.bodies, first.completed) == ([1, 2], [1, 2], [1])
 
         resumed = _Seen()
-        result = await _guarded_flow(store, asyncio.Event(), False, resumed).run(resume="latest")
+        flow = _guarded_flow(store, False, resumed)
+        result = await flow.run(resume="latest", halt=asyncio.Event())
         assert (resumed.guards, resumed.bodies, resumed.completed) == ([], [], [2])
         assert result == [10, 20]
 

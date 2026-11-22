@@ -22,11 +22,10 @@ async def _halt_at_two(store: FileStore) -> None:
     await build_canonical_flow(
         make_test_logger(),
         max_iters=4,
-        halt=asyncio.Event(),
         halt_after_iteration=2,
         store=store,
         client_flow_id="xproc",
-    ).run()
+    ).run(halt=asyncio.Event())
 
 
 async def test_matches_in_process_resume(tmp_path: Path) -> None:

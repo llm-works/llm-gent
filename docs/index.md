@@ -235,9 +235,10 @@ run's state is in that commit. A halted history is never marked
 complete. A run whose last step completed returns that step's result —
 `None` included — even when the halt was set during it: it finished.
 
-A run has one halt, set with `.with_halt(event)` on its top-level flow;
-every subflow observes it. `run()` raises when a nested flow sets a
-different event.
+A run has one halt, passed as `run(halt=event)`; every flow of the run
+observes it as `ctx.halt`. The halt belongs to the run, not the flow:
+one flow run several times at once takes one event per run, and setting
+it pauses that run alone.
 
 A map's cursor is its item list — resolved once, never evaluated again
 on resume — and its done items with their results. On resume a
@@ -349,12 +350,11 @@ signal the run was not given:
 loop = ff.create().iterate(body, max_iters=20).with_shortcut("cut")
 flow = (
     ff.create(...)
-    .with_halt(pause)
     .call(prepare)
     .then(loop)  # the region: the cut ends it
     .then(finish)  # runs as usual after it
 )
-await flow.run(signals={"cut": cut})
+await flow.run(halt=pause, signals={"cut": cut})
 ```
 
 While the signal is set, the region and every flow under it
@@ -401,7 +401,7 @@ different signals may nest. A signal set inside a step, without
 awaiting, is seen at that step's boundary.
 
 A cut is not a halt: it writes no checkpoint, and `ctx.halt` — the
-run's halt, `None` without `.with_halt(...)` — stays unset. A step that
+run's halt, `None` without `run(halt=...)` — stays unset. A step that
 stops for the halt raises `Interrupted` and runs again on resume; a
 step that ends early on a cut returns. Setting `ctx.halt` from a step
 pauses the whole run (a stop flag stored outside the process, say).

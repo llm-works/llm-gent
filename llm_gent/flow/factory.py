@@ -18,7 +18,6 @@ Two factories live here, at different scopes:
 
 from __future__ import annotations
 
-import asyncio
 import copy
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, overload
 
@@ -107,7 +106,6 @@ class Factory(Generic[F]):
         saia_factory: SAIAFactory | None = None,
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
-        halt: asyncio.Event | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
         checkpoint_store: Store | None = None,
@@ -122,7 +120,6 @@ class Factory(Generic[F]):
         saia_factory: SAIAFactory | None = None,
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
-        halt: asyncio.Event | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
         checkpoint_store: Store | None = None,
@@ -136,7 +133,6 @@ class Factory(Generic[F]):
         saia_factory: SAIAFactory | None = None,
         state: Any = UNSET,
         traits: TraitRegistry | None = None,
-        halt: asyncio.Event | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
         checkpoint_store: Store | None = None,
@@ -156,10 +152,6 @@ class Factory(Generic[F]):
                 built by this factory. Verbs reach mounted capabilities via
                 ``ctx.traits``. ``None`` yields flows with ``ctx.traits is
                 None``.
-            halt: Optional :class:`asyncio.Event` attached via
-                :meth:`Flow.with_halt` on every built flow. Wire once at
-                the factory to thread the same halt handle through an
-                entire agent shape.
             cost_tracker: Optional :class:`CostTracker` attached via
                 :meth:`Flow.with_cost_tracker` on every built flow. Wire once at
                 the factory to thread the same cost tracker through an
@@ -187,7 +179,6 @@ class Factory(Generic[F]):
         self._saia_factory = saia_factory
         self._state = state
         self._traits = traits
-        self._halt = halt
         self._cost_tracker = cost_tracker
         self._state_factory = state_factory
         self._checkpoint_store = checkpoint_store
@@ -202,10 +193,12 @@ class Factory(Generic[F]):
         *,
         state: Any = UNSET,
         client_flow_id: str | None = None,
-        halt: asyncio.Event | None = None,
         checkpointer: tuple[Store, str] | None = None,
     ) -> F:
         """Return a :class:`Flow` (``flow_class``) using this factory's captured environment.
+
+        The run's halt is not the flow's: pass it to :meth:`Flow.run`
+        ``halt=``.
 
         Args:
             name: Optional identifier — used in error messages and traces.
@@ -225,12 +218,6 @@ class Factory(Generic[F]):
                 when the factory carries a store. Ignored when
                 ``checkpointer=`` is passed (that argument carries its
                 own id).
-            halt: Per-Flow halt event override. Wires
-                :meth:`Flow.with_halt` on the built flow. ``None``
-                (default) falls back to the factory's captured
-                ``halt=``; passing an event here supersedes it. Use to
-                give each concurrent flow instance its own halt handle
-                while keeping one shared factory.
             checkpointer: Per-Flow ``(store, client_flow_id)`` pair —
                 atomically binds both via :meth:`Flow.with_checkpoint_store`.
                 Supersedes the factory's captured ``checkpoint_store`` and
@@ -249,9 +236,6 @@ class Factory(Generic[F]):
             traits=self._traits,
             state_factory=self._state_factory,
         )
-        effective_halt = halt if halt is not None else self._halt
-        if effective_halt is not None:
-            flow.with_halt(effective_halt)
         if self._cost_tracker is not None:
             flow.with_cost_tracker(self._cost_tracker)
         for key, value in self._resources.items():
@@ -343,7 +327,7 @@ class Factory(Generic[F]):
     def with_saia_factory(self, saia_factory: SAIAFactory) -> Factory[F]:
         """Return a new :class:`Factory` whose :class:`SAIAFactory` is swapped.
 
-        Every other captured slot (``lg``, ``state``, ``traits``, ``halt``,
+        Every other captured slot (``lg``, ``state``, ``traits``,
         ``cost_tracker``, ``state_factory``, ``checkpoint_store``, the flow
         class, resources and resource methods) carries over. Useful for
         subsystems that share the app's logger but need a different saia
@@ -358,15 +342,6 @@ class Factory(Generic[F]):
         :meth:`with_saia_factory` for the trait dimension.
         """
         return self._replace(traits=traits)
-
-    def with_halt(self, event: asyncio.Event) -> Factory[F]:
-        """Return a new :class:`Factory` whose halt event is swapped.
-
-        Every other captured slot carries over. Every subsequently created
-        :class:`Flow` gets ``event`` attached via :meth:`Flow.with_halt` —
-        one wiring reaches every layer that observes ``ctx.halt``.
-        """
-        return self._replace(halt=event)
 
     def with_cost_tracker(self, tracker: CostTracker) -> Factory[F]:
         """Return a new :class:`Factory` whose cost tracker is swapped.

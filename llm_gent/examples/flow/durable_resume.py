@@ -335,7 +335,7 @@ def _extract_summary(result: Any) -> str:
     return str(getattr(result, "output", "") or "")
 
 
-def _build_flow(lg: Logger, ff: Factory[Flow], halt: asyncio.Event) -> Flow:
+def _build_flow(lg: Logger, ff: Factory[Flow]) -> Flow:
     """Assemble the demo flow: iterate over topics, summarize each.
 
     A single :meth:`Flow.iterate` drains the ``pending`` queue
@@ -356,7 +356,6 @@ def _build_flow(lg: Logger, ff: Factory[Flow], halt: asyncio.Event) -> Flow:
     flow = ff.create(
         "durable-resume-demo",
         state=Digest(pending=list(TOPICS)),
-        halt=halt,
         client_flow_id=CLIENT_FLOW_ID,
     )
     flow.iterate(
@@ -406,7 +405,7 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     )
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
-    result = await _build_flow(lg, ff, halt).run(resume="latest" if resuming else "off")
+    result = await _build_flow(lg, ff).run(halt=halt, resume="latest" if resuming else "off")
     # A halted run returns HALTED; its state is in the halt checkpoint.
     halted = result is HALTED
     final = await _halted_state(history) if halted else result

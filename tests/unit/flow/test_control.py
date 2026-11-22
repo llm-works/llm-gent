@@ -893,9 +893,9 @@ class TestMapOnItemComplete:
             """Record outcomes; no item completes."""
             observed.append(outcome)
 
-        flow = make_ff().create().with_halt(halt)
+        flow = make_ff().create()
         flow.call(_identity).map(_double).on_item_complete(hook)
-        assert await flow.run([1, 2, 3]) is HALTED
+        assert await flow.run([1, 2, 3], halt=halt) is HALTED
         assert observed == []
 
     @pytest.mark.asyncio
@@ -1196,12 +1196,12 @@ class TestMapComputedConcurrency:
 
 
 # -----------------------------------------------------------------------------
-# Flow.with_halt — ambient halt reaches map and iterate boundaries
+# run(halt=) — the run's halt reaches map and iterate boundaries
 # -----------------------------------------------------------------------------
 
 
-class TestFlowWithHalt:
-    """`Flow.with_halt(event)` threads ``ctx.halt`` through every node.
+class TestRunHalt:
+    """``Flow.run(halt=event)`` threads ``ctx.halt`` through every node.
 
     Once the event fires, a map runs no more queued items, an iterate runs
     no more passes, and verbs may observe ``ctx.halt`` directly. A run the
@@ -1221,13 +1221,13 @@ class TestFlowWithHalt:
         async def nothing(_ctx: Context, x: Any) -> None:
             return None
 
-        halted = make_ff().create().with_halt(halt).call(stop).then(nothing)
-        assert await halted.run(1) is HALTED
+        halted = make_ff().create().call(stop).then(nothing)
+        assert await halted.run(1, halt=halt) is HALTED
         assert repr(HALTED) == "HALTED"
 
         halt.clear()
-        finished = make_ff().create().with_halt(halt).call(_identity).then(nothing)
-        assert await finished.run(1) is None
+        finished = make_ff().create().call(_identity).then(nothing)
+        assert await finished.run(1, halt=halt) is None
 
     @pytest.mark.asyncio
     async def test_a_halt_set_during_the_last_step_does_not_stop_the_run(self) -> None:
@@ -1239,8 +1239,8 @@ class TestFlowWithHalt:
             halt.set()
             return x + 1
 
-        flow = make_ff().create().with_halt(halt).call(_identity).then(last)
-        assert await flow.run(1) == 2
+        flow = make_ff().create().call(_identity).then(last)
+        assert await flow.run(1, halt=halt) == 2
 
     @pytest.mark.asyncio
     async def test_pre_set_halt_skips_every_map_item(self) -> None:
@@ -1255,9 +1255,9 @@ class TestFlowWithHalt:
             ran.append(x)
             return x
 
-        flow = make_ff().create().with_halt(halt)
+        flow = make_ff().create()
         flow.call(_identity).map(track)
-        assert await flow.run([1, 2, 3]) is HALTED
+        assert await flow.run([1, 2, 3], halt=halt) is HALTED
         assert ran == []
 
     @pytest.mark.asyncio
@@ -1274,9 +1274,9 @@ class TestFlowWithHalt:
                 halt.set()
             return x * 10
 
-        flow = make_ff().create().with_halt(halt)
+        flow = make_ff().create()
         flow.call(_identity).map(track, max_concurrency=1)
-        assert await flow.run([1, 2, 3, 4]) is HALTED
+        assert await flow.run([1, 2, 3, 4], halt=halt) is HALTED
         assert ran == [1]
 
     @pytest.mark.asyncio
@@ -1294,18 +1294,18 @@ class TestFlowWithHalt:
             """Record any child payload that leaks past the halt."""
             merged.append(child["payload"])
 
-        flow = make_ff().create(state={}).with_halt(halt)
+        flow = make_ff().create(state={})
         flow.call(_identity).map(_double, state=project, merge=merge)
-        await flow.run([1, 2, 3])
+        await flow.run([1, 2, 3], halt=halt)
         assert merged == []
 
     @pytest.mark.asyncio
     async def test_halt_unset_leaves_all_items_processed(self) -> None:
         """An event that never fires is a no-op — every item runs to completion."""
         halt = asyncio.Event()  # never set
-        flow = make_ff().create().with_halt(halt)
+        flow = make_ff().create()
         flow.call(_identity).map(_double)
-        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+        assert await flow.run([1, 2, 3], halt=halt) == [2, 4, 6]
 
     @pytest.mark.asyncio
     async def test_halt_stops_iterate_between_iterations(self) -> None:
@@ -1321,10 +1321,10 @@ class TestFlowWithHalt:
                 halt.set()
             return n + 1
 
-        flow = make_ff().create().with_halt(halt)
+        flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(tick), max_iters=10)
         # The pass that set the halt completes; the iterate stops before the next.
-        assert await flow.run(1) is HALTED
+        assert await flow.run(1, halt=halt) is HALTED
         assert ticks == [1, 2]
 
     @pytest.mark.asyncio
@@ -1340,14 +1340,14 @@ class TestFlowWithHalt:
             seen.append(ctx.halt is not None and ctx.halt.is_set())
             return x
 
-        flow = make_ff().create().with_halt(halt)
+        flow = make_ff().create()
         flow.call(check)
-        await flow.run(42)
+        await flow.run(42, halt=halt)
         assert seen == [True]
 
     @pytest.mark.asyncio
-    async def test_subflow_inherits_outer_halt(self) -> None:
-        """A subflow without its own halt inherits the outer runtime's event."""
+    async def test_subflow_sees_the_run_s_halt(self) -> None:
+        """Every flow of the run sees the run's halt."""
         halt = asyncio.Event()  # NOT set — inner flow runs and observes ctx.halt
         observed: list[asyncio.Event | None] = []
 
@@ -1360,51 +1360,16 @@ class TestFlowWithHalt:
         inner = make_ff().create()
         inner.call(capture_halt)
 
-        outer = make_ff().create().with_halt(halt)
+        outer = make_ff().create()
         outer.call(_identity).map(inner)
-        results = await outer.run([1, 2, 3])
-        # Inner verbs ran (no short-circuit) and inherited the outer halt.
+        results = await outer.run([1, 2, 3], halt=halt)
+        # Inner verbs ran (no short-circuit) and saw the run's halt.
         assert results == [2, 4, 6]
         assert observed == [halt, halt, halt]
 
     @pytest.mark.asyncio
-    async def test_nested_flow_with_a_halt_of_its_own_raises_at_run_start(self) -> None:
-        """A run has one halt, on its top-level flow."""
-        ran: list[int] = []
-
-        @verb(role=ROLE_A)
-        async def capture(ctx: Context, x: int) -> int:
-            ran.append(x)
-            return x
-
-        child = make_ff().create().call(capture)
-        middle = make_ff().create().with_halt(asyncio.Event()).call(child)
-        outer = make_ff().create().with_halt(asyncio.Event()).call(middle)
-
-        with pytest.raises(RuntimeError, match="a run has one halt"):
-            await outer.run(1)
-        assert ran == []
-
-    @pytest.mark.asyncio
-    async def test_nested_flows_carrying_the_run_halt_observe_it(self) -> None:
-        """Flows a Factory(halt=...) builds all carry the same event: that is the run's."""
-        halt = asyncio.Event()
-        ff = make_ff().with_halt(halt)
-        observed: list[asyncio.Event | None] = []
-
-        @verb(role=ROLE_A)
-        async def capture(ctx: Context, x: int) -> int:
-            observed.append(ctx.halt)
-            return x
-
-        middle = ff.create().call(ff.create().call(capture))
-        await ff.create().call(middle).run(1)
-        assert observed == [halt]
-
-    @pytest.mark.asyncio
     async def test_dispatch_accepts_halt_parameter(self) -> None:
-        """dispatch(halt=event) passes that event instead of the flow's default."""
-        flow_halt = asyncio.Event()
+        """dispatch(halt=event) passes that event; without it there is no run, so no halt."""
         caller_halt = asyncio.Event()
         observed: list[asyncio.Event | None] = []
 
@@ -1414,12 +1379,12 @@ class TestFlowWithHalt:
             observed.append(ctx.halt)
             return x
 
-        flow = make_ff().create().with_halt(flow_halt)
+        flow = make_ff().create()
         flow.register(sibling)
 
-        # Dispatch without halt= uses flow's halt
+        # Dispatch without halt=: no halt
         await flow.dispatch("sibling", 1)
-        assert observed == [flow_halt]
+        assert observed == [None]
 
         # Dispatch with halt= uses the passed halt
         observed.clear()

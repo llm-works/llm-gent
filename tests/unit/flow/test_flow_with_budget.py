@@ -139,10 +139,9 @@ class TestEndToEndHalt:
         flow = (
             Flow(make_test_logger(), saia_factory=StubFactory())
             .iterate(body, max_iters=10)
-            .with_halt(halt)
             .with_cost_tracker(tracker)
         )
-        await flow.run()
+        await flow.run(halt=halt)
         assert tracker.exceeded is True
         assert halt.is_set()
         assert len(iterations) < 10

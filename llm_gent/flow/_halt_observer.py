@@ -11,7 +11,7 @@ and raises :class:`~llm_gent.flow.Interrupted` to the step running it;
 once everything has stopped, :meth:`Flow.run` writes the run's one halt
 checkpoint from those positions (:func:`~llm_gent.flow._resume.commit_halt`).
 
-A run has one halt, set on its top-level flow (:func:`check_one_halt`).
+A run has one halt, given to :meth:`~llm_gent.flow.Flow.run` (``halt=``).
 :func:`note_halt` records where it was first observed, for that commit's
 metadata.
 """
@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
-    from .flow import Flow
     from .nodes import _RunEnv
     from .state import State
 
@@ -44,31 +43,6 @@ class HaltPoint:
     iteration: int
     node_id: str
     state: State[Any]
-
-
-def check_one_halt(root: Flow) -> None:
-    """Raise when a flow inside ``root``'s run sets a halt other than ``root``'s.
-
-    The halt pauses the whole run, so a run has one, on its top-level
-    flow. A nested flow carrying the same event (as every flow a
-    ``Factory(halt=...)`` builds does) sets no other halt.
-
-    Raises:
-        RuntimeError: A nested flow's ``with_halt`` event is not the
-            top-level flow's.
-    """
-    from ._node_id import iter_flows
-
-    for flow in iter_flows(root)[1:]:
-        if flow._halt_event is not None and flow._halt_event is not root._halt_event:
-            raise RuntimeError(
-                f"Flow {_label(flow)} sets a halt but runs inside {_label(root)}: a run "
-                f"has one halt, set on its top-level flow with with_halt(event)"
-            )
-
-
-def _label(flow: Flow) -> str:
-    return repr(flow._name or "<anonymous>")
 
 
 def is_halt_signaled(env: _RunEnv) -> bool:

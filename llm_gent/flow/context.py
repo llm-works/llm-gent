@@ -118,7 +118,7 @@ class Context(Generic[T]):
     """
 
     halt: asyncio.Event | None = None
-    """The run's halt — the top-level flow's :meth:`Flow.with_halt` event — or ``None``.
+    """The run's halt — :meth:`Flow.run` ``halt=`` — or ``None``.
 
     Verbs that expose their own inner loop (SAIA turn-by-turn, long-running
     external calls) can observe ``ctx.halt`` to short-circuit gracefully:

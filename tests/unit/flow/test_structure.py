@@ -158,8 +158,8 @@ class TestStructureDiff:
         assert diff.added_before((("", _key(prepare)),)) == ()
 
 
-def _checkpointed(store: Any, halt: asyncio.Event, *, stop: bool) -> Any:
-    """``prepare`` (takes the checkpoint ``"saved"``) → ``work`` (halts when ``stop``)."""
+def _checkpointed(store: Any, *, stop: bool) -> Any:
+    """``prepare`` (takes the checkpoint ``"saved"``) → ``work`` (halts the run when ``stop``)."""
 
     @verb
     async def first(ctx: Context[dict[str, Any]], x: int) -> int:
@@ -169,7 +169,7 @@ def _checkpointed(store: Any, halt: asyncio.Event, *, stop: bool) -> Any:
     @verb
     async def second(ctx: Context[dict[str, Any]], x: int) -> int:
         if stop:
-            halt.set()
+            ctx.halt.set()  # type: ignore[union-attr]
             raise Interrupted()
         return x
 
@@ -178,7 +178,6 @@ def _checkpointed(store: Any, halt: asyncio.Event, *, stop: bool) -> Any:
         .create(state={})
         .with_checkpoint_store(store, "structure")
         .with_checkpointer()
-        .with_halt(halt)
         .call(first, name="prepare")
         .then(second, name="work")
     )
@@ -188,9 +187,9 @@ def _checkpointed(store: Any, halt: asyncio.Event, *, stop: bool) -> Any:
 class TestStoredStructure:
     async def test_every_commit_holds_the_structure_it_records(self) -> None:
         store = memory_store()
-        flow = _checkpointed(store, asyncio.Event(), stop=True)
-        assert await flow.run(1) is HALTED
-        await _checkpointed(store, asyncio.Event(), stop=False).run(resume="latest")
+        flow = _checkpointed(store, stop=True)
+        assert await flow.run(1, halt=asyncio.Event()) is HALTED
+        await _checkpointed(store, stop=False).run(resume="latest")
 
         history = History(store, "structure")
         commits = [c async for c in history.commits()]
@@ -202,7 +201,7 @@ class TestStoredStructure:
 
     async def test_the_snapshot_does_not_read_it(self) -> None:
         store = memory_store()
-        await _checkpointed(store, asyncio.Event(), stop=True).run(1)
+        await _checkpointed(store, stop=True).run(1, halt=asyncio.Event())
         history = History(store, "structure")
         head = await history.head()
         assert head is not None
@@ -213,8 +212,8 @@ class TestStoredStructure:
     async def test_collecting_unreachable_objects_keeps_it(self) -> None:
         """A resume to an earlier checkpoint leaves objects behind; the structure is reachable."""
         store = memory_store()
-        await _checkpointed(store, asyncio.Event(), stop=True).run(1)
-        await _checkpointed(store, asyncio.Event(), stop=False).run(resume="saved")
+        await _checkpointed(store, stop=True).run(1, halt=asyncio.Event())
+        await _checkpointed(store, stop=False).run(resume="saved")
         assert store.repo("structure").prune(0) > 0
 
         history = History(store, "structure")

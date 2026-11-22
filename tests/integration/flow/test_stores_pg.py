@@ -107,9 +107,9 @@ class TestCheckpointedRun:
         baseline = await build_canonical_flow(pg_test_logger, max_iters=4).run()
 
         common: dict[str, Any] = {"max_iters": 4, "store": store, "client_flow_id": "pg-run"}
-        await build_canonical_flow(
-            pg_test_logger, halt=asyncio.Event(), halt_after_iteration=2, **common
-        ).run()
+        await build_canonical_flow(pg_test_logger, halt_after_iteration=2, **common).run(
+            halt=asyncio.Event()
+        )
         head = await History(store, "pg-run").head()
         assert head is not None and head.meta.outcome == "halted"
 

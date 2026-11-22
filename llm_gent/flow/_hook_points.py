@@ -196,7 +196,7 @@ def _pause(env: _RunEnv, decision: Decision) -> None:
     if env.halt is None:
         raise RuntimeError(
             f"{decision.hook} paused the run before a step, but the run has no halt: "
-            f"attach one with Flow.with_halt()"
+            f"pass one with run(halt=...)"
         )
     env.halt.set()
     raise Interrupted()

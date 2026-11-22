@@ -291,17 +291,15 @@ class TestVerdicts:
         gate = Gate({"b": Pause("approval")})
 
         def flow() -> Flow:
-            return (
-                _two_steps().with_halt(halt).with_checkpoint_store(store, "paused").with_hooks(gate)
-            )
+            return _two_steps().with_checkpoint_store(store, "paused").with_hooks(gate)
 
         rec = Recorder()
-        assert await flow().with_hooks(rec).run(1) is HALTED
+        assert await flow().with_hooks(rec).run(1, halt=halt) is HALTED
         b = next(e for e in rec.steps() if e.where.step_name == "b")
         assert b.outcome == "paused"
         halt.clear()
         gate.verdicts.clear()  # approved
-        assert await flow().run(resume="latest") == 4
+        assert await flow().run(resume="latest", halt=halt) == 4
         assert gate.asked == ["a", "b", "b"]
 
     async def test_a_pause_without_a_halt_raises(self) -> None:
@@ -357,15 +355,8 @@ class TestCheckpoints:
             return x
 
         rec = Recorder()
-        flow = (
-            _flow()
-            .with_halt(halt)
-            .with_checkpoint_store(store, "halt")
-            .call(stop)
-            .then(add_one)
-            .with_hooks(rec)
-        )
-        assert await flow.run(1) is HALTED
+        flow = _flow().with_checkpoint_store(store, "halt").call(stop).then(add_one).with_hooks(rec)
+        assert await flow.run(1, halt=halt) is HALTED
         (commit,) = [e for e in rec.events if isinstance(e, CheckpointEvent)]
         assert commit.outcome == "halted"
         assert commit.parent_activity_id == commit.run.run_id
@@ -384,7 +375,6 @@ class TestCheckpoints:
         def flow(rec: Recorder) -> Flow:
             return (
                 _flow()
-                .with_halt(halt)
                 .with_checkpoint_store(store, "resumed")
                 .call(stop)
                 .then(add_one)
@@ -392,9 +382,9 @@ class TestCheckpoints:
             )
 
         first, second = Recorder(), Recorder()
-        await flow(first).run(1)
+        await flow(first).run(1, halt=halt)
         halt.clear()
-        await flow(second).run(resume="latest")
+        await flow(second).run(resume="latest", halt=halt)
         (halt_commit,) = [e for e in first.events if isinstance(e, CheckpointEvent)]
         assert second.events[0].run.resumed_from == halt_commit.commit_id
         assert first.events[0].run.resumed_from is None
