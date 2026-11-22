@@ -9,7 +9,7 @@ starts. An LLM call in flight finishes (or its SAIA turn pauses) and
 its step ends. A structure that stops leaves its position registered
 and raises :class:`~llm_gent.flow.Interrupted` to the step running it;
 once everything has stopped, :meth:`Flow.run` writes the run's one halt
-checkpoint from those positions (:func:`~llm_gent.flow._resume.commit_halt`).
+checkpoint from those positions (:func:`~llm_gent.flow.run._resume.commit_halt`).
 
 A run has one halt, given to :meth:`~llm_gent.flow.Flow.run` (``halt=``).
 :func:`note_halt` records where it was first observed, for that commit's
@@ -23,8 +23,8 @@ from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
-    from ._scope import _RunEnv
-    from .state import State
+    from ..state import State
+    from .scope import _Frame
 
 
 @dataclass(frozen=True)
@@ -45,26 +45,28 @@ class HaltPoint:
     state: State[Any]
 
 
-def is_halt_signaled(env: _RunEnv) -> bool:
-    """True when the halt in effect under ``env`` — the run's — is set.
+def is_halt_signaled(frame: _Frame) -> bool:
+    """True when the halt in effect under ``frame`` — the run's — is set.
 
     A cut is not a halt: a region its signal cuts short fast-forwards
     instead (:func:`~._shortcut.is_fast_forward`).
     """
-    if env.halt is not None and env.halt.is_set():
+    if frame.halt is not None and frame.halt.is_set():
         return True
-    return is_run_halted(env)
+    return is_run_halted(frame)
 
 
-def is_run_halted(env: _RunEnv) -> bool:
+def is_run_halted(frame: _Frame) -> bool:
     """True when the run's halt is set."""
-    halt = env.run.halt
+    halt = frame.run.halt
     return halt is not None and halt.is_set()
 
 
-def note_halt(env: _RunEnv, iteration: int, node_id: str) -> None:
+def note_halt(frame: _Frame, iteration: int, node_id: str) -> None:
     """Record where the run's halt was observed, unless an earlier observation was recorded."""
-    run = env.run
+    run = frame.run
     halt = run.halt
     if halt is not None and halt.is_set() and run.halt_at is None:
-        run.halt_at = HaltPoint(env.position.ancestor_chain, iteration, node_id, env.scope.state)
+        run.halt_at = HaltPoint(
+            frame.position.ancestor_chain, iteration, node_id, frame.scope.state
+        )

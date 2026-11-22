@@ -486,7 +486,7 @@ class TestPausedCapture:
 
         @verb(role=ROLE_A)
         async def body_verb(ctx: Context, _prev: Any = None) -> Any:
-            run_scopes.append(ctx._env.scopes)
+            run_scopes.append(ctx._frame.scopes)
             return await loop(ctx, "t", conversation=convs.pop(0))
 
         flow = make_ff(saia_factory=factory).create()

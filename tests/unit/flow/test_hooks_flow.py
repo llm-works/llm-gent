@@ -185,7 +185,7 @@ class TestEvents:
         async def raises(*_: Any) -> None:
             raise OSError("store unavailable")
 
-        monkeypatch.setattr("llm_gent.flow.flow.apply_clean_exit_retention", raises)
+        monkeypatch.setattr("llm_gent.flow.run._flow_run.apply_clean_exit_retention", raises)
         rec = Recorder()
         with pytest.raises(OSError, match="store unavailable"):
             await _two_steps().with_hooks(rec).run(1)

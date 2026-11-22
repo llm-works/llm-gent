@@ -43,8 +43,9 @@ wrapper:
   ``dict``). Every node in the tree reaches it via the same call regardless
   of nesting depth or per-scope projection.
 
-Execution helpers (node dispatch, scoped-state projection/merge) live in
-:mod:`._executor`; the private dataclasses and the :class:`Failure`
+Execution (the run, the walk, scoped-state projection/merge, history
+writing) lives in :mod:`llm_gent.flow.run`, which imports this module; this
+module imports it only inside :meth:`Flow.run`, to start a run. The private dataclasses and the :class:`Failure`
 sentinel live in :mod:`.nodes`. This module owns the :class:`Flow` class
 itself plus the builder-side helpers used by its fluent methods —
 :func:`_validate_target`, :func:`_require_state_for_merge`, and the eager
@@ -54,33 +55,16 @@ Buildable materializer :func:`_materialize`.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, Self, get_args
+from typing import Any, Self
 
 from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
-from ._chain import Chain
-from ._checkpoint_ctx import CheckpointContext, check_checkpointers
-from ._hook_points import RunHooks
-from ._resume import (
-    Resume,
-    apply_clean_exit_retention,
-    commit_halt,
-)
-from ._run import Run
-from ._scope import Position, Scope, _RunEnv
-from ._shortcut import (
-    Shortcut,
-    check_shortcut,
-    check_shortcuts,
-    check_signals,
-    run_signals,
-)
+from ._shortcut import Shortcut, check_shortcut
 from ._validation import (
     _check_node_name,
     _map_bodies,
@@ -94,20 +78,16 @@ from .checkpoint import (
     ResumeMode,
     Retention,
     checkpoint_tag,
-    is_commit_hash,
 )
 from .context import Context
 from .decl import Decl
 from .factory import SAIAFactory
-from .hooks import Decision, HookDenied, RunOutcome, Where
 from .nodes import (
-    HALTED,
     UNSET,
     AfterHook,
     AggregateFn,
     Checkpointer,
     GuardFn,
-    Interrupted,
     ItemsFn,
     MaxConcurrencyFn,
     OnErrorFn,
@@ -124,11 +104,10 @@ from .nodes import (
     _Node,
 )
 from .resource import COST, R, ResourceKey, check_resource
-from .resource._runtime import Resources, check_resources, run_resources
-from .resource.cost import check_budget, check_budgets_have_a_tracker, check_cost_tracker
+from .resource._runtime import Resources
+from .resource.cost import check_budget, check_cost_tracker
 from .role import Role
 from .state import State, StateFactory
-from .state.snapshot import Snapshot, path_str
 from .structure import Structure
 
 
@@ -236,7 +215,7 @@ class Flow:
 
         Its checkpointer and checkpoint policy, resources and the per-run
         children it asks for, hooks and its shortcut; unset fields inherit
-        from the enclosing scope (:meth:`~llm_gent.flow._scope.Scope.child`).
+        from the enclosing scope (:meth:`~llm_gent.flow.run.Scope.child`).
         """
         return Decl(
             checkpointer=self._checkpointer,
@@ -1278,288 +1257,31 @@ class Flow:
             appinfra.cas.InvalidNameError: ``history`` cannot name a
                 repository.
         """
-        run_signals_ = check_signals(signals)
-        self._check_run_args(resume, restart, run_signals_, history, retention)
-        run = self._new_run(halt, run_signals_, history, retention)
-        active_state, saved = await self._start_state(
-            run, lambda: self._wrap_top_state(state), resume, restart
-        )
-        run.scopes.begin(active_state, saved)
-        hooks = run.hooks = RunHooks(run)
-        run.info = hooks.info
-        stopped = await hooks.before()
-        if stopped is not None:
-            return await self._stopped_before_run(hooks, stopped)
-        try:
-            outcome, value = await self._walk_and_finalize(run, active_state, extra, args, kwargs)
-        except asyncio.CancelledError as e:
-            await hooks.after("cancelled", e)
-            raise
-        except Exception as e:
-            await hooks.after("failed", e)
-            raise
-        await hooks.after(outcome)
-        return value
+        from .run._flow_run import run_flow
 
-    def _new_run(
-        self,
-        halt: asyncio.Event | None,
-        signals: dict[str, asyncio.Event],
-        history: str | None,
-        retention: Retention,
-    ) -> Run:
-        """The state of a new run of this flow, with its own writer on ``history``.
-
-        Raises:
-            appinfra.cas.InvalidNameError: ``history`` cannot name a repository.
-        """
-        ctx = None
-        if history is not None:
-            assert self._checkpoint_store is not None  # _check_history
-            ctx = CheckpointContext(
-                self._checkpoint_store, history, lambda: Structure.of(self), retention
-            )
-        return Run(flow=self, halt=halt, signals=signals, checkpoint_ctx=ctx)
-
-    async def _walk_and_finalize(
-        self,
-        run: Run,
-        state: State[Any],
-        extra: dict[str, Any] | None,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[RunOutcome, Any]:
-        """Walk the flow, then commit its halt or apply clean-exit retention.
-
-        Returns ``("halted", HALTED)`` when the halt stopped it, else ``("ok", result)``.
-        """
-        try:
-            result = await self._walk_top(run, state, extra, args, kwargs)
-        except Interrupted:
-            # Everything has stopped, each part registered where it stopped.
-            await commit_halt(run)
-            return "halted", HALTED
-        await apply_clean_exit_retention(run, state)
-        return "ok", result
-
-    async def _walk_top(
-        self,
-        run: Run,
-        state: State[Any],
-        extra: dict[str, Any] | None,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> Any:
-        """Walk this flow as the run's top level, with its signals set up.
-
-        The walk starts from the root scope (the run's state, nothing
-        declared yet) at the root position, whose activity is the run.
-        """
-        info = run.info
-        env = _RunEnv(
-            run=run,
-            lg=run.lg,
-            scope=Scope(state=state),
-            position=Position(activity_id=None if info is None else info.run_id),
-            extra=extra if extra is not None else {},
-        )
-        with run_signals(run):
-            return await self._run_as_subflow(args, kwargs, env)
-
-    async def _stopped_before_run(self, hooks: RunHooks, decision: Decision) -> Any:
-        """A ``before_run`` hook stopped the run: return :data:`HALTED` on a pause, else raise.
-
-        Nothing ran and nothing is committed: a paused run started again
-        reaches ``before_run`` again.
-
-        Raises:
-            HookDenied: A hook denied the run.
-        """
-        if decision.verdict == "pause":
-            await hooks.after("halted")
-            return HALTED
-        await hooks.after("denied")
-        raise HookDenied("before_run", decision)
-
-    def _check_run_args(
-        self,
-        resume: ResumeMode | str,
-        restart: str | None,
-        signals: Mapping[str, asyncio.Event],
-        history: str | None,
-        retention: Retention,
-    ) -> None:
-        """Reject an empty flow, a bad start, a history without a store, a bad shortcut, a lone cap.
-
-        Runs before anything is read or written, so a misconfigured run
-        leaves no new history behind.
-        """
-        if not self._nodes:
-            raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        if retention not in get_args(Retention):
-            raise ValueError(f"retention must be 'retain' or 'gc_on_success'; got {retention!r}")
-        self._check_history(history)
-        self._check_start(resume, restart, history)
-        check_checkpointers(self, history)
-        check_shortcuts(self, signals)
-        check_budgets_have_a_tracker(self)
-        check_resources(self)
-
-    def _check_history(self, history: str | None) -> None:
-        """Reject a ``history`` on a flow without a checkpoint store."""
-        if history is not None and self._checkpoint_store is None:
-            raise RuntimeError(
-                f"Flow {self._name or '<anonymous>'!r} was run with history={history!r} but has "
-                f"no checkpoint store: build it with checkpoint_store= (Flow or Factory)"
-            )
-
-    def _check_start(
-        self, resume: ResumeMode | str, restart: str | None, history: str | None
-    ) -> None:
-        """Reject a bad ``resume`` or ``restart``, both together, or either without a history."""
-        if resume not in get_args(ResumeMode) and not is_commit_hash(resume):
-            self._require_checkpoint_name(
-                resume,
-                f"resume must be one of {get_args(ResumeMode)}, a commit hash or a checkpoint name",
-            )
-        if restart is not None:
-            if resume != "off":
-                raise ValueError(
-                    f"run() takes resume or restart, not both; got resume={resume!r}, "
-                    f"restart={restart!r}"
-                )
-            if restart != "latest" and not is_commit_hash(restart):
-                self._require_checkpoint_name(
-                    restart, "restart must be 'latest', a commit hash or a checkpoint name"
-                )
-        start = f"resume={resume!r}" if restart is None else f"restart={restart!r}"
-        if (resume != "off" or restart is not None) and history is None:
-            label = self._name or "<anonymous>"
-            raise RuntimeError(
-                f"Flow {label!r} was run with {start} but no history: pass "
-                f"run(history=...) to name the history to start from"
-            )
-
-    @staticmethod
-    def _require_checkpoint_name(value: Any, what: str) -> None:
-        """Raise ``ValueError`` led by ``what`` when ``value`` cannot name a checkpoint."""
-        try:
-            checkpoint_tag(value)
-        except ValueError as e:
-            raise ValueError(f"{what}; got {value!r} ({e})") from None
-
-    async def _start_state(
-        self,
-        run: Run,
-        fallback: Callable[[], State[Any]],
-        resume: ResumeMode | str,
-        restart: str | None,
-    ) -> tuple[State[Any], Snapshot | None]:
-        """The run's initial state and the snapshot it starts from (``None`` for a fresh run).
-
-        ``fallback`` builds the state of a run that checks nothing out: a
-        fresh run, or a resume on a history with no commit to continue. A
-        run that checks out a commit never calls it, so a state factory
-        whose ``new()`` needs inputs still resumes without ``state=``.
-
-        Records on ``run`` the commit it checked out (``None`` for a fresh
-        run) for the run's hook events.
-        """
-        if resume == "off" and restart is None:
-            return fallback(), None
-        checkout = Resume(run)
-        if restart is not None:
-            started = await checkout.restart(restart, fallback)
-        elif resume == "latest":
-            started = await checkout.checkout(fallback)
-        else:
-            started = await checkout.checkout_at(resume)
-        run.resumed_from = checkout.checked_out
-        return started
-
-    async def _run_as_subflow(
-        self, args: tuple[Any, ...], kwargs: dict[str, Any], env: _RunEnv
-    ) -> Any:
-        """Walk this flow from ``env``: the place the walk enters it at.
-
-        ``args`` / ``kwargs`` are the first node's inputs. They are passed
-        as two values, not spread, so an input named like one of the
-        framework's own parameters reaches the node instead of colliding
-        with it.
-
-        ``env`` is what the node entering this flow hands it
-        (:meth:`_RunEnv.descend`; the root scope at the top level): the
-        run, the scope with the node's state, the position. This flow's
-        declarations apply on top (:meth:`~llm_gent.flow._scope.Scope.child`);
-        its resources register with the run while it walks
-        (:func:`~llm_gent.flow.resource._runtime.run_resources`).
-        """
-        if not self._nodes:
-            raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        decl = self.decl
-        with run_resources(
-            env.lg,
-            decl,
-            self._name or "<anonymous>",
-            env.position.path,
-            env.scopes,
-            env.scope.resources,
-        ) as resources:
-            scope = env.scope.child(
-                decl,
-                resources=resources,
-                where=self._entry_where(env.position),
-                signals=env.run.signals,
-                lg=env.lg,
-            )
-            return await self._run_in(dataclasses.replace(env, scope=scope), args, kwargs)
-
-    def _entry_where(self, position: Position) -> Where:
-        """Where this flow starts in the run: the step that entered it and its snapshot path."""
-        path = position.ancestor_chain
-        return Where(
-            flow=self,
-            node_id=path[-1] if path else None,
-            node_path=path,
-            scope_path=path_str(position.path),
-            step_name=self._name or None,
+        return await run_flow(
+            self,
+            args,
+            kwargs,
+            state=state,
+            halt=halt,
+            signals=signals,
+            history=history,
+            retention=retention,
+            resume=resume,
+            restart=restart,
+            extra=extra,
         )
 
-    async def _run_in(self, env: _RunEnv, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-        """Walk this Flow under ``env``."""
-        label = self._name or "<anonymous>"
-        is_subflow = env.runtime is not self
-        env.lg.debug(
-            "starting flow run",
-            extra={"flow": label, "nodes": len(self._nodes), "subflow": is_subflow},
-        )
-        result = await Chain(self, env).walk(args, kwargs)
-        env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
-        return result
-
-    def _wrap_top_state(self, state: Any) -> State[Any]:
-        """Wrap a top-level ``run(state=...)`` payload as :class:`State`.
-
-        Resolves the ``state=UNSET`` sentinel to a fresh state
-        (:meth:`_new_state`). Explicit ``state=None`` is honored — the
-        payload becomes ``None``. Already-wrapped :class:`State` inputs are
-        returned unchanged so a caller can thread a run-wide state instance
-        across multiple :meth:`run` calls.
-        """
-        payload = self._new_state() if state is UNSET else state
-        if isinstance(payload, State):
-            return payload
-        return State(data=payload, _factory=self._state_factory)
+    # -------------------------------------------------------------------------
+    # Internals
+    # -------------------------------------------------------------------------
 
     def _new_state(self) -> Any:
         """A fresh state payload: ``state_factory.new()``, else an empty ``dict``."""
         if self._state_factory is None:
             return {}
         return self._state_factory.new()
-
-    # -------------------------------------------------------------------------
-    # Internals
-    # -------------------------------------------------------------------------
 
     def _saia_for(self, role: Role) -> Any:
         """Return a cached saia for ``role``, building it on first request."""

@@ -8,7 +8,7 @@ many times at once. Everything one :meth:`~llm_gent.flow.Flow.run` call
 writes while it goes lives on its :class:`Run`: the live scopes and cursors
 its checkpoints are built from, the history writer, the halt and signals it
 observes, where its halt was first seen and its hook bookkeeping. The run
-reaches every step through the run environment (``_RunEnv.run``).
+reaches every step through the walk's frame (``_Frame.run``).
 """
 
 from __future__ import annotations
@@ -18,17 +18,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .state.snapshot import ScopeRegistry
+from ..flow import Flow
+from ..state.snapshot import ScopeRegistry
 
 
 if TYPE_CHECKING:
     from appinfra.log import Logger
 
+    from ..hooks import RunInfo
     from ._checkpoint_ctx import CheckpointContext
     from ._halt_observer import HaltPoint
     from ._hook_points import RunHooks
-    from .flow import Flow
-    from .hooks import RunInfo
 
 
 @dataclass(eq=False)

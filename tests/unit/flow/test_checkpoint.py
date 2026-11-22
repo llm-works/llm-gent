@@ -27,8 +27,8 @@ import pytest
 from appinfra.cas import MemoryStore, Tree
 
 from llm_gent.flow import FlowCommit, Role
-from llm_gent.flow._checkpoint_ctx import CheckpointContext
 from llm_gent.flow.checkpoint import HEAD_REF, ConcurrentWriteError
+from llm_gent.flow.run._checkpoint_ctx import CheckpointContext
 from llm_gent.flow.structure import Structure
 from llm_gent.flow.testing.checkpoint import (
     assert_resume_determinism,
@@ -898,8 +898,8 @@ class TestPausedTurnInSnapshot:
             State(data={}),
             Snapshot(has_state=True, root={}, cursors={f"n/{node_id}/t/0": {TURN: saved}}),
         )
-        env = SimpleNamespace(scopes=scopes, owner_path=lambda nid: ("n", nid))
-        ctx = SimpleNamespace(_env=env, _node_id=node_id)
+        frame = SimpleNamespace(scopes=scopes, owner_path=lambda nid: ("n", nid))
+        ctx = SimpleNamespace(_frame=frame, _node_id=node_id)
 
         turn = _LoopTurn(ctx)  # type: ignore[arg-type]
         task, conversation, is_resume = loop._consume_saved_turn(ctx, turn)  # type: ignore[arg-type]
@@ -978,7 +978,7 @@ class TestSaveOnHaltChain:
         ff = Factory(make_test_logger())
         flow = ff.create().call(a).then(b)
         # No .with_checkpointer — halt check fires between chain steps but
-        # _save_halt_checkpoint short-circuits at env.checkpoint_ctx is None.
+        # _save_halt_checkpoint short-circuits at frame.checkpoint_ctx is None.
         # Run should complete without raising.
         await flow.run(halt=halt)
 
@@ -1273,7 +1273,7 @@ class TestHistoryLineage:
         """After the history is deleted the next commit starts a new history with no parent."""
         from appinfra.cas import Tree
 
-        from llm_gent.flow._checkpoint_ctx import CheckpointContext
+        from llm_gent.flow.run._checkpoint_ctx import CheckpointContext
         from llm_gent.flow.structure import Structure
 
         ctx = CheckpointContext(store, "lineage-gc", lambda: Structure(()), "retain")
@@ -1497,8 +1497,8 @@ class TestCompletionTag:
         self, store: MemoryStore
     ) -> None:
         """A crash between the $end commit and the tag write: resume continues from $end."""
-        from llm_gent.flow._checkpoint_ctx import CheckpointContext
         from llm_gent.flow.checkpoint import COMPLETE_TAG
+        from llm_gent.flow.run._checkpoint_ctx import CheckpointContext
         from llm_gent.flow.state import State
         from llm_gent.flow.state.snapshot import ScopeRegistry
         from llm_gent.flow.structure import Structure

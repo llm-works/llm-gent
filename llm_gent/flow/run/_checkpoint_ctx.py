@@ -3,18 +3,17 @@
 
 """CheckpointContext — the run's history repository bundled with save operations.
 
-Every save site would otherwise guard on the store and the history name
-travelling separately (``if env.scope.checkpointer is None or
-env.client_flow_id is None: return``) and re-plumb the name into every
-store call. :class:`CheckpointContext` holds the history's
+Every save site would otherwise check the flow's checkpointer and the
+history's name separately, and re-plumb the name into every store call.
+:class:`CheckpointContext` holds the history's
 :class:`appinfra.cas.Repo` and exposes the save operations the framework
 needs.
 
 A run has at most one context: the repository its ``run(history=...)``
 names in the top-level flow's checkpoint store. Without one,
-``env.checkpoint_ctx is None`` and every save site skips; with one, saves
+``frame.checkpoint_ctx is None`` and every save site skips; with one, saves
 inside the run also need a ``with_checkpointer()`` on the saving flow or
-above it (``env.scope.checkpointer``). :func:`check_checkpointers` rejects a
+above it (``frame.scope.checkpointer``). :func:`check_checkpointers` rejects a
 checkpointer in a run without a history.
 
 The repository is named by ``client_flow_id``; store calls are
@@ -31,7 +30,8 @@ from typing import TYPE_CHECKING, Any
 
 from appinfra.cas import Blob, Repo, Store, Tree
 
-from .checkpoint import (
+from .._node_id import iter_flows
+from ..checkpoint import (
     COMPLETION_PRODUCER,
     END_NODE_PATH,
     HEAD_REF,
@@ -39,15 +39,15 @@ from .checkpoint import (
     ConcurrentWriteError,
     Retention,
 )
-from .state.cas import CommitMeta, FlowCommit, ProducedBy
-from .state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
-from .structure import Structure
+from ..flow import Flow
+from ..state.cas import CommitMeta, FlowCommit, ProducedBy
+from ..state.snapshot import ScopeRegistry, build_snapshot_tree, path_str
+from ..structure import Structure
 
 
 if TYPE_CHECKING:
-    from .flow import Flow
-    from .state import State
-    from .state.cas import CommitOutcome, TraceRef
+    from ..state import State
+    from ..state.cas import CommitOutcome, TraceRef
 
 
 def check_checkpointers(root: Flow, history: str | None) -> None:
@@ -57,8 +57,6 @@ def check_checkpointers(root: Flow, history: str | None) -> None:
         RuntimeError: A flow declares ``with_checkpointer()`` and the run
             was given no ``history``: its saves would have nowhere to go.
     """
-    from ._node_id import iter_flows
-
     if history is not None:
         return
     declaring = next((f for f in iter_flows(root) if f._checkpointer is not None), None)
@@ -83,7 +81,7 @@ class CheckpointContext:
 
     Constructed by :meth:`Flow.run` for ``run(history=...)``, on the
     top-level flow's checkpoint store. Absent when the run has no history —
-    save sites check ``env.checkpoint_ctx is None`` and skip.
+    save sites check ``frame.checkpoint_ctx is None`` and skip.
 
     Each top-level run writes through its own, built at run start: it reads
     the head from the store on its first commit, so a history deleted or

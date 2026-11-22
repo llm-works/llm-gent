@@ -17,7 +17,7 @@ Extracted from :mod:`._executor`. Two classes:
   strict/non-strict exception fan-out, then merges the child state
   back into the parent under a shared lock and fires the
   ``on_item_complete`` hook. Per-item merges serialize on
-  ``merge_lock`` so concurrent items don't race on ``env.scope.state``.
+  ``merge_lock`` so concurrent items don't race on ``frame.scope.state``.
 """
 
 from __future__ import annotations
@@ -28,26 +28,27 @@ import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .._validation import check_concurrency
+from ..context import Context
+from ..nodes import Failure, Interrupted, ItemsFn, RestoredError, Skipped
+from ..state import serialize_state_data
+from ..state.snapshot import DONE, ITEMS, ScopePath
 from ._executor import (
     _enter_scope,
     _merge_state,
     _restore_scope_state,
     _running,
     _save_scope_commit,
+    run_as_subflow,
 )
 from ._halt_observer import is_halt_signaled
 from ._shortcut import is_fast_forward, leave_drains
-from ._validation import check_concurrency
-from .context import Context
-from .nodes import Failure, Interrupted, ItemsFn, RestoredError, Skipped
-from .state import serialize_state_data
-from .state.snapshot import DONE, ITEMS, ScopePath
 
 
 if TYPE_CHECKING:
-    from ._scope import _RunEnv
-    from .nodes import _Map
-    from .state import State
+    from ..nodes import _Map
+    from ..state import State
+    from .scope import _Frame
 
 
 _INTERRUPTED = object()
@@ -95,7 +96,7 @@ class _Done:
 class MapRunner:
     """Fan out one ``.map`` node's body over its items.
 
-    Constructed with (mp, env, node_id). Public method :meth:`run` takes
+    Constructed with (mp, frame, node_id). Public method :meth:`run` takes
     the incoming ``node_args`` and returns the aggregated result (or the
     raw list when no aggregator is attached).
 
@@ -110,12 +111,12 @@ class MapRunner:
     skipped — a running one continues where it was, and the rest run.
     """
 
-    def __init__(self, mp: _Map, env: _RunEnv, node_id: str) -> None:
-        """Run ``mp`` as the step ``node_id`` of ``env``'s flow."""
+    def __init__(self, mp: _Map, frame: _Frame, node_id: str) -> None:
+        """Run ``mp`` as the step ``node_id`` of ``frame``'s flow."""
         self.mp = mp
-        self.env = env
+        self.frame = frame
         self.node_id = node_id
-        self.path: ScopePath = env.owner_path(node_id)
+        self.path: ScopePath = frame.owner_path(node_id)
         # The cursor. Kept here, not in run's locals, so a checkpoint reads it.
         self.items: list[Any] = []
         self.keys: list[str] = []
@@ -156,7 +157,7 @@ class MapRunner:
             Interrupted: The halt stopped at least one item.
         """
         await self._take_saved_or_resolve(node_args)
-        with _running(self.env, self.path, self):
+        with _running(self.frame, self.path, self):
             results = await self._gather_items(self.items)
             if any(r is _INTERRUPTED for r in results):
                 raise Interrupted()
@@ -171,7 +172,7 @@ class MapRunner:
         records of the members it still has.
         """
         prev_result = node_args[0] if node_args else None
-        scopes = self.env.scopes
+        scopes = self.frame.scopes
         if self.mp.over_members:
             self.keys = list(self.mp.member_keys)
             self.items = [prev_result] * len(self.keys)
@@ -194,16 +195,16 @@ class MapRunner:
         Uses the parent state at map entry. Role is ``None`` since both
         are data-producing callbacks, not role actions.
         """
-        env = self.env
+        frame = self.frame
         return Context(
             role=None,
-            state=env.scope.state,
-            flow=env.runtime,
-            traits=env.runtime._traits,
-            halt=env.halt,
-            extra=env.extra,
-            resources=env.scope.resources,
-            _env=env,
+            state=frame.scope.state,
+            flow=frame.runtime,
+            traits=frame.runtime._traits,
+            halt=frame.halt,
+            extra=frame.extra,
+            resources=frame.scope.resources,
+            _frame=frame,
             _node_id=self.node_id,
         )
 
@@ -296,7 +297,7 @@ class MapItemRunner:
     ) -> None:
         self.owner = owner
         self.mp = owner.mp
-        self.env = owner.env
+        self.frame = owner.frame
         self.node_id = owner.node_id
         self.item = item
         self.item_index = item_index
@@ -319,12 +320,12 @@ class MapItemRunner:
         sibling takes meanwhile. In a map that fast-forwards an item that
         had not started is :class:`Skipped` (:meth:`_shortcut_skips`).
         """
-        if is_halt_signaled(self.env):
+        if is_halt_signaled(self.frame):
             return _INTERRUPTED
         if self._shortcut_skips():
             skipped = Skipped(item=self.item)
             self.owner.done[self.key] = _Done(skipped, merged=True)
-            await self._fire_on_item_complete(skipped, self._ctx(self.env.scope.state))
+            await self._fire_on_item_complete(skipped, self._ctx(self.frame.scope.state))
             return skipped
         try:
             outcome = await self._run_item()
@@ -334,7 +335,7 @@ class MapItemRunner:
         # skipped or failed one is recorded as done in the same step — no
         # await between — so a checkpoint holds its positions or its record,
         # never both. (A completed one was recorded when its body returned.)
-        self.env.scopes.close_under(self.path)
+        self.frame.scopes.close_under(self.path)
         if isinstance(outcome, Failure | Skipped):
             self.owner.done[self.key] = _Done(outcome, merged=True)
         return outcome
@@ -346,9 +347,9 @@ class MapItemRunner:
         (:func:`~._shortcut.is_fast_forward`). An item a checkout saved as
         running (its positions are saved) continues from them.
         """
-        if not is_fast_forward(self.env):
+        if not is_fast_forward(self.frame):
             return False
-        return not self.env.scopes.has_saved_under(self.path)
+        return not self.frame.scopes.has_saved_under(self.path)
 
     async def merge_saved(self, result: Any) -> Any:
         """Finish an item whose body completed before the checkpoint but whose merge had not.
@@ -357,18 +358,18 @@ class MapItemRunner:
         body does not run again. Without the saved scope the merge cannot
         happen, and the item runs from the start.
         """
-        found, raw = self.env.scopes.take_saved(self.path)
+        found, raw = self.frame.scopes.take_saved(self.path)
         if not found:
             self.owner.done.pop(self.key, None)
             return await self.run()
-        factory = self.mp.state_factory or self.env.scope.state._factory
-        child_state = _restore_scope_state(self.env.scope.state, raw, factory)
+        factory = self.mp.state_factory or self.frame.scope.state._factory
+        child_state = _restore_scope_state(self.frame.scope.state, raw, factory)
         # Registered until it merges, like the scope of an item that runs.
-        self.env.scopes.open(self.path, child_state)
+        self.frame.scopes.open(self.path, child_state)
         try:
             return await self._on_success(result, child_state, self._ctx(child_state))
         finally:
-            self.env.scopes.close(self.path)
+            self.frame.scopes.close(self.path)
 
     async def _run_item(self) -> Any:
         """Project the item's scope, then guard, body and merge per the map's contract.
@@ -377,14 +378,14 @@ class MapItemRunner:
         not asked the guard again: the guard admitted it before the
         checkpoint, and it continues where it was.
         """
-        item_ctx = self._ctx(self.env.scope.state)
-        guard = None if self.env.scopes.has_saved_under(self.path) else self.mp.guard
+        item_ctx = self._ctx(self.frame.scope.state)
+        guard = None if self.frame.scopes.has_saved_under(self.path) else self.mp.guard
         try:
             child_state = await _enter_scope(
-                self.env, self.path, self.mp.state_fn, self.mp.state_factory
+                self.frame, self.path, self.mp.state_fn, self.mp.state_factory
             )
             if self.mp.state_fn is not None:
-                self.env.scopes.open(self.path, child_state)
+                self.frame.scopes.open(self.path, child_state)
             item_ctx = self._ctx(child_state)
             if guard is not None and not await _run_guard(guard, self.item, item_ctx):
                 skipped = Skipped(item=self.item)
@@ -411,16 +412,16 @@ class MapItemRunner:
         and under its own path (``self.path``), so its scopes and cursors
         are distinct in every snapshot.
         """
-        env = self.env
-        child = env.descend(
+        frame = self.frame
+        child = frame.descend(
             self.node_id,
             f"map:{self.key}",
             self.path,
             child_state,
             # A started item runs to its end however its drain regions are cut.
-            shortcuts=leave_drains(env.scope.shortcuts),
+            shortcuts=leave_drains(frame.scope.shortcuts),
         )
-        return await self.body._run_as_subflow((self.item,), {}, child)
+        return await run_as_subflow(self.body, (self.item,), {}, child)
 
     async def _on_success(
         self, result: Any, child_state: State[Any], item_ctx: Context[Any]
@@ -459,7 +460,7 @@ class MapItemRunner:
         except Exception as exc:
             self.owner.done.pop(self.key, None)
             if rollback:
-                _restore_state_data(self.env.scope.state.data, rollback[0])
+                _restore_state_data(self.frame.scope.state.data, rollback[0])
             if self.mp.on_error is not None:
                 await self._run_on_error(exc, item_ctx)
             failure = Failure(exception=exc, item=self.item)
@@ -480,16 +481,16 @@ class MapItemRunner:
         merge or the save fails.
         """
         async with self.merge_lock:
-            if self.env.scope.policy.on_map_item and scoped:
+            if self.frame.scope.policy.on_map_item and scoped:
                 # serialize_state_data passes a dict through as-is: copy it,
                 # or the merge mutates the snapshot the rollback restores from.
-                rollback.append(copy.deepcopy(serialize_state_data(self.env.scope.state.data)))
-            await _merge_state(self.mp.merge_fn, self.env.scope.state, child_state)
+                rollback.append(copy.deepcopy(serialize_state_data(self.frame.scope.state.data)))
+            await _merge_state(self.mp.merge_fn, self.frame.scope.state, child_state)
             self.owner.done[self.key].merged = True
-            self.env.scopes.close(self.path)
-            if self.env.scope.policy.on_map_item:
+            self.frame.scopes.close(self.path)
+            if self.frame.scope.policy.on_map_item:
                 await _save_scope_commit(
-                    self.env, self.item_index, self.node_id, self.env.scope.state, "ok"
+                    self.frame, self.item_index, self.node_id, self.frame.scope.state, "ok"
                 )
 
     async def _run_on_error(self, exc: BaseException, ctx: Context[Any]) -> None:
@@ -504,7 +505,7 @@ class MapItemRunner:
             if inspect.isawaitable(result):
                 await result
         except Exception as hook_exc:
-            self.env.lg.warning(
+            self.frame.lg.warning(
                 "map on_error hook raised — original exception preserved",
                 extra={"exception": hook_exc, "original": exc},
             )
@@ -524,7 +525,7 @@ class MapItemRunner:
             if inspect.isawaitable(result):
                 await result
         except Exception as hook_exc:
-            self.env.lg.warning(
+            self.frame.lg.warning(
                 "map on_item_complete hook raised — outcome preserved",
                 extra={"exception": hook_exc},
             )
@@ -537,16 +538,16 @@ class MapItemRunner:
         ``ctx.checkpoint()`` from a map hook addresses the map's
         position.
         """
-        env = self.env
+        frame = self.frame
         return Context(
             role=None,
             state=child_state,
-            flow=env.runtime,
-            traits=env.runtime._traits,
-            halt=env.halt,
-            extra=env.extra,
-            resources=env.scope.resources,
-            _env=env,
+            flow=frame.runtime,
+            traits=frame.runtime._traits,
+            halt=frame.halt,
+            extra=frame.extra,
+            resources=frame.scope.resources,
+            _frame=frame,
             _node_id=self.node_id,
         )
 

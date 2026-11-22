@@ -4,7 +4,7 @@
 """Where Flow calls its hooks: building the events and calling the hooks in effect.
 
 Kept out of the executor, the chain and the Loop so each call site stays
-short. A part of a run without hooks (``env.scope.hooks is None``) builds no
+short. A part of a run without hooks (``frame.scope.hooks is None``) builds no
 events: :meth:`StepHooks.start` returns ``None`` and the other helpers
 return at once.
 
@@ -21,10 +21,10 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from ._node_id import iter_flows
-from ._scope import _RunEnv
-from .context import Context
-from .hooks import (
+from .._node_id import iter_flows
+from ..context import Context
+from ..flow import Flow
+from ..hooks import (
     Actor,
     CheckpointEvent,
     Decision,
@@ -40,15 +40,16 @@ from .hooks import (
     TraceIds,
     Where,
 )
-from .nodes import Interrupted, _Branch, _Iterate, _Map, _Node, step_name
-from .state.cas import FlowCommit
-from .state.snapshot import path_str
-from .structure import Structure
+from ..loop import Loop
+from ..nodes import Interrupted, _Branch, _Iterate, _Map, _Node, step_name
+from ..state.cas import FlowCommit
+from ..state.snapshot import path_str
+from ..structure import Structure
+from .scope import _Frame
 
 
 if TYPE_CHECKING:
     from ._run import Run
-    from .flow import Flow
 
 
 def new_activity_id() -> str:
@@ -62,9 +63,6 @@ def _now() -> datetime:
 
 def step_kind(target: Any) -> StepKind:
     """What a chain step's target is."""
-    from .flow import Flow
-    from .loop import Loop
-
     if isinstance(target, Flow):
         return "subflow"
     if isinstance(target, _Branch):
@@ -84,26 +82,26 @@ def _actor(target: Any, ctx: Context[Any], kind: StepKind) -> Actor:
     return Actor(verb=verb, role=None if ctx.role is None else ctx.role.name)
 
 
-def _env_where(env: _RunEnv, node_id: str | None, flow: Flow | None = None) -> Where:
-    """Where a step ``node_id`` of the chain under ``env`` is; the chain's own place without one."""
+def _env_where(frame: _Frame, node_id: str | None, flow: Flow | None = None) -> Where:
+    """Where a step ``node_id`` of the chain under ``frame`` is; the chain's own place without one."""
     if node_id is None:
-        path = env.position.ancestor_chain
+        path = frame.position.ancestor_chain
         return Where(
             flow=flow,
             node_id=path[-1] if path else None,
             node_path=path,
-            scope_path=path_str(env.position.path),
+            scope_path=path_str(frame.position.path),
         )
     return Where(
         flow=flow,
         node_id=node_id,
-        node_path=(*env.position.ancestor_chain, node_id),
-        scope_path=path_str(env.owner_path(node_id)),
+        node_path=(*frame.position.ancestor_chain, node_id),
+        scope_path=path_str(frame.owner_path(node_id)),
     )
 
 
-def _run_info(env: _RunEnv) -> RunInfo:
-    info = env.run.info
+def _run_info(frame: _Frame) -> RunInfo:
+    info = frame.run.info
     assert info is not None, "hooks are in effect, so the run built its RunInfo"
     return info
 
@@ -116,25 +114,29 @@ class StepHooks:
     ``before_step``; :meth:`finish` calls ``after_step``.
     """
 
-    def __init__(self, env: _RunEnv, hooks: Hooks, flow: Flow, node: _Node, node_id: str) -> None:
+    def __init__(self, frame: _Frame, hooks: Hooks, flow: Flow, node: _Node, node_id: str) -> None:
         self.activity_id = new_activity_id()
-        self.env = env.at_activity(self.activity_id)
+        self.frame = frame.at_activity(self.activity_id)
         self.decision: Decision | None = None
         self._hooks = hooks
-        self._parent = env.position.activity_id
+        self._parent = frame.position.activity_id
         self._target = node.target
         kind = step_kind(node.target)
         self._where = dataclasses.replace(
-            _env_where(env, node_id, flow), kind=kind, step_name=step_name(node)
+            _env_where(frame, node_id, flow), kind=kind, step_name=step_name(node)
         )
         self._actor = Actor()
         self._ctx: Context[Any] | None = None
         self._inputs: tuple[tuple[Any, ...], dict[str, Any]] = ((), {})
 
     @classmethod
-    def start(cls, env: _RunEnv, flow: Flow, node: _Node, node_id: str) -> StepHooks | None:
+    def start(cls, frame: _Frame, flow: Flow, node: _Node, node_id: str) -> StepHooks | None:
         """The hooks around this step, or ``None`` when no hooks are in effect."""
-        return None if env.scope.hooks is None else cls(env, env.scope.hooks, flow, node, node_id)
+        return (
+            None
+            if frame.scope.hooks is None
+            else cls(frame, frame.scope.hooks, flow, node, node_id)
+        )
 
     async def check(self, ctx: Context[Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
         """Call ``before_step``; deny raises :class:`HookDenied`, pause halts the run.
@@ -153,7 +155,7 @@ class StepHooks:
             return
         self.decision = decision
         if decision.verdict == "pause":
-            _pause(self.env, decision)
+            _pause(self.frame, decision)
         raise HookDenied("before_step", decision)
 
     async def finish(
@@ -175,7 +177,7 @@ class StepHooks:
         return StepEvent(
             name=name,
             ts=_now(),
-            run=_run_info(self.env),
+            run=_run_info(self.frame),
             where=self._where,
             activity_id=self.activity_id,
             parent_activity_id=self._parent,
@@ -188,19 +190,19 @@ class StepHooks:
         )
 
 
-def _pause(env: _RunEnv, decision: Decision) -> None:
+def _pause(frame: _Frame, decision: Decision) -> None:
     """Halt the run before the step: set its halt and stop the step as interrupted.
 
     Raises:
         Interrupted: Always, once the halt is set.
         RuntimeError: The run has no halt to set.
     """
-    if env.halt is None:
+    if frame.halt is None:
         raise RuntimeError(
             f"{decision.hook} paused the run before a step, but the run has no halt: "
             f"pass one with run(halt=...)"
         )
-    env.halt.set()
+    frame.halt.set()
     raise Interrupted()
 
 
@@ -213,19 +215,19 @@ def llm_call_hook(
     runs it holds what the model was sent, before the response. ``verb``
     and ``role`` name the Loop making the calls.
     """
-    env = ctx._env
-    if env is None or env.scope.hooks is None or not env.scope.hooks.has("after_llm_call"):
+    frame = ctx._frame
+    if frame is None or frame.scope.hooks is None or not frame.scope.hooks.has("after_llm_call"):
         return None
-    hooks, where = env.scope.hooks, _env_where(env, ctx._node_id)
+    hooks, where = frame.scope.hooks, _env_where(frame, ctx._node_id)
 
     async def call(response: Any) -> None:
         event = LLMCallEvent(
             name="after_llm_call",
             ts=_now(),
-            run=_run_info(env),
+            run=_run_info(frame),
             where=where,
             activity_id=new_activity_id(),
-            parent_activity_id=env.position.activity_id,
+            parent_activity_id=frame.position.activity_id,
             actor=Actor(verb=verb, role=role, model=getattr(response, "model", None)),
             trace=TraceIds(call_id=getattr(response, "call_id", None) or None),
             ctx=ctx,
@@ -239,7 +241,7 @@ def llm_call_hook(
 
 async def checkpoint_written(
     hooks: Hooks | None,
-    env: _RunEnv | None,
+    frame: _Frame | None,
     run: RunInfo | None,
     commit: FlowCommit,
     node_id: str | None = None,
@@ -247,14 +249,14 @@ async def checkpoint_written(
     """Call ``after_checkpoint`` for ``commit``; a no-op without hooks that want it."""
     if hooks is None or run is None or not hooks.has("after_checkpoint"):
         return
-    where = Where() if env is None else _env_where(env, node_id)
+    where = Where() if frame is None else _env_where(frame, node_id)
     event = CheckpointEvent(
         name="after_checkpoint",
         ts=_now(),
         run=run,
         where=where,
         activity_id=new_activity_id(),
-        parent_activity_id=run.run_id if env is None else env.position.activity_id,
+        parent_activity_id=run.run_id if frame is None else frame.position.activity_id,
         commit_id=commit.id,
         outcome=commit.meta.outcome,
     )

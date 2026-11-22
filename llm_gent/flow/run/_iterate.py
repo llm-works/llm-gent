@@ -20,6 +20,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
+from ..nodes import Interrupted
+from ..state import State
+from ..state.snapshot import CARRY, PASS, UNTIL, ScopePath
 from ._executor import (
     _check_until,
     _enter_scope,
@@ -27,32 +30,30 @@ from ._executor import (
     _merge_state,
     _running,
     _save_scope_commit,
+    run_as_subflow,
 )
 from ._halt_observer import is_halt_signaled, note_halt
 from ._shortcut import is_fast_forward
-from .nodes import Interrupted
-from .state import State
-from .state.snapshot import CARRY, PASS, UNTIL, ScopePath
 
 
 if TYPE_CHECKING:
-    from ._scope import _RunEnv
-    from .nodes import _Iterate
+    from ..nodes import _Iterate
+    from .scope import _Frame
 
 
 class IterateRunner:
     """Drive one ``.iterate`` node's body under bounds + halt + resume.
 
-    Constructed with the node config (``it``), the current run env,
+    Constructed with the node config (``it``), the current run frame,
     and the runtime ``node_id`` for this iterate. Caller invokes
     :meth:`run` with the incoming ``node_args`` and receives the last
     body-pass result. Post-check loop semantics — the body always
     runs at least once, then ``until`` (if set) is evaluated.
     """
 
-    def __init__(self, it: _Iterate, env: _RunEnv, node_id: str) -> None:
+    def __init__(self, it: _Iterate, frame: _Frame, node_id: str) -> None:
         self.it = it
-        self.env = env
+        self.frame = frame
         self.node_id = node_id
         # The cursor: the pass the loop is in, the value it carries into that
         # pass, and until's verdict on that value (None: not checked yet). Kept
@@ -79,18 +80,18 @@ class IterateRunner:
         ``deadline`` is not restored — the wall clock resets each run.
         """
         self.carry = node_args[0] if node_args else None
-        path = self.env.owner_path(self.node_id)
+        path = self.frame.owner_path(self.node_id)
         self._take_saved_position(path)
-        env = self.env
-        child_state = await _enter_scope(env, path, self.it.state_fn, self.it.state_factory)
-        with _live_scope(env, path, self.it.state_fn, child_state), _running(env, path, self):
+        frame = self.frame
+        child_state = await _enter_scope(frame, path, self.it.state_fn, self.it.state_factory)
+        with _live_scope(frame, path, self.it.state_fn, child_state), _running(frame, path, self):
             result = await self._loop(path, child_state)
-            await _merge_state(self.it.merge_fn, env.scope.state, child_state)
+            await _merge_state(self.it.merge_fn, frame.scope.state, child_state)
         return result
 
     def _take_saved_position(self, path: ScopePath) -> None:
         """Continue at the pass, carried value and verdict a checkout saved at ``path``, if any."""
-        scopes = self.env.scopes
+        scopes = self.frame.scopes
         found, saved_pass = scopes.take_cursor(path, PASS)
         if found:
             self.iteration = saved_pass
@@ -133,12 +134,12 @@ class IterateRunner:
                 break
             if self.it.deadline is not None and time.monotonic() - started >= self.it.deadline:
                 break
-            if is_halt_signaled(self.env):
+            if is_halt_signaled(self.frame):
                 # Stopped before the next pass: the halt was set outside any
                 # step — before the loop started, or during the last step of
                 # the previous pass, which completed. The cursor is at the pass
                 # that has not run yet.
-                note_halt(self.env, self.iteration, self.node_id)
+                note_halt(self.frame, self.iteration, self.node_id)
                 raise Interrupted()
             pass_path = (*path, "p", str(self.iteration))
             if self._shortcut_ends(pass_path):
@@ -146,8 +147,10 @@ class IterateRunner:
             result = await self._dispatch_body(child_state, self.carry, pass_path)
             self.carry, self.iteration, self.done = result, self.iteration + 1, None
             self.done = await self._until_holds(child_state)
-            if self.env.scope.policy.on_iterate:
-                await _save_scope_commit(self.env, self.iteration, self.node_id, child_state, "ok")
+            if self.frame.scope.policy.on_iterate:
+                await _save_scope_commit(
+                    self.frame, self.iteration, self.node_id, child_state, "ok"
+                )
             if self.done:
                 break
         return self.carry
@@ -160,18 +163,18 @@ class IterateRunner:
         running (its positions are saved) runs again from them; no other
         pass starts.
         """
-        if not is_fast_forward(self.env):
+        if not is_fast_forward(self.frame):
             return False
-        return not self.env.scopes.has_saved_under(pass_path)
+        return not self.frame.scopes.has_saved_under(pass_path)
 
     async def _until_holds(self, child_state: State[Any]) -> bool:
         """``until``'s verdict on the carried value; ``False`` without ``until``."""
-        return await _check_until(self.it.until, self.carry, child_state, self.env, self.node_id)
+        return await _check_until(self.it.until, self.carry, child_state, self.frame, self.node_id)
 
     async def _dispatch_body(
         self, child_state: State[Any], prev_result: Any, pass_path: ScopePath
     ) -> Any:
-        """Run one pass of the body under the current env.
+        """Run one pass of the body under the current frame.
 
         Descends into the body with
         ``chain_context = _descend_context(node_id, "body")`` and
@@ -181,5 +184,5 @@ class IterateRunner:
         (``pass_path``), so scopes and cursors in different passes have
         different paths.
         """
-        child = self.env.descend(self.node_id, "body", pass_path, child_state)
-        return await self.it.body._run_as_subflow((prev_result,), {}, child)
+        child = self.frame.descend(self.node_id, "body", pass_path, child_state)
+        return await run_as_subflow(self.it.body, (prev_result,), {}, child)

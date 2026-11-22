@@ -44,7 +44,6 @@ from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
-from ._shortcut import is_draining, is_fast_forward
 from .checkpoint import checkpoint_tag
 from .resource import COST, NO_RESOURCES, R, ResourceKey
 from .role import Role
@@ -150,8 +149,8 @@ class Context(Generic[T]):
     resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
     """The resources the run runs with, by key; read one with :meth:`resource`."""
 
-    _env: Any = None
-    """Private: the executor's :class:`_RunEnv` for this dispatch.
+    _frame: Any = None
+    """Private: the executor's :class:`_Frame` for this dispatch.
 
     Threaded from :func:`_build_ctx` so verbs can invoke framework
     save primitives (:meth:`checkpoint`). ``None`` on ctx surfaces
@@ -281,14 +280,14 @@ class Context(Generic[T]):
         own ``activity_id``, which the events raised inside it name as their
         parent.
         """
-        return None if self._env is None else self._env.position.activity_id
+        return None if self._frame is None else self._frame.position.activity_id
 
     @property
     def run_id(self) -> str | None:
         """The id of the :meth:`Flow.run` call this step runs in; ``None`` without hooks."""
-        if self._env is None:
+        if self._frame is None:
             return None
-        info = self._env.run.info
+        info = self._frame.run.info
         return None if info is None else info.run_id
 
     def hook(self, cls: type[H]) -> H | None:
@@ -298,10 +297,10 @@ class Context(Generic[T]):
         call one directly, e.g. to record something of its own. ``None``
         outside a run.
         """
-        env = self._env
-        if env is None or env.scope.hooks is None:
+        frame = self._frame
+        if frame is None or frame.scope.hooks is None:
             return None
-        found: H | None = env.scope.hooks.find(cls)
+        found: H | None = frame.scope.hooks.find(cls)
         return found
 
     @property
@@ -313,7 +312,7 @@ class Context(Generic[T]):
         step stopping for the run's :attr:`halt` raises
         :class:`Interrupted` instead.) ``False`` outside a run.
         """
-        return self._env is not None and is_fast_forward(self._env)
+        return self._frame is not None and self._frame.fast_forward()
 
     @property
     def draining(self) -> bool:
@@ -324,7 +323,7 @@ class Context(Generic[T]):
         long LLM turn, a search — finishes what it has now and lets the
         item's remaining steps run. ``False`` outside a run.
         """
-        return self._env is not None and is_draining(self._env)
+        return self._frame is not None and self._frame.draining()
 
     @property
     def cost(self) -> CostTracker | None:
@@ -377,7 +376,7 @@ class Context(Generic[T]):
         No-op returning ``None`` when:
         - No ``with_checkpointer()`` is on this step's flow or above it, or
           the run has no checkpoint store.
-        - The ctx has no live executor env (e.g. built by
+        - The ctx has no live executor frame (e.g. built by
           :meth:`Flow.dispatch` used standalone).
 
         Raises:
@@ -386,16 +385,15 @@ class Context(Generic[T]):
                 form) — also without a checkpointer.
         """
         tag = None if name is None else checkpoint_tag(name)
-        env = self._env
+        frame = self._frame
         node_id = self._node_id
-        if env is None or node_id is None:
+        if frame is None or node_id is None:
             return None
-        from ._executor import _save_scope_commit
-
-        commit = await _save_scope_commit(env, 0, node_id, self.state, "ok")
+        commit = await frame.save_commit(node_id, self.state, "ok")
         if commit is None:
             return None
         if tag is not None:
-            assert env.checkpoint_ctx is not None  # a commit was written to it
-            await env.checkpoint_ctx.put_tag(tag, commit.id)
-        return commit.id
+            assert frame.checkpoint_ctx is not None  # a commit was written to it
+            await frame.checkpoint_ctx.put_tag(tag, commit.id)
+        commit_id: str = commit.id
+        return commit_id

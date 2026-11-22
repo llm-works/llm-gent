@@ -20,7 +20,7 @@ import pytest
 from appinfra.cas import MemoryStore
 
 from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, verb
-from llm_gent.flow._resume import _restart_snapshot
+from llm_gent.flow.run._resume import _restart_snapshot
 from llm_gent.flow.state.snapshot import (
     CHAIN,
     RESOURCES,
