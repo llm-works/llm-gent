@@ -105,7 +105,8 @@ class Scope:
     """
 
     state: State[Any]
-    resources: Mapping[ResourceKey[Any], Any] = NO_RESOURCES
+    # Through a factory: Python 3.11's dataclasses reject a mappingproxy default.
+    resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
     checkpointer: Checkpointer | None = None
     policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
     hooks: Hooks | None = None
