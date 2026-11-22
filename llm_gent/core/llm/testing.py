@@ -75,6 +75,8 @@ class DelayedScriptedBackend(ScriptedBackend):
         super().__init__(lg, script, default_model=default_model)
         self._delay = delay
         if not record:
+            # ScriptedBackend only appends to and measures `requests`; a deque
+            # holding nothing supports both and keeps no request.
             self.requests = deque(maxlen=0)  # type: ignore[assignment]
 
     async def chat_async(self, request: ChatRequest) -> ChatResponse:

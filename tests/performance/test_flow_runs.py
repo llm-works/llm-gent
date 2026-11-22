@@ -162,7 +162,7 @@ class CountingStore(MemoryStore):
         super().write_object(repo, object_id, object_type, data)
 
 
-class SAIAs:
+class _SAIAFactory:
     """SAIAFactory: every role gets a SAIA over the one shared client."""
 
     def __init__(self, lg: Logger, client: LLMClient) -> None:
@@ -269,7 +269,7 @@ def make_bench(lg: Logger, variant: str) -> Bench:
     store = CountingStore(lg) if variant == "checkpoint" else None
     ff: Factory[Flow] = Factory(
         lg,
-        saia_factory=SAIAs(lg, client),
+        saia_factory=_SAIAFactory(lg, client),
         state_factory=TypeStateFactory(RunState),
         checkpoint_store=store,
     )
