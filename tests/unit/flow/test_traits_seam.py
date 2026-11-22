@@ -19,7 +19,7 @@ import pytest
 from llm_gent.core.errors import TraitNotFoundError
 from llm_gent.core.traits import Registry
 from llm_gent.core.traits.base import BaseTrait
-from llm_gent.flow import Factory, Flow, verb
+from llm_gent.flow import Factory, Flow, TypeStateFactory, verb
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, make_test_logger
 
@@ -181,15 +181,20 @@ class TestFactoryDerivers:
         # Original untouched.
         assert ff.create().traits is first
 
-    def test_with_traits_preserves_saia_factory_and_state(self) -> None:
-        """with_traits() carries saia_factory, state, and lg forward."""
+    def test_with_traits_preserves_saia_factory_and_state_factory(self) -> None:
+        """with_traits() carries saia_factory, state_factory, and lg forward."""
         sf = StubFactory()
-        state = {"scope": "shared"}
-        ff = Factory(make_test_logger(), saia_factory=sf, state=state, traits=_fresh_registry())
+        state_factory = TypeStateFactory(dict)
+        ff = Factory(
+            make_test_logger(),
+            saia_factory=sf,
+            state_factory=state_factory,
+            traits=_fresh_registry(),
+        )
         derived = ff.with_traits(_fresh_registry())
         built = derived.create()
         assert built._saia_factory is sf
-        assert built.state is state
+        assert built._state_factory is state_factory
 
     def test_with_traits_none_clears_registry(self) -> None:
         """with_traits(None) derives a factory whose flows have no registry."""

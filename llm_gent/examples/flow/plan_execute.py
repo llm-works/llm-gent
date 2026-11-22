@@ -379,12 +379,13 @@ async def main() -> int:
     ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(PlanExecuteState))
 
     question = "What is twice the population of Tokyo?"
-    flow = ff.create("plan-execute", state=PlanExecuteState(question=question))
+    flow = ff.create("plan-execute")
     flow.call(plan).iterate(_build_body, until=is_done, max_iters=10)
 
     print(f"Question: {question}\n")
-    await flow.run()
-    _print_result(flow.state)
+    state = PlanExecuteState(question=question)
+    await flow.run(state=state)
+    _print_result(state)
     return 0
 
 

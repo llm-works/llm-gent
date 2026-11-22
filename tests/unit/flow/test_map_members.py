@@ -64,7 +64,7 @@ def _flow() -> Flow:
 
 def _store_flow(store: Any) -> Flow:
     """Run it with ``history=NAME``."""
-    flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
+    flow = Factory(make_test_logger(), checkpoint_store=store).create()
     return flow.with_checkpointer()
 
 
@@ -114,7 +114,7 @@ class TestRunsEachMemberOnTheInput:
         async def observe(ctx: Context[Any], _x: Any = None) -> dict[str, Any]:
             return dict(ctx.data)
 
-        flow = make_ff().create(state={}).map([mark_a, mark_b]).then(observe)
+        flow = make_ff().create().map([mark_a, mark_b]).then(observe)
         assert await flow.run() == {"a": True, "b": True}
 
     async def test_members_see_the_run_s_halt_from_any_depth(self) -> None:

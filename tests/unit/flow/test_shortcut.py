@@ -363,7 +363,7 @@ class TestConclude:
                 return x + "!"
 
             region = _region().call(s["a"]).then(s["b"]).conclude(close).then(s["c"])
-            return _ff(store).create(state={}).call(region).then(s["d"])
+            return _ff(store).create().call(region).then(s["d"])
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
@@ -420,7 +420,7 @@ class TestConclude:
                 return x + "b"
 
             region = _region().call(a).conclude(close).then(b, project=track_project)
-            return _ff(store).create(state={}).call(region)
+            return _ff(store).create().call(region)
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
@@ -615,7 +615,7 @@ def _loop_flow(saia: Any, out: dict[str, list[Any]], **top: Any) -> Any:
 
     flow = _top()
     if "store" in top:
-        flow = _ff(top["store"]).create(state={})
+        flow = _ff(top["store"]).create()
     return flow.call(_region().call(turn)).then(after)
 
 
@@ -678,7 +678,7 @@ class TestPauseDuringFastForward:
 
             s = _steps(ran, cut)
             region = _region().call(a).then(s["b"]).then(s["c"])
-            return _ff(store).create(state={}).call(region).then(s["d"])
+            return _ff(store).create().call(region).then(s["d"])
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
@@ -710,7 +710,7 @@ class TestPauseDuringFastForward:
 
             s = _steps(ran, cut)
             region = _region().call(s["b"]).then(s["c"])
-            return _ff(store).create(state={}).call(a).then(region).then(s["d"])
+            return _ff(store).create().call(a).then(region).then(s["d"])
 
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
@@ -731,7 +731,7 @@ class TestPauseDuringFastForward:
         cut = asyncio.Event()
         ran: list[str] = []
         s = _steps(ran, cut, cut_in="a")
-        flow = _ff(store).create(state={}).call(_region().call(s["a"]).then(s["b"]))
+        flow = _ff(store).create().call(_region().call(s["a"]).then(s["b"]))
         assert await flow.run("", history="cut-done", **_cut(cut)) == "a"
         history = History(store, "cut-done")
         assert [c.meta.outcome async for c in history.commits()] == ["ok"]
@@ -970,7 +970,7 @@ class TestSubtreeEndedEarly:
         region = _region().map(
             lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1
         )
-        flow = _ff(store).create(state={}).with_checkpointer().call(region)
+        flow = _ff(store).create().with_checkpointer().call(region)
         results = await flow.run(history="cut-map", **_cut(cut))
         assert ran == [1]
         assert results[0] == 1 and all(isinstance(r, Skipped) for r in results[1:])
@@ -998,7 +998,7 @@ class TestSubtreeEndedEarly:
                 return x
 
             region = _region().iterate(lambda b: b.call(step), max_iters=3)
-            return _ff(store).create(state={}).call(region).then(last)
+            return _ff(store).create().call(region).then(last)
 
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, arm=True)
@@ -1219,7 +1219,7 @@ def _drained_turns(saia: Any, out: dict[str, list[Any]], store: MemoryStore) -> 
         .with_shortcut("cut", drain=True)
         .map(lambda b: b.call(turn).then(after), items=lambda *_: [0, 1], max_concurrency=1)
     )
-    return _ff(store).create(state={}).with_checkpointer().call(region)
+    return _ff(store).create().with_checkpointer().call(region)
 
 
 class TestDrainLoop:

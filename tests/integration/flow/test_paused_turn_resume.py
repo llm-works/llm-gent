@@ -216,7 +216,7 @@ async def test_real_saia_pause_resume_round_trip(store: FileStore) -> None:
     body.call(run_loop)
 
     ff1 = Factory(make_test_logger(), saia_factory=_SaiaFactory(backend1), checkpoint_store=store)
-    flow1 = ff1.create(state={}).with_checkpointer().iterate(body, max_iters=2)
+    flow1 = ff1.create().with_checkpointer().iterate(body, max_iters=2)
     saved_conv = _SerializableConv(messages=[Message(role="user", content="SAVED_CONV_MARKER")])
     await flow1.run(
         halt=halt1,
@@ -244,7 +244,7 @@ async def test_real_saia_pause_resume_round_trip(store: FileStore) -> None:
     backend2.calls.append({"messages": [], "response_schema": None})
 
     ff2 = Factory(make_test_logger(), saia_factory=_SaiaFactory(backend2), checkpoint_store=store)
-    flow2 = ff2.create(state={}).with_checkpointer().iterate(body, max_iters=2)
+    flow2 = ff2.create().with_checkpointer().iterate(body, max_iters=2)
     caller_conv = _SerializableConv(messages=[Message(role="user", content="CALLER_CONV_MARKER")])
     await flow2.run(
         halt=halt2,
@@ -303,7 +303,7 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
     saia_factory = _HaltingSaiaFactory(_ToolThenPauseBackend(), halt)
     flow = (
         Factory(make_test_logger(), saia_factory=saia_factory, checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .iterate(body, max_iters=2)
     )

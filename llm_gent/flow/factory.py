@@ -26,7 +26,6 @@ from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
-from .nodes import UNSET
 from .resource import R, ResourceKey, check_resource, resource_method
 from .role import Role
 from .state import StateFactory
@@ -104,7 +103,6 @@ class Factory(Generic[F]):
         lg: Logger,
         *,
         saia_factory: SAIAFactory | None = None,
-        state: Any = UNSET,
         traits: TraitRegistry | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
@@ -118,7 +116,6 @@ class Factory(Generic[F]):
         lg: Logger,
         *,
         saia_factory: SAIAFactory | None = None,
-        state: Any = UNSET,
         traits: TraitRegistry | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
@@ -131,7 +128,6 @@ class Factory(Generic[F]):
         lg: Logger,
         *,
         saia_factory: SAIAFactory | None = None,
-        state: Any = UNSET,
         traits: TraitRegistry | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
@@ -145,9 +141,6 @@ class Factory(Generic[F]):
             saia_factory: A :class:`SAIAFactory` that builds role-bound
                 saia instances. Threaded into every :class:`Flow` this
                 factory builds.
-            state: Default construction ``state`` for built flows. Per-Flow
-                overrides go through :meth:`create`; per-run overrides go
-                through :meth:`Flow.run`.
             traits: Optional trait registry propagated to every :class:`Flow`
                 built by this factory. Verbs reach mounted capabilities via
                 ``ctx.traits``. ``None`` yields flows with ``ctx.traits is
@@ -157,13 +150,12 @@ class Factory(Generic[F]):
                 the factory to thread the same cost tracker through an
                 entire agent shape.
             state_factory: Optional :class:`StateFactory` threaded into
-                every :class:`Flow`'s ``state_factory=`` slot. Consumed by
-                :meth:`Flow.run` ``resume="latest"`` to reconstruct
-                ``ctx.state.data`` from a loaded checkpoint via
-                ``state_factory.restore(...)``. Wrap a stateless type in
+                every :class:`Flow`'s ``state_factory=`` slot: ``new()``
+                builds the state of a run given no ``state=``, ``restore()``
+                rebuilds it from a checkpoint. Wrap a stateless type in
                 :class:`TypeStateFactory`; implement :class:`StateFactory`
                 directly for state that binds runtime handles. ``None``
-                (default) treats the payload as a plain dict.
+                (default): a run given no state gets a fresh empty ``dict``.
             checkpoint_store: Optional :class:`appinfra.cas.Store` every
                 built :class:`Flow` keeps its runs' histories in (its
                 ``checkpoint_store=``). Each run names its history:
@@ -175,7 +167,6 @@ class Factory(Generic[F]):
         """
         self._lg = lg
         self._saia_factory = saia_factory
-        self._state = state
         self._traits = traits
         self._cost_tracker = cost_tracker
         self._state_factory = state_factory
@@ -185,28 +176,22 @@ class Factory(Generic[F]):
         self._resource_methods: dict[str, ResourceKey[Any]] = {}
         self._built_class: type[F] | None = None
 
-    def create(self, name: str = "", *, state: Any = UNSET) -> F:
+    def create(self, name: str = "") -> F:
         """Return a :class:`Flow` (``flow_class``) using this factory's captured environment.
 
         The flow is structure: it can run many times, at once too. What
-        belongs to one run — its halt, signals and history — goes to
-        :meth:`Flow.run`.
+        belongs to one run — its state, halt, signals and history — goes
+        to :meth:`Flow.run`.
 
         Args:
             name: Optional identifier — used in error messages and traces.
                 Also lets the flow serve as a named node inside a parent
                 chain.
-            state: Per-Flow construction ``state`` override. Passing
-                :data:`UNSET` (default) inherits the factory's ``state``;
-                passing ``None`` explicitly is honored as "payload is
-                ``None``"; any other value replaces the factory default.
         """
-        resolved_state = self._state if state is UNSET else state
         flow = self._class()(
             self._lg,
             name,
             saia_factory=self._saia_factory,
-            state=resolved_state,
             traits=self._traits,
             state_factory=self._state_factory,
             checkpoint_store=self._checkpoint_store,
@@ -291,7 +276,7 @@ class Factory(Generic[F]):
     def with_saia_factory(self, saia_factory: SAIAFactory) -> Factory[F]:
         """Return a new :class:`Factory` whose :class:`SAIAFactory` is swapped.
 
-        Every other captured slot (``lg``, ``state``, ``traits``,
+        Every other captured slot (``lg``, ``traits``,
         ``cost_tracker``, ``state_factory``, ``checkpoint_store``, the flow
         class, resources and resource methods) carries over. Useful for
         subsystems that share the app's logger but need a different saia

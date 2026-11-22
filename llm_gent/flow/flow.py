@@ -154,7 +154,6 @@ class Flow:
         name: str = "",
         *,
         saia_factory: SAIAFactory | None = None,
-        state: Any = UNSET,
         traits: TraitRegistry | None = None,
         state_factory: StateFactory[Any] | None = None,
         checkpoint_store: Store | None = None,
@@ -177,25 +176,22 @@ class Flow:
                 ``ctx.saia`` — verbs that route LLM calls through their own
                 configuration can run without one. A subflow borrows the
                 factory from the runtime it executes under.
-            state: User-owned shared state object. Verbs read and (typically)
-                mutate it in place. Opaque to the flow; may be overridden per
-                :meth:`run` invocation.
             traits: Optional trait registry surfaced on every dispatched
                 :class:`Context` as ``ctx.traits``. When ``None``, verbs see
                 ``ctx.traits is None``. A subflow inherits the outer
                 runtime's registry (like the saia cache) via the same
                 internal handoff, so mounting on the top-level flow is
                 enough to reach every nested dispatch.
-            state_factory: A :class:`StateFactory` the framework calls on
-                :meth:`run` ``resume="latest"`` to reconstruct ``ctx.state.data``
-                from the loaded checkpoint: ``state_factory.restore(...)``.
-                For state that carries no runtime handles wrap the type in
+            state_factory: A :class:`StateFactory` for this flow's state:
+                ``state_factory.new()`` builds the state of a :meth:`run`
+                given no ``state=``, and ``state_factory.restore(...)``
+                rebuilds ``ctx.state.data`` from a checkpoint on resume. For
+                state that carries no runtime handles wrap the type in
                 :class:`TypeStateFactory`; for state that binds a Logger /
                 storage / connection at restore, implement
-                :class:`StateFactory` directly. Only consulted when
-                :meth:`with_checkpointer` is wired. ``None`` (default)
-                treats ``ctx.state.data`` as a plain dict that round-trips
-                through the checkpointer as-is.
+                :class:`StateFactory` directly. ``None`` (default): a run
+                given no state gets a fresh empty ``dict``, which
+                round-trips through checkpoints as-is.
             checkpoint_store: The :class:`appinfra.cas.Store` the runs of
                 this flow keep their histories in, when it runs as the
                 top-level flow: each :meth:`run` given a ``history=`` writes
@@ -206,7 +202,6 @@ class Flow:
         self._lg = lg
         self._name = name
         self._saia_factory = saia_factory
-        self._state = state
         self._traits = traits
         self._state_factory = state_factory
         self._checkpoint_store = checkpoint_store
@@ -229,11 +224,6 @@ class Flow:
     def name(self) -> str:
         """The flow's identifier (empty string when unnamed)."""
         return self._name
-
-    @property
-    def state(self) -> Any:
-        """The flow's default shared state object (user-owned)."""
-        return self._state
 
     @property
     def traits(self) -> TraitRegistry | None:
@@ -295,13 +285,12 @@ class Flow:
         the low-level entrypoint for verbs that invoke sibling verbs
         directly.
 
-        ``scope_state=`` wins over the flow's construction state — pass
-        ``scope_state=ctx.state`` from an in-flight verb to hand the dispatched sibling the live
-        scope payload, not the flow's construction default. Omitting
-        ``scope_state=`` (or passing ``UNSET``) falls back to ``self._state``,
-        defaulting to a fresh empty ``dict`` when none was supplied at
-        construction. A ``State`` instance passes through as-is; any other
-        value is wrapped with this flow's ``state_factory``.
+        Pass ``scope_state=ctx.state`` from an in-flight verb to hand the
+        dispatched sibling the live scope payload. Omitting ``scope_state=``
+        (or passing ``UNSET``) gives the sibling a fresh state, as a
+        :meth:`run` given no ``state=`` gets. A ``State`` instance passes
+        through as-is; any other value is wrapped with this flow's
+        ``state_factory``.
 
         Pass ``halt=ctx.halt`` and ``resources=ctx.resources`` from an
         in-flight verb to propagate its effective ambients to the
@@ -320,11 +309,7 @@ class Flow:
         verb = self._verbs[name]
         role_name = verb.role.name if verb.role is not None else None
         self._lg.debug("dispatching verb", extra={"verb": name, "role": role_name})
-        payload = (
-            (self._state if self._state is not UNSET else {})
-            if scope_state is UNSET
-            else scope_state
-        )
+        payload = self._new_state() if scope_state is UNSET else scope_state
         effective_halt = None if halt is UNSET else halt
         effective_extra: dict[str, Any] = {} if extra is UNSET else extra
         wrapped_state = (
@@ -1172,9 +1157,11 @@ class Flow:
             state: The payload to expose on ``ctx.state`` for this run.
                 Framework wraps it as :class:`State` (``ctx.state.data``
                 reaches the payload; ``ctx.state.root()`` reaches the
-                outermost scope from any subflow). Omitted → the flow's
-                construction ``state`` is used, else a fresh empty ``dict``.
-                Explicitly passing ``None`` is honored (the payload becomes
+                outermost scope from any subflow). Omitted → a fresh state
+                of this run's own: ``state_factory.new()`` when the flow has
+                a state factory, else an empty ``dict``. A resumed run's
+                state comes from the checkpoint; ``state`` is used only on
+                an empty history. Explicitly passing ``None`` is honored (the payload becomes
                 ``None`` and verbs must guard). ``state`` is a bound
                 parameter — it is not forwarded to the first node; verbs
                 needing it as a kwarg are rejected at :meth:`call` time.
@@ -1620,16 +1607,22 @@ class Flow:
     def _wrap_top_state(self, state: Any) -> State[Any]:
         """Wrap a top-level ``run(state=...)`` payload as :class:`State`.
 
-        Resolves the ``state=UNSET`` sentinel to the flow's construction
-        default (or a fresh empty ``dict`` when none was supplied). Explicit
-        ``state=None`` is honored — the payload becomes ``None``. Already-
-        wrapped :class:`State` inputs are returned unchanged so a caller can
-        thread a run-wide state instance across multiple :meth:`run` calls.
+        Resolves the ``state=UNSET`` sentinel to a fresh state
+        (:meth:`_new_state`). Explicit ``state=None`` is honored — the
+        payload becomes ``None``. Already-wrapped :class:`State` inputs are
+        returned unchanged so a caller can thread a run-wide state instance
+        across multiple :meth:`run` calls.
         """
-        payload = (self._state if self._state is not UNSET else {}) if state is UNSET else state
+        payload = self._new_state() if state is UNSET else state
         if isinstance(payload, State):
             return payload
         return State(data=payload, _factory=self._state_factory)
+
+    def _new_state(self) -> Any:
+        """A fresh state payload: ``state_factory.new()``, else an empty ``dict``."""
+        if self._state_factory is None:
+            return {}
+        return self._state_factory.new()
 
     # -------------------------------------------------------------------------
     # Internals

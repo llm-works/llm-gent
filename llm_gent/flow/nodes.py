@@ -74,8 +74,9 @@ UNSET: Final[Unset] = Unset()
 Surfaces in two places on the public API:
 
 - :meth:`Flow.run` — ``state=UNSET`` is the sentinel default that resolves
-  to the flow's construction ``state`` (or a fresh empty ``dict``); passing
-  ``state=None`` explicitly is honored as "payload is ``None``".
+  to a fresh state of the run's own (``state_factory.new()``, else an empty
+  ``dict``); passing ``state=None`` explicitly is honored as "payload is
+  ``None``".
 - :type:`RescuePolicy` — the ``pending_input`` positional is :data:`UNSET`
   when the failing node is the chain's first node and :meth:`Flow.run` was
   called with no positional argument.

@@ -247,7 +247,7 @@ class TestInAFlow:
 
             return (
                 Factory(make_test_logger(), checkpoint_store=store)
-                .create(state={})
+                .create()
                 .iterate(lambda b: b.call(grow), max_iters=3)
             )
 
@@ -290,7 +290,7 @@ class TestInAFlow:
                 .guard(lambda item, _ctx: item != "skip")
             )
             return (
-                ff.create(state={})
+                ff.create()
                 .with_checkpointer()
                 .with_checkpoint_policy(on_iterate=True)
                 .iterate(lambda b: b.call(batch).then(keep), max_iters=2)

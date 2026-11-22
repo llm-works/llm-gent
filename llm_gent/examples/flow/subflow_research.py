@@ -435,7 +435,7 @@ async def main() -> int:
     saia_factory = StructuredStubSAIAFactory(_demo_scripts())
     ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(ResearchState))
 
-    flow = ff.create("subflow-research", state=ResearchState(question=_DEMO_QUESTION))
+    flow = ff.create("subflow-research")
     (
         flow.call(decompose)
         .map(
@@ -448,8 +448,9 @@ async def main() -> int:
     )
 
     print(f"Question: {_DEMO_QUESTION}\n")
-    await flow.run()
-    _print_report(flow.state)
+    state = ResearchState(question=_DEMO_QUESTION)
+    await flow.run(state=state)
+    _print_report(state)
     return 0
 
 

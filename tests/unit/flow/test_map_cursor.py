@@ -81,7 +81,7 @@ def _map_flow(
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .map(
             lambda b: b.call(work),
@@ -184,7 +184,7 @@ class TestUnmergedItem:
 
             return (
                 Factory(make_test_logger(), checkpoint_store=store)
-                .create(state={})
+                .create()
                 .with_checkpointer()
                 .map(
                     lambda b: b.call(work),
@@ -228,7 +228,7 @@ class TestLenientParallelMap:
 
             return (
                 Factory(make_test_logger(), checkpoint_store=store)
-                .create(state={})
+                .create()
                 .with_checkpointer()
                 .map(
                     lambda b: b.call(work),
@@ -294,7 +294,7 @@ def _mixed_flow(
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .map(
             lambda b: b.call(work),
@@ -413,7 +413,7 @@ class TestFailedAndSkippedItemsStayDone:
 
             return (
                 Factory(make_test_logger(), checkpoint_store=store)
-                .create(state={})
+                .create()
                 .with_checkpointer()
                 .map(
                     lambda b: b.call(work),
@@ -464,7 +464,7 @@ def _guarded_flow(store: Any, admit: bool, seen: _Seen) -> Any:
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .map(lambda b: b.call(first).then(second), items=lambda *_: [1, 2], max_concurrency=1)
         .guard(guard)
@@ -500,7 +500,7 @@ class TestSerialization:
 
         flow = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .map(lambda b: b.call(work), items=lambda _p, _c: [_Opaque()])
         )

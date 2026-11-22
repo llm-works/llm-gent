@@ -139,7 +139,6 @@ def _make_halt_check(halt_after_iteration: int | None) -> Any:
 def build_canonical_flow(
     lg: Logger,
     *,
-    state: CanonicalCounter | None = None,
     max_iters: int = 5,
     halt_after_iteration: int | None = None,
     store: Store | None = None,
@@ -155,11 +154,11 @@ def build_canonical_flow(
     ``snapshot`` returns ``state.data.to_dict()`` so :meth:`Flow.run`
     yields the final state directly (uniform observable across
     baseline, interrupt, and resume paths). Run it with
-    ``run(history=..., halt=...)`` as the case needs.
+    ``run(history=..., halt=...)`` as the case needs; a run given no
+    ``state=`` starts from a fresh ``CanonicalCounter()``.
 
     Args:
         lg: Logger.
-        state: Initial payload. Defaults to a fresh ``CanonicalCounter()``.
         max_iters: Iterate cap (cumulative across resumes — the resume
             of an interrupt saved in pass N runs passes N to
             ``max_iters - 1``).
@@ -173,12 +172,7 @@ def build_canonical_flow(
             ``checkpoint_store``, with a checkpointer and a save at every
             iterate pass. Its runs keep a history when given ``history=``.
     """
-    flow = Flow(
-        lg,
-        state=state if state is not None else CanonicalCounter(),
-        state_factory=TypeStateFactory(CanonicalCounter),
-        checkpoint_store=store,
-    )
+    flow = Flow(lg, state_factory=TypeStateFactory(CanonicalCounter), checkpoint_store=store)
     if store is not None:
         # Canonical fixture opts into per-iteration saves: the determinism
         # assertions and resume tests need each boundary as a resumable anchor.

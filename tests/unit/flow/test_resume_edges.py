@@ -83,7 +83,7 @@ class TestRescue:
 
             return (
                 Factory(make_test_logger(), checkpoint_store=store)
-                .create(state={})
+                .create()
                 .with_checkpointer()
                 .iterate(lambda b: b.call(step), max_iters=3, name="loop")
                 .rescue(lambda _e, _p, _c: -1)
@@ -155,7 +155,7 @@ def _typed_flow(store: Any, halt: asyncio.Event, ran: list[str], stop_at: int | 
 
     return (
         Factory(make_test_logger(), state_factory=TypeStateFactory(Totals), checkpoint_store=store)
-        .create(state=Totals())
+        .create()
         .with_checkpointer()
         .call(seed)
         .iterate(lambda b: b.call(bump), max_iters=2)

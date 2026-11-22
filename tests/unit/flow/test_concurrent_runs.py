@@ -33,7 +33,7 @@ def _probe_flow(barrier: asyncio.Barrier, seen: dict[str, list[str | None]]) -> 
         await barrier.wait()
         seen[tag].append(ctx.run_id)
 
-    return Factory(make_test_logger()).create(state={}).call(probe).with_hooks(_Quiet())
+    return Factory(make_test_logger()).create().call(probe).with_hooks(_Quiet())
 
 
 class TestConcurrentRuns:

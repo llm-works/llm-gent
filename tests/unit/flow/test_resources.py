@@ -246,7 +246,7 @@ class TestAcrossResume:
 
         return (
             _ff(store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .with_resource(COUNTER, counter)
             .call(a)
@@ -296,7 +296,7 @@ class TestAcrossResume:
                 return x
 
             inner = ff.create().call(b)
-            return ff.create(state={}).call(tick).then(inner)
+            return ff.create().call(tick).then(inner)
 
         assert await build(Counter(), arm=True).run(1, halt=halt, history=NAME) is HALTED
         history = History(store, NAME)
@@ -333,7 +333,7 @@ class TestAcrossResume:
 
             return (
                 _ff(store)
-                .create(state={})
+                .create()
                 .with_checkpointer()
                 .with_resource(COUNTER, root)
                 .map(
@@ -364,13 +364,7 @@ class TestAcrossResume:
             return x
 
         def build(key: ResourceKey[Counter], counter: Counter) -> Any:
-            return (
-                _ff(store)
-                .create(state={})
-                .with_checkpointer()
-                .with_resource(key, counter)
-                .call(step)
-            )
+            return _ff(store).create().with_checkpointer().with_resource(key, counter).call(step)
 
         await build(COUNTER, Counter()).run(1, history=NAME)
         fresh = Counter()
@@ -408,7 +402,7 @@ class TestRestart:
 
             return (
                 _ff(store)
-                .create(state={})
+                .create()
                 .with_checkpointer()
                 .with_resource(COUNTER, root)
                 .with_resource(COUNTER, per="run")
@@ -496,13 +490,7 @@ class TestProtocol:
             return x
 
         def build(resource: Structural) -> Any:
-            return (
-                _ff(store)
-                .create(state={})
-                .with_checkpointer()
-                .with_resource(key, resource)
-                .call(step)
-            )
+            return _ff(store).create().with_checkpointer().with_resource(key, resource).call(step)
 
         await build(Structural()).run(0, history=NAME)
         fresh = Structural()

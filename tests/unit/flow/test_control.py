@@ -111,9 +111,9 @@ class TestBranchExecution:
             seen["role"] = ctx.role
             return True
 
-        flow = make_ff().create(state={"k": "v"})
+        flow = make_ff().create()
         flow.call(_identity).branch(when=when, then=lambda f: f.call(_double))
-        await flow.run(4)
+        await flow.run(4, state={"k": "v"})
         assert seen == {"prev": 4, "state": {"k": "v"}, "role": None}
 
     @pytest.mark.asyncio
@@ -289,7 +289,7 @@ class TestIterateExecution:
             """Stop after 3 items."""
             return len(ctx.state.data["items"]) >= 3
 
-        flow = make_ff().create(state={"items": []})
+        flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(push), until=until, max_iters=10)
         state: dict[str, Any] = {"items": []}
         await flow.run(0, state=state)
@@ -419,9 +419,9 @@ class TestMapExecution:
             seen["state"] = ctx.state.data
             return list(range(prev))
 
-        flow = make_ff().create(state={"tag": "s"})
+        flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double), items=items)
-        assert await flow.run(3) == [0, 2, 4]
+        assert await flow.run(3, state={"tag": "s"}) == [0, 2, 4]
         assert seen == {"prev": 3, "state": {"tag": "s"}}
 
     @pytest.mark.asyncio
@@ -687,7 +687,7 @@ class TestMapGuard:
             merged.append(child["item"])
             parent["seen"].append(child["item"])
 
-        flow = make_ff().create(state={"seen": []})
+        flow = make_ff().create()
         flow.call(_identity).map(
             _double,
             state=project,
@@ -921,7 +921,7 @@ class TestMapOnItemComplete:
             """Read parent state — merge already fired for successful items."""
             seen_after_merge.append(len(ctx.state.root().data.get("merged", [])))
 
-        flow = make_ff().create(state={})
+        flow = make_ff().create()
         flow.call(_identity).map(bump, state=project, merge=merge).on_item_complete(hook)
         await flow.run([1, 2, 3])
         # Each hook call sees at least its own item's merge — post-merge order.
@@ -957,7 +957,7 @@ class TestMapOnItemComplete:
             """Record outcomes; merge failure should appear as Failure."""
             observed.append(outcome)
 
-        flow = make_ff().create(state={})
+        flow = make_ff().create()
         flow.call(_identity).map(_double, state=project, merge=bad_merge).on_item_complete(hook)
         with pytest.raises(ValueError, match="merge-failed"):
             await flow.run([1])
@@ -982,7 +982,7 @@ class TestMapOnItemComplete:
             """Record every outcome."""
             observed.append(outcome)
 
-        flow = make_ff().create(state={})
+        flow = make_ff().create()
         flow.call(_identity).map(
             _double, strict=False, state=project, merge=bad_merge
         ).on_item_complete(hook)
@@ -1154,12 +1154,8 @@ class TestMapComputedConcurrency:
             calls.append((items, ctx.state.data))
             return 1
 
-        flow = (
-            make_ff()
-            .create(state={"remaining": 3})
-            .map(_double, items=lambda _p, _c: [1, 2, 3], max_concurrency=cap)
-        )
-        assert await flow.run() == [2, 4, 6]
+        flow = make_ff().create().map(_double, items=lambda _p, _c: [1, 2, 3], max_concurrency=cap)
+        assert await flow.run(state={"remaining": 3}) == [2, 4, 6]
         assert calls == [([1, 2, 3], {"remaining": 3})]
 
     @pytest.mark.asyncio
@@ -1294,7 +1290,7 @@ class TestRunHalt:
             """Record any child payload that leaks past the halt."""
             merged.append(child["payload"])
 
-        flow = make_ff().create(state={})
+        flow = make_ff().create()
         flow.call(_identity).map(_double, state=project, merge=merge)
         await flow.run([1, 2, 3], halt=halt)
         assert merged == []
@@ -1437,9 +1433,9 @@ class TestMapProjectionErrors:
             observed.append((type(exc), item))
             observed_states.append(ctx.state.data)
 
-        flow = make_ff().create(state={"parent": True})
+        flow = make_ff().create()
         flow.call(_identity).map(_double, state=blow, strict=False).on_error(on_err)
-        await flow.run([1, 2])
+        await flow.run([1, 2], state={"parent": True})
         assert sorted(observed) == [(RuntimeError, 1), (RuntimeError, 2)]
         # Projection failed → on_error sees parent state, not (non-existent) child
         assert all(s == {"parent": True} for s in observed_states)

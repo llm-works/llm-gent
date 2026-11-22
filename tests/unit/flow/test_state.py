@@ -6,13 +6,25 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from llm_gent.flow import Failure, State, verb
+from llm_gent.flow import Factory, Failure, State, StateDataclass, TypeStateFactory, verb
 
-from .conftest import ROLE_A, ROLE_B, make_ff
+from .conftest import ROLE_A, ROLE_B, StubFactory, make_ff, make_test_logger
+
+
+@dataclass
+class _Tally(StateDataclass):
+    """A typed state a :class:`TypeStateFactory` builds."""
+
+    n: int = 0
+
+
+def _factory(state_factory: Any) -> Factory:
+    return Factory(make_test_logger(), saia_factory=StubFactory(), state_factory=state_factory)
 
 
 # -----------------------------------------------------------------------------
@@ -106,37 +118,58 @@ class TestStateWrapper:
 
         assert seen == [None]
 
-    async def test_construction_state_none_factory(self) -> None:
-        """Factory(state=None) is preserved at run time — not replaced with {}."""
-        seen: list[object] = []
+    async def test_a_state_factory_builds_each_run_s_state(self) -> None:
+        """A run given no ``state=`` gets ``state_factory.new()``: a new one per run."""
+        seen: list[_Tally] = []
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
+            ctx.state.data.n += 1
             seen.append(ctx.state.data)
 
-        from llm_gent.flow import Factory
-
-        from .conftest import StubFactory, make_test_logger
-
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state=None)
-        flow = ff.create().call(check)
+        flow = _factory(TypeStateFactory(_Tally)).create("top").call(check)
+        await flow.run()
         await flow.run()
 
-        assert seen == [None]
+        assert [type(s) for s in seen] == [_Tally, _Tally]
+        assert seen[0] is not seen[1]
+        assert [s.n for s in seen] == [1, 1]
 
-    async def test_construction_state_none_create(self) -> None:
-        """ff.create(state=None) is preserved at run time — not replaced with {}."""
-        seen: list[object] = []
+    async def test_runs_at_once_do_not_share_state(self) -> None:
+        """Concurrent runs of one flow each work on their own state."""
+        both = asyncio.Barrier(2)
+        seen: list[_Tally] = []
 
         @verb(role=ROLE_A)
         async def check(ctx) -> None:
+            ctx.state.data.n += 1
+            await both.wait()  # both runs are inside the step together
             seen.append(ctx.state.data)
 
-        ff = make_ff()
-        flow = ff.create(state=None).call(check)
-        await flow.run()
+        flow = _factory(TypeStateFactory(_Tally)).create("top").call(check)
+        await asyncio.gather(flow.run(), flow.run())
 
-        assert seen == [None]
+        assert seen[0] is not seen[1]
+        assert [s.n for s in seen] == [1, 1]
+
+    async def test_a_factory_that_cannot_build_a_state_raises_from_run(self) -> None:
+        """A factory whose ``new()`` raises needs ``run(state=...)``; without it the run raises."""
+
+        class _NeedsInputs:
+            def new(self) -> Any:
+                raise TypeError("pass run(state=...)")
+
+            def restore(self, data: dict[str, Any]) -> Any:
+                return data
+
+        @verb(role=ROLE_A)
+        async def check(ctx) -> None:
+            pass
+
+        flow = _factory(_NeedsInputs()).create("top").call(check)
+        with pytest.raises(TypeError, match=r"pass run\(state=\.\.\.\)"):
+            await flow.run()
+        await flow.run(state={"given": True})
 
     async def test_prewrapped_state_passed_through(self) -> None:
         """A caller-constructed :class:`State` is used verbatim (not re-wrapped)."""
@@ -153,8 +186,8 @@ class TestStateWrapper:
 
         assert seen[0] is outer
 
-    async def test_dispatch_wraps_construction_state(self) -> None:
-        """``Flow.dispatch`` also wraps its state as a top-level :class:`State`."""
+    async def test_dispatch_wraps_the_given_state(self) -> None:
+        """``Flow.dispatch(scope_state=...)`` wraps it as a top-level :class:`State`."""
         user_state = {"counter": 0}
         seen: list[object] = []
 
@@ -162,14 +195,29 @@ class TestStateWrapper:
         async def check(ctx) -> None:
             seen.append(ctx.state)
 
-        ff = make_ff()
-        flow = ff.create("top", state=user_state)
+        flow = make_ff().create("top")
         flow.register(check)
-        await flow.dispatch("check")
+        await flow.dispatch("check", scope_state=user_state)
 
         assert isinstance(seen[0], State)
         assert seen[0].data is user_state
         assert seen[0].is_root is True
+
+    async def test_dispatch_without_a_state_builds_a_fresh_one(self) -> None:
+        """Without ``scope_state=``, each dispatch gets a new state, as a run does."""
+        seen: list[object] = []
+
+        @verb(role=ROLE_A)
+        async def check(ctx) -> None:
+            seen.append(ctx.state.data)
+
+        flow = _factory(TypeStateFactory(_Tally)).create("top")
+        flow.register(check)
+        await flow.dispatch("check")
+        await flow.dispatch("check")
+
+        assert [type(s) for s in seen] == [_Tally, _Tally]
+        assert seen[0] is not seen[1]
 
 
 # -----------------------------------------------------------------------------
@@ -314,9 +362,9 @@ class TestScopedStateSharing:
         ff = make_ff()
         parent_state = {"from_inner": False, "root": "yes"}
         inner = ff.create("inner").call(inner_verb)
-        top = ff.create("top", state=parent_state).call(inner)
+        top = ff.create("top").call(inner)
 
-        await top.run()
+        await top.run(state=parent_state)
 
         assert parent_state["from_inner"] is True
 
@@ -330,9 +378,9 @@ class TestScopedStateSharing:
 
         ff = make_ff()
         parent_state: dict = {}
-        top = ff.create("top", state=parent_state).iterate(lambda f: f.call(bump), max_iters=4)
+        top = ff.create("top").iterate(lambda f: f.call(bump), max_iters=4)
 
-        await top.run("seed")
+        await top.run("seed", state=parent_state)
 
         assert parent_state == {"count": 4}
 
@@ -351,9 +399,9 @@ class TestScopedStateProjection:
         ff = make_ff()
         parent_state = {"parent_key": "kept"}
         inner = ff.create("inner").call(inner_verb)
-        top = ff.create("top", state=parent_state).call(inner, state=lambda _parent: {})
+        top = ff.create("top").call(inner, state=lambda _parent: {})
 
-        await top.run()
+        await top.run(state=parent_state)
 
         assert parent_state == {"parent_key": "kept"}
 
@@ -371,11 +419,9 @@ class TestScopedStateProjection:
         ff = make_ff()
         parent_state: dict = {}
         inner = ff.create("inner").call(inner_verb)
-        top = ff.create("top", state=parent_state).call(
-            inner, state=lambda _parent: {}, merge=merge
-        )
+        top = ff.create("top").call(inner, state=lambda _parent: {}, merge=merge)
 
-        await top.run()
+        await top.run(state=parent_state)
 
         assert parent_state == {"fold": 7}
 
@@ -396,12 +442,10 @@ class TestScopedStateProjection:
         ff = make_ff()
         parent_state: dict = {}
         inner = ff.create("inner").call(inner_verb)
-        top = ff.create("top", state=parent_state).call(
-            inner, state=lambda _parent: {}, merge=merge
-        )
+        top = ff.create("top").call(inner, state=lambda _parent: {}, merge=merge)
 
         with pytest.raises(RuntimeError, match="boom"):
-            await top.run()
+            await top.run(state=parent_state)
 
         assert merged == []
         assert parent_state == {}
@@ -421,9 +465,9 @@ class TestScopedStateProjection:
         ff = make_ff()
         parent_state = {"root": "R"}
         inner = ff.create("inner").call(inner_verb)
-        top = ff.create("top", state=parent_state).call(inner, state=project)
+        top = ff.create("top").call(inner, state=project)
 
-        await top.run()
+        await top.run(state=parent_state)
 
         assert received == [parent_state]
 
@@ -442,14 +486,14 @@ class TestScopedStateProjection:
 
         ff = make_ff()
         parent_state: dict = {"unrelated": True}
-        top = ff.create("top", state=parent_state).iterate(
+        top = ff.create("top").iterate(
             lambda f: f.call(bump),
             max_iters=3,
             state=lambda _parent: {},
             merge=merge,
         )
 
-        await top.run("seed")
+        await top.run("seed", state=parent_state)
 
         assert snapshots == [{"count": 1}, {"count": 2}, {"count": 3}]
         assert parent_state == {"unrelated": True, "final_count": 3}
@@ -470,7 +514,7 @@ class TestScopedStateProjection:
 
         ff = make_ff()
         parent_state: dict = {}
-        top = ff.create("top", state=parent_state).iterate(
+        top = ff.create("top").iterate(
             lambda f: f.call(bump),
             max_iters=5,
             state=lambda _parent: {},
@@ -478,7 +522,7 @@ class TestScopedStateProjection:
         )
 
         with pytest.raises(RuntimeError, match="boom"):
-            await top.run("seed")
+            await top.run("seed", state=parent_state)
 
         assert merged == []
 
@@ -494,13 +538,13 @@ class TestScopedStateProjection:
 
         ff = make_ff()
         parent_state: dict = {"count": 999}
-        top = ff.create("top", state=parent_state).iterate(
+        top = ff.create("top").iterate(
             lambda f: f.call(bump),
             until=lambda _result, ctx: ctx.state.data.get("count", 0) >= 3,
             state=lambda _parent: {},
         )
 
-        await top.run("seed")
+        await top.run("seed", state=parent_state)
 
         assert counts == [1, 2, 3]
         assert parent_state == {"count": 999}
@@ -518,12 +562,12 @@ class TestScopedStateProjection:
 
         ff = make_ff()
         parent_state = {"parent_key": "kept"}
-        top = ff.create("top", state=parent_state).map(
+        top = ff.create("top").map(
             lambda f: f.call(record),
             state=lambda _parent: {},
         )
 
-        await top.run([1, 2, 3])
+        await top.run([1, 2, 3], state=parent_state)
 
         seen.sort(key=lambda p: p[0])
         assert seen == [(1, {"item": 1}), (2, {"item": 2}), (3, {"item": 3})]
@@ -544,14 +588,14 @@ class TestScopedStateProjection:
 
         ff = make_ff()
         parent_state: dict = {}
-        top = ff.create("top", state=parent_state).map(
+        top = ff.create("top").map(
             lambda f: f.call(maybe_fail),
             state=lambda _parent: {},
             merge=merge,
             strict=False,
         )
 
-        results = await top.run([1, 2, 3])
+        results = await top.run([1, 2, 3], state=parent_state)
 
         assert results[0] == 1
         assert isinstance(results[1], Failure)
@@ -581,9 +625,9 @@ class TestStateProjectionAsync:
         ff = make_ff()
         parent_state: dict = {}
         inner = ff.create("inner").call(inner_verb)
-        top = ff.create("top", state=parent_state).call(inner, state=async_state, merge=async_merge)
+        top = ff.create("top").call(inner, state=async_state, merge=async_merge)
 
-        await top.run()
+        await top.run(state=parent_state)
 
         assert parent_state == {"carried": True}
 

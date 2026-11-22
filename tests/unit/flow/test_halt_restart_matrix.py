@@ -833,7 +833,7 @@ def _flow(shape: Seq, probe: Probe, store: Any, *, parallel: bool) -> Flow:
     It carries the runs' store; it declares the checkpointer itself unless
     the shape declares its own in a ``Ckpt``.
     """
-    flow = Factory(LG, checkpoint_store=store).create(state={})
+    flow = Factory(LG, checkpoint_store=store).create()
     if not _has(shape, Ckpt):
         flow = flow.with_checkpointer()
     if probe.policy in ("on_iterate", "on_map_item"):

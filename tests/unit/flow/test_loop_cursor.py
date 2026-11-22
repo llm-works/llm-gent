@@ -97,7 +97,7 @@ def _map_flow(store: Any, saia: _PausingSAIA) -> Any:
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .map(lambda b: b.call(item), items=lambda _p, _c: ["a", "b"], max_concurrency=2)
     )
@@ -162,7 +162,7 @@ def _two_calls_flow(store: Any, saia: _ScriptedSAIA, factory: Any) -> Any:
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .call(both)
         .then(then)
@@ -279,10 +279,7 @@ def _capped_flow(store: Any, saia: _CappedSAIA) -> Any:
         return await loop(ctx, "t")
 
     return (
-        Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
-        .with_checkpointer()
-        .call(turn)
+        Factory(make_test_logger(), checkpoint_store=store).create().with_checkpointer().call(turn)
     )
 
 

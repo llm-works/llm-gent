@@ -242,11 +242,11 @@ class TestCheckpointPolicyIterate:
 
         outer = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={"n": 0})
+            .create()
             .with_checkpointer()
             .iterate(body, max_iters=5)
         )
-        await outer.run(history="policy-halt-only")
+        await outer.run(state={"n": 0}, history="policy-halt-only")
 
         # Every commit written during the run has node_path == "$end"
         # (only the clean-exit final-state commit fires under the default
@@ -276,12 +276,12 @@ class TestCheckpointPolicyIterate:
 
         outer = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={"n": 0})
+            .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_iterate=True)
             .iterate(body, max_iters=3)
         )
-        await outer.run(history="policy-on-iter")
+        await outer.run(state={"n": 0}, history="policy-on-iter")
 
         # Under on_iterate=True the iterate boundary emits a commit each
         # iteration + a $end final-state commit on clean exit. Group commit
@@ -313,7 +313,7 @@ class TestCheckpointPolicyMap:
 
         outer = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .map(body, items=lambda _p, _c: [1, 2, 3])
         )
@@ -343,7 +343,7 @@ class TestCheckpointPolicyMap:
 
         outer = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(body, items=lambda _p, _c: [1, 2, 3])
@@ -380,7 +380,7 @@ class TestCheckpointPolicyMap:
 
         outer = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={"total": 1})
+            .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(
@@ -392,7 +392,7 @@ class TestCheckpointPolicyMap:
             )
             .call(read_state)
         )
-        assert await outer.run(history="map-rollback") == {"total": 1}
+        assert await outer.run(state={"total": 1}, history="map-rollback") == {"total": 1}
 
     async def test_failed_item_commit_without_state_keeps_sibling_writes(
         self, store: MemoryStore
@@ -417,12 +417,12 @@ class TestCheckpointPolicyMap:
         state: dict[str, Any] = {}
         outer = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state=state)
+            .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(lambda b: b.call(mark), items=lambda _p, _c: [0, 1], strict=False)
         )
-        await outer.run(history="map-siblings")
+        await outer.run(state=state, history="map-siblings")
         assert state == {"s0": True, "s1": True}
         history = History(store, "map-siblings")
         head = await history.head()
@@ -452,10 +452,10 @@ class TestCommitConsistency:
         sub.map(lambda b: b.call(bump), items=lambda _p, _c: list(range(6)))
         await (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={"n": 0})
+            .create()
             .with_checkpointer()
             .call(sub, state=lambda p: {"n": p["n"]})
-            .run(history="one-moment")
+            .run(state={"n": 0}, history="one-moment")
         )
         history = History(store, "one-moment")
         snapshots = [await history.snapshot(commit) async for commit in history.commits()]
@@ -485,7 +485,7 @@ class TestCheckpointedRunValues:
 
         flow = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .call(make)
             .call(read)
@@ -508,7 +508,7 @@ class TestCheckpointedRunValues:
 
         flow = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .map(
                 lambda b: b.call(dispatch),
@@ -535,7 +535,7 @@ class TestCheckpointedRunValues:
 
         flow = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .map(lambda b: b.call(double), items=lambda _p, _c: [1, 2, 3], strict=False)
             .call(summarize)
@@ -563,7 +563,7 @@ class TestCtxCheckpoint:
 
         outer = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .call(saver)
         )
@@ -598,10 +598,10 @@ class TestCtxCheckpoint:
 
         await (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={"n": 1})
+            .create()
             .with_checkpointer()
             .call(save_twice)
-            .run(history="no-reput")
+            .run(state={"n": 1}, history="no-reput")
         )
         assert len(puts) == len(set(puts))
 
@@ -663,7 +663,7 @@ class TestPausedTurnInSnapshot:
             return "not run"
 
         ff = Factory(make_test_logger(), saia_factory=_PausingSAIAFactory(), checkpoint_store=store)
-        flow = ff.create(state={}).with_checkpointer().call(run_loop).then(after)
+        flow = ff.create().with_checkpointer().call(run_loop).then(after)
         await flow.run(halt=halt, history="paused-turn-1")
 
         commit = head_commit(store, "paused-turn-1")
@@ -722,7 +722,7 @@ class TestPausedTurnInSnapshot:
             return "not run"
 
         ff = Factory(make_test_logger(), checkpoint_store=store)
-        flow = ff.create(state={}).with_checkpointer().call(run_a).then(run_b).then(after)
+        flow = ff.create().with_checkpointer().call(run_a).then(run_b).then(after)
         await flow.run(halt=halt, history="paused-turn-multi")
 
         commit = head_commit(store, "paused-turn-multi")
@@ -775,7 +775,7 @@ class TestPausedTurnInSnapshot:
             saia_factory=PhaseFactory(halt1, "first", complete_calls),
             checkpoint_store=store,
         )
-        flow1 = ff1.create(state={}).with_checkpointer().iterate(body, max_iters=2)
+        flow1 = ff1.create().with_checkpointer().iterate(body, max_iters=2)
         await flow1.run(
             halt=halt1, history="resume-round-trip", extra={"conv": Conv(messages=["from-turn-1"])}
         )
@@ -792,7 +792,7 @@ class TestPausedTurnInSnapshot:
             saia_factory=PhaseFactory(halt2, "resume", complete_calls),
             checkpoint_store=store,
         )
-        flow2 = ff2.create(state={}).with_checkpointer().iterate(body, max_iters=2)
+        flow2 = ff2.create().with_checkpointer().iterate(body, max_iters=2)
         await flow2.run(
             halt=halt2,
             history="resume-round-trip",
@@ -835,7 +835,7 @@ class TestPausedTurnInSnapshot:
             saia_factory=PhaseFactory(halt1, "first", complete_calls),
             checkpoint_store=store,
         )
-        flow1 = ff1.create(state={}).with_checkpointer().call(run_loop).then(after_step)
+        flow1 = ff1.create().with_checkpointer().call(run_loop).then(after_step)
         await flow1.run(
             halt=halt1,
             history="chain-resume",
@@ -851,7 +851,7 @@ class TestPausedTurnInSnapshot:
             saia_factory=PhaseFactory(halt2, "resume", complete_calls),
             checkpoint_store=store,
         )
-        flow2 = ff2.create(state={}).with_checkpointer().call(run_loop).then(after_step)
+        flow2 = ff2.create().with_checkpointer().call(run_loop).then(after_step)
         result = await flow2.run(
             halt=halt2,
             history="chain-resume",
@@ -945,7 +945,7 @@ class TestSaveOnHaltChain:
             return ctx.state.data["c"]
 
         ff = Factory(make_test_logger(), checkpoint_store=store)
-        pre = ff.create(state={}).with_checkpointer().call(step_a).then(step_b).then(step_c)
+        pre = ff.create().with_checkpointer().call(step_a).then(step_b).then(step_c)
         await pre.run(halt=halt, history="chain-halt")
 
         commit = head_commit(store, "chain-halt")
@@ -956,7 +956,7 @@ class TestSaveOnHaltChain:
         # the pre-halt state has only a and b, no c.
 
         halt.clear()
-        resume = ff.create(state={}).with_checkpointer().call(step_a).then(step_b).then(step_c)
+        resume = ff.create().with_checkpointer().call(step_a).then(step_b).then(step_c)
         result = await resume.run(history="chain-halt", resume="latest")
         # step_c ran on resume; a and b restored from the halt commit.
         assert result == 3
@@ -976,7 +976,7 @@ class TestSaveOnHaltChain:
             pass
 
         ff = Factory(make_test_logger())
-        flow = ff.create(state={}).call(a).then(b)
+        flow = ff.create().call(a).then(b)
         # No .with_checkpointer — halt check fires between chain steps but
         # _save_halt_checkpoint short-circuits at env.checkpoint_ctx is None.
         # Run should complete without raising.
@@ -1010,7 +1010,7 @@ class TestSaveOnHaltChain:
 
         ff = Factory(make_test_logger(), checkpoint_store=store)
         pre = (
-            ff.create(state={})
+            ff.create()
             .with_checkpointer()
             .call(step_a)
             .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
@@ -1025,7 +1025,7 @@ class TestSaveOnHaltChain:
         # Resume: branch runs (with its plain verb), then step_c.
         halt.clear()
         resume = (
-            ff.create(state={})
+            ff.create()
             .with_checkpointer()
             .call(step_a)
             .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
@@ -1055,7 +1055,7 @@ class TestSaveOnHaltChain:
             return sum(ctx.state.data["items"])
 
         ff = Factory(make_test_logger(), checkpoint_store=store)
-        pre = ff.create(state={}).with_checkpointer().call(step_a).then(step_b)
+        pre = ff.create().with_checkpointer().call(step_a).then(step_b)
         await pre.run([1, 2, 3], halt=halt, history="pre-set-halt")
 
         # Checkpoint saved at step_b (halt observed after step_a)
@@ -1064,7 +1064,7 @@ class TestSaveOnHaltChain:
 
         # Resume with halt cleared — step_b runs, reads items from state
         halt.clear()
-        resume = ff.create(state={}).with_checkpointer().call(step_a).then(step_b)
+        resume = ff.create().with_checkpointer().call(step_a).then(step_b)
         result = await resume.run(history="pre-set-halt", resume="latest")
         assert result == 6  # sum([1, 2, 3])
 
@@ -1100,7 +1100,7 @@ class TestSaveOnHaltChain:
         ff = Factory(make_test_logger(), checkpoint_store=store)
         inner = ff.create().call(inner_a).then(inner_b)
 
-        pre = ff.create(state={}).with_checkpointer().call(outer_a).call(inner).then(outer_b)
+        pre = ff.create().with_checkpointer().call(outer_a).call(inner).then(outer_b)
         await pre.run(halt=halt, history="nested-halt")
 
         # Checkpoint saved at outer_b (halt observed between outer's call(inner) and outer_b)
@@ -1111,9 +1111,7 @@ class TestSaveOnHaltChain:
         # Resume — outer_b runs, inner flow doesn't re-run
         halt.clear()
         inner_resume = ff.create().call(inner_a).then(inner_b)
-        resume = (
-            ff.create(state={}).with_checkpointer().call(outer_a).call(inner_resume).then(outer_b)
-        )
+        resume = ff.create().with_checkpointer().call(outer_a).call(inner_resume).then(outer_b)
         result = await resume.run(history="nested-halt", resume="latest")
         # inner_b ran before halt (state has inner_b=111), outer_b adds 1000
         assert result == 1111
@@ -1237,7 +1235,7 @@ class TestHistoryLineage:
         body.call(touch)
         outer = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(body, items=lambda _p, _c: [1, 2, 3, 4])
@@ -1408,7 +1406,7 @@ class TestCompletionTag:
 
         result = await (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .call(attach)
             .run(history="opaque-state")
@@ -1433,10 +1431,10 @@ class TestCompletionTag:
 
         await (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={"n": 0})
+            .create()
             .with_checkpointer()
             .iterate(lambda body: body.call(bump), max_iters=3)
-            .run(history="final-state")
+            .run(state={"n": 0}, history="final-state")
         )
 
         repo = store.repo("final-state")
@@ -1486,12 +1484,9 @@ class TestCompletionTag:
         assert repo.get_ref(COMPLETE_TAG) != repo.get_ref(HEAD_REF)
 
         # A fresh run would start from this fallback state (n=100); resume ignores it.
-        resumed = await build_canonical_flow(
-            make_test_logger(),
-            state=CanonicalCounter(n=100),
-            max_iters=5,
-            store=store,
-        ).run(history="tag-behind", resume="latest")
+        resumed = await build_canonical_flow(make_test_logger(), max_iters=5, store=store).run(
+            state=CanonicalCounter(n=100), history="tag-behind", resume="latest"
+        )
         # First run: 2 passes. Second run continues from its final state with its
         # own max_iters=5 and halts after its first pass; the resume runs its other 4.
         assert resumed["iterations_completed"] == 7
@@ -1516,12 +1511,9 @@ class TestCompletionTag:
         await ctx.save_completion_commit(tree)
         assert store.repo("torn-completion").get_ref(COMPLETE_TAG) is None
 
-        result = await build_canonical_flow(
-            make_test_logger(),
-            state=CanonicalCounter(n=100),
-            max_iters=1,
-            store=store,
-        ).run(history="torn-completion", resume="latest")
+        result = await build_canonical_flow(make_test_logger(), max_iters=1, store=store).run(
+            state=CanonicalCounter(n=100), history="torn-completion", resume="latest"
+        )
         assert result["log"][0] == 8  # n=7 from $end, not the fallback n=100
 
 
@@ -1575,13 +1567,13 @@ class TestResumeDeterminism:
         def _flow() -> Any:
             return (
                 Factory(make_test_logger(), checkpoint_store=store)
-                .create(state={"counter": 0})
+                .create()
                 .with_checkpointer()
                 .iterate(lambda body: body.call(bump), max_iters=3)
                 .call(tail)
             )
 
-        await _flow().run(history="complete-1")
+        await _flow().run(state={"counter": 0}, history="complete-1")
         assert tail_calls == [3]
         history = History(store, "complete-1")
         head = await history.head()
@@ -1626,12 +1618,12 @@ class TestResumeDeterminism:
         def _flow() -> Any:
             return (
                 Factory(make_test_logger(), checkpoint_store=store)
-                .create(state={"iter": 0})
+                .create()
                 .with_checkpointer()
                 .iterate(lambda b: b.call(step), max_iters=4)
             )
 
-        await _flow().run(0, halt=halt, history="scopeless-carry")
+        await _flow().run(0, state={"iter": 0}, halt=halt, history="scopeless-carry")
         assert calls == [(0, 0), (1, 10)]
 
         halt.clear()
@@ -1715,12 +1707,8 @@ class TestScopedStateRoundTrip:
         ff = Factory(make_test_logger(), checkpoint_store=store)
         inner = ff.create().iterate(lambda body: body.call(bump).then(maybe_halt), max_iters=5)
 
-        outer_pre = (
-            ff.create(state={"outer": True})
-            .with_checkpointer()
-            .call(inner, state=lambda _p: {"counter": 0})
-        )
-        await outer_pre.run(halt=halt, history="scoped-1")
+        outer_pre = ff.create().with_checkpointer().call(inner, state=lambda _p: {"counter": 0})
+        await outer_pre.run(state={"outer": True}, halt=halt, history="scoped-1")
 
         # The halt commit's snapshot holds the .call scope with counter=2.
         halted = await History(store, "scoped-1").head()
@@ -1731,11 +1719,7 @@ class TestScopedStateRoundTrip:
 
         # Resume — projected scope restores from the commit instead of
         # re-projecting to counter=0; run reaches max_iters=5 cleanly.
-        outer_resume = (
-            ff.create(state={"outer": True})
-            .with_checkpointer()
-            .call(inner, state=lambda _p: {"counter": 0})
-        )
+        outer_resume = ff.create().with_checkpointer().call(inner, state=lambda _p: {"counter": 0})
         await outer_resume.run(history="scoped-1", resume="latest")
 
     async def test_three_level_nested_scopes_survive_resume(self, store: MemoryStore) -> None:
@@ -1791,12 +1775,12 @@ class TestScopedStateRoundTrip:
 
         ff = Factory(make_test_logger(), checkpoint_store=store)
         outer_pre = (
-            ff.create(state={"outer": True})
+            ff.create()
             .with_checkpointer()
             .with_checkpoint_policy(on_iterate=True)
             .call(mid_flow, state=lambda _p: {})
         )
-        await outer_pre.run(halt=halt, history="3-level-1")
+        await outer_pre.run(state={"outer": True}, halt=halt, history="3-level-1")
         assert store.repo("3-level-1").get_ref(HEAD_REF) is not None
 
         # The head's snapshot holds the root, the middle (.call) scope and
@@ -1820,7 +1804,7 @@ class TestScopedStateRoundTrip:
         # bumps to 5. If the middle scope re-projects from scratch (the
         # pre-fix behavior), WITNESS_KEY starts at 0 and only reaches 3.
         outer_resume = (
-            ff.create(state={"outer": True})
+            ff.create()
             .with_checkpointer()
             .with_checkpoint_policy(on_iterate=True)
             .call(mid_flow, state=lambda _p: {})
@@ -1868,7 +1852,7 @@ class TestScopedStateRoundTrip:
 
         # Leaf iterate with its own state= projection (not inherited from .call)
         flow_pre = (
-            ff.create(state={"root": True})
+            ff.create()
             .with_checkpointer()
             .iterate(
                 lambda body: body.call(bump).then(maybe_halt),
@@ -1876,7 +1860,7 @@ class TestScopedStateRoundTrip:
                 state=lambda _p: {"counter": 0},  # leaf iterate's own scope
             )
         )
-        await flow_pre.run(halt=halt, history="leaf-iterate-state")
+        await flow_pre.run(state={"root": True}, halt=halt, history="leaf-iterate-state")
 
         # Verify the halt commit's snapshot has the iterate's scope
         history = History(store, "leaf-iterate-state")
@@ -1889,7 +1873,7 @@ class TestScopedStateRoundTrip:
         # not re-project to counter=0
         halt.clear()
         flow_resume = (
-            ff.create(state={"root": True})
+            ff.create()
             .with_checkpointer()
             .iterate(
                 lambda body: body.call(bump).then(maybe_halt),

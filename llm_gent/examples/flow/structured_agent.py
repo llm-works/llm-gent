@@ -205,11 +205,11 @@ async def main() -> int:
         "Excel export crashes the app when I try to export a workbook "
         "with more than 10 sheets. Reproduces every time."
     )
-    flow = ff.create("structured-agent", state=BugReportState(report=report))
+    flow = ff.create("structured-agent")
     flow.call(classify).call(triage)
 
     print(f"Report: {report}\n")
-    final = await flow.run()
+    final = await flow.run(state=BugReportState(report=report))
     print("\n=== triage complete ===")
     print(f"owner:       {final.owner_team}")
     print(f"escalate:    {final.needs_escalation}")

@@ -91,7 +91,7 @@ async def double(ctx: Context[dict[str, Any]], x: int) -> int:
 
 
 def _flow(store: Any = None) -> Flow:
-    return Factory(make_test_logger(), checkpoint_store=store).create(state={})
+    return Factory(make_test_logger(), checkpoint_store=store).create()
 
 
 def _two_steps(store: Any = None) -> Flow:
@@ -257,12 +257,13 @@ class TestVerdicts:
     async def test_a_denied_step_does_not_run_and_fails_the_run(self) -> None:
         rec, gate = Recorder(), Gate({"b": "not allowed"})
         flow = _two_steps().with_hooks(gate, rec)
+        state: dict[str, Any] = {}
         with pytest.raises(HookDenied, match="not allowed"):
-            await flow.run(1)
+            await flow.run(1, state=state)
         b = next(e for e in rec.steps() if e.where.step_name == "b")
         assert b.outcome == "denied" and b.decision is not None
         assert b.decision.reason == "not allowed"
-        assert flow.state.get("ran") is None or "double" not in flow.state["ran"]
+        assert state["ran"] == ["add_one"]  # double never ran
 
     async def test_a_rescue_policy_handles_a_denied_step(self) -> None:
         rec, gate = Recorder(), Gate({"a": False})
@@ -422,7 +423,7 @@ class TestLLMCalls:
                 return []
 
         loop = Loop(Role(name="worker"), conversation_factory=Conversations())  # type: ignore[arg-type]
-        flow = make_ff(_Factory()).create(state={})
+        flow = make_ff(_Factory()).create()
         await flow.call(loop, name="work").with_hooks(rec, Snapshot()).run("go")
         calls = [e for e in rec.events if isinstance(e, LLMCallEvent)]
         step = next(e for e in rec.steps() if e.where.step_name == "work")

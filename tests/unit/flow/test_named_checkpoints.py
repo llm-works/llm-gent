@@ -66,7 +66,7 @@ def _flow(store: Any, calls: list[str], tag: str | None = "mid", fail: bool = Fa
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .call(a)
         .then(b)
@@ -144,7 +144,7 @@ class TestNamedCheckpoint:
 
         changed = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .call(other)
         )
@@ -230,7 +230,7 @@ class TestNamedCheckpointInIterate:
 
             return (
                 Factory(make_test_logger(), checkpoint_store=store)
-                .create(state={})
+                .create()
                 .with_checkpointer()
                 .iterate(lambda body: body.call(step), max_iters=4)
             )
@@ -285,7 +285,7 @@ def _hash_flow(
         ctx.state.data["d"] = x
         return x - 1
 
-    flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
+    flow = Factory(make_test_logger(), checkpoint_store=store).create()
     return flow.with_checkpointer().call(a).then(b).then(c).then(d)
 
 
@@ -301,7 +301,7 @@ class TestResumeByHash:
             seen.append((written, None if head is None else head.id))
             return x
 
-        flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
+        flow = Factory(make_test_logger(), checkpoint_store=store).create()
         await flow.with_checkpointer().call(a).run(1, history=NAME)
         assert len(seen) == 1 and seen[0][0] is not None and seen[0][0] == seen[0][1]
 
@@ -313,7 +313,7 @@ class TestResumeByHash:
             seen.append(await ctx.checkpoint("mid"))
             return x
 
-        await Factory(make_test_logger()).create(state={}).call(a).run(1)
+        await Factory(make_test_logger()).create().call(a).run(1)
         assert seen == [None]
 
     async def test_any_commit_stays_resumable_after_a_reset(self) -> None:
@@ -367,7 +367,7 @@ class TestResumeByHash:
             ctx.state.data["handle"] = object()
             return x
 
-        flow = Factory(make_test_logger(), checkpoint_store=store).create(state={})
+        flow = Factory(make_test_logger(), checkpoint_store=store).create()
         await flow.with_checkpointer().call(a).run(1, history=NAME)
         head = await History(store, NAME).head()
         assert head is not None

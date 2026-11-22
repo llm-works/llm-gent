@@ -435,7 +435,7 @@ async def main() -> int:
     ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(BatchGradingState))
 
     submissions = _demo_submissions()
-    flow = ff.create("batch-grade", state=BatchGradingState(submissions=submissions))
+    flow = ff.create("batch-grade")
     (
         flow.call(load_submissions)
         .map(grade_one, aggregate=summarize, strict=False)
@@ -446,7 +446,7 @@ async def main() -> int:
     )
 
     print(f"Batch: {len(submissions)} submissions\n")
-    summary = await flow.run()
+    summary = await flow.run(state=BatchGradingState(submissions=submissions))
     _print_summary(summary)
     return 0
 

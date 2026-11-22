@@ -53,7 +53,7 @@ def _two_steps(store: Any, calls: list[str], mode: str) -> Any:
 
     return (
         Factory(make_test_logger(), checkpoint_store=store)
-        .create(state={})
+        .create()
         .with_checkpointer()
         .call(s1)
         .call(s2)
@@ -101,7 +101,7 @@ class TestHaltInLastStep:
 
         flow = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .call(s1)
         )
@@ -127,7 +127,7 @@ class TestHaltInLastStep:
 
         flow = (
             Factory(make_test_logger(), checkpoint_store=store)
-            .create(state={})
+            .create()
             .with_checkpointer()
             .map(lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1)
         )

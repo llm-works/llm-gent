@@ -120,9 +120,9 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_dispatch_passes_state_through(self) -> None:
-        """ctx.state exposes whatever the flow was constructed with."""
+        """ctx.state exposes the ``scope_state=`` the dispatch is given."""
         user_state = {"counter": 0}
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory(), state=user_state)
+        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context) -> int:
@@ -131,8 +131,8 @@ class TestDispatch:
             return ctx.state.data["counter"]
 
         flow.register(bump)
-        assert await flow.dispatch("bump") == 1
-        assert await flow.dispatch("bump") == 2
+        assert await flow.dispatch("bump", scope_state=user_state) == 1
+        assert await flow.dispatch("bump", scope_state=user_state) == 2
         assert user_state["counter"] == 2
 
     @pytest.mark.asyncio

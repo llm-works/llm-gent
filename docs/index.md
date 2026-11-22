@@ -108,8 +108,8 @@ async def execute(ctx: Context, _prev: Any) -> int:
 
 
 ff = Factory(lg)  # lg: Logger — elided for brevity
-flow = ff.create("run", state={}).call(plan).call(execute)
-assert await flow.run("ship it") == 3
+flow = ff.create("run").call(plan).call(execute)
+assert await flow.run("ship it") == 3  # the run gets a fresh {} as its state
 ```
 
 `execute` did not need a two-argument signature; it read what it needed from
@@ -640,12 +640,8 @@ without a store, and on `resume=` / `restart=` without `history=`.
 
 ```python
 ff = Factory(lg, checkpoint_store=store)
-flow = (
-    ff.create(state=...)
-    .call(prepare)
-    .map(lambda b: b.with_checkpointer("items").call(item), items=...)
-)
-await flow.run(history="session-42")  # the run's repo
+flow = ff.create().call(prepare).map(lambda b: b.with_checkpointer("items").call(item), items=...)
+await flow.run(state=..., history="session-42")  # the run's state and repo
 ```
 
 ### Checkpoint cadence
@@ -680,12 +676,12 @@ wanted.
 
 ```python
 flow = (
-    ff.create(state=...)
+    ff.create()
     .with_checkpointer()
     .with_checkpoint_policy(on_iterate=True, on_map_item=True)
     .iterate(body, max_iters=10)
 )
-await flow.run(history="history-42")
+await flow.run(state=..., history="history-42")
 ```
 
 Halt-save and `ctx.checkpoint()` are unaffected by the policy — the
