@@ -3,10 +3,9 @@
 
 """CheckpointContext — the run's history repository bundled with save operations.
 
-Every save site would otherwise guard on the store and the history name
-travelling separately (``if frame.scope.checkpointer is None or
-frame.client_flow_id is None: return``) and re-plumb the name into every
-store call. :class:`CheckpointContext` holds the history's
+Every save site would otherwise check the flow's checkpointer and the
+history's name separately, and re-plumb the name into every store call.
+:class:`CheckpointContext` holds the history's
 :class:`appinfra.cas.Repo` and exposes the save operations the framework
 needs.
 
