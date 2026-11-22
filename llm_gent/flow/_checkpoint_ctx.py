@@ -4,7 +4,7 @@
 """CheckpointContext — the run's history repository bundled with save operations.
 
 Every save site would otherwise guard on the store and the history name
-travelling separately (``if env.checkpointer is None or
+travelling separately (``if env.scope.checkpointer is None or
 env.client_flow_id is None: return``) and re-plumb the name into every
 store call. :class:`CheckpointContext` holds the history's
 :class:`appinfra.cas.Repo` and exposes the save operations the framework
@@ -14,7 +14,7 @@ A run has at most one context: the repository its ``run(history=...)``
 names in the top-level flow's checkpoint store. Without one,
 ``env.checkpoint_ctx is None`` and every save site skips; with one, saves
 inside the run also need a ``with_checkpointer()`` on the saving flow or
-above it (``env.checkpointer``). :func:`check_checkpointers` rejects a
+above it (``env.scope.checkpointer``). :func:`check_checkpointers` rejects a
 checkpointer in a run without a history.
 
 The repository is named by ``client_flow_id``; store calls are

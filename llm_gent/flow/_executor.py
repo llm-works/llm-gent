@@ -26,6 +26,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from ._hook_points import StepHooks, checkpoint_written
+from ._scope import _RunEnv
 from .checkpoint import checkpoint_tag
 from .context import Context
 from .nodes import (
@@ -37,7 +38,6 @@ from .nodes import (
     _Iterate,
     _Map,
     _Node,
-    _RunEnv,
 )
 from .state import State, StateFactory
 from .state.cas import (
@@ -73,23 +73,23 @@ def _build_ctx(target: Any, env: _RunEnv, node_id: str | None = None) -> Context
     if isinstance(target, Flow | _Branch | _Iterate | _Map):
         return Context(
             role=None,
-            state=env.state,
+            state=env.scope.state,
             flow=env.runtime,
             traits=traits,
             halt=env.halt,
             extra=env.extra,
-            resources=env.resources,
+            resources=env.scope.resources,
             _env=env,
             _node_id=node_id,
         )
     return Context(
         role=target.role,
-        state=env.state,
+        state=env.scope.state,
         flow=env.runtime,
         traits=traits,
         halt=env.halt,
         extra=env.extra,
-        resources=env.resources,
+        resources=env.scope.resources,
         _env=env,
         _node_id=node_id,
     )
@@ -288,34 +288,15 @@ async def _run_subflow(
 ) -> Any:
     """Run a subflow node, honoring optional scoped-state projection/merge.
 
-    Threads the composition-tree identity into the child Flow:
-    ``ancestor_chain`` gains ``node_id`` (this call's ``_Node`` is now
-    an ancestor of everything inside), and ``chain_context`` becomes
-    ``_descend_context(node_id, "call")`` — the hash the child's
-    chain-step IDs are computed against.
+    The child Flow is entered through the node's ``"call"`` boundary
+    (:meth:`_RunEnv.descend`), with the projected state when there is one.
     """
-    from ._node_id import _descend_context
-
     path = env.owner_path(node_id)
     child_state = await _enter_scope(env, path, state_fn, state_factory)
     with _live_scope(env, path, state_fn, child_state):
-        result = await body._run_as_subflow(
-            node_args,
-            node_kwargs,
-            state=child_state,
-            run=env.run,
-            parent_resources=env.resources,
-            parent_checkpointer=env.checkpointer,
-            parent_chain_context=_descend_context(node_id, "call"),
-            parent_ancestor_chain=env.ancestor_chain + (node_id,),
-            parent_extra=env.extra,
-            parent_policy=env.policy,
-            parent_path=path,
-            parent_shortcuts=env.shortcuts,
-            parent_hooks=env.hooks,
-            parent_activity=env.activity_id,
-        )
-        await _merge_state(merge_fn, env.state, child_state)
+        child = env.descend(node_id, "call", path, child_state)
+        result = await body._run_as_subflow(node_args, node_kwargs, child)
+        await _merge_state(merge_fn, env.scope.state, child_state)
     return result
 
 
@@ -372,9 +353,9 @@ async def _enter_scope(
     if state_fn is not None:
         found, raw = env.scopes.take_saved(path)
         if found:
-            factory = state_factory if state_factory is not None else env.state._factory
-            return _restore_scope_state(env.state, raw, factory)
-    return await _project_state(state_fn, env.state, state_factory)
+            factory = state_factory if state_factory is not None else env.scope.state._factory
+            return _restore_scope_state(env.scope.state, raw, factory)
+    return await _project_state(state_fn, env.scope.state, state_factory)
 
 
 def _restore_scope_state(
@@ -449,7 +430,7 @@ async def _check_until(
         traits=env.runtime._traits,
         halt=env.halt,
         extra=env.extra,
-        resources=env.resources,
+        resources=env.scope.resources,
         _env=env,
         _node_id=node_id,
     )
@@ -508,26 +489,10 @@ async def _run_arm(
     chosen: Flow, arm: _BranchArm, env: _RunEnv, node_id: str, prev_result: Any
 ) -> Any:
     """Run the arm a branch took, with the branch's cursor in every snapshot meanwhile."""
-    from ._node_id import _descend_context
-
     path = env.owner_path(node_id)
     with _running(env, path, arm):
-        return await chosen._run_as_subflow(
-            (prev_result,),
-            {},
-            state=env.state,
-            run=env.run,
-            parent_resources=env.resources,
-            parent_checkpointer=env.checkpointer,
-            parent_chain_context=_descend_context(node_id, arm.arm),
-            parent_ancestor_chain=env.ancestor_chain + (node_id,),
-            parent_extra=env.extra,
-            parent_policy=env.policy,
-            parent_path=path,
-            parent_shortcuts=env.shortcuts,
-            parent_hooks=env.hooks,
-            parent_activity=env.activity_id,
-        )
+        child = env.descend(node_id, arm.arm, path, env.scope.state)
+        return await chosen._run_as_subflow((prev_result,), {}, child)
 
 
 class _BranchArm:
@@ -554,19 +519,25 @@ async def _save_scope_commit(
     The save point of :class:`IterateRunner`, :class:`MapItemRunner` and
     :meth:`Context.checkpoint`. It writes only with a repo
     (``env.checkpoint_ctx``) and a checkpointer on the saving flow or
-    above it (``env.checkpointer``); the save belongs to that innermost
+    above it (``env.scope.checkpointer``); the save belongs to that innermost
     checkpointer, and a named one's tag moves to the commit. Delegates the
     persistence to :meth:`CheckpointContext.save_scope_commit`.
     """
-    ctx, checkpointer = env.checkpoint_ctx, env.checkpointer
+    ctx, checkpointer = env.checkpoint_ctx, env.scope.checkpointer
     if ctx is None or checkpointer is None:
         return None
     commit = await ctx.save_scope_commit(
-        env.ancestor_chain, iteration, node_id, env.scopes, current_state, outcome, trace_ref
+        env.position.ancestor_chain,
+        iteration,
+        node_id,
+        env.scopes,
+        current_state,
+        outcome,
+        trace_ref,
     )
     if checkpointer.name is not None:
         await ctx.put_tag(checkpoint_tag(checkpointer.name), commit.id)
-    await checkpoint_written(env.hooks, env, env.run.info, commit, node_id)
+    await checkpoint_written(env.scope.hooks, env, env.run.info, commit, node_id)
     return commit
 
 

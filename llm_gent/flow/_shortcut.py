@@ -47,8 +47,8 @@ from .state.snapshot import SIGNALS
 
 if TYPE_CHECKING:
     from ._run import Run
+    from ._scope import _RunEnv
     from .flow import Flow
-    from .nodes import _RunEnv
 
 
 @dataclass(frozen=True)
@@ -203,12 +203,12 @@ class ShortcutRun:
 
 def is_fast_forward(env: _RunEnv) -> bool:
     """True when the flow running under ``env`` is in a region whose signal is set."""
-    return any(s.signal.is_set() for s in env.shortcuts if not s.left)
+    return any(s.signal.is_set() for s in env.scope.shortcuts if not s.left)
 
 
 def is_draining(env: _RunEnv) -> bool:
     """True when ``env`` runs in a started map item of a drain region whose signal is set."""
-    return any(s.signal.is_set() for s in env.shortcuts if s.left)
+    return any(s.signal.is_set() for s in env.scope.shortcuts if s.left)
 
 
 @contextlib.asynccontextmanager
@@ -220,7 +220,7 @@ async def turn_abort(env: _RunEnv) -> AsyncIterator[asyncio.Event | None]:
     started map item left never reaches a turn in it, however the regions
     nest. One source is used as is; ``None`` when there is none.
     """
-    sources = [s.signal for s in env.shortcuts if not s.left]
+    sources = [s.signal for s in env.scope.shortcuts if not s.left]
     if env.halt is not None:
         sources.append(env.halt)
     if len(sources) <= 1:
@@ -260,12 +260,13 @@ def follow(source: asyncio.Event, target: asyncio.Event) -> asyncio.Task[None] |
     return asyncio.create_task(follow())
 
 
-def region_run(flow: Flow, signals: Mapping[str, asyncio.Event]) -> ShortcutRun | None:
-    """The region one run of ``flow`` makes; ``None`` when it declares no shortcut.
+def region_run(
+    shortcut: Shortcut | None, signals: Mapping[str, asyncio.Event]
+) -> ShortcutRun | None:
+    """The region one run of a flow declaring ``shortcut`` makes; ``None`` without one.
 
     ``signals`` are the run's.
     """
-    shortcut = flow._shortcut
     if shortcut is None:
         return None
     return ShortcutRun(signals[shortcut.signal], drain=shortcut.drain, left=False)

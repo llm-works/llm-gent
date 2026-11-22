@@ -14,7 +14,7 @@ at its position for the run's halt checkpoint.
 
 Constructed once per :meth:`Flow._run_as_subflow` entry:
 ``Chain(flow, env)`` eagerly computes ``self.ids`` from
-``env.chain_context`` and the flow's nodes. Caller then invokes
+``env.position.chain_context`` and the flow's nodes. Caller then invokes
 ``await chain.walk(args, kwargs)``.
 """
 
@@ -34,8 +34,8 @@ from .state.snapshot import CHAIN, TURN, path_str
 
 
 if TYPE_CHECKING:
+    from ._scope import _RunEnv
     from .flow import Flow
-    from .nodes import _RunEnv
 
 
 Inputs = tuple[tuple[Any, ...], dict[str, Any]]
@@ -68,7 +68,7 @@ class Chain:
     def __init__(self, flow: Flow, env: _RunEnv) -> None:
         self.flow = flow
         self.env = env
-        self.ids: tuple[str, ...] = _compute_node_ids(env.chain_context, flow._nodes)
+        self.ids: tuple[str, ...] = _compute_node_ids(env.position.chain_context, flow._nodes)
         # The cursor: the step running and the input it gets. Kept here, not
         # in _walk_steps' locals, so a checkpoint reads it. ``pending``: the
         # chain stopped past a completed step, before this one started;
@@ -107,7 +107,7 @@ class Chain:
         chain. The chain's cursor is in every snapshot taken while it walks.
         """
         saved = self._saved_step()
-        with _running(self.env, self.env.path, self):
+        with _running(self.env, self.env.position.path, self):
             return await self._walk_steps(saved, args, kwargs)
 
     def _saved_step(self) -> _Saved | None:
@@ -119,11 +119,11 @@ class Chain:
         Raises:
             RuntimeError: The saved step is no longer in this chain.
         """
-        found, step = self.env.scopes.take_cursor(self.env.path, CHAIN)
+        found, step = self.env.scopes.take_cursor(self.env.position.path, CHAIN)
         if not found:
             return None
         if step["step"] not in self.ids:
-            where = path_str((*self.env.path, CHAIN))
+            where = path_str((*self.env.position.path, CHAIN))
             label = self.flow._name or "<anonymous>"
             raise RuntimeError(
                 f"Flow {label!r}: the checkpoint's cursor at {where!r} is at step "

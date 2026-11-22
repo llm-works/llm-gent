@@ -4,7 +4,7 @@
 """Where Flow calls its hooks: building the events and calling the hooks in effect.
 
 Kept out of the executor, the chain and the Loop so each call site stays
-short. A part of a run without hooks (``env.hooks is None``) builds no
+short. A part of a run without hooks (``env.scope.hooks is None``) builds no
 events: :meth:`StepHooks.start` returns ``None`` and the other helpers
 return at once.
 
@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ._node_id import iter_flows
+from ._scope import _RunEnv
 from .context import Context
 from .hooks import (
     Actor,
@@ -39,7 +40,7 @@ from .hooks import (
     TraceIds,
     Where,
 )
-from .nodes import Interrupted, _Branch, _Iterate, _Map, _Node, _RunEnv, step_name
+from .nodes import Interrupted, _Branch, _Iterate, _Map, _Node, step_name
 from .state.cas import FlowCommit
 from .state.snapshot import path_str
 from .structure import Structure
@@ -86,17 +87,17 @@ def _actor(target: Any, ctx: Context[Any], kind: StepKind) -> Actor:
 def _env_where(env: _RunEnv, node_id: str | None, flow: Flow | None = None) -> Where:
     """Where a step ``node_id`` of the chain under ``env`` is; the chain's own place without one."""
     if node_id is None:
-        path = env.ancestor_chain
+        path = env.position.ancestor_chain
         return Where(
             flow=flow,
             node_id=path[-1] if path else None,
             node_path=path,
-            scope_path=path_str(env.path),
+            scope_path=path_str(env.position.path),
         )
     return Where(
         flow=flow,
         node_id=node_id,
-        node_path=(*env.ancestor_chain, node_id),
+        node_path=(*env.position.ancestor_chain, node_id),
         scope_path=path_str(env.owner_path(node_id)),
     )
 
@@ -117,10 +118,10 @@ class StepHooks:
 
     def __init__(self, env: _RunEnv, hooks: Hooks, flow: Flow, node: _Node, node_id: str) -> None:
         self.activity_id = new_activity_id()
-        self.env = dataclasses.replace(env, activity_id=self.activity_id)
+        self.env = env.at_activity(self.activity_id)
         self.decision: Decision | None = None
         self._hooks = hooks
-        self._parent = env.activity_id
+        self._parent = env.position.activity_id
         self._target = node.target
         kind = step_kind(node.target)
         self._where = dataclasses.replace(
@@ -133,7 +134,7 @@ class StepHooks:
     @classmethod
     def start(cls, env: _RunEnv, flow: Flow, node: _Node, node_id: str) -> StepHooks | None:
         """The hooks around this step, or ``None`` when no hooks are in effect."""
-        return None if env.hooks is None else cls(env, env.hooks, flow, node, node_id)
+        return None if env.scope.hooks is None else cls(env, env.scope.hooks, flow, node, node_id)
 
     async def check(self, ctx: Context[Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
         """Call ``before_step``; deny raises :class:`HookDenied`, pause halts the run.
@@ -213,9 +214,9 @@ def llm_call_hook(
     and ``role`` name the Loop making the calls.
     """
     env = ctx._env
-    if env is None or env.hooks is None or not env.hooks.has("after_llm_call"):
+    if env is None or env.scope.hooks is None or not env.scope.hooks.has("after_llm_call"):
         return None
-    hooks, where = env.hooks, _env_where(env, ctx._node_id)
+    hooks, where = env.scope.hooks, _env_where(env, ctx._node_id)
 
     async def call(response: Any) -> None:
         event = LLMCallEvent(
@@ -224,7 +225,7 @@ def llm_call_hook(
             run=_run_info(env),
             where=where,
             activity_id=new_activity_id(),
-            parent_activity_id=env.activity_id,
+            parent_activity_id=env.position.activity_id,
             actor=Actor(verb=verb, role=role, model=getattr(response, "model", None)),
             trace=TraceIds(call_id=getattr(response, "call_id", None) or None),
             ctx=ctx,
@@ -253,7 +254,7 @@ async def checkpoint_written(
         run=run,
         where=where,
         activity_id=new_activity_id(),
-        parent_activity_id=run.run_id if env is None else env.activity_id,
+        parent_activity_id=run.run_id if env is None else env.position.activity_id,
         commit_id=commit.id,
         outcome=commit.meta.outcome,
     )

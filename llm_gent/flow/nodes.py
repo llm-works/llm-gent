@@ -24,27 +24,16 @@ without pulling in :mod:`.flow`.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from appinfra.log import Logger
-
 from .context import Context
-from .hooks import Hooks
-from .resource import NO_RESOURCES, ResourceKey
-from .state import State, StateFactory
-from .state.snapshot import ScopePath, ScopeRegistry
+from .state import StateFactory
 
 
 if TYPE_CHECKING:
-    from ._checkpoint_ctx import CheckpointContext
-    from ._run import Run
-    from ._shortcut import ShortcutRun
     from .flow import Flow
-
-from .checkpoint import CheckpointPolicy
 
 
 class Unset:
@@ -299,90 +288,6 @@ class Checkpointer:
     """
 
     name: str | None = None
-
-
-@dataclass(frozen=True)
-class _RunEnv:
-    """Per-run environment threaded through the execution helpers.
-
-    Bundles the :class:`~llm_gent.flow._run.Run` (the state of this
-    execution of the top-level flow), the currently active :class:`State`
-    and the run's resources so helpers do not each need to carry them as
-    separate positional arguments. ``lg`` is cached off the top-level flow
-    for brevity in the debug/warning call sites. :attr:`runtime`,
-    :attr:`halt`, :attr:`checkpoint_ctx` and :attr:`scopes` read the run:
-    its top-level flow (factory + saia cache + logger source), its halt
-    event, its history writer and its live scopes. ``checkpointer`` is the
-    innermost :meth:`Flow.with_checkpointer` on this flow or above it —
-    saves write commits only under one.
-
-    Composition-graph position is threaded via a pair of content-addressed
-    hashes: ``chain_context`` is the hash used to compute this Flow's own
-    chain-step node IDs, and ``ancestor_chain`` is the tuple of ancestor
-    ``_Node`` IDs from the run's root down to the ``_Node`` whose descent
-    entered this Flow. Extended pairwise on every subflow / branch-arm /
-    iterate-body descent. The pair is what the checkpoint layer walks to
-    address any point in the composition tree.
-
-    ``path`` is the snapshot path of this Flow's position — node ids plus
-    the iterate pass and map item coordinates that tell repeated
-    executions apart (:mod:`llm_gent.flow.state.snapshot`). Scopes opened
-    under this Flow register at ``path`` extended by their owner.
-
-    ``shortcuts`` are the :meth:`Flow.with_shortcut` regions this run is
-    in, outermost first: the enclosing flows' and this Flow's own. Its
-    chain, iterates, maps and Loop calls fast-forward while one of their
-    signals is set.
-
-    ``resources`` are the resources this run runs with (``ctx.resource``;
-    the cost tracker, ``ctx.cost``, among them): the ones this Flow
-    declares, its per-run children, and the ones inherited
-    (:mod:`llm_gent.flow.resource._runtime`).
-
-    ``hooks`` are the hooks in effect here (:meth:`Flow.with_hooks`): this
-    Flow's and the ones it inherits; ``None`` when there are none, so a run
-    without hooks builds no events. ``activity_id`` is the invocation the
-    events raised here belong to: the step running this Flow, ``None`` at
-    the top level.
-    """
-
-    run: Run
-    state: State[Any]
-    lg: Logger
-    checkpointer: Checkpointer | None = None
-    chain_context: str = ""
-    ancestor_chain: tuple[str, ...] = ()
-    extra: dict[str, Any] = field(default_factory=dict)
-    policy: CheckpointPolicy = field(default_factory=CheckpointPolicy)
-    path: ScopePath = ()
-    shortcuts: tuple[ShortcutRun, ...] = ()
-    resources: Mapping[ResourceKey[Any], Any] = field(default_factory=lambda: NO_RESOURCES)
-    hooks: Hooks | None = None
-    activity_id: str | None = None
-
-    @property
-    def runtime(self) -> Flow:
-        """The run's top-level Flow."""
-        return self.run.flow
-
-    @property
-    def halt(self) -> asyncio.Event | None:
-        """The run's halt event; ``None`` when the run has none."""
-        return self.run.halt
-
-    @property
-    def checkpoint_ctx(self) -> CheckpointContext | None:
-        """The run's history writer; ``None`` without a checkpoint store."""
-        return self.run.checkpoint_ctx
-
-    @property
-    def scopes(self) -> ScopeRegistry:
-        """The run's live-scope registry."""
-        return self.run.scopes
-
-    def owner_path(self, node_id: str) -> ScopePath:
-        """Snapshot path of the step ``node_id`` of this Flow."""
-        return (*self.path, "n", node_id)
 
 
 @dataclass

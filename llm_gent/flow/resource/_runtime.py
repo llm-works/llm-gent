@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 from appinfra.log import Logger
 
 from .._node_id import _child_flows
+from ..decl import Decl
 from ..state.snapshot import RESOURCES, RUN_RESOURCES, ScopePath, ScopeRegistry, path_str
 from .base import Resource, ResourceKey, has_child
 
@@ -54,37 +55,42 @@ Resources = Mapping[ResourceKey[Any], Any]
 
 @contextlib.contextmanager
 def run_resources(
-    flow: Flow, path: ScopePath, scopes: ScopeRegistry, parent: Resources
+    lg: Logger,
+    decl: Decl,
+    label: str,
+    path: ScopePath,
+    scopes: ScopeRegistry,
+    parent: Resources,
 ) -> Iterator[Resources]:
-    """The resources of one run of ``flow`` at ``path``, for the duration of the run.
+    """The resources of one run of a flow declaring ``decl``, at ``path``, for the run.
 
-    ``parent`` are the enclosing run's. The resources ``flow`` declares
-    (those its parent does not already run with) and the run's per-run
-    children are kept registered at ``path`` — after restoring what a
-    checked-out snapshot saved there — while the run is in progress; a
-    run that stops keeps them, for the run's halt checkpoint. The
-    top-level flow's declared resources stay registered after the run
-    completes, for the completion commit.
+    ``parent`` are the enclosing run's; ``label`` names the flow in
+    errors. The resources the flow declares (those its parent does not
+    already run with) and the run's per-run children are kept registered
+    at ``path`` — after restoring what a checked-out snapshot saved there
+    — while the run is in progress; a run that stops keeps them, for the
+    run's halt checkpoint. The top-level flow's declared resources stay
+    registered after the run completes, for the completion commit.
 
     Raises:
-        RuntimeError: ``flow`` asks for a per-run child of a resource no
+        RuntimeError: The flow asks for a per-run child of a resource no
             flow above it declares (a flow reached outside its parent's
             composition tree).
     """
-    effective = {**parent, **flow._resources}
-    declared = {k: v for k, v in flow._resources.items() if parent.get(k) is not v}
-    with _kept(flow._lg, scopes, path, RESOURCES, declared, past_the_run=path == ()):
+    effective = {**parent, **decl.resources}
+    declared = {k: v for k, v in decl.resources.items() if parent.get(k) is not v}
+    with _kept(lg, scopes, path, RESOURCES, declared, past_the_run=path == ()):
         children = {
-            key: _child(flow, effective.get(key), key, args)
-            for key, args in flow._resource_children.items()
+            key: _child(label, effective.get(key), key, dict(args))
+            for key, args in decl.resource_children.items()
         }
         effective.update(children)
-        with _kept(flow._lg, scopes, path, RUN_RESOURCES, children, past_the_run=False):
+        with _kept(lg, scopes, path, RUN_RESOURCES, children, past_the_run=False):
             yield MappingProxyType(effective)
 
 
-def _child(flow: Flow, base: Any, key: ResourceKey[Any], args: dict[str, Any]) -> Any:
-    """``base.child(**args)``: the per-run child ``flow`` asks for under ``key``.
+def _child(label: str, base: Any, key: ResourceKey[Any], args: dict[str, Any]) -> Any:
+    """``base.child(**args)``: the per-run child flow ``label`` asks for under ``key``.
 
     Raises:
         RuntimeError: No ``key`` resource is in scope.
@@ -92,7 +98,7 @@ def _child(flow: Flow, base: Any, key: ResourceKey[Any], args: dict[str, Any]) -
             implement :class:`Resource`.
     """
     if base is None:
-        raise RuntimeError(_no_resource_message(flow, key))
+        raise RuntimeError(_no_resource_message(label, key))
     if not has_child(base):
         raise TypeError(
             f"resource {key.name!r} ({type(base).__name__}) has no child(); "
@@ -200,12 +206,13 @@ def check_resources(root: Flow) -> None:
         if (id(flow), covered) in seen:
             continue
         seen.add((id(flow), covered))
-        _check_names(names, [*flow._resources, *flow._resource_children])
-        covered = covered | frozenset(flow._resources)
-        for key in flow._resource_children:
+        decl = flow.decl
+        _check_names(names, [*decl.resources, *decl.resource_children])
+        covered = covered | frozenset(decl.resources)
+        for key in decl.resource_children:
             if key not in covered:
-                raise RuntimeError(_no_resource_message(flow, key))
-        covered = covered | frozenset(flow._resource_children)
+                raise RuntimeError(_no_resource_message(flow.name or "<anonymous>", key))
+        covered = covered | frozenset(decl.resource_children)
         for node in flow._nodes:
             stack.extend((child, covered) for _, child in _child_flows(node))
 
@@ -221,9 +228,8 @@ def _check_names(names: dict[str, ResourceKey[Any]], keys: list[ResourceKey[Any]
             )
 
 
-def _no_resource_message(flow: Flow, key: ResourceKey[Any]) -> str:
+def _no_resource_message(label: str, key: ResourceKey[Any]) -> str:
     """The error for a per-run child of a resource no flow above declares."""
-    label = flow._name or "<anonymous>"
     return (
         f"Flow {label!r} asks for a per-run {key.name!r} resource but none is in "
         f"scope: declare one with with_resource(key, resource) on it or an enclosing flow"

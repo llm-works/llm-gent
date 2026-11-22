@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
-    from .nodes import _RunEnv
+    from ._scope import _RunEnv
     from .state import State
 
 
@@ -67,4 +67,4 @@ def note_halt(env: _RunEnv, iteration: int, node_id: str) -> None:
     run = env.run
     halt = run.halt
     if halt is not None and halt.is_set() and run.halt_at is None:
-        run.halt_at = HaltPoint(env.ancestor_chain, iteration, node_id, env.state)
+        run.halt_at = HaltPoint(env.position.ancestor_chain, iteration, node_id, env.scope.state)

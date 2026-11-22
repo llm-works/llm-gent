@@ -281,7 +281,7 @@ class Context(Generic[T]):
         own ``activity_id``, which the events raised inside it name as their
         parent.
         """
-        return None if self._env is None else self._env.activity_id
+        return None if self._env is None else self._env.position.activity_id
 
     @property
     def run_id(self) -> str | None:
@@ -299,9 +299,9 @@ class Context(Generic[T]):
         outside a run.
         """
         env = self._env
-        if env is None or env.hooks is None:
+        if env is None or env.scope.hooks is None:
             return None
-        found: H | None = env.hooks.find(cls)
+        found: H | None = env.scope.hooks.find(cls)
         return found
 
     @property

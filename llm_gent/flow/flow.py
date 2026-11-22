@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any, Self, get_args
 
 from appinfra.cas import Store
@@ -72,13 +73,12 @@ from ._resume import (
     commit_halt,
 )
 from ._run import Run
+from ._scope import Position, Scope, _RunEnv
 from ._shortcut import (
     Shortcut,
-    ShortcutRun,
     check_shortcut,
     check_shortcuts,
     check_signals,
-    region_run,
     run_signals,
 )
 from ._validation import (
@@ -97,8 +97,9 @@ from .checkpoint import (
     is_commit_hash,
 )
 from .context import Context
+from .decl import Decl
 from .factory import SAIAFactory
-from .hooks import Decision, HookDenied, Hooks, RunOutcome, Where
+from .hooks import Decision, HookDenied, RunOutcome, Where
 from .nodes import (
     HALTED,
     UNSET,
@@ -121,14 +122,13 @@ from .nodes import (
     _Iterate,
     _Map,
     _Node,
-    _RunEnv,
 )
-from .resource import COST, NO_RESOURCES, R, ResourceKey, check_resource
+from .resource import COST, R, ResourceKey, check_resource
 from .resource._runtime import Resources, check_resources, run_resources
 from .resource.cost import check_budget, check_budgets_have_a_tracker, check_cost_tracker
 from .role import Role
 from .state import State, StateFactory
-from .state.snapshot import ScopePath, Snapshot, path_str
+from .state.snapshot import Snapshot, path_str
 from .structure import Structure
 
 
@@ -229,6 +229,24 @@ class Flow:
     def traits(self) -> TraitRegistry | None:
         """The trait registry this flow was constructed with, or ``None``."""
         return self._traits
+
+    @property
+    def decl(self) -> Decl:
+        """What this flow declares for its subtree, as the walk applies it on entry.
+
+        Its checkpointer and checkpoint policy, resources and the per-run
+        children it asks for, hooks and its shortcut; unset fields inherit
+        from the enclosing scope (:meth:`~llm_gent.flow._scope.Scope.child`).
+        """
+        return Decl(
+            checkpointer=self._checkpointer,
+            policy=self._checkpoint_policy,
+            resources=MappingProxyType(self._resources),
+            resource_children=MappingProxyType(self._resource_children),
+            hooks=self._hooks,
+            hooks_replace=self._hooks_replace,
+            shortcut=self._shortcut,
+        )
 
     # -------------------------------------------------------------------------
     # Registration
@@ -1332,17 +1350,21 @@ class Flow:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
-        """Walk this flow as the run's top level, with its signals set up."""
+        """Walk this flow as the run's top level, with its signals set up.
+
+        The walk starts from the root scope (the run's state, nothing
+        declared yet) at the root position, whose activity is the run.
+        """
         info = run.info
+        env = _RunEnv(
+            run=run,
+            lg=run.lg,
+            scope=Scope(state=state),
+            position=Position(activity_id=None if info is None else info.run_id),
+            extra=extra if extra is not None else {},
+        )
         with run_signals(run):
-            return await self._run_as_subflow(
-                args,
-                kwargs,
-                state=state,
-                run=run,
-                parent_extra=extra,
-                parent_activity=None if info is None else info.run_id,
-            )
+            return await self._run_as_subflow(args, kwargs, env)
 
     async def _stopped_before_run(self, hooks: RunHooks, decision: Decision) -> Any:
         """A ``before_run`` hook stopped the run: return :data:`HALTED` on a pause, else raise.
@@ -1456,107 +1478,50 @@ class Flow:
         return started
 
     async def _run_as_subflow(
-        self,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        *,
-        state: State[Any],
-        run: Run,
-        parent_resources: Resources = NO_RESOURCES,
-        parent_checkpointer: Checkpointer | None = None,
-        parent_chain_context: str = "",
-        parent_ancestor_chain: tuple[str, ...] = (),
-        parent_extra: dict[str, Any] | None = None,
-        parent_policy: CheckpointPolicy | None = None,
-        parent_path: ScopePath = (),
-        parent_shortcuts: tuple[ShortcutRun, ...] = (),
-        parent_hooks: Hooks | None = None,
-        parent_activity: str | None = None,
+        self, args: tuple[Any, ...], kwargs: dict[str, Any], env: _RunEnv
     ) -> Any:
-        """Internal entry: walk nodes with caller-supplied ``State`` in ``run``.
+        """Walk this flow from ``env``: the place the walk enters it at.
 
         ``args`` / ``kwargs`` are the first node's inputs. They are passed
         as two values, not spread, so an input named like one of the
-        framework's own parameters (``run=``, ``parent_extra=``) reaches the
-        node instead of colliding with it.
+        framework's own parameters reaches the node instead of colliding
+        with it.
 
-        ``run`` is the execution of the top-level flow this walk belongs
-        to: its halt, its history writer and its live scopes are the ones
-        every flow of the run uses. ``parent_hooks`` are the hooks in
-        effect in the calling scope and ``parent_activity`` the invocation
-        entering this flow (the step, or the run at the top level); see
-        :attr:`_RunEnv.hooks`.
-
-        The executor's subflow helpers (``.call`` targeting a Flow, and the
-        ``.branch`` / ``.iterate`` / ``.map`` bodies) invoke this directly so
-        the top-level flow's factory and saia cache are shared with the
-        subflow. State arrives pre-wrapped — top-level wrapping happens once
-        in :meth:`run`.
-
-        ``parent_checkpointer`` / ``parent_policy`` are the effective
-        ambients from the calling scope — nested subflows fall back to them
-        when they have no local ``.with_checkpointer()`` /
-        ``.with_checkpoint_policy()``, preserving an intermediate layer's
-        ambient through arbitrarily deep nesting. ``parent_shortcuts`` are the regions the calling
-        scope is in; a shortcut this flow declares adds its own
-        (:func:`~llm_gent.flow._shortcut.region_run`).
-        ``parent_resources`` are the calling scope's resources — the cost
-        tracker among them; the run's own come from
-        :func:`~llm_gent.flow.resource._runtime.run_resources`.
-
-        ``parent_chain_context`` is the hash the executor uses to compute
-        this Flow's chain-step node IDs (empty at run root; extended by
-        :func:`_descend_context` at each subflow / arm / body boundary).
-        ``parent_ancestor_chain`` is the tuple of ancestor ``_Node`` IDs
-        from root down to the ``_Node`` whose descent entered this Flow;
-        it grows by one on every recursion. ``parent_path`` is this Flow's
-        snapshot path (see :attr:`_RunEnv.path`).
+        ``env`` is what the node entering this flow hands it
+        (:meth:`_RunEnv.descend`; the root scope at the top level): the
+        run, the scope with the node's state, the position. This flow's
+        declarations apply on top (:meth:`~llm_gent.flow._scope.Scope.child`);
+        its resources register with the run while it walks
+        (:func:`~llm_gent.flow.resource._runtime.run_resources`).
         """
         if not self._nodes:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
-        shortcut = region_run(self, run.signals)
-        with run_resources(self, parent_path, run.scopes, parent_resources) as resources:
-            env = self._make_run_env(
-                run=run,
-                state=state,
+        decl = self.decl
+        with run_resources(
+            env.lg,
+            decl,
+            self._name or "<anonymous>",
+            env.position.path,
+            env.scopes,
+            env.scope.resources,
+        ) as resources:
+            scope = env.scope.child(
+                decl,
                 resources=resources,
-                parent_checkpointer=parent_checkpointer,
-                parent_chain_context=parent_chain_context,
-                parent_ancestor_chain=parent_ancestor_chain,
-                parent_extra=parent_extra,
-                parent_policy=parent_policy,
-                parent_path=parent_path,
-                shortcuts=parent_shortcuts + ((shortcut,) if shortcut is not None else ()),
+                where=self._entry_where(env.position),
+                signals=env.run.signals,
+                lg=env.lg,
             )
-            env = dataclasses.replace(
-                env,
-                hooks=self._resolve_hooks(env, parent_hooks),
-                activity_id=parent_activity,
-            )
-            return await self._run_in(env, args, kwargs)
+            return await self._run_in(dataclasses.replace(env, scope=scope), args, kwargs)
 
-    def _resolve_hooks(self, env: _RunEnv, parent: Hooks | None) -> Hooks | None:
-        """The hooks in effect in this flow: the inherited ones' children, then this flow's.
-
-        The inherited hooks are asked for their :meth:`~llm_gent.flow.hooks.Hook.child`
-        at this flow's place; ``replace`` drops them. ``None`` when no hook is
-        in effect.
-        """
-        inherited = None if parent is None else parent.child(self._entry_where(env))
-        if not self._hooks:
-            return None if self._hooks_replace else inherited
-        if inherited is None or self._hooks_replace:
-            return Hooks(env.lg, self._hooks)
-        return inherited.extend(self._hooks)
-
-    def _entry_where(self, env: _RunEnv) -> Where:
+    def _entry_where(self, position: Position) -> Where:
         """Where this flow starts in the run: the step that entered it and its snapshot path."""
-        path = env.ancestor_chain
+        path = position.ancestor_chain
         return Where(
             flow=self,
             node_id=path[-1] if path else None,
             node_path=path,
-            scope_path=path_str(env.path),
+            scope_path=path_str(position.path),
             step_name=self._name or None,
         )
 
@@ -1571,47 +1536,6 @@ class Flow:
         result = await Chain(self, env).walk(args, kwargs)
         env.lg.debug("completed flow run", extra={"flow": label, "subflow": is_subflow})
         return result
-
-    def _make_run_env(
-        self,
-        *,
-        run: Run,
-        state: State[Any],
-        resources: Resources,
-        parent_chain_context: str = "",
-        parent_ancestor_chain: tuple[str, ...] = (),
-        parent_extra: dict[str, Any] | None = None,
-        parent_policy: CheckpointPolicy | None = None,
-        parent_path: ScopePath = (),
-        parent_checkpointer: Checkpointer | None = None,
-        shortcuts: tuple[ShortcutRun, ...] = (),
-    ) -> _RunEnv:
-        """Resolve local-override-wins ambients and build the per-run environment.
-
-        Local ``.with_checkpointer`` / ``.with_checkpoint_policy`` wins over
-        the caller's parent ambients; unset locals fall back to the parent
-        so an intermediate layer's ambient survives arbitrarily deep
-        nesting. ``resources`` and ``shortcuts`` (the regions the run is
-        in) come resolved; the halt and the history writer are ``run``'s.
-
-        ``parent_chain_context`` and ``parent_ancestor_chain`` are copied
-        verbatim: the descent sites in :mod:`._executor` are the ones
-        that extend them when recursing into a subflow / arm / body.
-        """
-        policy = self._checkpoint_policy or parent_policy or CheckpointPolicy()
-        return _RunEnv(
-            run=run,
-            state=state,
-            lg=run.lg,
-            checkpointer=self._checkpointer or parent_checkpointer,
-            chain_context=parent_chain_context,
-            ancestor_chain=parent_ancestor_chain,
-            extra=parent_extra if parent_extra is not None else {},
-            policy=policy,
-            path=parent_path,
-            shortcuts=shortcuts,
-            resources=resources,
-        )
 
     def _wrap_top_state(self, state: Any) -> State[Any]:
         """Wrap a top-level ``run(state=...)`` payload as :class:`State`.
