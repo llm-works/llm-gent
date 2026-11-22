@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `llm_gent.provenance.VersionControl` commits a record of each step, model call, checkpoint and
   run to an appinfra CAS repository, as a Flow hook or explicitly (`commit`, `activity`,
   `llm_call`) without Flow.
+- `llm_gent.core.llm.testing.DelayedScriptedBackend`: llm-infer's scripted backend with an awaited
+  per-call delay and optional request recording, so concurrent runs overlap in experiments.
 
 ### Changed
 
