@@ -87,7 +87,8 @@ class _PausingSAIA:
         return _Result(paused=True)
 
 
-def _map_flow(store: Any, halt: asyncio.Event, saia: _PausingSAIA) -> Any:
+def _map_flow(store: Any, saia: _PausingSAIA) -> Any:
+    """Run it with the halt ``saia`` sets."""
     loop = Loop(ROLE, saia=saia, conversation_factory=_ConvFactory())
 
     @verb(role=ROLE)
@@ -99,7 +100,6 @@ def _map_flow(store: Any, halt: asyncio.Event, saia: _PausingSAIA) -> Any:
         .create(state={})
         .with_checkpoint_store(store, "loop-in-map")
         .with_checkpointer()
-        .with_halt(halt)
         .map(lambda b: b.call(item), items=lambda _p, _c: ["a", "b"], max_concurrency=2)
     )
 
@@ -108,11 +108,11 @@ class TestLoopInMap:
     async def test_each_item_resumes_its_own_paused_turn(self) -> None:
         store = memory_store()
         halt1 = asyncio.Event()
-        await _map_flow(store, halt1, _PausingSAIA(halt1, arrivals=2)).run()
+        await _map_flow(store, _PausingSAIA(halt1, arrivals=2)).run(halt=halt1)
 
         halt2 = asyncio.Event()
         saia2 = _PausingSAIA(halt2, arrivals=None)
-        await _map_flow(store, halt2, saia2).run(resume="latest")
+        await _map_flow(store, saia2).run(halt=halt2, resume="latest")
 
         assert sorted(saia2.resumed) == [
             ("a", ["turn-of-a"], True),
@@ -144,8 +144,8 @@ class _ScriptedSAIA:
         return _Result(text=f"done:{task}")
 
 
-def _two_calls_flow(store: Any, halt: asyncio.Event, saia: _ScriptedSAIA, factory: Any) -> Any:
-    """One step calling two Loops, then a second step."""
+def _two_calls_flow(store: Any, saia: _ScriptedSAIA, factory: Any) -> Any:
+    """One step calling two Loops, then a second step; run it with the halt ``saia`` sets."""
     first = Loop(ROLE, name="first", saia=saia, conversation_factory=factory)
     second = Loop(ROLE, name="second", saia=saia, conversation_factory=factory)
     after: list[str] = []
@@ -164,7 +164,6 @@ def _two_calls_flow(store: Any, halt: asyncio.Event, saia: _ScriptedSAIA, factor
         .create(state={})
         .with_checkpoint_store(store, "two-calls")
         .with_checkpointer()
-        .with_halt(halt)
         .call(both)
         .then(then)
     )
@@ -175,11 +174,12 @@ class TestTurnsInOneStep:
         """Call 1 pauses and sets the halt; call 2 pauses on the halt. Both resume."""
         store = memory_store()
         halt1 = asyncio.Event()
-        await _two_calls_flow(store, halt1, _ScriptedSAIA(halt1, {"a"}), _ConvFactory()).run()
+        flow = _two_calls_flow(store, _ScriptedSAIA(halt1, {"a"}), _ConvFactory())
+        await flow.run(halt=halt1)
 
         halt2 = asyncio.Event()
         saia2 = _ScriptedSAIA(halt2, set())
-        await _two_calls_flow(store, halt2, saia2, _ConvFactory()).run(resume="latest")
+        await _two_calls_flow(store, saia2, _ConvFactory()).run(halt=halt2, resume="latest")
 
         assert saia2.calls == [("a", ["turn-of-a"], True), ("b", ["turn-of-b"], True)]
 
@@ -187,14 +187,14 @@ class TestTurnsInOneStep:
         """Without a ConversationFactory the paused step still counts as interrupted."""
         store = memory_store()
         halt1 = asyncio.Event()
-        await _two_calls_flow(store, halt1, _ScriptedSAIA(halt1, {"a"}), None).run()
+        await _two_calls_flow(store, _ScriptedSAIA(halt1, {"a"}), None).run(halt=halt1)
         history = History(store, "two-calls")
         head = await history.head()
         assert head is not None and head.meta.outcome == "halted"
 
         halt2 = asyncio.Event()
         saia2 = _ScriptedSAIA(halt2, set())
-        await _two_calls_flow(store, halt2, saia2, None).run(resume="latest")
+        await _two_calls_flow(store, saia2, None).run(halt=halt2, resume="latest")
 
         assert [(task, resume) for task, _, resume in saia2.calls] == [("a", False), ("b", False)]
         assert await history.is_complete()
@@ -209,8 +209,8 @@ class TestTurnPausedAgain:
         for pause, resume in runs:
             halt = asyncio.Event()
             saias.append(_ScriptedSAIA(halt, pause))
-            flow = _two_calls_flow(store, halt, saias[-1], _ConvFactory())
-            await (flow.run() if resume is None else flow.run(resume=resume))
+            flow = _two_calls_flow(store, saias[-1], _ConvFactory())
+            await flow.run(halt=halt, resume="off" if resume is None else resume)
 
         assert saias[2].calls[0] == ("a", ["turn-of-a", "more-of-a"], True)
         assert await History(store, "two-calls").is_complete()
@@ -264,7 +264,8 @@ class _CappedSAIA:
         )
 
 
-def _capped_flow(store: Any, halt: asyncio.Event, saia: _CappedSAIA) -> Any:
+def _capped_flow(store: Any, saia: _CappedSAIA) -> Any:
+    """Run it with the halt ``saia`` sets."""
     loop = Loop(ROLE, saia=saia, conversation_factory=_ConvFactory())
 
     @verb(role=ROLE)
@@ -276,7 +277,6 @@ def _capped_flow(store: Any, halt: asyncio.Event, saia: _CappedSAIA) -> Any:
         .create(state={})
         .with_checkpoint_store(store, "caps")
         .with_checkpointer()
-        .with_halt(halt)
         .call(turn)
     )
 
@@ -288,8 +288,8 @@ async def _run_sessions(
     seen: list[tuple[int, int]] = []
     for i, session_used in enumerate(used):
         halt = asyncio.Event()
-        flow = _capped_flow(store, halt, _CappedSAIA(halt, session_used, caps, seen))
-        await (flow.run() if i == 0 else flow.run(resume="latest"))
+        flow = _capped_flow(store, _CappedSAIA(halt, session_used, caps, seen))
+        await flow.run(halt=halt, resume="off" if i == 0 else "latest")
     return seen
 
 

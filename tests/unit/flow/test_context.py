@@ -316,8 +316,8 @@ class TestCtxExtraResume:
                 halt.set()
             return ctx.state.data["counter"]
 
-        def build(halt_event: asyncio.Event | None) -> Flow:
-            """Build the outer flow bound to the shared store + optional halt."""
+        def build() -> Flow:
+            """Build the outer flow bound to the shared store."""
             body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
             body.call(body_step)
             outer = Flow(
@@ -326,11 +326,10 @@ class TestCtxExtraResume:
                 state={"counter": 0},
             )
             outer.iterate(body, max_iters=5)
-            outer = outer.with_checkpoint_store(store, "extra-resume-1").with_checkpointer()
-            return outer.with_halt(halt_event) if halt_event is not None else outer
+            return outer.with_checkpoint_store(store, "extra-resume-1").with_checkpointer()
 
         pre_lock = threading.Lock()
-        await build(halt).run(extra={"lock": pre_lock})
+        await build().run(halt=halt, extra={"lock": pre_lock})
         # Pre-halt: 2 iterations, both observed the pre-halt lock.
         assert seen == [pre_lock, pre_lock]
 
@@ -338,7 +337,7 @@ class TestCtxExtraResume:
         # the post-halt iterations by identity.
         resume_lock = threading.Lock()
         assert resume_lock is not pre_lock
-        await build(halt_event=None).run(resume="latest", extra={"lock": resume_lock})
+        await build().run(resume="latest", extra={"lock": resume_lock})
         # Every post-resume iteration observed the resume lock, never the
         # pre-halt one (which would prove extra leaked through a blob).
         assert len(seen) == 5, f"expected 5 iterations total, got {len(seen)}"

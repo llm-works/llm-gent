@@ -250,11 +250,11 @@ def _hash_flow(
     hashes: list[str | None],
     *,
     take: bool,
-    halt: asyncio.Event | None,
+    halt: bool,
 ) -> Any:
     """``a → b → c → d``; with ``take``, ``a`` checkpoints unnamed, ``b`` as ``"y"``.
 
-    With ``halt``, ``c`` sets it: the run stops before ``d``. Every hash
+    With ``halt``, ``c`` sets the run's halt: the run stops before ``d``. Every hash
     ``ctx.checkpoint`` returns lands in ``hashes``.
     """
 
@@ -277,8 +277,8 @@ def _hash_flow(
     @verb
     async def c(ctx: Context[dict[str, Any]], x: int) -> int:
         calls.append("c")
-        if halt is not None:
-            halt.set()
+        if halt:
+            ctx.halt.set()  # type: ignore[union-attr]
         ctx.state.data["c"] = x
         return x + 3
 
@@ -294,8 +294,6 @@ def _hash_flow(
         .with_checkpoint_store(store, NAME)
         .with_checkpointer()
     )
-    if halt is not None:
-        flow = flow.with_halt(halt)
     return flow.call(a).then(b).then(c).then(d)
 
 
@@ -337,28 +335,29 @@ class TestResumeByHash:
         history = History(store, NAME)
         calls: list[str] = []
         hashes: list[str | None] = []
-        first = _hash_flow(store, calls, hashes, take=True, halt=asyncio.Event())
-        assert await first.run(1) is HALTED
+        first = _hash_flow(store, calls, hashes, take=True, halt=True)
+        assert await first.run(1, halt=asyncio.Event()) is HALTED
         h1 = hashes[0]
         assert h1 is not None
         halted = await history.head()
         assert halted is not None and halted.meta.outcome == "halted"
 
         calls.clear()
-        assert await _hash_flow(store, calls, [], take=False, halt=None).run(resume=h1) == 22
+        assert await _hash_flow(store, calls, [], take=False, halt=False).run(resume=h1) == 22
         assert calls == ["a", "b", "c", "d"]
         line = [commit.id async for commit in history.commits()]
         assert halted.id not in line
 
         calls.clear()
-        assert await _hash_flow(store, calls, [], take=False, halt=None).run(resume=halted.id) == 22
+        flow = _hash_flow(store, calls, [], take=False, halt=False)
+        assert await flow.run(resume=halted.id) == 22
         assert calls == ["d"]
         head = await history.head()
         assert head is not None and head.parents == (halted.id,)
         assert (await history.snapshot(head)).root == {"a": 1, "b": 2, "c": 20, "d": 23}
 
         calls.clear()
-        assert await _hash_flow(store, calls, [], take=False, halt=None).run(resume="y") == 22
+        assert await _hash_flow(store, calls, [], take=False, halt=False).run(resume="y") == 22
         assert calls == ["b", "c", "d"]
 
     async def test_unknown_hash_raises_and_writes_nothing(self) -> None:

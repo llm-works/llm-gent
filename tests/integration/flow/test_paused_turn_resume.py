@@ -220,11 +220,10 @@ async def test_real_saia_pause_resume_round_trip(store: FileStore) -> None:
         ff1.create(state={})
         .with_checkpoint_store(store, "real-saia-resume")
         .with_checkpointer()
-        .with_halt(halt1)
         .iterate(body, max_iters=2)
     )
     saved_conv = _SerializableConv(messages=[Message(role="user", content="SAVED_CONV_MARKER")])
-    await flow1.run(extra={"task": "please answer", "conv": saved_conv})
+    await flow1.run(halt=halt1, extra={"task": "please answer", "conv": saved_conv})
 
     # SAIA's real complete() was called exactly once — it hit PauseRequested and
     # returned paused before the second turn could start.
@@ -250,11 +249,11 @@ async def test_real_saia_pause_resume_round_trip(store: FileStore) -> None:
         ff2.create(state={})
         .with_checkpoint_store(store, "real-saia-resume")
         .with_checkpointer()
-        .with_halt(halt2)
         .iterate(body, max_iters=2)
     )
     caller_conv = _SerializableConv(messages=[Message(role="user", content="CALLER_CONV_MARKER")])
     await flow2.run(
+        halt=halt2,
         resume="latest",
         # Caller supplies a DIFFERENT task + conv to prove the resume path
         # forwards the SAVED values from the envelope, not the caller's.
@@ -312,10 +311,9 @@ async def test_loop_without_caller_conversation_persists_paused_turn(
         .create(state={})
         .with_checkpoint_store(store, "no-caller-conv")
         .with_checkpointer()
-        .with_halt(halt)
         .iterate(body, max_iters=2)
     )
-    await flow.run()
+    await flow.run(halt=halt)
 
     [(_path, turn)] = (await _saved_turns(store, "no-caller-conv")).items()
     assert turn["task"] == "look up cas"

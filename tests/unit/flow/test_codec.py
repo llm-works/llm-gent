@@ -235,12 +235,12 @@ class TestInAFlow:
         """The carry holds tuples nested in a list: the halt checkpoint stores it, resume gets it back."""
         store = memory_store()
 
-        def build(halt: asyncio.Event, arm: bool, seen: list[Pairs]) -> Any:
+        def build(arm: bool, seen: list[Pairs]) -> Any:
             @verb
             async def grow(ctx: Context[Any], carry: Pairs) -> Pairs:
                 n = len(carry.pairs)
                 if arm and n == 1:
-                    halt.set()
+                    ctx.halt.set()  # type: ignore[union-attr]
                     raise Interrupted()
                 seen.append(carry)
                 return Pairs(pairs=[*carry.pairs, (f"n{n}", "a")], fixed=carry.fixed)
@@ -249,15 +249,14 @@ class TestInAFlow:
                 Factory(make_test_logger())
                 .create(state={})
                 .with_checkpoint_store(store, "tuples")
-                .with_halt(halt)
                 .iterate(lambda b: b.call(grow), max_iters=3)
             )
 
         start = Pairs(fixed=("x",))
-        assert await build(asyncio.Event(), True, []).run(start) is HALTED
+        assert await build(True, []).run(start, halt=asyncio.Event()) is HALTED
 
         seen: list[Pairs] = []
-        result = await build(asyncio.Event(), False, seen).run(start, resume="latest")
+        result = await build(False, seen).run(start, resume="latest")
         assert seen[0] == Pairs(pairs=[("n0", "a")], fixed=("x",))
         assert result == Pairs(pairs=[("n0", "a"), ("n1", "a"), ("n2", "a")], fixed=("x",))
 
@@ -270,7 +269,7 @@ class TestInAFlow:
         """
         store = memory_store()
 
-        def build(halt: asyncio.Event, arm: bool, seen: list[Any]) -> Any:
+        def build(arm: bool, seen: list[Any]) -> Any:
             @verb
             async def work(ctx: Context[Any], item: str) -> str:
                 if item == "boom":
@@ -280,7 +279,7 @@ class TestInAFlow:
             @verb
             async def keep(ctx: Context[Any], results: list[Any]) -> list[Any]:
                 if arm and len(seen) == 1:
-                    halt.set()
+                    ctx.halt.set()  # type: ignore[union-attr]
                     raise Interrupted()
                 seen.append(results)
                 return results
@@ -296,14 +295,13 @@ class TestInAFlow:
                 .with_checkpoint_store(store, "sentinels")
                 .with_checkpointer()
                 .with_checkpoint_policy(on_iterate=True)
-                .with_halt(halt)
                 .iterate(lambda b: b.call(batch).then(keep), max_iters=2)
             )
 
-        assert await build(asyncio.Event(), True, []).run() is HALTED
+        assert await build(True, []).run(halt=asyncio.Event()) is HALTED
 
         seen: list[Any] = []
-        result = await build(asyncio.Event(), False, seen).run(resume="latest")
+        result = await build(False, seen).run(resume="latest")
         assert seen == [result]
         item, skipped, failure = result
         assert item == "a" and skipped == Skipped("skip")

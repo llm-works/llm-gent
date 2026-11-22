@@ -65,7 +65,6 @@ from ..core.cost import Tracker as CostTracker
 from ..core.traits import Registry as TraitRegistry
 from ._chain import Chain
 from ._checkpoint_ctx import CheckpointContext, check_one_repo
-from ._halt_observer import check_one_halt
 from ._hook_points import RunHooks
 from ._resume import (
     Resume,
@@ -203,7 +202,6 @@ class Flow:
         self._state = state
         self._traits = traits
         self._state_factory = state_factory
-        self._halt_event: asyncio.Event | None = None
         self._shortcut: Shortcut | None = None
         self._resources: dict[ResourceKey[Any], Any] = {}
         self._resource_children: dict[ResourceKey[Any], dict[str, Any]] = {}
@@ -300,10 +298,9 @@ class Flow:
 
         Pass ``halt=ctx.halt`` and ``resources=ctx.resources`` from an
         in-flight verb to propagate its effective ambients to the
-        dispatched sibling; omitting either (or passing ``UNSET``) defaults
-        to this flow's ``.with_halt()`` binding and the resources it
-        declares (no per-run children such as ``.with_budget()``'s: there
-        is no run). ``cost=`` sets the sibling's ``ctx.cost`` on top of
+        dispatched sibling; omitting either (or passing ``UNSET``) gives
+        no halt and the resources this flow declares (no per-run children
+        such as ``.with_budget()``'s: there is no run). ``cost=`` sets the sibling's ``ctx.cost`` on top of
         those — ``None`` for none.
 
         Pass ``extra=ctx.extra`` from an in-flight verb to propagate the
@@ -321,7 +318,7 @@ class Flow:
             if scope_state is UNSET
             else scope_state
         )
-        effective_halt = self._halt_event if halt is UNSET else halt
+        effective_halt = None if halt is UNSET else halt
         effective_extra: dict[str, Any] = {} if extra is UNSET else extra
         wrapped_state = (
             payload
@@ -618,9 +615,9 @@ class Flow:
                 steps. Must be non-empty when given.
 
         At least one of ``until`` or ``max_iters`` must be provided so the
-        iteration is guaranteed to terminate. An ambient :meth:`with_halt`
-        event, if set, is checked between iterations and terminates the
-        block gracefully once fired.
+        iteration is guaranteed to terminate. The run's halt
+        (:meth:`run` ``halt=``), if set, is checked between iterations and
+        terminates the block gracefully once fired.
 
         Returns ``self`` for chaining.
         """
@@ -845,27 +842,6 @@ class Flow:
         target.on_item_complete = fn
         return self
 
-    def with_halt(self, event: asyncio.Event) -> Self:
-        """Set the run's halt: the app sets ``event`` to pause the whole run.
-
-        Threads ``event`` through the execution environment as ``ctx.halt``,
-        available to any verb that wants to observe it. :meth:`map` and
-        :meth:`iterate` also check the event at their natural boundaries:
-        map raises :class:`Interrupted` when the halt stops an item before
-        its body ran; iterate exits the loop between passes. In-flight
-        bodies are not interrupted — a verb that needs mid-request
-        cancellation should read ``ctx.halt`` itself. A halted
-        :meth:`~Flow.run` returns :data:`HALTED`; state is in the halt checkpoint.
-
-        A run has one halt, set on its top-level flow; every subflow
-        observes it. :meth:`run` raises when a nested flow sets a different
-        event.
-
-        Returns ``self`` for chaining.
-        """
-        self._halt_event = event
-        return self
-
     def with_shortcut(self, signal: str, *, drain: bool = False) -> Self:
         """Let the run's ``signal`` cut this flow short: it fast-forwards to its end.
 
@@ -929,9 +905,9 @@ class Flow:
         the tracker is the flow's :data:`~llm_gent.flow.COST` resource (see
         :mod:`llm_gent.flow.resource.cost`). A hard
         stop is opt-in on the tracker side: pass the run's halt event to
-        both :meth:`CostTracker.__init__` (``halt=``) and :meth:`with_halt`,
-        and the tracker sets it on the first cross into ``exceeded``,
-        pausing the run. Without a tracker of its own a flow shares the
+        both :meth:`CostTracker.__init__` (``halt=``) and :meth:`run`
+        (``halt=``), and the tracker sets it on the first cross into
+        ``exceeded``, pausing the run. Without a tracker of its own a flow shares the
         enclosing one.
 
         Returns ``self`` for chaining.
@@ -1049,8 +1025,9 @@ class Flow:
         - **Ambients** (halt, cost tracker, saia, traits, logger,
           checkpointer itself) are never serialized — they reattach
           from the current runtime, so a resumed run gets fresh
-          handles under whichever ``.with_halt`` / ``.with_cost_tracker`` /
-          ``.with_traits`` were wired at resume time.
+          handles: the resuming run's ``halt=`` and whichever
+          ``.with_cost_tracker`` / ``.with_traits`` were wired at resume
+          time.
         - **Deadline** is not restored — the wall clock starts fresh
           each run.
 
@@ -1187,6 +1164,7 @@ class Flow:
         self,
         *args: Any,
         state: Any = UNSET,
+        halt: asyncio.Event | None = None,
         signals: Mapping[str, asyncio.Event] | None = None,
         resume: ResumeMode | str = "off",
         restart: str | None = None,
@@ -1199,12 +1177,23 @@ class Flow:
         node receives one positional — the previous node's result, optionally
         transformed by its ``project`` callable.
 
+        A flow is the structure of the work: it can run many times, at once
+        too. What belongs to one run — its halt, its signals and everything
+        it writes as it goes — is given here and kept per run.
+
         Cancellation is honored end-to-end: :class:`asyncio.CancelledError`
         raised by any node (verb or subflow) propagates out of :meth:`run`
         unchanged, past any ``rescue`` policy.
 
         Args:
             *args: Positional inputs to the first node.
+            halt: The run's halt: the app sets it to pause the whole run.
+                Every step sees it as ``ctx.halt``; a chain checks it after
+                each step, an iterate before each pass, a map before each
+                item. In-flight bodies are not interrupted — a verb that
+                needs mid-request cancellation reads ``ctx.halt`` itself.
+                A halted run returns :data:`HALTED`; its state is in the
+                halt checkpoint.
             signals: The run's signals by name, events the app sets for
                 :meth:`with_shortcut` regions. Which are set is recorded in
                 every checkpoint the run takes, and resume sets them again
@@ -1287,8 +1276,7 @@ class Flow:
 
         Raises:
             RuntimeError: The flow has no nodes to run, OR a resume mode or
-                a restart was requested without :meth:`with_checkpoint_store` wired, OR
-                a nested flow sets a halt other than this flow's, OR a
+                a restart was requested without :meth:`with_checkpoint_store` wired, OR a
                 shortcut's signal is not one of the run's ``signals`` or a
                 flow under it declares a shortcut on the same signal, OR
                 a flow in the tree has ``with_budget(...)`` with no cost
@@ -1307,7 +1295,7 @@ class Flow:
         """
         run_signals_ = check_signals(signals)
         self._check_run_args(resume, restart, run_signals_)
-        run = self._new_run(run_signals_)
+        run = self._new_run(halt, run_signals_)
         active_state, saved = await self._start_state(
             run, self._wrap_top_state(state), resume, restart
         )
@@ -1328,12 +1316,12 @@ class Flow:
         await hooks.after(outcome)
         return value
 
-    def _new_run(self, signals: dict[str, asyncio.Event]) -> Run:
+    def _new_run(self, halt: asyncio.Event | None, signals: dict[str, asyncio.Event]) -> Run:
         """The state of a new run of this flow, with its own history writer."""
         ctx = self._checkpoint_ctx
         return Run(
             flow=self,
-            halt=self._halt_event,
+            halt=halt,
             signals=signals,
             checkpoint_ctx=None if ctx is None else ctx.for_run(),
         )
@@ -1409,7 +1397,6 @@ class Flow:
             raise RuntimeError(f"Flow {self._name!r} has no nodes to run")
         self._check_start(resume, restart)
         check_one_repo(self)
-        check_one_halt(self)
         check_shortcuts(self, signals)
         check_budgets_have_a_tracker(self)
         check_resources(self)

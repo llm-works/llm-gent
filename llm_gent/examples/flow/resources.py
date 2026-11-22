@@ -94,16 +94,16 @@ class MyFlow(Flow):
     with_stats = resource_method(STATS)
 
 
-def build(ff: Factory[MyFlow], stats: Stats, halt: asyncio.Event, arm: bool) -> MyFlow:
-    """Fetch every document, then score each; armed, halt once all are fetched."""
+def build(ff: Factory[MyFlow], stats: Stats, arm: bool) -> MyFlow:
+    """Fetch every document, then score each; armed, halt the run once all are fetched."""
     fetched: set[str] = set()
 
     @verb
     async def fetch(ctx: Context[Any], doc: str) -> str:
         ctx.resource(STATS).record("fetched")
         fetched.add(doc)
-        if arm and len(fetched) == len(DOCS):
-            halt.set()
+        if arm and len(fetched) == len(DOCS) and ctx.halt is not None:
+            ctx.halt.set()
         return doc
 
     @verb
@@ -120,7 +120,6 @@ def build(ff: Factory[MyFlow], stats: Stats, halt: asyncio.Event, arm: bool) -> 
     return (
         ff.create("score-docs", client_flow_id="docs")
         .with_checkpointer()
-        .with_halt(halt)
         .with_stats(stats)
         .map(per_document, items=lambda _prev, _ctx: DOCS)
     )
@@ -134,12 +133,12 @@ async def main() -> int:
 
     print("--- Run 1: halts once every document is fetched ---")
     stats1 = Stats()
-    assert await build(ff, stats1, asyncio.Event(), arm=True).run() is HALTED
+    assert await build(ff, stats1, arm=True).run(halt=asyncio.Event()) is HALTED
     print(f"halted with tallies {dict(stats1.tallies)}")
 
     print("\n--- Run 2: fresh flow and Stats, resume='latest' ---")
     stats2 = Stats()
-    scores = await build(ff, stats2, asyncio.Event(), arm=False).run(resume="latest")
+    scores = await build(ff, stats2, arm=False).run(halt=asyncio.Event(), resume="latest")
     print(f"scores {scores}, tallies {dict(stats2.tallies)}")
     assert stats2.tallies == Counter(fetched=len(DOCS), scored=len(DOCS))
     return 0

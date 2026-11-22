@@ -249,11 +249,11 @@ class TestHaltResolution:
 
     @pytest.mark.asyncio
     async def test_ambient_ctx_halt_used_when_no_explicit(self) -> None:
-        """Without ``Loop(halt=)``, ``ctx.halt`` (from ``Flow.with_halt``) is used."""
+        """Without ``Loop(halt=)``, ``ctx.halt`` (the run's halt) is used."""
         ambient = asyncio.Event()
         factory = _CompleteFactory()
-        flow = make_ff(saia_factory=factory).with_halt(ambient).create().call(Loop(ROLE_A))
-        await flow.run("t")
+        flow = make_ff(saia_factory=factory).create().call(Loop(ROLE_A))
+        await flow.run("t", halt=ambient)
         assert factory.built[0].calls[0]["abort_signal"] is ambient
 
     @pytest.mark.asyncio
@@ -262,13 +262,8 @@ class TestHaltResolution:
         explicit = asyncio.Event()
         ambient = asyncio.Event()
         factory = _CompleteFactory()
-        flow = (
-            make_ff(saia_factory=factory)
-            .with_halt(ambient)
-            .create()
-            .call(Loop(ROLE_A, halt=explicit))
-        )
-        await flow.run("t")
+        flow = make_ff(saia_factory=factory).create().call(Loop(ROLE_A, halt=explicit))
+        await flow.run("t", halt=ambient)
         assert factory.built[0].calls[0]["abort_signal"] is explicit
 
 

@@ -827,9 +827,7 @@ def _add_map(node: Map, flow: Flow, probe: Probe, parallel: bool) -> Flow:
     return flow
 
 
-def _flow(
-    shape: Seq, probe: Probe, store: Any, *, parallel: bool, halt: asyncio.Event | None = None
-) -> Flow:
+def _flow(shape: Seq, probe: Probe, store: Any, *, parallel: bool) -> Flow:
     """Build the top-level flow for ``shape`` under ``probe.policy``.
 
     It carries the run's store; it declares the checkpointer itself unless
@@ -840,16 +838,14 @@ def _flow(
         flow = flow.with_checkpointer()
     if probe.policy in ("on_iterate", "on_map_item"):
         flow = flow.with_checkpoint_policy(**{probe.policy: True})
-    if halt is not None:
-        flow = flow.with_halt(halt)
     for step in shape.children:
         _add(step, flow, probe, parallel)
     return flow
 
 
-def _run_kw(shape: Seq, probe: Probe) -> dict[str, Any]:
-    """The ``run()`` settings of ``shape``'s run: with a cut, its signal."""
-    kw: dict[str, Any] = {}
+def _run_kw(shape: Seq, probe: Probe, halt: asyncio.Event | None = None) -> dict[str, Any]:
+    """The ``run()`` settings of ``shape``'s run: its halt and, with a cut, its signal."""
+    kw: dict[str, Any] = {"halt": halt}
     if _has(shape, Cut):
         kw["signals"] = {"cut": probe.cut}
     return kw
@@ -1093,10 +1089,12 @@ async def _run_stopping(
     """
     halt = asyncio.Event()
     probe = Probe(policy=case.policy, stop=stop, stop_at=stop_at, mode=mode, halt=halt, store=store)
-    flow = _flow(shape, probe, store, parallel=case.parallel, halt=halt)
+    flow = _flow(shape, probe, store, parallel=case.parallel)
     raised: BaseException | None = None
     try:
-        await flow.run(RUN_INPUT, resume="latest" if resume else "off", **_run_kw(shape, probe))
+        await flow.run(
+            RUN_INPUT, resume="latest" if resume else "off", **_run_kw(shape, probe, halt)
+        )
     except (SimulatedCrash, LeafError) as e:
         raised = e
     expected = _RAISED_BY.get(stop) if probe.stopped is not None else None
@@ -1419,8 +1417,8 @@ async def test_halt_around_a_shortcut_resumes_to_the_cut_run(case: CutCase) -> N
         store=store,
         cut_key=case.cut_key,
     )
-    flow = _flow(shape, probe, store, parallel=case.parallel, halt=halt)
-    result = await flow.run(RUN_INPUT, **_run_kw(shape, probe))
+    flow = _flow(shape, probe, store, parallel=case.parallel)
+    result = await flow.run(RUN_INPUT, **_run_kw(shape, probe, halt))
     if await History(inner, FLOW_NAME).is_complete():
         assert result == expected
         assert await _head_done(inner) == expected_done

@@ -133,6 +133,17 @@ class TestBuilderValidation:
         with pytest.raises(TypeError, match="reserved parameter 'signals'"):
             flow.call(bad)
 
+    def test_call_rejects_verb_declaring_halt_kwarg(self) -> None:
+        """A verb with a ``halt=`` parameter collides with ``Flow.run(halt=...)``."""
+        flow = make_ff().create()
+
+        @verb(role=ROLE_A)
+        async def bad(ctx: Context, *, halt: asyncio.Event) -> None:
+            """Verb tries to bind ``halt`` — would never receive it via .run()."""
+
+        with pytest.raises(TypeError, match="reserved parameter 'halt'"):
+            flow.call(bad)
+
     def test_rescue_before_any_call_raises(self) -> None:
         """.rescue requires a preceding node to attach to."""
         flow = make_ff().create()

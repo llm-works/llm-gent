@@ -86,18 +86,19 @@ class TestRescue:
                 .create(state={})
                 .with_checkpoint_store(store, "rescue")
                 .with_checkpointer()
-                .with_halt(halt)
                 .iterate(lambda b: b.call(step), max_iters=3, name="loop")
                 .rescue(lambda _e, _p, _c: -1)
                 .then(_stop_then_halt(halt, ran, arm))
             )
 
-        assert await build(asyncio.Event(), arm=True).run(0) is HALTED
+        halt = asyncio.Event()
+        assert await build(halt, arm=True).run(0, halt=halt) is HALTED
         assert ran == ["step:0", "step:1", "last"]
         assert await _paths(store, "rescue") == [""]  # only the top chain, at `last`
 
         ran.clear()
-        assert await build(asyncio.Event(), arm=False).run(0, resume="latest") == -1
+        halt = asyncio.Event()
+        assert await build(halt, arm=False).run(0, halt=halt, resume="latest") == -1
         assert ran == ["last"]
 
 
@@ -118,7 +119,8 @@ class Totals(StateDataclass):
 def _typed_flow(store: Any, halt: asyncio.Event, ran: list[str], stop_at: int | None) -> Any:
     """``seed -> iterate(bump) -> map(double) -> total`` over pydantic values, typed state.
 
-    The ``stop_at``-th step to run sets the halt and stops before its work.
+    The ``stop_at``-th step to run sets ``halt`` (pass it to the run) and
+    stops before its work.
     """
     count = [0]
 
@@ -156,7 +158,6 @@ def _typed_flow(store: Any, halt: asyncio.Event, ran: list[str], stop_at: int | 
         .create(state=Totals())
         .with_checkpoint_store(store, "typed")
         .with_checkpointer()
-        .with_halt(halt)
         .call(seed)
         .iterate(lambda b: b.call(bump), max_iters=2)
         .map(
@@ -176,11 +177,14 @@ class TestTypedValues:
     async def test_halt_and_resume_keep_the_types(self, store: MemoryStore, stop_at: int) -> None:
         """Halted at each step in turn, resume runs that step and the rest, over typed values."""
         ran: list[str] = []
-        assert await _typed_flow(store, asyncio.Event(), ran, stop_at).run(1) is HALTED
+        halt = asyncio.Event()
+        assert await _typed_flow(store, halt, ran, stop_at).run(1, halt=halt) is HALTED
         assert ran == _TYPED_STEPS[:stop_at]
 
         ran.clear()
-        assert await _typed_flow(store, asyncio.Event(), ran, None).run(1, resume="latest") == 32
+        halt = asyncio.Event()
+        flow = _typed_flow(store, halt, ran, None)
+        assert await flow.run(1, halt=halt, resume="latest") == 32
         assert ran == _TYPED_STEPS[stop_at - 1 :]
         history = History(store, "typed")
         head = await history.head()

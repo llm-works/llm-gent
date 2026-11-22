@@ -120,11 +120,10 @@ class TestLatest:
         await build_canonical_flow(
             make_test_logger(),
             max_iters=5,
-            halt=asyncio.Event(),
             halt_after_iteration=2,
             store=store,
             client_flow_id="halted",
-        ).run()
+        ).run(halt=asyncio.Event())
 
         result = await build_canonical_flow(
             make_test_logger(), max_iters=5, store=store, client_flow_id="halted"
@@ -324,14 +323,14 @@ class TestCursors:
     ) -> None:
         """The 2nd step sets the halt, then raises ``Interrupted`` or finishes its work."""
 
-        def build(halt: asyncio.Event | None, seen: list[Any]) -> Any:
+        def build(arm: bool, seen: list[Any]) -> Any:
             @verb
             async def step(ctx: Context[dict[str, Any]], prev: Any = None) -> Any:
                 if ctx.halt is not None and ctx.halt.is_set():
                     raise Interrupted()
                 seen.append(prev)
-                if halt is not None and len(seen) == 2:
-                    halt.set()
+                if arm and len(seen) == 2:
+                    ctx.halt.set()  # type: ignore[union-attr]
                     if mode == "bail":
                         raise Interrupted()
                 return prev + 10
@@ -342,15 +341,13 @@ class TestCursors:
                 .with_checkpoint_store(store, "h")
                 .with_checkpointer()
             )
-            if halt is not None:
-                flow = flow.with_halt(halt)
             if shape == "chain":
                 return flow.call(step).call(step).call(step).call(step)
             return flow.iterate(lambda b: b.call(step), max_iters=4)
 
-        assert await build(asyncio.Event(), []).run(0) is HALTED
+        assert await build(True, []).run(0, halt=asyncio.Event()) is HALTED
         seen: list[Any] = []
-        assert await build(None, seen).run(0, resume="latest") == 40
+        assert await build(False, seen).run(0, resume="latest") == 40
         assert seen == resumed
 
     async def test_interrupted_without_a_halt_is_an_error(self, store: MemoryStore) -> None:
@@ -482,9 +479,7 @@ def _plain_step_flow(store: MemoryStore, name: str, lg: Any) -> Any:
     )
 
 
-def _bounded_iterate_flow(
-    store: MemoryStore, name: str, lg: Any, max_iters: int, halt: Any = None
-) -> Any:
+def _bounded_iterate_flow(store: MemoryStore, name: str, lg: Any, max_iters: int) -> Any:
     """``.iterate`` over a ``.call(state=)`` pass; the pass that gets 2 checkpoints and crashes.
 
     Run with ``0``: passes 0 and 1 complete, pass 2 saves its scope and
@@ -502,8 +497,6 @@ def _bounded_iterate_flow(
 
     body = Factory(lg).create().call(work)
     flow = Factory(lg).create(state={}).with_checkpoint_store(store, name).with_checkpointer()
-    if halt is not None:
-        flow = flow.with_halt(halt)
     return flow.iterate(
         lambda b: b.call(body, state=lambda _p: {}, merge=lambda _p, _c: None),
         max_iters=max_iters,
@@ -545,8 +538,8 @@ class TestScopesFromSnapshot:
 
         halt = asyncio.Event()
         halt.set()
-        flow = _bounded_iterate_flow(store, "halt-early", make_test_logger(), 5, halt=halt)
-        await flow.run(resume="latest")
+        flow = _bounded_iterate_flow(store, "halt-early", make_test_logger(), 5)
+        await flow.run(resume="latest", halt=halt)
 
         history = History(store, "halt-early")
         head = await history.head()
@@ -555,23 +548,20 @@ class TestScopesFromSnapshot:
         assert [v for p, v in scopes.items() if "/p/2/" in p] == [{"x": 2}]
 
 
-def _counting_chain(store: MemoryStore, halt: asyncio.Event | None, seen: list[Any]) -> Any:
-    """Four steps, each adding 10 to its input and 1 to state ``n``; the 2nd sets ``halt`` and stops."""
+def _counting_chain(store: MemoryStore, arm: bool, seen: list[Any]) -> Any:
+    """Four steps, each adding 10 to its input and 1 to state ``n``; armed, the 2nd halts the run."""
 
     @verb
     async def step(ctx: Context[dict[str, Any]], prev: Any = None) -> Any:
         seen.append(prev)
         ctx.state.data["n"] = ctx.state.data.get("n", 0) + 1
-        if halt is not None and len(seen) == 2:
-            halt.set()
+        if arm and len(seen) == 2:
+            ctx.halt.set()  # type: ignore[union-attr]
             raise Interrupted()
         return prev + 10
 
     flow = Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "session")
-    flow = flow.with_checkpointer()
-    if halt is not None:
-        flow = flow.with_halt(halt)
-    return flow.call(step).call(step).call(step).call(step)
+    return flow.with_checkpointer().call(step).call(step).call(step).call(step)
 
 
 @verb
@@ -596,12 +586,12 @@ class TestRestart:
         assert warnings == []  # the crashed run's scope and cursors were never handed out
 
     async def test_starts_at_the_top_on_the_saved_state(self, store: MemoryStore) -> None:
-        assert await _counting_chain(store, asyncio.Event(), []).run(0) is HALTED
+        assert await _counting_chain(store, True, []).run(0, halt=asyncio.Event()) is HALTED
         _, halted = await _head(store, "session")
         assert halted.root == {"n": 2}
 
         seen: list[Any] = []
-        assert await _counting_chain(store, None, seen).run(0, restart="latest") == 40
+        assert await _counting_chain(store, False, seen).run(0, restart="latest") == 40
         assert seen == [0, 10, 20, 30]  # resume would run the 2nd step on: [10, 20, 30]
         _, done = await _head(store, "session")
         assert done.root == {"n": 6}
@@ -609,30 +599,28 @@ class TestRestart:
     async def test_set_signals_stay_behind(self, store: MemoryStore) -> None:
         """The halted run had its signal set; the restarted run does not get it set again."""
 
-        def build(cut: asyncio.Event, halt: asyncio.Event | None, seen: list[bool]) -> Any:
+        def build(cut: asyncio.Event, arm: bool, seen: list[bool]) -> Any:
             @verb
             async def step(ctx: Context[dict[str, Any]], x: Any = None) -> Any:
                 seen.append(cut.is_set())
-                if halt is not None:
+                if arm:
                     cut.set()
-                    halt.set()
+                    ctx.halt.set()  # type: ignore[union-attr]
                     raise Interrupted()
                 return x
 
             flow = Factory(make_test_logger()).create(state={}).with_checkpoint_store(store, "sig")
-            flow = flow.with_checkpointer()
-            if halt is not None:
-                flow = flow.with_halt(halt)
-            return flow.call(step)
+            return flow.with_checkpointer().call(step)
 
         cut = asyncio.Event()
-        assert await build(cut, asyncio.Event(), []).run(signals={"cut": cut}) is HALTED
+        halted_run = build(cut, True, []).run(halt=asyncio.Event(), signals={"cut": cut})
+        assert await halted_run is HALTED
         _, halted = await _head(store, "sig")
         assert halted.cursors[""][SIGNALS] == ["cut"]
 
         seen: list[bool] = []
         cut = asyncio.Event()
-        await build(cut, None, seen).run(restart="latest", signals={"cut": cut})
+        await build(cut, False, seen).run(restart="latest", signals={"cut": cut})
         assert seen == [False]
 
     @pytest.mark.parametrize("by", ["name", "hash"])

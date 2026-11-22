@@ -35,10 +35,10 @@ def _ff() -> Factory:
     return Factory(make_test_logger())
 
 
-def _nested(store: Any, ran: list[str], *, crash: bool, halt: asyncio.Event | None = None) -> Any:
+def _nested(store: Any, ran: list[str], *, crash: bool, halt: bool = False) -> Any:
     """``sub(a1 → a2 → b) → c``; only ``sub`` declares a checkpointer; ``a2`` saves first thing.
 
-    With ``crash``, ``b`` dies; with ``halt``, ``b`` sets it and stops before its work.
+    With ``crash``, ``b`` dies; with ``halt``, ``b`` sets the run's halt and stops before its work.
     """
 
     @verb
@@ -59,8 +59,8 @@ def _nested(store: Any, ran: list[str], *, crash: bool, halt: asyncio.Event | No
         ran.append("b")
         if crash:
             raise Crash()
-        if halt is not None and not halt.is_set():
-            halt.set()
+        if halt:
+            ctx.halt.set()  # type: ignore[union-attr]
             raise Interrupted()
         return x * 10
 
@@ -70,8 +70,7 @@ def _nested(store: Any, ran: list[str], *, crash: bool, halt: asyncio.Event | No
         return x + 3
 
     sub = _ff().create().with_checkpointer().call(a1).then(a2).then(b)
-    flow = _ff().create(state={}).with_checkpoint_store(store, NAME).call(sub).then(c)
-    return flow if halt is None else flow.with_halt(halt)
+    return _ff().create(state={}).with_checkpoint_store(store, NAME).call(sub).then(c)
 
 
 class TestNestedCheckpointer:
@@ -91,8 +90,8 @@ class TestNestedCheckpointer:
     async def test_halt_inside_a_checkpointed_subtree_resumes_as_uninterrupted(self) -> None:
         store = memory_store()
         ran: list[str] = []
-        halt = asyncio.Event()
-        assert await _nested(store, ran, crash=False, halt=halt).run(1) is HALTED
+        flow = _nested(store, ran, crash=False, halt=True)
+        assert await flow.run(1, halt=asyncio.Event()) is HALTED
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "halted"
 

@@ -118,42 +118,8 @@ class TestFlowFactory:
         assert derived.create().state is state
 
 
-class TestCreateHaltAndCheckpointer:
-    """Factory.create() accepts halt= and checkpointer= for per-flow wiring."""
-
-    def test_create_halt_kwarg_binds_flow_halt(self) -> None:
-        """A ``halt=`` on create() supersedes the factory's captured halt."""
-        import asyncio
-
-        from llm_gent.flow import Factory
-
-        factory_halt = asyncio.Event()
-        create_halt = asyncio.Event()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), halt=factory_halt)
-        flow = ff.create("named", halt=create_halt)
-        assert flow._halt_event is create_halt
-
-    def test_create_halt_kwarg_supplies_when_factory_has_none(self) -> None:
-        """A ``halt=`` on create() applies even when the factory has none."""
-        import asyncio
-
-        from llm_gent.flow import Factory
-
-        create_halt = asyncio.Event()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory())
-        flow = ff.create(halt=create_halt)
-        assert flow._halt_event is create_halt
-
-    def test_create_halt_absent_inherits_factory(self) -> None:
-        """Without ``halt=``, the factory's captured halt reaches the flow."""
-        import asyncio
-
-        from llm_gent.flow import Factory
-
-        factory_halt = asyncio.Event()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), halt=factory_halt)
-        flow = ff.create()
-        assert flow._halt_event is factory_halt
+class TestCreateCheckpointer:
+    """Factory.create() accepts checkpointer= for per-flow wiring."""
 
     def test_create_checkpointer_pair_binds_flow(self) -> None:
         """``checkpointer=(store, id)`` binds the run's repo via .with_checkpoint_store, nothing more."""
