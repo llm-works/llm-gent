@@ -234,6 +234,22 @@ checked-out snapshot and registered with the run while the flow walks, so its ch
 their accounting. A field that fits none of the rules is either fixed for the whole run (as
 `extra` is) or needs a rule of its own named here.
 
+The walk carries a frame from node to node: the run (fixed for the whole run), the scope (the
+fold so far) and the position (snapshot path, chain context, ancestor chain).
+
+### Packages
+
+```
+flow/       structure: the builder and its read-only tree, nodes, verbs, state, the declaration
+            type (Decl), Context and Loop
+flow/run/   execution: Scope and Position, the frame, the walk (chain, branch, iterate, map),
+            the top-level run, start and resume, history writing, hook events, shortcut regions
+```
+
+`flow/run` imports the structure; the structure imports `flow/run` only where `Flow.run` starts a
+run. Context and Loop reach the run through the frame they are handed, never by importing the
+engine.
+
 ## 7. Runtime
 
 Each agent is an appinfra `AsyncService` on its worker's `LoopHost`: one task per agent, no thread
