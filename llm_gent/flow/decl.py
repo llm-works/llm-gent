@@ -35,7 +35,8 @@ class Decl:
     resources: Mapping[ResourceKey[Any], Any] = NO_RESOURCES
     """The resources the flow declares (:meth:`Flow.with_resource`)."""
     resource_children: Mapping[ResourceKey[Any], Mapping[str, Any]] = _NO_CHILDREN
-    """The per-run children the flow asks for, by key, with their ``child()`` arguments."""
+    """The per-run children the flow asks for: each key maps to the keyword arguments of
+    the resource's ``child()`` (``with_resource(key, **args)``)."""
     hooks: tuple[object, ...] = ()
     hooks_replace: bool = False
     """The flow's hooks replace the inherited ones instead of extending them."""
