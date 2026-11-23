@@ -111,7 +111,8 @@ class MemoryTrait:
         self._database = database
         self._client = chat_client
         self._embedder = embedder
-        self._schema = _schema_name(config.get("schema"))
+        self._platform_schema = _schema_name(config.get("schema"), database.schema)
+        self._schema = self._platform_schema
         self._llm_defaults: dict[str, Any] = resolve_llm_defaults(config.get("llm") or DotDict())
         self._root = KeltClient(
             lg=lg,
@@ -134,7 +135,7 @@ class MemoryTrait:
         """
         bound = copy.copy(self)
         bound._identity = identity
-        bound._schema = schema or self._schema
+        bound._schema = schema or self._platform_schema
         bound._kelt = self._root.view(identity.context_key, schema_name=bound._schema)
         return bound
 
@@ -225,6 +226,7 @@ class MemoryTrait:
         Returns:
             CompletionResult with response and metadata.
         """
+        self._bound_identity()  # a completion is made as an identity, facts or not
         prompt = self._build_completion_prompt(
             system_prompt, query, include_facts, rag, rag_top_k, rag_min_similarity
         )
@@ -516,6 +518,10 @@ class MemoryTrait:
         )
 
 
-def _schema_name(schema_config: dict[str, Any] | None) -> str:
-    """The schema a memory config names (``schema.name``), else ``public``."""
-    return str((schema_config or {}).get("name") or "public")
+def _schema_name(schema_config: dict[str, Any] | None, database_schema: str | None) -> str:
+    """The schema a memory config names (``schema.name``), else the database's, else ``public``.
+
+    An explicit schema that differs from the database's still fails in kelt's
+    schema-conflict check.
+    """
+    return str((schema_config or {}).get("name") or database_schema or "public")

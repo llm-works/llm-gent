@@ -44,21 +44,20 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class Trait(Protocol):
-    """Protocol for agent traits.
+    """Protocol for traits: an agent's capabilities, or resources a platform shares.
 
-    Traits extend agent capabilities through composition. Each trait
-    is bound to an agent at construction and integrates with the agent
-    lifecycle:
+    The protocol is the lifecycle an agent drives:
 
-    - __init__(agent): Trait is created with agent reference
-    - on_start(): Called when agent starts
-    - on_stop(): Called when agent stops
+    - on_start(): Called when the agent starts
+    - on_stop(): Called when the agent stops
 
-    Traits can depend on other traits. Use agent.get_trait() in on_start()
-    to get references to required traits (all traits are added before on_start()).
+    A trait that belongs to one agent usually takes it in its constructor;
+    BaseTrait provides that. A trait over the platform's shared clients is
+    built once by the platform and handed to agents as views (see
+    MemoryTrait.view), with no agent of its own.
 
-    For convenience, inherit from BaseTrait instead of implementing this
-    protocol directly.
+    Traits can depend on other traits: use agent.get_trait() in on_start()
+    (all traits are added before on_start()).
     """
 
     def on_start(self) -> None:

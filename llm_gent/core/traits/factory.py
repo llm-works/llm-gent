@@ -117,7 +117,9 @@ class Factory:
     def _create_memory(self, agent: Agent) -> MemoryTrait:
         """The platform's memory, viewed as the agent's identity.
 
-        The agent's ``kelt.schema.name`` overrides the platform's schema.
+        A non-empty ``kelt.schema`` on the agent replaces the platform's
+        schema: its ``name``, or ``public`` without one. Without it the
+        agent shares the platform's schema.
 
         Raises:
             ConfigError: The platform was built without memory.
@@ -126,8 +128,9 @@ class Factory:
 
         if self._memory is None:
             raise ConfigError("Memory trait requires a platform built with memory configuration")
-        schema = (agent.config.get("kelt") or {}).get("schema") or {}
-        return self._memory.view(agent.identity, schema=schema.get("name"))
+        schema = (agent.config.get("kelt") or {}).get("schema")
+        name = (schema.get("name") or "public") if schema else None
+        return self._memory.view(agent.identity, schema=name)
 
     def _create_training(self, agent: Agent) -> TrainingTrait:
         """Route to create_training_trait.

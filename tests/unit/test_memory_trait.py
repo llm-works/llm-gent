@@ -46,9 +46,26 @@ class TestSharedInstance:
         assert kwargs["training_config"] == {"x": 1}
 
     def test_schema_defaults_to_public(self, kelt_class, clients):
+        clients["database"].schema = None
         memory = _memory(clients)
 
         assert memory.default_schema == "public"
+
+    def test_without_a_platform_schema_the_database_schema_is_used(self, kelt_class, clients):
+        clients["database"].schema = "tenant"
+
+        memory = _memory(clients)
+
+        assert kelt_class.call_args.kwargs["context"].schema_name == "tenant"
+        assert memory.default_schema == "tenant"
+
+    def test_the_platform_schema_wins_over_the_database_schema(self, kelt_class, clients):
+        clients["database"].schema = "tenant"
+
+        memory = _memory(clients, schema={"name": "acme"})
+
+        assert kelt_class.call_args.kwargs["context"].schema_name == "acme"
+        assert memory.default_schema == "acme"
 
     def test_memory_operations_need_a_view(self, kelt_class, clients):
         memory = _memory(clients)
@@ -58,6 +75,13 @@ class TestSharedInstance:
         with pytest.raises(RuntimeError, match="call view"):
             memory.get_client_for_schema("other")
         assert memory.identity is None
+
+    def test_a_completion_needs_a_view_even_without_facts(self, kelt_class, clients):
+        memory = _memory(clients)
+
+        with pytest.raises(RuntimeError, match="call view"):
+            memory.complete("hi", include_facts=False)
+        clients["chat_client"].chat.assert_not_called()
 
     def test_lifecycle_closes_no_client(self, kelt_class, clients):
         memory = _memory(clients)
@@ -97,6 +121,14 @@ class TestView:
 
         kelt_class.return_value.view.assert_called_once_with("a", schema_name="agent_schema")
         assert view.default_schema == "agent_schema"
+
+    def test_a_view_of_a_view_defaults_to_the_platform_schema(self, kelt_class, clients):
+        memory = _memory(clients, schema={"name": "acme"})
+
+        view = memory.view(Identity("a"), schema="tenant").view(Identity("b"))
+
+        assert view.default_schema == "acme"
+        kelt_class.return_value.view.assert_called_with("b", schema_name="acme")
 
     def test_leaves_the_shared_instance_unbound(self, kelt_class, clients):
         memory = _memory(clients)

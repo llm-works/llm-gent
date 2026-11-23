@@ -105,3 +105,8 @@ class TestTableNames:
     def test_a_schema_qualifies_them(self, run: Any, test_logger: Logger) -> None:
         sql = run(test_logger, "tenant")
         assert all(f"tenant.{FACTS}" in s or f"tenant.{FEEDBACK}" in s for s in sql)
+
+    def test_an_explicit_public_schema_qualifies_them(self, run: Any, test_logger: Logger) -> None:
+        """The search path may name another schema; public is reached only by name."""
+        sql = run(test_logger, "public")
+        assert all(f"public.{FACTS}" in s or f"public.{FEEDBACK}" in s for s in sql)

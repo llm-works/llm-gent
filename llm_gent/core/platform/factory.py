@@ -33,7 +33,9 @@ class Factory:
     of building a router, and stays the caller's to close. The platform's
     SAIA factory is the one given through :meth:`with_saia_factory`; without
     one, the platform builds no SAIA and a step reading ``ctx.saia`` raises.
-    The platform's trait registry starts empty.
+    The platform's trait registry starts empty, or, with memory configured,
+    holding the shared :class:`MemoryTrait`, whose memory schema is prepared
+    here; agents and flow steps take views of it (``MemoryTrait.view``).
 
     Example:
         async with PlatformFactory(lg).from_config({}) as platform:

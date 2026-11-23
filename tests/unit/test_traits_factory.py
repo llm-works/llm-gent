@@ -137,6 +137,20 @@ class TestCreateMemory:
         assert trait.default_schema == "custom"
         assert memory.default_schema == "platform"
 
+    def test_agent_kelt_schema_without_a_name_means_public(self, router, memory):
+        factory = TraitFactory(MagicMock(), router, memory=memory)
+        agent = MagicMock(
+            config=DotDict({"kelt": {"schema": {"enforce": True}}}), identity=Identity("a")
+        )
+
+        assert factory._create_memory(agent).default_schema == "public"
+
+    def test_without_an_agent_kelt_schema_the_platform_schema_is_kept(self, router, memory):
+        factory = TraitFactory(MagicMock(), router, memory=memory)
+        agent = MagicMock(config=DotDict({"kelt": {"schema": {}}}), identity=Identity("a"))
+
+        assert factory._create_memory(agent).default_schema == "platform"
+
 
 class TestCreateTrainingTrait:
     """Tests for TraitFactory.create_training_trait()."""

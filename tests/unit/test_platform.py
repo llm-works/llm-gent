@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from appinfra import DotDict
 
 from llm_gent.core import Role
 from llm_gent.core.platform import Config, Factory, Platform
@@ -246,3 +247,15 @@ class TestTraits:
     def test_traits_are_the_registry_given(self):
         registry = TraitRegistry(LG)
         assert make_platform(LG, traits=registry).traits is registry
+
+    def test_memory_joins_a_copy_of_the_registry_given(self):
+        registry = TraitRegistry(LG)
+        with patch("llm_gent.core.traits.builtin.memory.KeltClient"):
+            memory = MemoryTrait(LG, DotDict({}), database=MagicMock(), chat_client=MagicMock())
+
+        first = make_platform(LG, traits=registry, memory=memory)
+        second = make_platform(LG, traits=registry, memory=memory)
+
+        assert not registry.has(MemoryTrait)
+        assert first.traits.require(MemoryTrait) is memory
+        assert second.traits.require(MemoryTrait) is memory

@@ -74,8 +74,8 @@ class BatchRatingService:
         self._max_chars = max_chars
 
     def _schema_prefix(self) -> str:
-        """Get schema prefix for table names."""
-        if self._schema and self._schema != "public":
+        """The schema prefix for table names when a schema is given (``public`` included)."""
+        if self._schema:
             return f"{validate_schema_name(self._schema)}."
         return ""
 
