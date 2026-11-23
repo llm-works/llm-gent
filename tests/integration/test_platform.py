@@ -5,7 +5,7 @@
 
 import pytest
 
-from llm_gent.core.platform import Config, Factory
+from llm_gent.core.platform import Factory, Platform
 from llm_gent.core.platform.config import packaged_llm_config
 from tests.helpers import make_test_logger
 
@@ -21,5 +21,5 @@ def test_packaged_config_has_a_default_backend():
 
 async def test_empty_config_builds_and_closes():
     async with Factory(make_test_logger()).from_config({}) as platform:
-        assert platform.config == Config()
+        assert isinstance(platform, Platform)
         assert platform.llm is not None

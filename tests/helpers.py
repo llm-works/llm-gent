@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 from appinfra.cas import FileStore, MemoryStore, Store
 from appinfra.log import Logger, quick_console_logger
 
-from llm_gent.core.env import Environment, SAIAFactory
-from llm_gent.core.platform import Config, Context
+from llm_gent.core.platform import Platform, SAIAFactory
+from llm_gent.core.platform.factory import _NoSAIAFactory
 from llm_gent.core.tools.factory import Factory as ToolFactory
 from llm_gent.core.traits import Registry as TraitRegistry
 from llm_gent.core.traits.factory import Factory as TraitFactory
@@ -32,19 +32,19 @@ def make_test_logger() -> Logger:
     return quick_console_logger("test", config={"level": "error"})
 
 
-# A flow does not carry what its runs may use or where they keep their histories; the
-# runner's environment and store do. Tests build flows in one place and run them in
-# another, so the test factory and flow below stamp the environment and store a test gives
+# A flow does not carry the platform its runs run on or where they keep their histories;
+# the runner's platform and store do. Tests build flows in one place and run them in
+# another, so the test factory and flow below stamp the platform and store a test gives
 # them on the flows they make, and run_flow starts the run with them. The library never
 # reads these attributes.
-_ENV = "_test_env"
+_PLATFORM = "_test_platform"
 _STORE = "_test_store"
 
 
 class TestFactory(Factory[Flow]):
     """:class:`Factory` that also takes ``saia_factory=`` / ``traits=`` / ``checkpoint_store=``.
 
-    The flows it creates carry an :class:`Environment` of the first two (one
+    The flows it creates carry a :class:`Platform` of the first two (one
     per factory, so its flows share their SAIAs) and the store, which
     :func:`run_flow` runs them with.
     """
@@ -61,22 +61,24 @@ class TestFactory(Factory[Flow]):
         **kwargs: Any,
     ) -> None:
         super().__init__(lg, **kwargs)
-        self._env = Environment(saia_factory, traits)
+        self._saia_factory = saia_factory
+        self._traits = traits
+        self._platform = make_platform(lg, saia_factory=saia_factory, traits=traits)
         self._store = checkpoint_store
 
     def create(self, name: str = "") -> Flow:
         flow = super().create(name)
-        setattr(flow, _ENV, self._env)
+        setattr(flow, _PLATFORM, self._platform)
         setattr(flow, _STORE, self._store)
         return flow
 
     def with_saia_factory(self, saia_factory: SAIAFactory) -> "TestFactory":
-        traits = self._env.traits
-        return self._replace(env=Environment(saia_factory, traits))  # type: ignore[return-value]
+        platform = make_platform(self._lg, saia_factory=saia_factory, traits=self._traits)
+        return self._replace(saia_factory=saia_factory, platform=platform)  # type: ignore[return-value]
 
     def with_traits(self, traits: TraitRegistry | None) -> "TestFactory":
-        saia_factory = self._env.saia_factory
-        return self._replace(env=Environment(saia_factory, traits))  # type: ignore[return-value]
+        platform = make_platform(self._lg, saia_factory=self._saia_factory, traits=traits)
+        return self._replace(traits=traits, platform=platform)  # type: ignore[return-value]
 
     def with_checkpoint_store(self, store: Store) -> "TestFactory":
         return self._replace(store=store)  # type: ignore[return-value]
@@ -98,14 +100,14 @@ class TestFlow(Flow):
         **kwargs: Any,
     ) -> None:
         super().__init__(lg, name, **kwargs)
-        setattr(self, _ENV, Environment(saia_factory, traits))
+        setattr(self, _PLATFORM, make_platform(lg, saia_factory=saia_factory, traits=traits))
         setattr(self, _STORE, checkpoint_store)
 
 
-def env_of(flow: Flow) -> Environment:
-    """The environment a test stamped on ``flow``; an empty one when none was."""
-    env: Environment | None = getattr(flow, _ENV, None)
-    return env if env is not None else Environment()
+def platform_of(flow: Flow) -> Platform:
+    """The platform a test stamped on ``flow``; a stub platform when none was."""
+    platform: Platform | None = getattr(flow, _PLATFORM, None)
+    return platform if platform is not None else make_platform(make_test_logger())
 
 
 def store_of(flow: Flow) -> Store | None:
@@ -117,20 +119,20 @@ def store_of(flow: Flow) -> Store | None:
 async def run_flow(
     flow: Flow,
     *args: Any,
-    env: Environment | None = None,
+    platform: Platform | None = None,
     store: Store | None = None,
     **kwargs: Any,
 ) -> Any:
     """Run ``flow`` once on a runner with the test logger and return its result.
 
-    The runner's environment and store are ``env`` / ``store``, else the
+    The runner's platform and store are ``platform`` / ``store``, else the
     ones a test factory or test flow stamped on ``flow``. A coroutine, so it
     fits wherever a test awaits a run, gathers runs or hands one to
     ``asyncio.run``; ``FlowRunner.start`` takes the other arguments.
     """
-    run_env = env if env is not None else env_of(flow)
+    run_platform = platform if platform is not None else platform_of(flow)
     runner_store = store if store is not None else store_of(flow)
-    runner = FlowRunner(make_test_logger(), env=run_env, store=runner_store)
+    runner = FlowRunner(make_test_logger(), platform=run_platform, store=runner_store)
     return await runner.start(flow, *args, **kwargs)
 
 
@@ -148,29 +150,30 @@ def make_platform(
     lg: Logger,
     *,
     router: Any = None,
+    saia_factory: SAIAFactory | None = None,
+    traits: TraitRegistry | None = None,
     llm_config: Mapping[str, Any] | None = None,
     memory_config: Mapping[str, Any] | None = None,
     memory: MemoryResources | None = None,
-) -> Context:
-    """A platform context on stub clients, built directly: no config file read, no client built.
+) -> Platform:
+    """A platform on stub clients, built directly: no config file read, no client built.
 
     ``router`` defaults to a ``MagicMock``; ``llm_config`` is the router config
-    the trait factory hands LLM traits.
+    the trait factory hands LLM traits. Without ``saia_factory`` the platform
+    builds no SAIA, as one from ``PlatformFactory`` without one; without
+    ``traits`` its registry is empty.
     """
     router = router if router is not None else MagicMock()
-    config = Config(
-        llm=dict(llm_config or {}), memory=dict(memory_config) if memory_config else None
-    )
     trait_factory = TraitFactory(
         lg, llm_config or {}, router, memory_config=memory_config, memory=memory
     )
-    return Context(
+    return Platform(
         lg,
-        config,
         llm=router,
-        memory=memory,
+        saia_factory=saia_factory if saia_factory is not None else _NoSAIAFactory(),
         trait_factory=trait_factory,
         tool_factory=ToolFactory(lg),
+        traits=traits if traits is not None else TraitRegistry(lg),
         owned=[],
     )
 

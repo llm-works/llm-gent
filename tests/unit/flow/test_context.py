@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import Context, Flow, Resume, State, verb
-from tests.helpers import TestFlow, env_of, memory_store, run_flow
+from tests.helpers import TestFlow, make_platform, memory_store, platform_of, run_flow
 
 from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
 
@@ -33,7 +33,7 @@ class TestCtxLg:
             return ctx.lg
 
         flow.register(read_lg)
-        assert (await flow.dispatch("read_lg")) is lg
+        assert (await flow.dispatch("read_lg", platform=platform_of(flow))) is lg
 
     @pytest.mark.asyncio
     async def test_ctx_lg_survives_dispatch(self) -> None:
@@ -47,8 +47,8 @@ class TestCtxLg:
             return ctx.lg
 
         flow.register(read_lg)
-        first = await flow.dispatch("read_lg")
-        second = await flow.dispatch("read_lg")
+        first = await flow.dispatch("read_lg", platform=platform_of(flow))
+        second = await flow.dispatch("read_lg", platform=platform_of(flow))
         assert first is second is lg
 
 
@@ -88,7 +88,7 @@ class TestContextGeneric:
             return ctx.state.data.turn
 
         flow.register(bump)
-        assert await flow.dispatch("bump", scope_state=payload) == 1
+        assert await flow.dispatch("bump", scope_state=payload, platform=platform_of(flow)) == 1
         assert payload.turn == 1
 
 
@@ -107,7 +107,9 @@ class TestCtxData:
             return ctx.state.data, ctx.data
 
         flow.register(probe)
-        via_state, via_alias = await flow.dispatch("probe", scope_state=payload)
+        via_state, via_alias = await flow.dispatch(
+            "probe", scope_state=payload, platform=platform_of(flow)
+        )
         assert via_state is via_alias is payload
 
     @pytest.mark.asyncio
@@ -123,7 +125,7 @@ class TestCtxData:
             return ctx.state.data.turn
 
         flow.register(bump)
-        assert await flow.dispatch("bump", scope_state=payload) == 1
+        assert await flow.dispatch("bump", scope_state=payload, platform=platform_of(flow)) == 1
         assert payload.turn == 1
 
     def test_ctx_data_reaches_scope_not_root(self) -> None:
@@ -138,7 +140,9 @@ class TestCtxData:
         child_payload = _Payload(turn=99)
         root_state: State[dict[str, bool]] = State(data=root_payload)
         child_state: State[_Payload] = State(data=child_payload, _parent=root_state)
-        ctx: Context[_Payload] = Context(role=None, state=child_state, flow=None)
+        ctx: Context[_Payload] = Context(
+            role=None, state=child_state, flow=None, platform=make_platform(make_test_logger())
+        )
         assert ctx.data is child_payload
         assert ctx.state.root().data is root_payload
 
@@ -365,7 +369,7 @@ class TestPureVerbCtx:
             return ctx.saia
 
         flow.register(tick)
-        assert (await flow.dispatch("tick")) is None
+        assert (await flow.dispatch("tick", platform=platform_of(flow))) is None
 
     @pytest.mark.asyncio
     async def test_pure_verb_in_chain(self) -> None:
@@ -395,7 +399,7 @@ class TestSaiaAs:
             return ctx.saia, ctx.saia_as(StubSAIA)
 
         flow.register(probe)
-        s, s_as = await flow.dispatch("probe", env=env_of(flow))
+        s, s_as = await flow.dispatch("probe", platform=platform_of(flow))
         assert s is s_as
         assert isinstance(s, StubSAIA)
 
@@ -410,4 +414,4 @@ class TestSaiaAs:
             return ctx.saia_as(StubSAIA)
 
         flow.register(probe)
-        assert (await flow.dispatch("probe")) is None
+        assert (await flow.dispatch("probe", platform=platform_of(flow))) is None

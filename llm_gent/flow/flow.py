@@ -56,7 +56,7 @@ from typing import Any, ParamSpec, Self, TypeVar
 
 from appinfra.log import Logger
 
-from ..core.env import Environment
+from ..core.platform import Platform
 from ..core.role import Role
 from ._node_id import iter_flows
 from ._shortcut import Shortcut, check_shortcut
@@ -280,7 +280,7 @@ class Flow:
         resources: Any = UNSET,
         scope_state: Any = UNSET,
         extra: Any = UNSET,
-        env: Environment | None = None,
+        platform: Platform,
         **kwargs: Any,
     ) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
@@ -309,10 +309,9 @@ class Flow:
         (or passing ``UNSET``) yields a fresh empty dict at the sibling —
         ``dispatch`` has no flow-level ``.with_extra()`` fallback.
 
-        Pass ``env=ctx.env`` from an in-flight verb so the
-        sibling's ``ctx.saia`` and ``ctx.traits`` are the run's. Omitted, the
-        sibling has an empty environment: no traits, and ``ctx.saia``
-        raises for a role-bound verb.
+        ``platform`` is the platform the sibling runs on: pass
+        ``platform=ctx.platform`` from an in-flight verb so its
+        ``ctx.saia`` and ``ctx.traits`` are the run's.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
@@ -331,7 +330,7 @@ class Flow:
             role=verb.role,
             state=wrapped_state,
             flow=self,
-            env=env if env is not None else Environment(),
+            platform=platform,
             halt=effective_halt,
             extra=effective_extra,
             resources=self._dispatch_resources(resources, cost),

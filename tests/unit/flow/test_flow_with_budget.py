@@ -12,7 +12,7 @@ import pytest
 from llm_gent.core.cost import FixedOp, PricingConfig
 from llm_gent.core.cost import Tracker as CostTracker
 from llm_gent.flow import Context, verb
-from tests.helpers import TestFlow, run_flow
+from tests.helpers import TestFlow, platform_of, run_flow
 
 from .conftest import ROLE_A, StubFactory, make_test_logger
 
@@ -70,7 +70,7 @@ class TestContextCost:
 
         flow = _flow()
         flow.register(peek)
-        await flow.dispatch("peek", cost=tracker)
+        await flow.dispatch("peek", cost=tracker, platform=platform_of(flow))
         assert captured["cost"] is tracker
 
 

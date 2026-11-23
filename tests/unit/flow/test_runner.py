@@ -24,6 +24,7 @@ from llm_gent.flow import (
     verb,
 )
 from llm_gent.flow._node_id import iter_flows
+from tests.helpers import make_platform
 
 from .conftest import make_ff, make_test_logger
 
@@ -31,6 +32,7 @@ from .conftest import make_ff, make_test_logger
 pytestmark = pytest.mark.unit
 
 LG = make_test_logger()
+PLATFORM = make_platform(LG)
 
 
 @verb
@@ -40,19 +42,19 @@ async def double(ctx: Context[Any], x: int) -> int:
 
 class TestStart:
     async def test_awaiting_the_run_gives_the_result(self) -> None:
-        run = FlowRunner(LG).start(make_ff().create("d").call(double), 21)
+        run = FlowRunner(LG, platform=PLATFORM).start(make_ff().create("d").call(double), 21)
         assert isinstance(run, FlowRun)
         assert await run == 42
         assert run.done
 
     async def test_runs_report_to_the_runner_logger(self) -> None:
-        run = FlowRunner(LG).start(make_ff().create("d").call(double), 1)
+        run = FlowRunner(LG, platform=PLATFORM).start(make_ff().create("d").call(double), 1)
         await run
         assert run.lg is LG
 
     async def test_one_flow_runs_many_times_at_once(self) -> None:
         flow = make_ff().create("d").call(double)
-        runner = FlowRunner(LG)
+        runner = FlowRunner(LG, platform=PLATFORM)
         runs = [runner.start(flow, i) for i in range(5)]
         assert await asyncio.gather(*runs) == [0, 2, 4, 6, 8]
 
@@ -62,11 +64,11 @@ class TestStart:
             return flow
 
         graph = make_ff().create("c").call(consume)
-        assert await FlowRunner(LG).start(graph, flow="input") == "input"
+        assert await FlowRunner(LG, platform=PLATFORM).start(graph, flow="input") == "input"
 
     def test_needs_a_running_event_loop(self) -> None:
         with pytest.raises(RuntimeError, match="no running event loop"):
-            FlowRunner(LG).start(make_ff().create("d").call(double), 1)
+            FlowRunner(LG, platform=PLATFORM).start(make_ff().create("d").call(double), 1)
 
 
 class TestChecksRaiseAtStart:
@@ -75,17 +77,17 @@ class TestChecksRaiseAtStart:
     async def test_start_must_be_a_start(self) -> None:
         flow = make_ff().create("d").call(double)
         with pytest.raises(TypeError, match=r"start= takes Fresh\(\), Resume\(at\)"):
-            FlowRunner(LG).start(flow, 1, start="latest")  # type: ignore[arg-type]
+            FlowRunner(LG, platform=PLATFORM).start(flow, 1, start="latest")  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("start", [Resume(), Restart("mid")])
     async def test_a_start_from_a_commit_needs_a_history(self, start: Any) -> None:
         flow = make_ff(checkpoint_store=MemoryStore(LG)).create("d").call(double)
         with pytest.raises(RuntimeError, match="but no history"):
-            FlowRunner(LG).start(flow, 1, start=start)
+            FlowRunner(LG, platform=PLATFORM).start(flow, 1, start=start)
 
     async def test_an_empty_flow_is_rejected(self) -> None:
         with pytest.raises(RuntimeError, match="no nodes to run"):
-            FlowRunner(LG).start(make_ff().create("empty"))
+            FlowRunner(LG, platform=PLATFORM).start(make_ff().create("empty"))
 
 
 class TestStartTypes:
@@ -124,7 +126,9 @@ class TestHalt:
         async def second(ctx: Context[Any]) -> None:
             ran.append("second")
 
-        run = FlowRunner(LG).start(make_ff().create("h").call(first).call(second))
+        run = FlowRunner(LG, platform=PLATFORM).start(
+            make_ff().create("h").call(first).call(second)
+        )
         await entered.wait()
         run.halt()
         gate.set()
@@ -133,7 +137,9 @@ class TestHalt:
 
     async def test_halt_sets_the_event_the_run_was_given(self) -> None:
         halt = asyncio.Event()
-        run = FlowRunner(LG).start(make_ff().create("d").call(double), 1, halt=halt)
+        run = FlowRunner(LG, platform=PLATFORM).start(
+            make_ff().create("d").call(double), 1, halt=halt
+        )
         run.halt()
         assert halt.is_set()
         await run
@@ -148,7 +154,7 @@ class TestCancel:
             started.set()
             await asyncio.Event().wait()
 
-        run = FlowRunner(LG).start(make_ff().create("c").call(forever))
+        run = FlowRunner(LG, platform=PLATFORM).start(make_ff().create("c").call(forever))
         waiter = asyncio.create_task(_await(run))
         await started.wait()
         waiter.cancel()
@@ -206,7 +212,7 @@ class TestFrozenOnceStarted:
         flow, flows = _tree()
         assert len(flows) == 5
         assert not any(f.frozen for f in flows)
-        await FlowRunner(LG).start(flow, 1)
+        await FlowRunner(LG, platform=PLATFORM).start(flow, 1)
         assert all(f.frozen for f in flows)
 
     @pytest.mark.parametrize("method", sorted(_CHANGES))
@@ -217,25 +223,25 @@ class TestFrozenOnceStarted:
             .call(double)
             .map(lambda b: b.call(double), items=lambda _r, _c: [1])
         )
-        await FlowRunner(LG).start(flow, 1)
+        await FlowRunner(LG, platform=PLATFORM).start(flow, 1)
         with pytest.raises(RuntimeError, match=rf"'started' has been started .*\.{method}\(\)"):
             _CHANGES[method](flow)
 
     async def test_a_started_flow_runs_again(self) -> None:
         flow = make_ff().create("d").call(double)
-        runner = FlowRunner(LG)
+        runner = FlowRunner(LG, platform=PLATFORM)
         assert await runner.start(flow, 1) == 2
         assert await runner.start(flow, 2) == 4
 
     async def test_a_run_rejected_at_start_leaves_the_flow_open(self) -> None:
         flow = make_ff().create("d").call(double)
         with pytest.raises(RuntimeError, match="but no history"):
-            FlowRunner(LG).start(flow, 1, start=Resume())
+            FlowRunner(LG, platform=PLATFORM).start(flow, 1, start=Resume())
         assert not flow.frozen
         flow.call(double)
 
     async def test_an_open_flow_can_call_a_started_one(self) -> None:
         started = make_ff().create("inner").call(double)
-        await FlowRunner(LG).start(started, 1)
+        await FlowRunner(LG, platform=PLATFORM).start(started, 1)
         outer = make_ff().create("outer").call(started).then(double)
-        assert await FlowRunner(LG).start(outer, 1) == 4
+        assert await FlowRunner(LG, platform=PLATFORM).start(outer, 1) == 4

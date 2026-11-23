@@ -901,7 +901,7 @@ class TestRuntimeErrors:
             return 0
 
         flow = Flow(make_test_logger(), "naked").call(reads_saia)
-        with pytest.raises(RuntimeError, match="SAIAFactory"):
+        with pytest.raises(RuntimeError, match="platform builds no SAIA"):
             await run_flow(flow)
 
     @pytest.mark.asyncio

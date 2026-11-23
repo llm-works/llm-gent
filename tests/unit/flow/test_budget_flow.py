@@ -41,7 +41,7 @@ from llm_gent.flow import (
     verb,
 )
 from llm_gent.flow.state.snapshot import RESOURCES
-from tests.helpers import TestFactory, memory_store, run_flow
+from tests.helpers import TestFactory, make_platform, memory_store, run_flow
 
 from .conftest import make_test_logger
 
@@ -76,7 +76,9 @@ class TestRunTracker:
             _spend(ctx, 0.5)
             return x
 
-        run = FlowRunner(make_test_logger()).start(_ff().create().call(step), 1, cost=caller)
+        run = FlowRunner(make_test_logger(), platform=make_platform(make_test_logger())).start(
+            _ff().create().call(step), 1, cost=caller
+        )
         assert await run == 1
         assert seen == [run.cost]
         assert run.cost is not None and run.cost.parent is caller
@@ -105,7 +107,9 @@ class TestRunTracker:
             seen.append(ctx.cost)
             return x
 
-        run = FlowRunner(make_test_logger()).start(_ff().create().call(step), 1)
+        run = FlowRunner(make_test_logger(), platform=make_platform(make_test_logger())).start(
+            _ff().create().call(step), 1
+        )
         assert await run == 1
         assert seen == [None] and run.cost is None
 
@@ -820,7 +824,9 @@ class TestValidation:
     async def test_a_flow_key_named_like_the_run_s_tracker_raises_at_start(self) -> None:
         """Both would be saved under one name in a checkpoint."""
         with pytest.raises(ValueError, match="two resource keys are named 'cost'"):
-            FlowRunner(make_test_logger()).start(self._flow_with_own_cost_key(), 1, cost=_tracker())
+            FlowRunner(make_test_logger(), platform=make_platform(make_test_logger())).start(
+                self._flow_with_own_cost_key(), 1, cost=_tracker()
+            )
 
     async def test_the_name_is_free_in_a_run_without_cost(self) -> None:
         assert await run_flow(self._flow_with_own_cost_key(), 1) == 1

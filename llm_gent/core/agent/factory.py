@@ -20,7 +20,7 @@ or the factory-class ``required_traits`` class variable. Each builtin trait
 reads its own top-level key from ``agent.config``; nesting under
 ``traits.<name>`` is NOT recognized.
 
-The factory builds agents on a platform :class:`~llm_gent.core.platform.Context`:
+The factory builds agents on a :class:`~llm_gent.core.Platform`:
 traits use the platform's shared clients, and agent-config keys override the
 platform's defaults (an ``llm`` override gives the agent a router of its own).
 """
@@ -32,7 +32,7 @@ from typing import Any, ClassVar
 from appinfra import DotDict
 
 from ..errors import ConfigError, TraitNotFoundError
-from ..platform import Context
+from ..platform import Platform
 from ..traits import TraitName
 from .agent import Agent
 from .helpers import _substitute_in_dict
@@ -93,7 +93,7 @@ class Factory:
     # When set, enables: ./llm-gent.py agent <agent-name> <command>
     cli_tool: ClassVar[type | None] = None
 
-    def __init__(self, platform: Context) -> None:
+    def __init__(self, platform: Platform) -> None:
         """Initialize the factory on a platform.
 
         Args:

@@ -8,7 +8,7 @@ structure (the logger, the state factory, the flow class, declared
 resources), so construction sites read as ``f.create("grade").call(...)``.
 What a run may use (SAIA factory, traits) and where it keeps its history
 are not structure: they are the runner's (its
-:class:`~llm_gent.core.env.Environment` and its store).
+:class:`~llm_gent.core.Platform` and its store).
 """
 
 from __future__ import annotations
@@ -96,8 +96,8 @@ class Factory(Generic[F]):
         """Return a :class:`Flow` (``flow_class``) built with this factory's settings.
 
         The flow is structure: it can run many times, at once too. What
-        belongs to one run — its state, halt, signals, history and
-        environment — goes to the runner that starts it.
+        belongs to one run — its state, halt, signals and history — goes
+        to the runner that starts it, which also holds the platform.
 
         Args:
             name: Optional identifier — used in error messages and traces.

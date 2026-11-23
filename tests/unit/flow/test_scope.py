@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-from llm_gent.core import Environment
 from llm_gent.flow import State
 from llm_gent.flow._node_id import _descend_context
 from llm_gent.flow._shortcut import Shortcut
@@ -29,6 +28,7 @@ from llm_gent.flow.run import Position, Scope
 from llm_gent.flow.run._run import Run
 from llm_gent.flow.run._shortcut import ShortcutRun
 from llm_gent.flow.run.scope import _Frame
+from tests.helpers import make_platform
 
 from .conftest import make_ff, make_test_logger
 
@@ -166,7 +166,7 @@ class TestPosition:
 
 def _frame() -> _Frame:
     flow = make_ff().create("top")
-    run = Run(lg=LG, env=Environment(), flow=flow, signals={}, checkpoint_ctx=None)
+    run = Run(lg=LG, platform=make_platform(LG), flow=flow, signals={}, checkpoint_ctx=None)
     return _Frame(run=run, lg=LG, scope=Scope(state=State(data={"root": True})))
 
 

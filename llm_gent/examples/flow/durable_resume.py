@@ -109,7 +109,7 @@ from llm_saia import SAIA, ToolDef
 from llm_saia.core.backend import Backend
 
 from llm_gent.examples._clients import ANTHROPIC_MODEL, real_client
-from llm_gent.core import Environment, Role
+from llm_gent.core import PlatformFactory, Role
 from llm_gent.flow import (
     HALTED,
     Context,
@@ -398,17 +398,17 @@ async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> t
     halt = asyncio.Event()
     ff = Factory(lg, state_factory=TypeStateFactory(Digest))
     saia_factory = _SAIAFactory(lg, backend, halt, arm_halt=not resuming)
-    runner = FlowRunner(lg, env=Environment(saia_factory=saia_factory), store=store)
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
     # A resumed run's state comes from the checkpoint; the given one starts a fresh run.
-    result = await runner.start(
-        _build_flow(lg, ff),
-        state=Digest(pending=list(TOPICS)),
-        halt=halt,
-        history=CLIENT_FLOW_ID,
-        start=Resume("latest") if resuming else Fresh(),
-    )
+    async with PlatformFactory(lg).with_saia_factory(saia_factory).from_config({}) as platform:
+        result = await FlowRunner(lg, platform=platform, store=store).start(
+            _build_flow(lg, ff),
+            state=Digest(pending=list(TOPICS)),
+            halt=halt,
+            history=CLIENT_FLOW_ID,
+            start=Resume("latest") if resuming else Fresh(),
+        )
     # A halted run returns HALTED; its state is in the halt checkpoint.
     halted = result is HALTED
     final = await _halted_state(history) if halted else result

@@ -24,6 +24,7 @@ from typing import Any
 
 from appinfra.log import quick_console_logger
 
+from ...core.platform import Factory as PlatformFactory
 from ..run.runner import Runner as FlowRunner
 from ..run.start import Resume
 
@@ -41,8 +42,9 @@ async def _run(payload: dict[str, Any]) -> Any:
     flow_builder = _resolve(payload["flow_module"], payload["flow_builder"])
     flow = flow_builder(lg, **payload["flow_builder_kwargs"])
     start = Resume(payload["resume"])
-    runner = FlowRunner(lg, store=store)
-    return await runner.start(flow, history=payload["history"], start=start)
+    async with PlatformFactory(lg).from_config({}) as platform:
+        runner = FlowRunner(lg, platform=platform, store=store)
+        return await runner.start(flow, history=payload["history"], start=start)
 
 
 def main() -> None:

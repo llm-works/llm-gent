@@ -34,7 +34,7 @@ from llm_gent.flow import (
     verb,
 )
 from llm_gent.flow.state.snapshot import RESOURCES, RUN_RESOURCES
-from tests.helpers import TestFactory, memory_store, run_flow
+from tests.helpers import TestFactory, memory_store, platform_of, run_flow
 
 from .conftest import make_test_logger
 
@@ -164,7 +164,7 @@ class TestDeclared:
         counter = Counter()
         flow = _ff().create().with_resource(COUNTER, counter)
         flow.register(tick)
-        await flow.dispatch("tick", 0)
+        await flow.dispatch("tick", 0, platform=platform_of(flow))
         assert counter.count == 1
 
 
@@ -548,9 +548,10 @@ class TestCostIsAResource:
 
         flow = _ff().create()
         flow.register(step)
-        await flow.dispatch("step")
-        await flow.dispatch("step", cost=tracker)
-        await flow.dispatch("step", cost=None)
+        platform = platform_of(flow)
+        await flow.dispatch("step", platform=platform)
+        await flow.dispatch("step", cost=tracker, platform=platform)
+        await flow.dispatch("step", cost=None, platform=platform)
         assert seen == [None, tracker, None]
 
 

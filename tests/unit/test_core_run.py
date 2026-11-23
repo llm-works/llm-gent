@@ -9,17 +9,18 @@ import asyncio
 
 import pytest
 
-from llm_gent.core import Environment, Run
-from tests.helpers import make_test_logger
+from llm_gent.core import Run
+from tests.helpers import make_platform, make_test_logger
 
 
 pytestmark = pytest.mark.unit
 
 LG = make_test_logger()
+PLATFORM = make_platform(LG)
 
 
 def _run() -> Run:
-    return Run(lg=LG, env=Environment())
+    return Run(lg=LG, platform=PLATFORM)
 
 
 class TestAwait:
@@ -81,7 +82,7 @@ class TestHalt:
 
     def test_halt_sets_the_event_it_was_given(self) -> None:
         event = asyncio.Event()
-        run = Run(lg=LG, env=Environment(), halt_event=event)
+        run = Run(lg=LG, platform=PLATFORM, halt_event=event)
         run.halt()
         assert run.halt_event is event and event.is_set()
 

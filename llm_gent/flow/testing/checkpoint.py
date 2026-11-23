@@ -35,6 +35,7 @@ from typing import Any
 from appinfra.cas import Store
 from appinfra.log import Logger
 
+from ...core.platform import Platform
 from ..context import Context
 from ..flow import Flow
 from ..history import History
@@ -193,6 +194,7 @@ def build_canonical_flow(
 
 async def assert_resume_determinism(
     lg: Logger,
+    platform: Platform,
     store: Store,
     *,
     halt_after_iteration: int = 2,
@@ -211,6 +213,7 @@ async def assert_resume_determinism(
 
     Args:
         lg: Logger.
+        platform: The platform the three runs run on.
         store: Checkpoint store for the interrupt and resume runs.
         halt_after_iteration: Iteration at which to fire halt (default 2).
         max_iters: Total iterations for the flow (default 5).
@@ -231,9 +234,8 @@ async def assert_resume_determinism(
             f"halt_after_iteration must be in [1, {max_iters}]; got {halt_after_iteration}"
         )
 
-    baseline = await FlowRunner(lg).start(build_canonical_flow(lg, max_iters=max_iters))
-
-    runner = FlowRunner(lg, store=store)
+    runner = FlowRunner(lg, platform=platform, store=store)
+    baseline = await runner.start(build_canonical_flow(lg, max_iters=max_iters))
     interrupted = build_canonical_flow(
         lg, max_iters=max_iters, halt_after_iteration=halt_after_iteration, checkpointed=True
     )

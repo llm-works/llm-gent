@@ -16,8 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `llm_call`) without Flow.
 - `llm_gent.core.llm.testing.DelayedScriptedBackend`: llm-infer's scripted backend with an awaited
   per-call delay and optional request recording, so concurrent runs overlap in experiments.
-- `llm_gent.core.Run`, a handle on one execution (await it, `halt()` it, check `done`), and
-  `llm_gent.core.Environment`, the `SAIAFactory` and traits a run uses with one SAIA per role.
+- `llm_gent.core.Run`, a handle on one execution (await it, `halt()` it, check `done`).
 
 ### Changed
 
@@ -31,29 +30,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository holds other refs, such as version-control records; otherwise the whole repository.
 - Breaking: `core.cost.CostTracker` is `core.cost.Tracker` and `core.llm.LLMCaller` is
   `core.llm.Caller`; the `llm_gent` package exports them as `CostTracker` and `LLMCaller`.
-- Breaking: a platform built once (`PlatformFactory(lg).from_config(...)`) holds the model router
-  and memory clients every agent's traits share; `AgentFactory` takes it. Removed:
-  `AgentFactory(lg)` and `PlatformContext.from_config(...)`. Agent, trait and tool factories are
-  `Factory` in their subpackages; `llm_gent` exports them with the prefix.
+- Breaking: a `Platform` built once per process (`PlatformFactory(lg).from_config(...)`) holds the
+  model router, the trait and tool factories, the trait registry and one SAIA per role; agents
+  (`AgentFactory(platform)`) and runs (`FlowRunner(lg, platform=)`) share it. Removed:
+  `AgentFactory(lg)` and `PlatformContext`. Agent, trait and tool factories are `Factory` in
+  their subpackages; `llm_gent` exports them with the prefix.
 - Breaking: a Flow is a structure that runs many times at once. State, halt, signals, history and
   retention are `FlowRunner.start()` arguments, and a run given no state gets a fresh one
   (`StateFactory.new()`, else `{}`). Removed: `Flow(state=)` / `Flow.state` / `with_halt` /
   `with_signal` / `with_checkpoint_store`, `Factory(state=, halt=)`, `Factory.with_halt`, and
   `Factory.create()`'s `state=`, `halt=`, `checkpointer=` and `client_flow_id=`.
-- Breaking: a flow never runs itself. `FlowRunner(lg).start(flow, ...)` starts a run and returns
+- Breaking: a flow never runs itself. `FlowRunner.start(flow, ...)` starts a run and returns
   it to await or `halt()`; `start=Fresh() | Resume(at) | Restart(at)` replaces `resume=` /
   `restart=`. A started flow and the flows under it refuse further changes. Removed: `Flow.run()`
   and `ResumeMode`.
-- Breaking: what a run may use is the runner's environment, `FlowRunner(lg, env=Environment(...))`,
-  shared by every run it starts and read as `ctx.env`. Removed: `saia_factory=` / `traits=` on
-  `Flow` and `Factory`, `Factory.with_saia_factory` / `with_traits` and `Flow.traits`;
-  `Flow.dispatch` takes `env=`.
+- Breaking: a run runs on its runner's platform, `FlowRunner(lg, platform=...)`, read as
+  `ctx.platform`; `PlatformFactory.with_saia_factory()` sets how roles become SAIAs. Removed:
+  `saia_factory=` / `traits=` on `Flow` and `Factory`, `Factory.with_saia_factory` /
+  `with_traits` and `Flow.traits`; `Flow.dispatch` requires `platform=`.
 - Breaking: `Role` and `SAIAFactory` move to `llm_gent.core`; `llm_gent.flow` no longer exports
   them.
-- Breaking: runs keep their histories in the runner's store, `FlowRunner(lg, store=)`. Removed:
-  `checkpoint_store=` on `Flow` and `Factory`, `Factory.with_checkpoint_store`.
+- Breaking: runs keep their histories in the runner's store, `FlowRunner(lg, platform=, store=)`.
+  Removed: `checkpoint_store=` on `Flow` and `Factory`, `Factory.with_checkpoint_store`.
   `build_canonical_flow` takes `checkpointed=` for `store=`; `resume_in_subprocess` flow builders
-  take `(lg, **kwargs)`.
+  take `(lg, **kwargs)`; `assert_resume_determinism` takes a platform.
 - Breaking: a run's cost tracker is the run's: `FlowRunner.start(flow, cost=tracker)` runs it on
   a child of `tracker`, and a resumed run restores its spend into its own child, never into
   `tracker`. `CostTracker.exceeded`, `urgent_wrapup` and `remaining` count ancestors' caps.

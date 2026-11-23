@@ -33,7 +33,7 @@ from llm_gent.flow import (
     verb,
 )
 from llm_gent.flow.state.snapshot import TURN
-from tests.helpers import env_of, run_flow
+from tests.helpers import platform_of, run_flow
 
 from .conftest import ROLE_A, make_ff, make_test_logger
 
@@ -177,7 +177,7 @@ class TestFlowBodyIntegration:
         """No SAIAFactory → ``ctx.saia`` accessor raises before Loop touches it."""
         # Loop needs ctx.saia; a factoryless Flow raises at the accessor.
         flow = Flow(make_test_logger()).call(Loop(ROLE_A))
-        with pytest.raises(RuntimeError, match="SAIAFactory"):
+        with pytest.raises(RuntimeError, match="platform builds no SAIA"):
             await run_flow(flow, "x")
 
     def test_require_saia_raises_when_saia_is_none(self) -> None:
@@ -394,7 +394,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", conversation=conv, env=env_of(flow))
+        await flow.dispatch("loop", "t", conversation=conv, platform=platform_of(flow))
         assert loop._paused_bytes is not None
         assert loop._paused_bytes == canonical_json(
             {"task": "t", "conversation": {"messages": ["hi", "there"], "n": 2}}
@@ -408,7 +408,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A)
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", conversation=conv, env=env_of(flow))
+        await flow.dispatch("loop", "t", conversation=conv, platform=platform_of(flow))
         assert loop._paused_bytes is None
 
     @pytest.mark.asyncio
@@ -420,7 +420,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", env=env_of(flow))
+        await flow.dispatch("loop", "t", platform=platform_of(flow))
         assert loop._paused_bytes == canonical_json(
             {"task": "t", "conversation": {"messages": [], "n": 0}}
         )
@@ -432,7 +432,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", env=env_of(flow))
+        await flow.dispatch("loop", "t", platform=platform_of(flow))
         assert isinstance(factory.built[-1].calls[0]["conversation"], _StubConversation)
 
     @pytest.mark.asyncio
@@ -443,7 +443,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", conversation=conv, env=env_of(flow))
+        await flow.dispatch("loop", "t", conversation=conv, platform=platform_of(flow))
         assert factory.built[-1].calls[0]["conversation"] is conv
 
     @pytest.mark.asyncio
@@ -453,7 +453,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A)
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", env=env_of(flow))
+        await flow.dispatch("loop", "t", platform=platform_of(flow))
         assert factory.built[-1].calls[0]["conversation"] is None
 
     @pytest.mark.asyncio
@@ -464,7 +464,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", conversation=conv, env=env_of(flow))
+        await flow.dispatch("loop", "t", conversation=conv, platform=platform_of(flow))
         assert loop._paused_bytes is None
 
     @pytest.mark.asyncio
@@ -508,7 +508,7 @@ class TestPausedCapture:
             "loop",
             "t",
             conversation=_StubConversation(messages=["a"]),
-            env=env_of(flow1),
+            platform=platform_of(flow1),
         )
         assert loop._paused_bytes is not None
         # Second dispatch: not paused → cleared.
@@ -519,7 +519,7 @@ class TestPausedCapture:
             "loop",
             "t",
             conversation=_StubConversation(messages=["b"]),
-            env=env_of(flow2),
+            platform=platform_of(flow2),
         )
         assert loop._paused_bytes is None
 

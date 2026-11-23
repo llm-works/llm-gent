@@ -12,7 +12,7 @@ import pytest
 from appinfra.testing import FakeClock
 
 from llm_gent.flow import HALTED, Context, Failure, Flow, Skipped, verb
-from tests.helpers import run_flow
+from tests.helpers import platform_of, run_flow
 
 from .conftest import ROLE_A, StubFactory, make_ff
 
@@ -1380,17 +1380,17 @@ class TestRunHalt:
         flow.register(sibling)
 
         # Dispatch without halt=: no halt
-        await flow.dispatch("sibling", 1)
+        await flow.dispatch("sibling", 1, platform=platform_of(flow))
         assert observed == [None]
 
         # Dispatch with halt= uses the passed halt
         observed.clear()
-        await flow.dispatch("sibling", 2, halt=caller_halt)
+        await flow.dispatch("sibling", 2, halt=caller_halt, platform=platform_of(flow))
         assert observed == [caller_halt]
 
         # Dispatch with halt=None explicitly passes None
         observed.clear()
-        await flow.dispatch("sibling", 3, halt=None)
+        await flow.dispatch("sibling", 3, halt=None, platform=platform_of(flow))
         assert observed == [None]
 
 

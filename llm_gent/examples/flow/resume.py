@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from appinfra.cas import FileStore
 from appinfra.log import quick_console_logger
 
+from llm_gent.core import PlatformFactory
 from llm_gent.flow import (
     HALTED,
     Context,
@@ -144,6 +145,7 @@ async def main() -> int:
     """Run the demo end-to-end, printing state progression."""
     lg = quick_console_logger("resume-example", config={"level": "warning"})
     tmp_root = Path(tempfile.mkdtemp(prefix="gent-example-resume-"))
+    platform = PlatformFactory(lg).from_config({})
     try:
         store = FileStore(lg, tmp_root)
         name = "resume-demo"
@@ -152,7 +154,7 @@ async def main() -> int:
 
         # Only run 1 gets a halt: run 2 resumes at the step that halted,
         # and without a halt that step passes through.
-        runner = FlowRunner(lg, store=store)
+        runner = FlowRunner(lg, platform=platform, store=store)
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
         result1 = await runner.start(flow, halt=asyncio.Event(), history=name)
         history = History(store, name)
@@ -167,6 +169,7 @@ async def main() -> int:
 
         return 0
     finally:
+        await platform.aclose()
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 

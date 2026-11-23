@@ -265,7 +265,7 @@ async def review(ctx, draft):
     ...
 
 
-runner = FlowRunner(lg, store=store)
+runner = FlowRunner(lg, platform=platform, store=store)
 await runner.start(flow, history="history-42", start=Resume("before-review"))
 ```
 

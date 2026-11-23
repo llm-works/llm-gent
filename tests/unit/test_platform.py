@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Tests for the platform config and factory."""
+"""The platform: its config, its factory, one SAIA per role and its traits."""
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from llm_gent.core.platform import Config, Context, Factory
+from llm_gent.core import Role
+from llm_gent.core.platform import Config, Factory, Platform
+from llm_gent.core.traits import Registry as TraitRegistry
+from tests.helpers import make_platform, make_test_logger
 
 
 pytestmark = pytest.mark.unit
+
+LG = make_test_logger()
 
 
 PACKAGED = {
@@ -63,9 +69,9 @@ class TestFactory:
 
         platform = Factory(lg).from_config({"llm": {"default": "anthropic"}})
 
-        assert isinstance(platform, Context)
+        assert isinstance(platform, Platform)
         assert platform.llm is router
-        assert platform.memory is None
+        assert platform.trait_factory._memory is None
         built_from = clients.return_value.from_config.call_args[0][0]
         assert built_from["default"] == "anthropic"
         assert "local" in built_from["backends"]
@@ -75,9 +81,9 @@ class TestFactory:
     def test_accepts_a_config_instance(self, packaged, clients):
         config = Config(llm={"default": "local"})
 
-        platform = Factory(MagicMock()).from_config(config)
+        Factory(MagicMock()).from_config(config)
 
-        assert platform.config is config
+        assert clients.return_value.from_config.call_args[0][0]["default"] == "local"
 
     def test_traits_get_the_shared_router(self, packaged, clients):
         platform = Factory(MagicMock()).from_config({})
@@ -96,6 +102,29 @@ class TestFactory:
         client.close.assert_not_called()
         assert base._llm is None
 
+    def test_the_registry_starts_empty(self, packaged, clients):
+        platform = Factory(MagicMock()).from_config({})
+
+        assert platform.traits.count() == 0
+
+    def test_without_a_saia_factory_the_platform_builds_no_saia(self, packaged, clients):
+        platform = Factory(MagicMock()).from_config({})
+
+        with pytest.raises(RuntimeError, match=r"builds no SAIA \(role 'planner'\)"):
+            platform.saia(Role(name="planner"))
+
+    def test_with_saia_factory_gives_its_platforms_the_factory(self, packaged, clients):
+        factory = _CountingFactory()
+        base = Factory(MagicMock())
+
+        platform = base.with_saia_factory(factory).from_config({})
+        platform.saia(Role(name="planner"))
+
+        assert platform.saia_factory is factory
+        assert factory.built == [Role(name="planner")]
+        with pytest.raises(RuntimeError, match="builds no SAIA"):
+            base.from_config({}).saia(Role(name="planner"))
+
 
 @pytest.fixture
 def database():
@@ -113,7 +142,7 @@ class TestFactoryMemory:
             {"memory": {"adapters": {"lora": {"base_path": "/a"}}}}
         )
 
-        assert platform.memory is None
+        assert platform.trait_factory._memory is None
         database["database"].assert_not_called()
 
     def test_builds_shared_memory_clients(self, packaged, clients, database):
@@ -126,14 +155,13 @@ class TestFactoryMemory:
 
         platform = Factory(lg).from_config({"memory": memory_config})
 
-        memory = platform.memory
+        memory = platform.trait_factory._memory
         assert memory.database is database["database"].return_value
         database["pg"].assert_called_once_with(lg, memory_config["db"])
         clients.return_value.embeddings.assert_called_once_with(
             base_url="http://localhost:9000", model="default", timeout=30.0
         )
         assert memory.embedder is clients.return_value.embeddings.return_value
-        assert platform.trait_factory._memory is memory
 
     def test_close_disposes_database_and_closes_clients(self, packaged, clients, database):
         router, chat_client = MagicMock(), MagicMock()
@@ -141,7 +169,7 @@ class TestFactoryMemory:
         platform = Factory(MagicMock()).from_config(
             {"memory": {"db": {"url": "x"}, "embedder_url": "http://localhost:9000"}}
         )
-        memory = platform.memory
+        memory = platform.trait_factory._memory
 
         platform.close()
 
@@ -162,3 +190,49 @@ class TestFactoryMemory:
 
         router.close.assert_called()
         database["database"].return_value.dispose.assert_called_once()
+
+
+class _CountingFactory:
+    """Builds a fresh object per call and records the roles it was asked for."""
+
+    def __init__(self) -> None:
+        self.built: list[Role] = []
+
+    def build(self, role: Role) -> Any:
+        self.built.append(role)
+        return object()
+
+
+class TestSaia:
+    def test_a_role_is_built_once_and_kept(self):
+        factory = _CountingFactory()
+        platform = make_platform(LG, saia_factory=factory)
+        role = Role(name="planner")
+        first = platform.saia(role)
+        assert platform.saia(role) is first
+        assert platform.saia(Role(name="planner")) is first
+        assert factory.built == [role]
+
+    def test_each_role_gets_its_own_saia(self):
+        platform = make_platform(LG, saia_factory=_CountingFactory())
+        assert platform.saia(Role(name="planner")) is not platform.saia(Role(name="worker"))
+
+    def test_roles_differing_only_in_params_build_apart(self):
+        factory = _CountingFactory()
+        platform = make_platform(LG, saia_factory=factory)
+        role = Role(name="planner")
+        varied = role.with_params(max_iterations=3)
+        assert platform.saia(role) is not platform.saia(varied)
+        assert factory.built == [role, varied]
+
+    def test_platforms_do_not_share_saias(self):
+        factory = _CountingFactory()
+        role = Role(name="planner")
+        first = make_platform(LG, saia_factory=factory).saia(role)
+        assert make_platform(LG, saia_factory=factory).saia(role) is not first
+
+
+class TestTraits:
+    def test_traits_are_the_registry_given(self):
+        registry = TraitRegistry(LG)
+        assert make_platform(LG, traits=registry).traits is registry

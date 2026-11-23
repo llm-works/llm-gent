@@ -3,8 +3,8 @@
 
 """Agent flow framework — role-based verb dispatch on top of saia.
 
-Public surface (what a run may use and how roles become SAIA instances,
-:class:`~llm_gent.core.Environment`, :class:`~llm_gent.core.Role` and
+Public surface (the platform a run runs on and how roles become SAIA
+instances, :class:`~llm_gent.core.Platform`, :class:`~llm_gent.core.Role` and
 :class:`~llm_gent.core.SAIAFactory`, are :mod:`llm_gent.core`'s):
 
 - :func:`verb` — decorator marking an async function as a role-bound verb
@@ -29,8 +29,8 @@ Public surface (what a run may use and how roles become SAIA instances,
 - :class:`FlowRunner` — executes flows: ``start(flow, ...)`` returns a
   :class:`FlowRun` to await, hold or halt; :class:`Fresh`, :class:`Resume`
   and :class:`Restart` (a :data:`Start`) say whether a run starts from its
-  state or from a commit of its history; its ``env=``
-  (:class:`~llm_gent.core.Environment`) is what the runs may use
+  state or from a commit of its history; its ``platform=``
+  (:class:`~llm_gent.core.Platform`) is what the runs run on
 - :class:`Factory` — app-scoped :class:`Flow` builder (captures ``lg``
   and the shared declarations); preferred entry point at the application
   boundary

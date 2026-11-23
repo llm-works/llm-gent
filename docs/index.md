@@ -109,7 +109,7 @@ async def execute(ctx: Context, _prev: Any) -> int:
 
 ff = Factory(lg)  # lg: Logger — elided for brevity
 flow = ff.create("run").call(plan).call(execute)
-runner = FlowRunner(lg)
+runner = FlowRunner(lg, platform=platform)  # platform: see below
 assert await runner.start(flow, "ship it") == 3  # the run gets a fresh {} as its state
 ```
 
@@ -123,15 +123,15 @@ raises.
 `ctx.state.data`. Adding a third downstream verb that also needs `target` is
 free — the state is already there.
 
-What a run may use is the runner's, not the flow's:
-`FlowRunner(lg, env=Environment(saia_factory=..., traits=...))`, with
-`Environment` from `llm_gent.core`; steps read it as `ctx.env`. A
-verb's `ctx.saia` is the SAIA its role's `SAIAFactory.build(role)` returned,
-built once per role and shared by every run that shares the environment; a
-SAIA holds configuration only, so runs share it safely. `ctx.traits` is the
-environment's trait registry. Every flow of a run, nested ones included, sees
-the same environment. A run without one may still run verbs that never read
-`ctx.saia`.
+A run runs on its runner's platform, not on anything of the flow's:
+`FlowRunner(lg, platform=platform)`, with `platform` built once per process by
+`PlatformFactory(lg).with_saia_factory(saia_factory).from_config({})` (both from
+`llm_gent.core`); steps read it as `ctx.platform`. A verb's `ctx.saia` is the SAIA
+its role's `SAIAFactory.build(role)` returned, built once per role and shared by
+every run on the platform; a SAIA holds configuration only, so runs share it
+safely. `ctx.traits` is the platform's trait registry. Every flow of a run,
+nested ones included, sees the same platform. On a platform built without a
+SAIA factory, a verb that reads `ctx.saia` raises; the others run.
 
 A `Role` can also be just a name, `Role(name="planner")`, when the app's
 `SAIAFactory` resolves the backend, model, temperature and max tokens itself
@@ -612,7 +612,7 @@ with keys of its own in the snapshot to decide on in `restore()`.
 
 ### One history per run
 
-The checkpoint store is the runner's: `FlowRunner(lg, store=store)`. The
+The checkpoint store is the runner's: `FlowRunner(lg, platform=platform, store=store)`. The
 history is the run's: `start(flow, history="session-42")` names it, so one flow
 runs many histories, one per run, at once. Every commit the run writes
 holds the whole run and goes to that history, wherever in the flow tree
@@ -642,7 +642,7 @@ raises on a checkpointer in a run without `history=`, on `history=`
 without a store, and on a `Resume` / `Restart` without `history=`.
 
 ```python
-runner = FlowRunner(lg, store=store)
+runner = FlowRunner(lg, platform=platform, store=store)
 flow = (
     Factory(lg)
     .create()

@@ -35,7 +35,7 @@ from llm_gent.flow.testing.checkpoint import (
     assert_resume_determinism,
     build_canonical_flow,
 )
-from tests.helpers import TestFactory, memory_store, run_flow
+from tests.helpers import TestFactory, make_platform, memory_store, run_flow
 
 from .conftest import commit_ids, head_commit, make_test_logger, read_commit
 
@@ -1591,6 +1591,7 @@ class TestResumeDeterminism:
         """The load-bearing invariant: resume state == uninterrupted state."""
         final = await assert_resume_determinism(
             make_test_logger(),
+            make_platform(make_test_logger()),
             store,
             halt_after_iteration=2,
             max_iters=5,
@@ -1651,6 +1652,7 @@ class TestResumeDeterminism:
         for cut_at in (1, 2, 3, 4):
             final = await assert_resume_determinism(
                 make_test_logger(),
+                make_platform(make_test_logger()),
                 store,
                 halt_after_iteration=cut_at,
                 max_iters=5,

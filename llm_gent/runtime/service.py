@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Any
 from appinfra import DotDict
 from appinfra.service import Service
 
-from ..core.platform import Context
 from ..core.platform import Factory as PlatformFactory
+from ..core.platform import Platform
 from .runner import ManagedAgentRunner
 
 
@@ -65,7 +65,7 @@ class AgentService(Service):
         self._variables = variables or {}
         self._factory_module = factory_module
         self._runner: ManagedAgentRunner | None = None
-        self._platform: Context | None = None
+        self._platform: Platform | None = None
         self._healthy = False
         # Injected by ProcessRunner before run()
         self._shutdown_event: MPEvent | None = None
