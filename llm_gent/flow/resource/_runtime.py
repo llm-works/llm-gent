@@ -189,8 +189,11 @@ class _ResourcesCursor:
         return {self.entry: {key.name: r.snapshot() for key, r in self.resources.items()}}
 
 
-def check_resources(root: Flow) -> None:
+def check_resources(root: Flow, provided: frozenset[ResourceKey[Any]] = frozenset()) -> None:
     """Raise when ``root``'s composition tree uses resources it cannot run with.
+
+    ``provided``: the resources the run itself brings to the root (its
+    cost tracker), in scope for every flow of the tree.
 
     Raises:
         ValueError: Two different keys with the same name — they would
@@ -200,7 +203,7 @@ def check_resources(root: Flow) -> None:
     """
     names: dict[str, ResourceKey[Any]] = {}
     seen: set[tuple[int, frozenset[ResourceKey[Any]]]] = set()
-    stack: list[tuple[Flow, frozenset[ResourceKey[Any]]]] = [(root, frozenset())]
+    stack: list[tuple[Flow, frozenset[ResourceKey[Any]]]] = [(root, provided)]
     while stack:
         flow, covered = stack.pop()
         if (id(flow), covered) in seen:

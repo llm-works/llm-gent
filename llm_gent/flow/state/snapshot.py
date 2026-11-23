@@ -94,7 +94,8 @@ SIGNALS = "signals"
 """Cursor entry at the root: the run's signals (``FlowRunner.start(signals=)``) that are set."""
 
 RESOURCES = "resources"
-"""Cursor entry: the resources a flow declares (``with_resource``, ``with_cost_tracker``) — name to ``snapshot()``."""
+"""Cursor entry: the resources a flow declares (``with_resource``; at the root, also the run's
+cost tracker) — name to ``snapshot()``."""
 
 RUN_RESOURCES = "run_resources"
 """Cursor entry: a running flow's per-run resource children (``with_budget``'s) — name to ``snapshot()``."""

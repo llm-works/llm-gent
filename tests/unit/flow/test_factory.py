@@ -111,7 +111,7 @@ class TestRunnerStore:
 
 
 class TestPricingProviderSwap:
-    """A stub PricingProvider injected via Factory.with_budget reaches ctx.cost.track."""
+    """A stub PricingProvider on the run's tracker reaches ctx.cost.track."""
 
     @pytest.mark.asyncio
     async def test_verb_sees_stub_pricing(self) -> None:
@@ -129,8 +129,7 @@ class TestPricingProviderSwap:
         async def spend(ctx: Context) -> None:
             recorded["cost"] = ctx.cost.track("some-model", input_tokens=1000, output_tokens=100)
 
-        ff = Factory(make_test_logger()).with_cost_tracker(tracker)
-        await run_flow(ff.create().call(spend))
+        await run_flow(Factory(make_test_logger()).create().call(spend), cost=tracker)
         assert recorded["cost"] == pytest.approx(0.42)
         assert tracker.spent == pytest.approx(0.42)
         assert calls == [("some-model", {"input_tokens": 1000, "output_tokens": 100})]

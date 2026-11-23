@@ -168,6 +168,49 @@ class TestCap:
         assert t.urgent_wrapup is False
 
 
+class TestAncestorCaps:
+    """A cost recorded on a child counts against every cap above it."""
+
+    def test_a_child_of_an_exhausted_parent_is_exceeded(self) -> None:
+        root = CostTracker(_lg(), _pricing(), budget=1.0)
+        child = root.child(budget=10.0)
+        root.track("x", override_cost=1.0)
+        assert child.exceeded and child.urgent_wrapup
+        assert not child._own_exceeded()
+
+    def test_an_uncapped_child_follows_its_parent(self) -> None:
+        root = CostTracker(_lg(), _pricing(), budget=1.0)
+        child = root.child()
+        assert not child.exceeded and child.remaining == pytest.approx(1.0)
+        child.track("x", override_cost=1.5)
+        assert child.exceeded and child.urgent_wrapup and child.remaining == 0.0
+
+    def test_remaining_is_the_smallest_on_the_chain(self) -> None:
+        root = CostTracker(_lg(), _pricing(), budget=2.0)
+        child = root.child(budget=5.0)
+        grandchild = child.child(budget=1.0)
+        root.track("x", override_cost=1.5)
+        assert grandchild.remaining == pytest.approx(0.5)
+        assert child.remaining == pytest.approx(0.5)
+        assert root.child().child().remaining == pytest.approx(0.5)
+
+    def test_remaining_is_none_when_nothing_on_the_chain_is_capped(self) -> None:
+        assert CostTracker(_lg(), _pricing()).child().child().remaining is None
+
+    def test_a_parent_does_not_see_a_child_s_cap(self) -> None:
+        root = CostTracker(_lg(), _pricing())
+        child = root.child(budget=1.0)
+        child.track("x", override_cost=2.0)
+        assert child.exceeded and not root.exceeded and not root.urgent_wrapup
+
+    def test_a_child_s_halt_fires_on_its_own_cap_only(self) -> None:
+        halt = asyncio.Event()
+        root = CostTracker(_lg(), _pricing(), budget=1.0)
+        child = root.child(budget=10.0, halt=halt)
+        child.track("x", override_cost=2.0)
+        assert child.exceeded and not halt.is_set()
+
+
 class TestPerOpAggregation:
     """costs_by_op accumulates per invocation and reports up."""
 

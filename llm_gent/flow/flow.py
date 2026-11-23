@@ -56,7 +56,6 @@ from typing import Any, ParamSpec, Self, TypeVar
 
 from appinfra.log import Logger
 
-from ..core.cost import Tracker as CostTracker
 from ..core.env import Environment
 from ..core.role import Role
 from ._node_id import iter_flows
@@ -98,7 +97,7 @@ from .nodes import (
 )
 from .resource import COST, R, ResourceKey, check_resource
 from .resource._runtime import Resources
-from .resource.cost import check_budget, check_cost_tracker
+from .resource.cost import check_budget, check_not_a_tracker
 from .state import State, StateFactory
 from .structure import Structure
 
@@ -909,43 +908,19 @@ class Flow:
         return self
 
     @_builder
-    def with_cost_tracker(self, tracker: CostTracker) -> Self:
-        """Run every run of this flow on ``tracker``, reachable as ``ctx.cost``.
-
-        Verbs record LLM and operation costs against it through
-        ``ctx.cost``. Its ``snapshot()`` is in the run's checkpoints — on
-        the top-level flow, in every commit including the completion
-        commit — and handed back to its ``restore()`` on resume: the total
-        over the whole history for a plain :class:`CostTracker`, whatever
-        a subclass makes of it otherwise. ``with_resource(COST, tracker)``:
-        the tracker is the flow's :data:`~llm_gent.flow.COST` resource (see
-        :mod:`llm_gent.flow.resource.cost`). A hard
-        stop is opt-in on the tracker side: pass the run's halt event to
-        both :meth:`CostTracker.__init__` (``halt=``) and :meth:`FlowRunner.start`
-        (``halt=``), and the tracker sets it on the first cross into
-        ``exceeded``, pausing the run. Without a tracker of its own a flow shares the
-        enclosing one.
-
-        Returns ``self`` for chaining.
-
-        Raises:
-            TypeError: ``tracker`` is not a :class:`CostTracker`.
-        """
-        return self.with_resource(COST, check_cost_tracker(tracker))
-
-    @_builder
     def with_budget(self, budget: float) -> Self:
         """Give each run of this flow its own budget: a child tracker with that limit.
 
-        Each run runs on a child of the flow's tracker (its own, else the
-        enclosing flow's) with ``budget`` as its limit — cost rolls up and
-        every budget on the chain is tracked. A map body runs once per
-        item, an iterate body once per pass, a subflow once per ``.call``.
-        Crossing the budget latches the child's ``exceeded`` and
-        ``urgent_wrapup`` for the agent to read through ``ctx.cost``; gent
-        does not stop the run — the agent decides how to keep to its
-        budget. A budget needs a tracker on this flow or an enclosing one:
-        :meth:`FlowRunner.start` raises otherwise.
+        Each run runs on a child of the enclosing tracker (the run's own,
+        :meth:`FlowRunner.start` ``cost=``, or an enclosing budget's) with
+        ``budget`` as its limit — cost rolls up and every budget on the
+        chain is tracked. A map body runs once per item, an iterate body
+        once per pass, a subflow once per ``.call``. Crossing the budget,
+        or an enclosing one, latches ``exceeded`` and ``urgent_wrapup`` for
+        the agent to read through ``ctx.cost``; gent does not stop the run
+        — the agent decides how to keep to its budget. A budget needs a
+        run started with ``cost=``: :meth:`FlowRunner.start` raises
+        otherwise.
 
         The child's spend is in every checkpoint taken while the run is in
         progress, and restored when it resumes. ``with_resource(COST,
@@ -994,9 +969,12 @@ class Flow:
                 ``restore(data)``; child arguments for a ``value`` without
                 ``child()``. Type checkers report the first two, and a
                 ``value`` not of ``key``'s type, statically.
-            ValueError: Neither a value nor child arguments.
+            ValueError: Neither a value nor child arguments; a cost tracker
+                as ``value`` under :data:`~llm_gent.flow.COST` (the run's
+                tracker is :meth:`FlowRunner.start` ``cost=``).
         """
         check_resource(key, value, child_args)
+        check_not_a_tracker(key, value)
         if value is not None:
             self._resources[key] = value
         if child_args:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Tests for Flow.with_budget: ctx.cost propagation and subflow inheritance."""
+"""ctx.cost: the run's tracker, its subflows and budgets, and a cap's halt."""
 
 from __future__ import annotations
 
@@ -25,101 +25,89 @@ def _tracker(*, budget: float = 1.0, halt: asyncio.Event | None = None) -> CostT
     return CostTracker(make_test_logger(), pricing, budget=budget, halt=halt)
 
 
-class TestContextBudgetPropagation:
-    """ctx.cost arrives at verbs when Flow.with_budget was called."""
+def _flow(name: str = "") -> TestFlow:
+    return TestFlow(make_test_logger(), name, saia_factory=StubFactory())
+
+
+class TestContextCost:
+    """ctx.cost is the run's own tracker, a child of the one the run was started with."""
 
     @pytest.mark.asyncio
-    async def test_verb_sees_tracker(self) -> None:
+    async def test_verb_sees_the_run_s_tracker(self) -> None:
         tracker = _tracker()
         captured: dict[str, CostTracker | None] = {}
 
         @verb(role=ROLE_A)
         async def peek(ctx: Context) -> str:
-            captured["budget"] = ctx.cost
+            captured["cost"] = ctx.cost
             return "ok"
 
-        flow = (
-            TestFlow(make_test_logger(), saia_factory=StubFactory())
-            .call(peek)
-            .with_cost_tracker(tracker)
-        )
-        await run_flow(flow)
-        assert captured["budget"] is tracker
+        await run_flow(_flow().call(peek), cost=tracker)
+        cost = captured["cost"]
+        assert cost is not None and cost.parent is tracker
 
     @pytest.mark.asyncio
-    async def test_no_budget_gives_none(self) -> None:
+    async def test_no_cost_gives_none(self) -> None:
         captured: dict[str, CostTracker | None] = {}
 
         @verb(role=ROLE_A)
         async def peek(ctx: Context) -> str:
-            captured["budget"] = ctx.cost
+            captured["cost"] = ctx.cost
             return "ok"
 
-        flow = TestFlow(make_test_logger(), saia_factory=StubFactory()).call(peek)
-        await run_flow(flow)
-        assert captured["budget"] is None
+        await run_flow(_flow().call(peek))
+        assert captured["cost"] is None
 
     @pytest.mark.asyncio
-    async def test_dispatch_forwards_default(self) -> None:
+    async def test_dispatch_takes_cost(self) -> None:
         tracker = _tracker()
         captured: dict[str, CostTracker | None] = {}
 
         @verb(role=ROLE_A)
         async def peek(ctx: Context) -> str:
-            captured["budget"] = ctx.cost
+            captured["cost"] = ctx.cost
             return "ok"
 
-        flow = TestFlow(make_test_logger(), saia_factory=StubFactory()).with_cost_tracker(tracker)
+        flow = _flow()
         flow.register(peek)
-        await flow.dispatch("peek")
-        assert captured["budget"] is tracker
+        await flow.dispatch("peek", cost=tracker)
+        assert captured["cost"] is tracker
 
 
-class TestSubflowInheritance:
-    """Subflow inherits outer budget unless it overrides via its own .with_budget."""
+class TestSubflows:
+    """A subflow shares the run's tracker unless it declares a budget."""
 
     @pytest.mark.asyncio
     async def test_inherited(self) -> None:
-        outer_tracker = _tracker()
+        tracker = _tracker()
         captured: dict[str, CostTracker | None] = {}
 
         @verb(role=ROLE_A)
         async def peek(ctx: Context) -> str:
-            captured["budget"] = ctx.cost
+            captured["cost"] = ctx.cost
             return "ok"
 
-        inner = TestFlow(make_test_logger(), saia_factory=StubFactory(), name="inner").call(peek)
-        outer = (
-            TestFlow(make_test_logger(), saia_factory=StubFactory(), name="outer")
-            .call(inner)
-            .with_cost_tracker(outer_tracker)
-        )
-        await run_flow(outer)
-        assert captured["budget"] is outer_tracker
+        inner = _flow("inner").call(peek)
+        run = await run_flow(_flow("outer").call(inner).call(peek), cost=tracker)
+        assert run == "ok"
+        cost = captured["cost"]
+        assert cost is not None and cost.parent is tracker
 
     @pytest.mark.asyncio
-    async def test_override(self) -> None:
-        outer_tracker = _tracker()
-        inner_tracker = _tracker()
+    async def test_a_budget_is_a_child_of_the_run_s_tracker(self) -> None:
+        tracker = _tracker()
         captured: dict[str, CostTracker | None] = {}
 
         @verb(role=ROLE_A)
         async def peek(ctx: Context) -> str:
-            captured["budget"] = ctx.cost
+            captured["cost"] = ctx.cost
             return "ok"
 
-        inner = (
-            TestFlow(make_test_logger(), saia_factory=StubFactory(), name="inner")
-            .call(peek)
-            .with_cost_tracker(inner_tracker)
-        )
-        outer = (
-            TestFlow(make_test_logger(), saia_factory=StubFactory(), name="outer")
-            .call(inner)
-            .with_cost_tracker(outer_tracker)
-        )
-        await run_flow(outer)
-        assert captured["budget"] is inner_tracker
+        inner = _flow("inner").with_budget(0.5).call(peek)
+        await run_flow(_flow("outer").call(inner), cost=tracker)
+        cost = captured["cost"]
+        assert cost is not None and cost.budget == 0.5
+        assert cost.parent is not None and cost.parent.parent is tracker
 
 
 class TestEndToEndHalt:
@@ -136,19 +124,14 @@ class TestEndToEndHalt:
             ctx.cost.track("web_search", count=3)
             iterations.append(len(iterations) + 1)
 
-        body = TestFlow(make_test_logger(), saia_factory=StubFactory(), name="body").call(burn)
-        flow = (
-            TestFlow(make_test_logger(), saia_factory=StubFactory())
-            .iterate(body, max_iters=10)
-            .with_cost_tracker(tracker)
-        )
-        await run_flow(flow, halt=halt)
+        body = _flow("body").call(burn)
+        await run_flow(_flow().iterate(body, max_iters=10), cost=tracker, halt=halt)
         assert tracker.exceeded is True
         assert halt.is_set()
         assert len(iterations) < 10
 
     @pytest.mark.asyncio
-    async def test_nested_scope_via_ctx_budget_child(self) -> None:
+    async def test_nested_scope_via_ctx_cost_child(self) -> None:
         halt = asyncio.Event()
         root = _tracker(budget=10.0, halt=halt)
         scope_halt = asyncio.Event()
@@ -158,12 +141,7 @@ class TestEndToEndHalt:
             scope = ctx.cost.child(budget=0.002, halt=scope_halt)
             scope.track("web_search", count=3)
 
-        flow = (
-            TestFlow(make_test_logger(), saia_factory=StubFactory())
-            .call(scoped_work)
-            .with_cost_tracker(root)
-        )
-        await run_flow(flow)
+        await run_flow(_flow().call(scoped_work), cost=root)
         assert scope_halt.is_set()
         assert not halt.is_set()
         assert root.spent == pytest.approx(0.003)

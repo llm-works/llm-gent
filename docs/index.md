@@ -541,52 +541,56 @@ A fluent name of the app's own — `flow.with_stats(...)` for
 Cost is what calls and operations cost; a cost tracker
 (`llm_gent.CostTracker`) records it, and a budget is the limit
 it is checked against. Verbs reach the run's tracker as `ctx.cost`:
-`ctx.cost.spent` is the cost so far, `ctx.cost.budget` the limit.
+`ctx.cost.spent` is the cost so far, `ctx.cost.remaining` what can still
+be spent before a budget on the chain is reached.
 
-The cost tracker is a resource (see Resources) under the key `COST`, and
-the cost API is sugar over it: `with_cost_tracker(t)` is
-`with_resource(COST, t)`, `with_budget(limit)` is
-`with_resource(COST, budget=limit)`, `ctx.cost` is
-`ctx.resource(COST, None)`.
+A tracker is the run's, never the flow's: a tracker on the structure would
+be shared by every run of it.
 
-- `with_cost_tracker(tracker)` — every run of the flow runs on that
-  tracker.
-- `with_budget(limit)` — each run of the flow runs on a child of its
-  tracker (its own, else the enclosing flow's) with that budget; spend
-  rolls up, and every budget on the chain is tracked. A map body runs once
-  per item, an iterate body once per pass, a subflow once per `.call`, so
-  a budget on the body is a per-item, per-pass or per-call budget. A
-  budget needs a tracker on the flow or an enclosing one; `start()` raises
-  otherwise.
-- Neither — the run shares the enclosing tracker: map items compete for
+- `runner.start(flow, cost=tracker)` — the run tracks its cost on a
+  tracker of its own, a child of `tracker`: spend rolls up to `tracker`,
+  the run's accounting is the run's. Without `cost=`, the run tracks no
+  cost and `ctx.cost` is `None`.
+- `with_budget(limit)` — each run of the flow runs on a child of the
+  enclosing tracker with that budget; spend rolls up, and every budget on
+  the chain is tracked. A map body runs once per item, an iterate body
+  once per pass, a subflow once per `.call`, so a budget on the body is a
+  per-item, per-pass or per-call budget. A budget needs a run started with
+  `cost=`; `start()` raises otherwise.
+- Neither — the flow shares the enclosing tracker: map items compete for
   it.
+
+The cost tracker is a resource (see Resources) under the key `COST`:
+`with_budget(limit)` is `with_resource(COST, budget=limit)`, `ctx.cost` is
+`ctx.resource(COST, None)`, and `with_resource(COST, tracker)` raises.
 
 ```python
 flow = (
     ff.create(...)
-    .with_cost_tracker(session_tracker)  # the run's tracker
     .map(lambda b: b.with_budget(0.5).call(work), items=topics)  # each item: 0.5
     .call(ff.create().with_budget(3.0).map(...))  # this map: 3.0 in total
 )
+await runner.start(flow, cost=session_tracker)  # the run's spend rolls up here
 ```
 
 Gent tracks cost; the agent decides how to keep to its budget. Crossing
-a budget latches the tracker's `exceeded` and `urgent_wrapup`, which the
-agent reads through `ctx.cost` (to wrap up, say); gent stops nothing. A
-hard stop is the app's choice: a tracker built with `halt=` the run's
-halt event pauses the run when its budget is crossed.
+a budget latches `exceeded` and `urgent_wrapup` on that tracker and every
+tracker below it, which the agent reads through `ctx.cost` (to wrap up,
+say); gent stops nothing. A run under an exhausted session tracker sees
+`ctx.cost.exceeded`, whatever its own budget. A hard stop is the app's
+choice: a tracker built with `halt=` the run's halt event pauses the run
+when its budget is crossed.
 
 The running cost is reconstructed across pause, resume and shortcut, the
 way every resource's accounting is. Every tracker's spend (and spend by
 op) is in the checkpoints, and resume restores it before the run's first
 step:
 
-- The run's tracker (`with_cost_tracker` on the top-level flow) is in
-  every commit, the completion commit included, so its spend is the total
-  over the whole history: a later session continues it. A tracker every
-  flow inherits (a `Factory(cost_tracker=...)`) is kept once, at the
-  top. A tracker a nested flow declares of its own is kept while that
-  flow runs.
+- The run's own tracker is in every commit, the completion commit
+  included, so its spend is the total over the whole history: a later run
+  of the history continues it. A resumed run restores it into a new
+  tracker of its own, never into the one it was started with: the
+  caller's tracker sees only what the runs it is given to spend.
 - A budgeted run's child is kept while the run is in progress: a run
   halted at 9.0 of a 10.0 budget resumes with 1.0 left. A cut runs no
   step again, so nothing is counted twice.
@@ -594,36 +598,17 @@ step:
   that save is in no checkpoint, so the step that runs again records it
   again. Cost tracking is best effort.
 
-Spend is cumulative; a per-session budget is a limit set on it. The app
-reads the spend so far from the history's head
-(`History.snapshot(head).cursors[""]["resources"]["cost"]["spent"]`) and builds the
-session's tracker with `budget=` that plus the session's allowance.
+A per-session budget is the session tracker's own: build it with
+`budget=` the session's allowance and start each run with `cost=` it. The
+history's total is the run's `ctx.cost.spent`, also readable from the
+history's head
+(`History.snapshot(head).cursors[""]["resources"]["cost"]["spent"]`).
 
-What resume does to the spend is the tracker's: gent saves what its
-`snapshot()` returns and hands that dict to its `restore()`. A
-`CostTracker` subclass can keep keys of its own in the snapshot and
-decide in `restore()`, e.g. charge each session only its own spend:
-
-```python
-class SessionTracker(CostTracker):
-    def __init__(self, lg, pricing, session_id, allowance, halt=None):
-        super().__init__(lg, pricing, allowance, halt=halt)
-        self.session_id, self.allowance, self.baseline = session_id, allowance, 0.0
-
-    def snapshot(self):
-        return {**super().snapshot(), "session": self.session_id, "baseline": self.baseline}
-
-    def restore(self, data):
-        same = data.get("session") == self.session_id
-        self.baseline = data["baseline"] if same else data["spent"]
-        # Raise the cap first: the base restore fires the halt at the cap.
-        self.update_budget(self.baseline + self.allowance)
-        super().restore(data)
-```
-
-The session's spend is then `spent - baseline`. Budgeted runs' children
-come from `tracker.child()`; a subclass overriding it puts them on its
-own class.
+What resume does to the run's spend is its tracker's: gent saves what its
+`snapshot()` returns and hands that dict to its `restore()`. The run's
+tracker and budgeted runs' children come from `tracker.child()`, so a
+`CostTracker` subclass overriding `child()` puts them on its own class,
+with keys of its own in the snapshot to decide on in `restore()`.
 
 ### One history per run
 

@@ -23,10 +23,12 @@ import contextlib
 import dataclasses
 import inspect
 from collections.abc import Iterator
+from types import MappingProxyType
 from typing import Any
 
 from ..checkpoint import checkpoint_tag
 from ..context import Context
+from ..decl import Decl
 from ..flow import Flow
 from ..hooks import Where
 from ..nodes import (
@@ -39,6 +41,7 @@ from ..nodes import (
     _Map,
     _Node,
 )
+from ..resource import COST
 from ..resource._runtime import run_resources
 from ..state import State, StateFactory
 from ..state.cas import (
@@ -314,7 +317,7 @@ async def run_as_subflow(
     """
     if not flow._nodes:
         raise RuntimeError(f"Flow {flow._name!r} has no nodes to run")
-    decl = flow.decl
+    decl = _entry_decl(flow, frame)
     with run_resources(
         frame.lg,
         decl,
@@ -331,6 +334,21 @@ async def run_as_subflow(
             lg=frame.lg,
         )
         return await _walk(flow, dataclasses.replace(frame, scope=scope), args, kwargs)
+
+
+def _entry_decl(flow: Flow, frame: _Frame) -> Decl:
+    """What ``flow`` declares where the walk enters it.
+
+    The run's own cost tracker joins the top-level flow's declared
+    resources, so it is saved with them through the run's end and a
+    resumed run restores its spend into the run's own tracker, never into
+    the one the run was started with.
+    """
+    decl = flow.decl
+    cost = frame.run.cost
+    if cost is None or frame.position.path != () or flow is not frame.run.flow:
+        return decl
+    return dataclasses.replace(decl, resources=MappingProxyType({**decl.resources, COST: cost}))
 
 
 def _entry_where(flow: Flow, position: Position) -> Where:
