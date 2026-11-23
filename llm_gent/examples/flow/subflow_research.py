@@ -72,10 +72,11 @@ from appinfra.log import quick_console_logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
-from llm_gent.core import Role
+from llm_gent.core import Environment, Role
 from llm_gent.flow import (
     Context,
     Factory,
+    FlowRunner,
     StateDataclass,
     TypeStateFactory,
     planner,
@@ -433,7 +434,8 @@ async def main() -> int:
     """Run the multi-topic research flow on the canned question."""
     lg = quick_console_logger("subflow-research-example", config={"level": "warning"})
     saia_factory = StructuredStubSAIAFactory(_demo_scripts())
-    ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(ResearchState))
+    ff = Factory(lg, state_factory=TypeStateFactory(ResearchState))
+    runner = FlowRunner(lg, env=Environment(saia_factory=saia_factory))
 
     flow = ff.create("subflow-research")
     (
@@ -449,7 +451,7 @@ async def main() -> int:
 
     print(f"Question: {_DEMO_QUESTION}\n")
     state = ResearchState(question=_DEMO_QUESTION)
-    await flow.run(state=state)
+    await runner.start(flow, state=state)
     _print_report(state)
     return 0
 

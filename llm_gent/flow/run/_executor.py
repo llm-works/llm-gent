@@ -3,7 +3,7 @@
 
 """Flow execution helpers — walk the composition graph, dispatch each node.
 
-Internal to :mod:`llm_gent.flow`: the coroutines that :meth:`Flow.run` calls
+Internal to :mod:`llm_gent.flow`: the coroutines that :meth:`FlowRunner.start` calls
 into to execute each node in order (verbs, subflows, and the
 branch/iterate/map control-flow primitives), together with the scoped-state
 projection/merge plumbing.
@@ -55,7 +55,7 @@ def _build_ctx(target: Any, frame: _Frame, node_id: str | None = None) -> Contex
     """Build the Context passed to the node's verb (and to its hooks).
 
     Verb nodes get a role-bound ctx; ``ctx.saia`` resolves lazily on first
-    read via the flow's SAIAFactory. Subflow nodes and control-flow nodes
+    read via the run's environment. Subflow nodes and control-flow nodes
     (branch/iterate/map) get an ambient ctx with ``role=None`` — those nodes
     have no single role, so ``ctx.saia`` returns ``None`` (each inner verb
     builds its own role-bound ctx as it runs).
@@ -66,13 +66,13 @@ def _build_ctx(target: Any, frame: _Frame, node_id: str | None = None) -> Contex
     (until predicates, on_error, on_item_complete) where no verb is
     running under a single node id.
     """
-    traits = frame.run.env.traits
+    env = frame.run.env
     if isinstance(target, Flow | _Branch | _Iterate | _Map):
         return Context(
             role=None,
             state=frame.scope.state,
             flow=frame.runtime,
-            traits=traits,
+            env=env,
             halt=frame.halt,
             extra=frame.extra,
             resources=frame.scope.resources,
@@ -83,7 +83,7 @@ def _build_ctx(target: Any, frame: _Frame, node_id: str | None = None) -> Contex
         role=target.role,
         state=frame.scope.state,
         flow=frame.runtime,
-        traits=traits,
+        env=env,
         halt=frame.halt,
         extra=frame.extra,
         resources=frame.scope.resources,
@@ -487,7 +487,7 @@ async def _check_until(
         role=None,
         state=iterate_state,
         flow=frame.runtime,
-        traits=frame.run.env.traits,
+        env=frame.run.env,
         halt=frame.halt,
         extra=frame.extra,
         resources=frame.scope.resources,

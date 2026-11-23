@@ -11,10 +11,10 @@ import pytest
 
 from llm_gent.core import Role, SAIAFactory
 from llm_gent.core.cost import Tracker as CostTracker
-from llm_gent.flow import Context, Factory, Flow, TypeStateFactory, verb
-from tests.helpers import memory_store
+from llm_gent.flow import Context, Factory, Flow, FlowRunner, TypeStateFactory, verb
+from tests.helpers import memory_store, run_flow
 
-from .conftest import ROLE_A, StubFactory, make_test_logger
+from .conftest import ROLE_A, make_test_logger
 
 
 class _StubSAIA:
@@ -61,64 +61,53 @@ class TestSAIAFactoryProtocol:
 
 
 class TestFlowFactory:
-    """Factory captures lg + saia + state; .create builds Flows."""
+    """Factory captures lg + state; .create builds Flows."""
 
     def test_create_returns_flow(self) -> None:
         """The value from .create() is a fresh :class:`Flow`."""
-        ff = Factory(make_test_logger(), saia_factory=StubFactory())
+        ff = Factory(make_test_logger())
         flow = ff.create("grade")
         assert isinstance(flow, Flow)
         assert flow.name == "grade"
 
     def test_create_default_name_is_empty(self) -> None:
         """.create() without a name yields an anonymous flow."""
-        ff = Factory(make_test_logger(), saia_factory=StubFactory())
-        assert ff.create().name == ""
+        assert Factory(make_test_logger()).create().name == ""
 
-    def test_create_threads_saia_to_flow(self) -> None:
-        """The saia captured on the factory is used by the built flow."""
-        sf = StubFactory()
-        ff = Factory(make_test_logger(), saia_factory=sf)
-        flow = ff.create()
-        # Reach into the private slot — this test's point is the wiring itself.
-        assert flow._env.saia_factory is sf
-
-    def test_with_saia_returns_new_factory(self) -> None:
-        """with_saia_factory() derives a new Factory (immutable-style swap)."""
-        a, b = StubFactory(), StubFactory()
-        ff = Factory(make_test_logger(), saia_factory=a)
-        derived = ff.with_saia_factory(b)
-        assert derived is not ff
-        assert derived.create()._env.saia_factory is b
-        # Original untouched.
-        assert ff.create()._env.saia_factory is a
-
-    def test_with_saia_preserves_the_state_factory(self) -> None:
-        """with_saia_factory() carries the state factory forward untouched."""
+    def test_with_state_factory_returns_new_factory(self) -> None:
+        """with_state_factory() derives a new Factory; the original keeps its own."""
         state_factory = TypeStateFactory(dict)
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), state_factory=state_factory)
-        derived = ff.with_saia_factory(StubFactory())
-        assert derived.create()._state_factory is state_factory
-
-
-class TestCheckpointStore:
-    """The factory's checkpoint store reaches every flow it creates."""
-
-    def test_create_gives_the_flow_the_factory_s_store(self) -> None:
-        """The store only: saves need an explicit with_checkpointer(), runs a history=."""
-        store = memory_store()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), checkpoint_store=store)
-        flow = ff.create("named")
-        assert flow._checkpoint_store is store
-        assert flow._checkpointer is None
-
-    def test_with_checkpoint_store_swaps_it_on_a_new_factory(self) -> None:
-        first, second = memory_store(), memory_store()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), checkpoint_store=first)
-        derived = ff.with_checkpoint_store(second)
+        ff = Factory(make_test_logger())
+        derived = ff.with_state_factory(state_factory)
         assert derived is not ff
-        assert derived.create()._checkpoint_store is second
-        assert ff.create()._checkpoint_store is first
+        assert derived.create()._state_factory is state_factory
+        assert ff.create()._state_factory is None
+
+
+class TestRunnerStore:
+    """Where runs keep their histories is the runner's store, not the flow's."""
+
+    @pytest.mark.asyncio
+    async def test_a_run_s_history_goes_to_the_runner_s_store(self) -> None:
+        @verb
+        async def noop(ctx: Context[Any]) -> None:
+            return None
+
+        store = memory_store()
+        runner = FlowRunner(make_test_logger(), store=store)
+        assert runner.store is store
+        await runner.start(Factory(make_test_logger()).create("named").call(noop), history="h")
+        assert store.list_repos() == ["h"]
+
+    @pytest.mark.asyncio
+    async def test_a_history_on_a_runner_without_a_store_raises_at_start(self) -> None:
+        @verb
+        async def noop(ctx: Context[Any]) -> None:
+            return None
+
+        flow = Factory(make_test_logger()).create("plain").call(noop)
+        with pytest.raises(RuntimeError, match="history='h' but the runner has no store"):
+            FlowRunner(make_test_logger()).start(flow, history="h")
 
 
 class TestPricingProviderSwap:
@@ -140,8 +129,8 @@ class TestPricingProviderSwap:
         async def spend(ctx: Context) -> None:
             recorded["cost"] = ctx.cost.track("some-model", input_tokens=1000, output_tokens=100)
 
-        ff = Factory(make_test_logger(), saia_factory=StubFactory()).with_cost_tracker(tracker)
-        await ff.create().call(spend).run()
+        ff = Factory(make_test_logger()).with_cost_tracker(tracker)
+        await run_flow(ff.create().call(spend))
         assert recorded["cost"] == pytest.approx(0.42)
         assert tracker.spent == pytest.approx(0.42)
         assert calls == [("some-model", {"input_tokens": 1000, "output_tokens": 100})]

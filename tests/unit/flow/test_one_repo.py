@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, verb
-from tests.helpers import memory_store
+from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, Resume, verb
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import make_test_logger
 
@@ -33,7 +33,7 @@ class Crash(BaseException):
 
 
 def _ff(store: Any = None) -> Factory:
-    return Factory(make_test_logger(), checkpoint_store=store)
+    return TestFactory(make_test_logger(), checkpoint_store=store)
 
 
 def _nested(store: Any, ran: list[str], *, crash: bool, halt: bool = False) -> Any:
@@ -79,25 +79,35 @@ class TestNestedCheckpointer:
         store = memory_store()
         ran: list[str] = []
         with pytest.raises(Crash):
-            await _nested(store, ran, crash=True).run(1, history=NAME)
+            await run_flow(_nested(store, ran, crash=True), 1, history=NAME)
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "ok"
         assert (await History(store, NAME).snapshot(head)).root == {"a1": 1}
 
         ran.clear()
-        assert await _nested(store, ran, crash=False).run(1, history=NAME, resume="latest") == 33
+        assert (
+            await run_flow(
+                _nested(store, ran, crash=False), 1, history=NAME, start=Resume("latest")
+            )
+            == 33
+        )
         assert ran == ["a2", "b", "c"]  # a1's checkpointed work does not run again
 
     async def test_halt_inside_a_checkpointed_subtree_resumes_as_uninterrupted(self) -> None:
         store = memory_store()
         ran: list[str] = []
         flow = _nested(store, ran, crash=False, halt=True)
-        assert await flow.run(1, halt=asyncio.Event(), history=NAME) is HALTED
+        assert await run_flow(flow, 1, halt=asyncio.Event(), history=NAME) is HALTED
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "halted"
 
         ran.clear()
-        assert await _nested(store, ran, crash=False).run(1, history=NAME, resume="latest") == 33
+        assert (
+            await run_flow(
+                _nested(store, ran, crash=False), 1, history=NAME, start=Resume("latest")
+            )
+            == 33
+        )
         assert ran == ["b", "c"]
 
     async def test_without_a_checkpointer_a_save_writes_nothing(self) -> None:
@@ -109,7 +119,7 @@ class TestNestedCheckpointer:
             written.append(await ctx.checkpoint("x"))
             return x
 
-        await _ff(store).create().call(a).run(1, history=NAME)
+        await run_flow(_ff(store).create().call(a), 1, history=NAME)
         assert written == [None]
         history = History(store, NAME)
         assert await history.checkpoint_names() == []
@@ -124,7 +134,7 @@ class TestNestedCheckpointer:
             return x
 
         sub = _ff(store).create().with_checkpointer().call(a)
-        await sub.run(1, history="sub")
+        await run_flow(sub, 1, history="sub")
         assert await History(store, "sub").head() is not None
         assert await History(store, NAME).head() is None
 
@@ -138,7 +148,7 @@ class TestNestedCheckpointer:
             return x
 
         sub = _ff(other).create().with_checkpointer().call(a)
-        await _ff(store).create().call(sub).run(1, history=NAME)
+        await run_flow(_ff(store).create().call(sub), 1, history=NAME)
         assert await History(store, NAME).head() is not None
         assert other.list_repos() == []
 
@@ -155,7 +165,7 @@ class TestOneHistoryRules:
         sub = _ff().create().with_checkpointer().call(a)
         flow = _ff(memory_store()).create().call(a).call(sub)
         with pytest.raises(RuntimeError, match="has no history"):
-            await flow.run(1)
+            await run_flow(flow, 1)
         assert ran == []
 
     async def test_a_history_must_name_a_repository(self) -> None:
@@ -168,7 +178,7 @@ class TestOneHistoryRules:
         store = memory_store()
         flow = _ff(store).create().with_checkpointer().call(a)
         with pytest.raises(InvalidNameError):
-            await flow.run(1, history="..")
+            await run_flow(flow, 1, history="..")
         assert store.list_repos() == []
 
     @pytest.mark.parametrize("bad", ["latest", "complete", "a" * 64, ""])
@@ -199,7 +209,7 @@ class TestNamedCheckpointer:
                 )
             )
 
-        assert await flow().run(history=NAME) == [2, 4, 6]
+        assert await run_flow(flow(), history=NAME) == [2, 4, 6]
         history = History(store, NAME)
         tagged = await history.checkpoint("items")
         assert tagged is not None
@@ -208,7 +218,7 @@ class TestNamedCheckpointer:
         assert sorted(done) == ["0", "1"]  # the third item's own checkpoint: items 0 and 1 done
 
         ran.clear()
-        assert await flow().run(history=NAME, resume="items") == [2, 4, 6]
+        assert await run_flow(flow(), history=NAME, start=Resume("items")) == [2, 4, 6]
         assert ran == [3]
 
     async def test_a_save_moves_only_its_innermost_checkpointer_tag(self) -> None:
@@ -225,7 +235,7 @@ class TestNamedCheckpointer:
 
         inner = _ff().create().with_checkpointer("inner").call(inner_step)
         outer = _ff().create().with_checkpointer("outer").call(outer_step).call(inner)
-        await _ff(store).create().call(outer).run(1, history=NAME)
+        await run_flow(_ff(store).create().call(outer), 1, history=NAME)
         assert await History(store, NAME).checkpoint_names() == ["inner"]
 
     async def test_one_name_on_two_flows_is_one_tag(self) -> None:
@@ -239,7 +249,7 @@ class TestNamedCheckpointer:
         first = _ff().create().with_checkpointer("phase").call(save)
         second = _ff().create().with_checkpointer("phase").call(save)
         flow = _ff(store).create().call(first).call(second)
-        assert await flow.run(1, history=NAME) == 3
+        assert await run_flow(flow, 1, history=NAME) == 3
         history = History(store, NAME)
         assert await history.checkpoint_names() == ["phase"]
         tagged = await history.checkpoint("phase")

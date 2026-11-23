@@ -121,17 +121,17 @@ class HookDenied(Exception):
 
 @dataclass(frozen=True)
 class RunInfo:
-    """The run an event belongs to: one :meth:`Flow.run` call."""
+    """The run an event belongs to: one :meth:`FlowRunner.start` call."""
 
     run_id: str
-    """Unique per :meth:`Flow.run` call."""
+    """Unique per :meth:`FlowRunner.start` call."""
     flow_name: str | None
     structure_hash: str
     """The top-level flow's structure hash (``flow_root_hash`` on its checkpoints)."""
     repo: str | None
     """The run's repository name (``client_flow_id``), or ``None`` without a store."""
     resumed_from: str | None = None
-    """The commit the run checked out (``resume=`` / ``restart=``), or ``None``."""
+    """The commit the run checked out (``Resume`` / ``Restart``), or ``None``."""
 
 
 @dataclass(frozen=True)

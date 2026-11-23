@@ -12,9 +12,10 @@ sentinel returned in place of a failed item by :meth:`Flow.map` when
 a checkpoint); :class:`Skipped`, the sentinel returned in place of an
 item whose :meth:`Flow.guard` predicate returned falsy; :data:`UNSET`
 (with its :class:`Unset` type), the "no value here" sentinel used by
-:meth:`Flow.run`'s ``state=`` default and by rescue policies'
+:meth:`FlowRunner.start`'s ``state=`` default and by rescue policies'
 ``pending_input`` positional; and :data:`HALTED` (with its :class:`Halted`
-type), what :meth:`Flow.run` returns when the halt stopped the run.
+type), what awaiting the run :meth:`FlowRunner.start` returns gives when the
+halt stopped it.
 
 Depends only on :mod:`.context` and :mod:`.state`; :class:`Flow` is
 referenced solely inside string-form annotations (via
@@ -62,12 +63,12 @@ UNSET: Final[Unset] = Unset()
 
 Surfaces in two places on the public API:
 
-- :meth:`Flow.run` — ``state=UNSET`` is the sentinel default that resolves
+- :meth:`FlowRunner.start` — ``state=UNSET`` is the sentinel default that resolves
   to a fresh state of the run's own (``state_factory.new()``, else an empty
   ``dict``); passing ``state=None`` explicitly is honored as "payload is
   ``None``".
 - :type:`RescuePolicy` — the ``pending_input`` positional is :data:`UNSET`
-  when the failing node is the chain's first node and :meth:`Flow.run` was
+  when the failing node is the chain's first node and :meth:`FlowRunner.start` was
   called with no positional argument.
 """
 
@@ -90,9 +91,11 @@ class Halted:
 
 
 HALTED: Final[Halted] = Halted()
-"""What :meth:`Flow.run` returns when the halt stopped the run before its end.
+"""What awaiting a run gives when the halt stopped it before its end.
 
-The run wrote its halt checkpoint; ``resume="latest"`` continues it. A run
+A run with a history (its runner's store and ``history=``) wrote its halt
+checkpoint, and ``Resume("latest")`` continues it; a run without one keeps no
+checkpoint. A run
 whose last step completed returns that step's result — ``None`` included —
 also when the halt was set during that step: it finished.
 """
@@ -104,7 +107,7 @@ RescuePolicy = Callable[[BaseException, Any, Context[Any]], Any]
 ``pending_input`` is the value that would have been passed into the failing
 node (post ``project=`` if one was set) — carried through so a rescue can
 fall back to a prior result without a preceding ``.after``-hook stash. When
-the failing node is the chain's first node and :meth:`Flow.run` had no
+the failing node is the chain's first node and :meth:`FlowRunner.start` had no
 positional argument, ``pending_input`` is :data:`UNSET`.
 """
 

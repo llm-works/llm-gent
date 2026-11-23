@@ -1,220 +1,110 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Tests for the Trait ↔ Flow seam.
+"""The run's environment: what every step of a run sees as ``ctx.traits`` and ``ctx.saia``.
 
-Flow, Factory, and Context each carry an optional ``traits`` registry.
-Verbs reach mounted platform capabilities via ``ctx.traits``. When no
-registry is supplied, ``ctx.traits is None`` and behavior is unchanged
-from before the seam existed.
+The environment is given to the runner, not to the flow: every flow of a
+run, nested ones included, sees the same one, and runs sharing an
+environment share its SAIA instances, one per role.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest
 
+from llm_gent.core import Environment
 from llm_gent.core.errors import TraitNotFoundError
 from llm_gent.core.traits import Registry
 from llm_gent.core.traits.base import BaseTrait
-from llm_gent.flow import Factory, Flow, TypeStateFactory, verb
+from llm_gent.flow import Factory, Flow, FlowRunner, verb
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, make_test_logger
+
+
+pytestmark = pytest.mark.unit
+
+LG = make_test_logger()
 
 
 class _MemoryStub(BaseTrait):
     """Minimal trait carrying an in-memory list — stands in for kelt-shaped traits."""
 
     def __init__(self, agent: Any) -> None:
-        """Store the stub agent ref; init an empty write log."""
         super().__init__(agent)
         self.writes: list[str] = []
 
     def record(self, item: str) -> None:
-        """Append ``item`` to the write log."""
         self.writes.append(item)
 
 
 class _StorageStub(BaseTrait):
     """Second trait type — proves multi-trait lookup by type keying."""
 
-    def __init__(self, agent: Any) -> None:
-        """Store the stub agent ref."""
-        super().__init__(agent)
 
-
-def _fresh_registry(*traits: BaseTrait) -> Registry:
-    """Build a Registry pre-populated with ``traits``."""
-    reg = Registry(make_test_logger())
+def _registry(*traits: BaseTrait) -> Registry:
+    reg = Registry(LG)
     for t in traits:
         reg.register(t)
     return reg
 
 
-class TestContextField:
-    """Context carries ``traits`` as an optional field with default ``None``."""
+def _flow() -> Flow:
+    return Factory(LG).create()
 
-    def test_default_is_none(self) -> None:
-        """A Flow constructed without traits produces ctx.traits == None."""
-        captured: dict[str, Any] = {}
 
+class TestTraits:
+    """``ctx.traits`` is the run's environment's registry."""
+
+    async def test_none_without_a_registry(self) -> None:
         @verb(role=ROLE_A)
-        async def peek(ctx: Any) -> None:
-            captured["traits"] = ctx.traits
+        async def peek(ctx: Any) -> Any:
+            return ctx.traits
 
-        flow = Flow(make_test_logger(), saia_factory=StubFactory()).call(peek)
-        asyncio.run(flow.run())
-        assert captured["traits"] is None
+        assert await FlowRunner(LG).start(_flow().call(peek)) is None
 
-    def test_verb_reads_registered_trait(self) -> None:
-        """Verb reads a trait via ctx.traits.get(TraitType)."""
+    async def test_a_verb_reads_and_uses_a_registered_trait(self) -> None:
         memory = _MemoryStub(agent=object())
-        registry = _fresh_registry(memory)
+        runner = FlowRunner(LG, env=Environment(traits=_registry(memory)))
 
         @verb(role=ROLE_A)
-        async def write_fact(ctx: Any, item: str) -> str:
-            trait = ctx.traits.get(_MemoryStub)
-            trait.record(item)
+        async def write(ctx: Any, item: str) -> str:
+            ctx.traits.get(_MemoryStub).record(item)
             return item
 
-        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry).call(
-            write_fact
-        )
-        asyncio.run(flow.run("first"))
-        asyncio.run(flow.run("second"))
+        flow = _flow().call(write)
+        await runner.start(flow, "first")
+        await runner.start(flow, "second")
         assert memory.writes == ["first", "second"]
 
-    def test_verb_reads_via_require(self) -> None:
-        """require() returns the same instance and raises on missing traits."""
-        memory = _MemoryStub(agent=object())
-        registry = _fresh_registry(memory)
-
-        @verb(role=ROLE_A)
-        async def read(ctx: Any) -> _MemoryStub:
-            return ctx.traits.require(_MemoryStub)
-
-        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry).call(read)
-        result = asyncio.run(flow.run())
-        assert result is memory
-
-    def test_multiple_traits_keyed_by_type(self) -> None:
-        """Registry lookup is type-keyed; two distinct trait types coexist."""
-        mem = _MemoryStub(agent=object())
-        stg = _StorageStub(agent=object())
-        registry = _fresh_registry(mem, stg)
+    async def test_traits_are_keyed_by_type(self) -> None:
+        mem, stg = _MemoryStub(agent=object()), _StorageStub(agent=object())
+        runner = FlowRunner(LG, env=Environment(traits=_registry(mem, stg)))
 
         @verb(role=ROLE_A)
         async def peek(ctx: Any) -> tuple[Any, Any]:
-            return ctx.traits.get(_MemoryStub), ctx.traits.get(_StorageStub)
+            return ctx.traits.get(_MemoryStub), ctx.traits.require(_StorageStub)
 
-        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry).call(peek)
-        m, s = asyncio.run(flow.run())
-        assert m is mem
-        assert s is stg
+        assert await runner.start(_flow().call(peek)) == (mem, stg)
 
-
-class TestFlowConstructor:
-    """Flow.__init__ accepts a ``traits=`` kwarg; ``flow.traits`` property exposes it."""
-
-    def test_traits_kwarg_stored(self) -> None:
-        """The registry passed at construction is retrievable via the property."""
-        registry = _fresh_registry()
-        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry)
-        assert flow.traits is registry
-
-    def test_traits_default_none(self) -> None:
-        """Without the kwarg the property returns None."""
-        flow = Flow(make_test_logger(), saia_factory=StubFactory())
-        assert flow.traits is None
-
-
-class TestFlowFactoryPropagation:
-    """Factory captures ``traits`` once; every ``.create()`` inherits it."""
-
-    def test_factory_traits_reaches_flow(self) -> None:
-        """A Factory-built flow surfaces the captured registry."""
-        registry = _fresh_registry()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
-        assert ff.create().traits is registry
-
-    def test_factory_traits_reaches_verb(self) -> None:
-        """A verb dispatched through a Factory-built flow reads ctx.traits."""
-        memory = _MemoryStub(agent=object())
-        registry = _fresh_registry(memory)
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
-
-        captured: dict[str, Any] = {}
+    async def test_require_on_a_missing_trait_raises(self) -> None:
+        runner = FlowRunner(LG, env=Environment(traits=_registry()))
 
         @verb(role=ROLE_A)
-        async def peek(ctx: Any) -> None:
-            captured["trait"] = ctx.traits.get(_MemoryStub)
+        async def demand(ctx: Any) -> None:
+            ctx.traits.require(_MemoryStub)
 
-        flow = ff.create("grade").call(peek)
-        asyncio.run(flow.run())
-        assert captured["trait"] is memory
-
-    def test_factory_default_traits_none(self) -> None:
-        """Without traits= on the factory, built flows carry None."""
-        ff = Factory(make_test_logger(), saia_factory=StubFactory())
-        assert ff.create().traits is None
+        with pytest.raises(TraitNotFoundError, match="_MemoryStub"):
+            await runner.start(_flow().call(demand))
 
 
-class TestFactoryDerivers:
-    """with_saia_factory and with_traits preserve unrelated fields."""
+class TestNestedFlows:
+    """Every flow of a run, nested ones included, sees the run's environment."""
 
-    def test_with_saia_factory_preserves_traits(self) -> None:
-        """Swapping the SAIA factory keeps the trait registry intact."""
-        registry = _fresh_registry()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=registry)
-        derived = ff.with_saia_factory(StubFactory())
-        assert derived.create().traits is registry
-
-    def test_with_traits_returns_new_factory(self) -> None:
-        """with_traits() derives a new factory (immutable-style swap)."""
-        first, second = _fresh_registry(), _fresh_registry()
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=first)
-        derived = ff.with_traits(second)
-        assert derived is not ff
-        assert derived.create().traits is second
-        # Original untouched.
-        assert ff.create().traits is first
-
-    def test_with_traits_preserves_saia_factory_and_state_factory(self) -> None:
-        """with_traits() carries saia_factory, state_factory, and lg forward."""
-        sf = StubFactory()
-        state_factory = TypeStateFactory(dict)
-        ff = Factory(
-            make_test_logger(),
-            saia_factory=sf,
-            state_factory=state_factory,
-            traits=_fresh_registry(),
-        )
-        derived = ff.with_traits(_fresh_registry())
-        built = derived.create()
-        assert built._env.saia_factory is sf
-        assert built._state_factory is state_factory
-
-    def test_with_traits_none_clears_registry(self) -> None:
-        """with_traits(None) derives a factory whose flows have no registry."""
-        ff = Factory(make_test_logger(), saia_factory=StubFactory(), traits=_fresh_registry())
-        derived = ff.with_traits(None)
-        assert derived.create().traits is None
-
-
-class TestSubflowInheritance:
-    """Subflows borrow the outer runtime's traits (matches saia_factory behavior)."""
-
-    def test_lambda_subflow_sees_parent_traits(self) -> None:
-        """A lambda-form (Buildable) subflow reads the parent's registered traits.
-
-        Uses :meth:`Flow.branch` because ``.then`` takes a verb/Flow target
-        directly, not a Buildable — the lambda-materialization path lives on
-        the branch/loop/map primitives.
-        """
+    async def test_a_branch_arm_sees_it(self) -> None:
         memory = _MemoryStub(agent=object())
-        registry = _fresh_registry(memory)
+        runner = FlowRunner(LG, env=Environment(traits=_registry(memory)))
 
         @verb(role=ROLE_A)
         async def outer(ctx: Any) -> bool:
@@ -225,55 +115,60 @@ class TestSubflowInheritance:
             ctx.traits.require(_MemoryStub).record("inner")
             return "done"
 
-        flow = (
-            Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry)
-            .call(outer)
-            .branch(when=lambda prev, _ctx: prev, then=lambda f: f.call(inner))
-        )
-        asyncio.run(flow.run())
+        flow = _flow().call(outer).branch(when=lambda p, _c: p, then=lambda f: f.call(inner))
+        await runner.start(flow)
         assert memory.writes == ["inner"]
 
-    def test_flow_as_node_subflow_sees_parent_traits(self) -> None:
-        """A Flow-as-node subflow reads the outer runtime's traits, not its own."""
+    async def test_a_called_flow_sees_it(self) -> None:
         memory = _MemoryStub(agent=object())
-        parent_registry = _fresh_registry(memory)
+        runner = FlowRunner(LG, env=Environment(traits=_registry(memory)))
 
         @verb(role=ROLE_A)
         async def inner(ctx: Any) -> Any:
             return ctx.traits.get(_MemoryStub)
 
-        # Child constructed with NO traits — should still see the parent's registry
-        # when run as a subflow under the parent runtime.
-        child = Flow(make_test_logger(), name="child").call(inner)
-        parent = Flow(make_test_logger(), saia_factory=StubFactory(), traits=parent_registry).call(
-            child
-        )
-        result = asyncio.run(parent.run())
-        assert result is memory
+        child = Flow(LG, name="child").call(inner)
+        assert await runner.start(_flow().call(child)) is memory
 
 
-class TestBackwardCompatibility:
-    """Existing code paths that never touch traits remain unchanged."""
+class TestSAIA:
+    """``ctx.saia`` comes from the environment, one per role, shared by the runs that share it."""
 
-    def test_run_without_traits_matches_prior_behavior(self) -> None:
-        """A flow built the pre-seam way runs identically."""
+    async def test_runs_sharing_an_environment_share_a_role_s_saia(self) -> None:
+        factory = StubFactory()
+        runner = FlowRunner(LG, env=Environment(saia_factory=factory))
 
         @verb(role=ROLE_A)
-        async def echo(ctx: Any, value: str) -> str:
-            assert ctx.traits is None
-            return value
+        async def get(ctx: Any) -> Any:
+            return ctx.saia
 
-        flow = Flow(make_test_logger(), saia_factory=StubFactory()).call(echo)
-        assert asyncio.run(flow.run("hello")) == "hello"
+        flow = _flow().call(get)
+        first, second = await runner.start(flow), await runner.start(_flow().call(get))
+        assert first is second
+        assert factory.built_for == [ROLE_A]
 
-    def test_missing_trait_via_require_raises(self) -> None:
-        """require() on an unregistered trait type raises TraitNotFoundError."""
-        registry = _fresh_registry()
+    async def test_another_environment_builds_its_own(self) -> None:
+        factory = StubFactory()
 
         @verb(role=ROLE_A)
-        async def demand(ctx: Any) -> None:
-            ctx.traits.require(_MemoryStub)
+        async def get(ctx: Any) -> Any:
+            return ctx.saia
 
-        flow = Flow(make_test_logger(), saia_factory=StubFactory(), traits=registry).call(demand)
-        with pytest.raises(TraitNotFoundError, match="_MemoryStub"):
-            asyncio.run(flow.run())
+        flow = _flow().call(get)
+        a = await FlowRunner(LG, env=Environment(saia_factory=factory)).start(flow)
+        b = await FlowRunner(LG, env=Environment(saia_factory=factory)).start(flow)
+        assert a is not b
+        assert factory.built_for == [ROLE_A, ROLE_A]
+
+    async def test_a_role_bound_verb_without_a_saia_factory_raises_at_ctx_saia(self) -> None:
+        @verb(role=ROLE_A)
+        async def get(ctx: Any) -> Any:
+            return ctx.saia
+
+        with pytest.raises(RuntimeError, match="no SAIAFactory .* role 'a'"):
+            await FlowRunner(LG).start(_flow().call(get))
+
+    def test_the_runner_exposes_its_environment(self) -> None:
+        env = Environment()
+        assert FlowRunner(LG, env=env).env is env
+        assert isinstance(FlowRunner(LG).env, Environment)

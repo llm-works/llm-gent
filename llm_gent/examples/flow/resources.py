@@ -48,9 +48,11 @@ from llm_gent.flow import (
     Context,
     Flow,
     Factory,
+    FlowRunner,
     Interrupted,
     Resource,
     ResourceKey,
+    Resume,
     resource_method,
     verb,
 )
@@ -129,18 +131,22 @@ async def main() -> int:
     """Run 1 halts mid-map; run 2 resumes it."""
     lg = quick_console_logger("resources-example", config={"level": "warning"})
     store = MemoryStore(lg)
-    ff = Factory(lg, flow_class=MyFlow, checkpoint_store=store)
+    ff = Factory(lg, flow_class=MyFlow)
+    runner = FlowRunner(lg, store=store)
 
     print("--- Run 1: halts once every document is fetched ---")
     stats1 = Stats()
-    result1 = await build(ff, stats1, arm=True).run(halt=asyncio.Event(), history="docs")
+    result1 = await runner.start(build(ff, stats1, arm=True), halt=asyncio.Event(), history="docs")
     assert result1 is HALTED
     print(f"halted with tallies {dict(stats1.tallies)}")
 
-    print("\n--- Run 2: fresh flow and Stats, resume='latest' ---")
+    print("\n--- Run 2: fresh flow and Stats, Resume('latest') ---")
     stats2 = Stats()
-    scores = await build(ff, stats2, arm=False).run(
-        halt=asyncio.Event(), history="docs", resume="latest"
+    scores = await runner.start(
+        build(ff, stats2, arm=False),
+        halt=asyncio.Event(),
+        history="docs",
+        start=Resume("latest"),
     )
     print(f"scores {scores}, tallies {dict(stats2.tallies)}")
     assert stats2.tallies == Counter(fetched=len(DOCS), scored=len(DOCS))

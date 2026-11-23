@@ -46,8 +46,8 @@ from dataclasses import dataclass
 from appinfra.log import quick_console_logger
 
 from llm_gent.examples.flow._infra import ExampleSAIA, StubSAIAFactory
-from llm_gent.core import Role
-from llm_gent.flow import Context, Factory, StateDataclass, TypeStateFactory, verb
+from llm_gent.core import Environment, Role
+from llm_gent.flow import Context, Factory, FlowRunner, StateDataclass, TypeStateFactory, verb
 
 
 MAX_ROUNDS = 5
@@ -88,8 +88,8 @@ async def answer_query(ctx: Context[VerifierState]) -> str:
     """Primary produces the initial answer.
 
     Reads the query from ``ctx.data.query`` — the run's
-    :class:`VerifierState` carries it — so ``.run()`` does not need to
-    also pass it as a positional argument.
+    :class:`VerifierState` carries it — so ``runner.start()`` does not need
+    to also pass it as a positional argument.
     """
     saia: ExampleSAIA = ctx.saia
     prompt = f"Answer this question concisely:\n{ctx.data.query}"
@@ -205,7 +205,8 @@ async def main() -> int:
     """Run the verifier flow on a canned query."""
     lg = quick_console_logger("verifier-example", config={"level": "warning"})
     saia_factory = StubSAIAFactory(_demo_scripts())
-    ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(VerifierState))
+    ff = Factory(lg, state_factory=TypeStateFactory(VerifierState))
+    runner = FlowRunner(lg, env=Environment(saia_factory=saia_factory))
 
     query = "What is the capital of France?"
     flow = ff.create("verifier")
@@ -216,7 +217,7 @@ async def main() -> int:
     )
 
     print(f"Query: {query}\n")
-    final = await flow.run(state=VerifierState(query=query))
+    final = await runner.start(flow, state=VerifierState(query=query))
     print("\n=== converged ===")
     print(f"final answer: {final}")
     print(f"rounds run:   {len(saia_factory.instance('judge').call_log)}")

@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from llm_gent.core import Role
-from llm_gent.flow import HALTED, Context, Factory, Flow, Interrupted, Loop, verb
+from llm_gent.flow import HALTED, Context, Flow, Interrupted, Loop, Resume, verb
 from llm_gent.flow.hooks import (
     CheckpointEvent,
     Hook,
@@ -24,7 +24,7 @@ from llm_gent.flow.hooks import (
     StepEvent,
     Where,
 )
-from tests.helpers import memory_store
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import make_ff, make_test_logger
 
@@ -92,7 +92,7 @@ async def double(ctx: Context[dict[str, Any]], x: int) -> int:
 
 
 def _flow(store: Any = None) -> Flow:
-    return Factory(make_test_logger(), checkpoint_store=store).create()
+    return TestFactory(make_test_logger(), checkpoint_store=store).create()
 
 
 def _two_steps(store: Any = None) -> Flow:
@@ -102,7 +102,7 @@ def _two_steps(store: Any = None) -> Flow:
 class TestEvents:
     async def test_a_run_calls_run_and_step_events_in_order(self) -> None:
         rec = Recorder()
-        assert await _two_steps().with_hooks(rec).run(1) == 4
+        assert await run_flow(_two_steps().with_hooks(rec), 1) == 4
         assert rec.names() == [
             "before_run",
             "before_step:a",
@@ -114,7 +114,7 @@ class TestEvents:
 
     async def test_step_events_carry_inputs_result_and_outcome(self) -> None:
         rec = Recorder()
-        await _two_steps().with_hooks(rec).run(1)
+        await run_flow(_two_steps().with_hooks(rec), 1)
         a, b = rec.steps()
         assert (a.args, a.result, a.outcome) == ((1,), 2, "ok")
         assert (b.args, b.result, b.outcome) == ((2,), 4, "ok")
@@ -124,7 +124,7 @@ class TestEvents:
     async def test_steps_belong_to_the_run_and_nested_steps_to_their_step(self) -> None:
         rec = Recorder()
         inner = _flow().call(add_one, name="inner")
-        await _flow().call(inner, name="outer").with_hooks(rec).run(1)
+        await run_flow(_flow().call(inner, name="outer").with_hooks(rec), 1)
         run = rec.events[0]
         outer = next(e for e in rec.steps() if e.where.step_name == "outer")
         nested = next(e for e in rec.steps() if e.where.step_name == "inner")
@@ -135,8 +135,8 @@ class TestEvents:
 
     async def test_each_execution_is_its_own_activity(self) -> None:
         rec = Recorder()
-        await (
-            _flow().iterate(_flow().call(add_one, name="body"), max_iters=3).with_hooks(rec).run(0)
+        await run_flow(
+            _flow().iterate(_flow().call(add_one, name="body"), max_iters=3).with_hooks(rec), 0
         )
         bodies = [e for e in rec.steps() if e.where.step_name == "body"]
         assert len({e.activity_id for e in bodies}) == 3
@@ -149,7 +149,7 @@ class TestEvents:
 
         rec = Recorder()
         with pytest.raises(ValueError):
-            await _flow().call(boom, name="boom").with_hooks(rec).run(1)
+            await run_flow(_flow().call(boom, name="boom").with_hooks(rec), 1)
         (step,) = rec.steps()
         assert step.outcome == "failed" and isinstance(step.error, ValueError)
         assert rec.events[-1].name == "after_run"
@@ -162,7 +162,7 @@ class TestEvents:
 
         rec = Recorder()
         with pytest.raises(asyncio.CancelledError):
-            await _flow().call(cancelled, name="c").with_hooks(rec).run(1)
+            await run_flow(_flow().call(cancelled, name="c").with_hooks(rec), 1)
         (step,) = rec.steps()
         assert step.outcome == "cancelled" and isinstance(step.error, asyncio.CancelledError)
         run = rec.events[-1]
@@ -176,7 +176,7 @@ class TestEvents:
 
         rec = Recorder()
         with pytest.raises(RuntimeError, match="while no halt is set") as raised:
-            await _flow().call(stray, name="s").with_hooks(rec).run(1)
+            await run_flow(_flow().call(stray, name="s").with_hooks(rec), 1)
         (step,) = rec.steps()
         assert step.outcome == "failed" and step.error is raised.value
 
@@ -189,7 +189,7 @@ class TestEvents:
         monkeypatch.setattr("llm_gent.flow.run._flow_run.apply_clean_exit_retention", raises)
         rec = Recorder()
         with pytest.raises(OSError, match="store unavailable"):
-            await _two_steps().with_hooks(rec).run(1)
+            await run_flow(_two_steps().with_hooks(rec), 1)
         run = rec.events[-1]
         assert isinstance(run, RunEvent) and run.name == "after_run"
         assert run.outcome == "failed" and isinstance(run.error, OSError)
@@ -199,7 +199,7 @@ class TestAttachment:
     async def test_hooks_on_a_subflow_see_only_its_steps(self) -> None:
         rec = Recorder()
         inner = _flow().call(add_one, name="inner").with_hooks(rec)
-        await _flow().call(inner, name="outer").then(double, name="after").run(1)
+        await run_flow(_flow().call(inner, name="outer").then(double, name="after"), 1)
         assert rec.names() == ["before_step:inner", "after_step:inner"]
 
     async def test_inherited_hooks_run_outside_the_local_ones(self) -> None:
@@ -218,13 +218,13 @@ class TestAttachment:
                     order.append(f"after {self.name}")
 
         inner = _flow().call(add_one, name="inner").with_hooks(Named("local"))
-        await _flow().call(inner).with_hooks(Named("inherited")).run(1)
+        await run_flow(_flow().call(inner).with_hooks(Named("inherited")), 1)
         assert order == ["before inherited", "before local", "after local", "after inherited"]
 
     async def test_replace_drops_the_inherited_hooks(self) -> None:
         outer_rec, inner_rec = Recorder(), Recorder()
         inner = _flow().call(add_one, name="inner").with_hooks(inner_rec, replace=True)
-        await _flow().call(inner, name="outer").with_hooks(outer_rec).run(1)
+        await run_flow(_flow().call(inner, name="outer").with_hooks(outer_rec), 1)
         assert "before_step:inner" not in outer_rec.names()
         assert "before_step:inner" in inner_rec.names()
 
@@ -237,7 +237,9 @@ class TestAttachment:
                 return self
 
         body = _flow().call(add_one, name="body")
-        await _flow().map(body, items=lambda _prev, _ctx: [1, 2, 3]).with_hooks(PerItem()).run(0)
+        await run_flow(
+            _flow().map(body, items=lambda _prev, _ctx: [1, 2, 3]).with_hooks(PerItem()), 0
+        )
         assert len(wheres) == 3
         assert len({w.scope_path for w in wheres}) == 3
 
@@ -250,7 +252,7 @@ class TestAttachment:
             found.extend([ctx.hook(Recorder), ctx.hook(Gate)])
             return x
 
-        await _flow().call(look).with_hooks(rec).run(1)
+        await run_flow(_flow().call(look).with_hooks(rec), 1)
         assert found == [rec, None]
 
 
@@ -260,7 +262,7 @@ class TestVerdicts:
         flow = _two_steps().with_hooks(gate, rec)
         state: dict[str, Any] = {}
         with pytest.raises(HookDenied, match="not allowed"):
-            await flow.run(1, state=state)
+            await run_flow(flow, 1, state=state)
         b = next(e for e in rec.steps() if e.where.step_name == "b")
         assert b.outcome == "denied" and b.decision is not None
         assert b.decision.reason == "not allowed"
@@ -273,7 +275,7 @@ class TestVerdicts:
             .call(add_one, name="a", rescue=lambda _exc, _pending, _ctx: -1)
             .with_hooks(gate, rec)
         )
-        assert await flow.run(1) == -1
+        assert await run_flow(flow, 1) == -1
         (a,) = rec.steps()
         assert a.outcome == "denied" and a.result == -1
 
@@ -284,7 +286,7 @@ class TestVerdicts:
         rec, gate = Recorder(), Gate({"a": False})
         flow = _flow().call(add_one, name="a", rescue=cancel).with_hooks(gate, rec)
         with pytest.raises(asyncio.CancelledError):
-            await flow.run(1)
+            await run_flow(flow, 1)
         (a,) = rec.steps()
         assert a.outcome == "cancelled" and a.decision is not None
 
@@ -296,18 +298,18 @@ class TestVerdicts:
             return _two_steps(store).with_hooks(gate)
 
         rec = Recorder()
-        assert await flow().with_hooks(rec).run(1, halt=halt, history="paused") is HALTED
+        assert await run_flow(flow().with_hooks(rec), 1, halt=halt, history="paused") is HALTED
         b = next(e for e in rec.steps() if e.where.step_name == "b")
         assert b.outcome == "paused"
         halt.clear()
         gate.verdicts.clear()  # approved
-        assert await flow().run(history="paused", resume="latest", halt=halt) == 4
+        assert await run_flow(flow(), history="paused", start=Resume("latest"), halt=halt) == 4
         assert gate.asked == ["a", "b", "b"]
 
     async def test_a_pause_without_a_halt_raises(self) -> None:
         flow = _two_steps().with_hooks(Gate({"a": Pause()}))
         with pytest.raises(RuntimeError, match="no halt"):
-            await flow.run(1)
+            await run_flow(flow, 1)
 
     async def test_before_run_can_deny_or_pause_the_run(self) -> None:
         class RunGate(Hook):
@@ -319,9 +321,9 @@ class TestVerdicts:
 
         rec = Recorder()
         with pytest.raises(HookDenied):
-            await _two_steps().with_hooks(RunGate("closed"), rec).run(1)
+            await run_flow(_two_steps().with_hooks(RunGate("closed"), rec), 1)
         assert rec.names() == ["after_run"]
-        assert await _two_steps().with_hooks(RunGate(Pause())).run(1) is HALTED
+        assert await run_flow(_two_steps().with_hooks(RunGate(Pause())), 1) is HALTED
 
 
 class TestCheckpoints:
@@ -336,7 +338,7 @@ class TestCheckpoints:
 
         rec = Recorder()
         flow = _flow(store).with_checkpointer().call(save).with_hooks(rec)
-        await flow.run(1, history="cp")
+        await run_flow(flow, 1, history="cp")
         commits = [e for e in rec.events if isinstance(e, CheckpointEvent)]
         assert [c.commit_id for c in commits][0] == hashes[0]
         assert [c.outcome for c in commits] == ["ok", "ok"]  # save point, final state
@@ -352,7 +354,7 @@ class TestCheckpoints:
 
         rec = Recorder()
         flow = _flow(store).call(stop).then(add_one).with_hooks(rec)
-        assert await flow.run(1, halt=halt, history="halt") is HALTED
+        assert await run_flow(flow, 1, halt=halt, history="halt") is HALTED
         (commit,) = [e for e in rec.events if isinstance(e, CheckpointEvent)]
         assert commit.outcome == "halted"
         assert commit.parent_activity_id == commit.run.run_id
@@ -372,9 +374,9 @@ class TestCheckpoints:
             return _flow(store).call(stop).then(add_one).with_hooks(rec)
 
         first, second = Recorder(), Recorder()
-        await flow(first).run(1, halt=halt, history="resumed")
+        await run_flow(flow(first), 1, halt=halt, history="resumed")
         halt.clear()
-        await flow(second).run(history="resumed", resume="latest", halt=halt)
+        await run_flow(flow(second), history="resumed", start=Resume("latest"), halt=halt)
         (halt_commit,) = [e for e in first.events if isinstance(e, CheckpointEvent)]
         assert second.events[0].run.resumed_from == halt_commit.commit_id
         assert first.events[0].run.resumed_from is None
@@ -425,7 +427,7 @@ class TestLLMCalls:
 
         loop = Loop(Role(name="worker"), conversation_factory=Conversations())  # type: ignore[arg-type]
         flow = make_ff(_Factory()).create()
-        await flow.call(loop, name="work").with_hooks(rec, Snapshot()).run("go")
+        await run_flow(flow.call(loop, name="work").with_hooks(rec, Snapshot()), "go")
         calls = [e for e in rec.events if isinstance(e, LLMCallEvent)]
         step = next(e for e in rec.steps() if e.where.step_name == "work")
         assert [c.response.content for c in calls] == ["turn-0", "turn-1"]

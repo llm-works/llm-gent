@@ -27,7 +27,7 @@ import pytest
 from appinfra.cas import MemoryStore, Tree
 
 from llm_gent.core import Role
-from llm_gent.flow import FlowCommit
+from llm_gent.flow import FlowCommit, Resume
 from llm_gent.flow.checkpoint import HEAD_REF, ConcurrentWriteError
 from llm_gent.flow.run._checkpoint_ctx import CheckpointContext
 from llm_gent.flow.structure import Structure
@@ -35,7 +35,7 @@ from llm_gent.flow.testing.checkpoint import (
     assert_resume_determinism,
     build_canonical_flow,
 )
-from tests.helpers import memory_store
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import commit_ids, head_commit, make_test_logger, read_commit
 
@@ -172,16 +172,20 @@ def store() -> MemoryStore:
 class TestFreshRunSaves:
     async def test_saves_a_commit_per_iteration(self, store: MemoryStore) -> None:
         """Each successful iterate iteration writes a commit + ref."""
-        await build_canonical_flow(make_test_logger(), max_iters=3, store=store).run(
-            history="freshrun"
+        await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=3, checkpointed=True),
+            history="freshrun",
+            store=store,
         )
         # A resolvable ref exists — the history reached at least one commit.
         assert store.repo("freshrun").get_ref(HEAD_REF) is not None
 
     async def test_default_retention_keeps_history_on_success(self, store: MemoryStore) -> None:
         """retention="retain" (default): clean-exit does NOT delete the history."""
-        await build_canonical_flow(make_test_logger(), max_iters=2, store=store).run(
-            history="retain-1"
+        await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=2, checkpointed=True),
+            history="retain-1",
+            store=store,
         )
         # Successful run — but retention="retain" so the ref survives.
         assert store.repo("retain-1").get_ref(HEAD_REF) is not None
@@ -195,8 +199,11 @@ class TestFreshRunSaves:
 class TestRetention:
     async def test_gc_on_success_deletes_the_history(self, store: MemoryStore) -> None:
         """retention="gc_on_success": clean-exit deletes the history's repository."""
-        await build_canonical_flow(make_test_logger(), max_iters=2, store=store).run(
-            history="gc-1", retention="gc_on_success"
+        await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=2, checkpointed=True),
+            history="gc-1",
+            retention="gc_on_success",
+            store=store,
         )
         assert "gc-1" not in store.list_repos()
 
@@ -204,12 +211,18 @@ class TestRetention:
         """A halt-triggered exit preserves the history even under gc_on_success —
         the framework only deletes it on fully successful runs.
         """
-        await build_canonical_flow(
-            make_test_logger(),
-            max_iters=5,
-            halt_after_iteration=2,
+        await run_flow(
+            build_canonical_flow(
+                make_test_logger(),
+                max_iters=5,
+                halt_after_iteration=2,
+                checkpointed=True,
+            ),
+            halt=asyncio.Event(),
+            history="halt-preserve",
+            retention="gc_on_success",
             store=store,
-        ).run(halt=asyncio.Event(), history="halt-preserve", retention="gc_on_success")
+        )
         assert store.repo("halt-preserve").get_ref(HEAD_REF) is not None
 
 
@@ -242,12 +255,12 @@ class TestCheckpointPolicyIterate:
         body.call(bump)
 
         outer = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .iterate(body, max_iters=5)
         )
-        await outer.run(state={"n": 0}, history="policy-halt-only")
+        await run_flow(outer, state={"n": 0}, history="policy-halt-only")
 
         # Every commit written during the run has node_path == "$end"
         # (only the clean-exit final-state commit fires under the default
@@ -276,13 +289,13 @@ class TestCheckpointPolicyIterate:
         body.call(bump)
 
         outer = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_iterate=True)
             .iterate(body, max_iters=3)
         )
-        await outer.run(state={"n": 0}, history="policy-on-iter")
+        await run_flow(outer, state={"n": 0}, history="policy-on-iter")
 
         # Under on_iterate=True the iterate boundary emits a commit each
         # iteration + a $end final-state commit on clean exit. Group commit
@@ -313,12 +326,12 @@ class TestCheckpointPolicyMap:
         body.call(touch)
 
         outer = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .map(body, items=lambda _p, _c: [1, 2, 3])
         )
-        await outer.run(history="map-default")
+        await run_flow(outer, history="map-default")
 
         node_paths = {c.meta.node_path for c in stored_commits(store, "map-default")}
         assert node_paths == {"$end"}, (
@@ -343,13 +356,13 @@ class TestCheckpointPolicyMap:
         body.call(touch)
 
         outer = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(body, items=lambda _p, _c: [1, 2, 3])
         )
-        await outer.run(history="map-on-item")
+        await run_flow(outer, history="map-on-item")
 
         iterations_at_map_path: dict[str, list[int]] = {}
         for commit in stored_commits(store, "map-on-item"):
@@ -366,7 +379,7 @@ class TestCheckpointPolicyMap:
         self, store: MemoryStore
     ) -> None:
         """A per-item commit that fails rolls the merge back to the prior state, not to empty."""
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         fail_first_commit(store)
 
@@ -380,7 +393,7 @@ class TestCheckpointPolicyMap:
             return dict(ctx.state.data)
 
         outer = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
@@ -393,7 +406,7 @@ class TestCheckpointPolicyMap:
             )
             .call(read_state)
         )
-        assert await outer.run(state={"total": 1}, history="map-rollback") == {"total": 1}
+        assert await run_flow(outer, state={"total": 1}, history="map-rollback") == {"total": 1}
 
     async def test_failed_item_commit_without_state_keeps_sibling_writes(
         self, store: MemoryStore
@@ -403,7 +416,7 @@ class TestCheckpointPolicyMap:
         Item 0's commit fails while item 1 has not finished writing.
         Restoring a pre-merge snapshot would drop item 1's write.
         """
-        from llm_gent.flow import Context, Factory, History, verb
+        from llm_gent.flow import Context, History, verb
 
         fail_first_commit(store)
 
@@ -417,13 +430,13 @@ class TestCheckpointPolicyMap:
 
         state: dict[str, Any] = {}
         outer = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(lambda b: b.call(mark), items=lambda _p, _c: [0, 1], strict=False)
         )
-        await outer.run(state=state, history="map-siblings")
+        await run_flow(outer, state=state, history="map-siblings")
         assert state == {"s0": True, "s1": True}
         history = History(store, "map-siblings")
         head = await history.head()
@@ -451,12 +464,13 @@ class TestCommitConsistency:
 
         sub = Factory(make_test_logger()).create()
         sub.map(lambda b: b.call(bump), items=lambda _p, _c: list(range(6)))
-        await (
-            Factory(make_test_logger(), checkpoint_store=store)
+        await run_flow(
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
-            .call(sub, state=lambda p: {"n": p["n"]})
-            .run(state={"n": 0}, history="one-moment")
+            .call(sub, state=lambda p: {"n": p["n"]}),
+            state={"n": 0},
+            history="one-moment",
         )
         history = History(store, "one-moment")
         snapshots = [await history.snapshot(commit) async for commit in history.commits()]
@@ -474,7 +488,7 @@ class TestCheckpointedRunValues:
     """
 
     async def test_app_object_passed_between_steps(self, store: MemoryStore) -> None:
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         @verb
         async def make(ctx: Context[dict[str, Any]]) -> AppHandle:
@@ -485,17 +499,17 @@ class TestCheckpointedRunValues:
             return handle.qid
 
         flow = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .call(make)
             .call(read)
         )
-        assert await flow.run(history="app-object") == 7
+        assert await run_flow(flow, history="app-object") == 7
 
     async def test_non_strict_guarded_map_of_app_objects(self, store: MemoryStore) -> None:
         """Items that fail, are skipped by the guard, or return app objects all reach the next step."""
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         @verb
         async def dispatch(ctx: Context[dict[str, Any]], t: Target) -> AppHandle:
@@ -508,7 +522,7 @@ class TestCheckpointedRunValues:
             return [type(o).__name__ for o in outcomes]
 
         flow = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .map(
@@ -519,10 +533,10 @@ class TestCheckpointedRunValues:
             .guard(lambda t, _c: t.qid != 3)
             .call(kinds)
         )
-        assert await flow.run(history="targets") == ["AppHandle", "Failure", "Skipped"]
+        assert await run_flow(flow, history="targets") == ["AppHandle", "Failure", "Skipped"]
 
     async def test_non_strict_map_with_a_failed_item(self, store: MemoryStore) -> None:
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         @verb
         async def double(ctx: Context[dict[str, Any]], x: int) -> int:
@@ -535,13 +549,13 @@ class TestCheckpointedRunValues:
             return [r if isinstance(r, int) else "failed" for r in results]
 
         flow = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .map(lambda b: b.call(double), items=lambda _p, _c: [1, 2, 3], strict=False)
             .call(summarize)
         )
-        assert await flow.run(history="failed-item") == [2, "failed", 6]
+        assert await run_flow(flow, history="failed-item") == [2, "failed", 6]
 
 
 class TestCtxCheckpoint:
@@ -554,7 +568,7 @@ class TestCtxCheckpoint:
         boundary save fires; the only commit besides the final-state one
         that exists is the one the verb explicitly requested.
         """
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         @verb
         async def saver(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
@@ -563,12 +577,12 @@ class TestCtxCheckpoint:
             return 42
 
         outer = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .call(saver)
         )
-        await outer.run(history="ctx-ckpt")
+        await run_flow(outer, history="ctx-ckpt")
 
         # Two commits total: one from the explicit ctx.checkpoint() (verb's
         # chain-step node) + one $end final-state commit on clean exit.
@@ -581,7 +595,7 @@ class TestCtxCheckpoint:
 
     async def test_unchanged_state_is_not_put_again(self, store: MemoryStore) -> None:
         """Two checkpoints of the same state put its blob and tree once; only the commits differ."""
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         puts: list[str] = []
         original = store.write_object
@@ -597,12 +611,13 @@ class TestCtxCheckpoint:
             await ctx.checkpoint()
             await ctx.checkpoint()
 
-        await (
-            Factory(make_test_logger(), checkpoint_store=store)
+        await run_flow(
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
-            .call(save_twice)
-            .run(state={"n": 1}, history="no-reput")
+            .call(save_twice),
+            state={"n": 1},
+            history="no-reput",
         )
         assert len(puts) == len(set(puts))
 
@@ -619,7 +634,7 @@ class TestCtxCheckpoint:
             await ctx.checkpoint()  # no checkpointer wired — must not raise
 
         flow = Factory(make_test_logger()).create().call(saver)
-        await flow.run()
+        await run_flow(flow)
         assert called == 1
 
 
@@ -628,7 +643,7 @@ class TestPausedTurnInSnapshot:
 
     async def test_halt_commit_holds_paused_turn_at_the_call_path(self, store: MemoryStore) -> None:
         """Loop paused mid-turn → the snapshot holds its task + conversation at ``<step>/t/0``."""
-        from llm_gent.flow import Context, Factory, History, Loop, verb
+        from llm_gent.flow import Context, History, Loop, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -663,9 +678,11 @@ class TestPausedTurnInSnapshot:
         async def after(ctx: Context, _prev: Any = None) -> str:
             return "not run"
 
-        ff = Factory(make_test_logger(), saia_factory=_PausingSAIAFactory(), checkpoint_store=store)
+        ff = TestFactory(
+            make_test_logger(), saia_factory=_PausingSAIAFactory(), checkpoint_store=store
+        )
         flow = ff.create().with_checkpointer().call(run_loop).then(after)
-        await flow.run(halt=halt, history="paused-turn-1")
+        await run_flow(flow, halt=halt, history="paused-turn-1")
 
         commit = head_commit(store, "paused-turn-1")
         assert commit.meta.outcome == "halted"
@@ -683,7 +700,7 @@ class TestPausedTurnInSnapshot:
         Loop B then sets the halt and completes, so the halt commit's
         cursor is at the step after B and holds no paused turn.
         """
-        from llm_gent.flow import Context, Factory, History, Loop, verb
+        from llm_gent.flow import Context, History, Loop, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -722,9 +739,9 @@ class TestPausedTurnInSnapshot:
         async def after(ctx: Context, _prev: Any = None) -> str:
             return "not run"
 
-        ff = Factory(make_test_logger(), checkpoint_store=store)
+        ff = TestFactory(make_test_logger(), checkpoint_store=store)
         flow = ff.create().with_checkpointer().call(run_a).then(run_b).then(after)
-        await flow.run(halt=halt, history="paused-turn-multi")
+        await run_flow(flow, halt=halt, history="paused-turn-multi")
 
         commit = head_commit(store, "paused-turn-multi")
         assert commit.meta.outcome == "halted"
@@ -771,14 +788,17 @@ class TestPausedTurnInSnapshot:
 
         # ---- Run 1: iterate iteration 0 halts mid-Loop-turn.
         halt1 = asyncio.Event()
-        ff1 = Factory(
+        ff1 = TestFactory(
             make_test_logger(),
             saia_factory=PhaseFactory(halt1, "first", complete_calls),
             checkpoint_store=store,
         )
         flow1 = ff1.create().with_checkpointer().iterate(body, max_iters=2)
-        await flow1.run(
-            halt=halt1, history="resume-round-trip", extra={"conv": Conv(messages=["from-turn-1"])}
+        await run_flow(
+            flow1,
+            halt=halt1,
+            history="resume-round-trip",
+            extra={"conv": Conv(messages=["from-turn-1"])},
         )
         assert [c["phase"] for c in complete_calls] == ["first"]
 
@@ -788,16 +808,17 @@ class TestPausedTurnInSnapshot:
         # conversation — the resume path must override it with the rebuilt
         # one from the halted commit.
         halt2 = asyncio.Event()
-        ff2 = Factory(
+        ff2 = TestFactory(
             make_test_logger(),
             saia_factory=PhaseFactory(halt2, "resume", complete_calls),
             checkpoint_store=store,
         )
         flow2 = ff2.create().with_checkpointer().iterate(body, max_iters=2)
-        await flow2.run(
+        await run_flow(
+            flow2,
             halt=halt2,
             history="resume-round-trip",
-            resume="latest",
+            start=Resume("latest"),
             extra={"conv": Conv(messages=["caller-supplied-but-overridden"])},
         )
 
@@ -810,7 +831,7 @@ class TestPausedTurnInSnapshot:
 
     async def test_chain_resume_re_dispatches_paused_loop_verb(self, store: MemoryStore) -> None:
         """Chain flow with Loop verb: halt on turn 1 → resume re-runs the loop verb."""
-        from llm_gent.flow import Context, Factory, Loop, verb
+        from llm_gent.flow import Context, Loop, verb
 
         role = Role(name="r", backend="openai", model="gpt-4o-mini")
 
@@ -831,13 +852,14 @@ class TestPausedTurnInSnapshot:
         # commit lands at run_loop's node (not after_step's) so resume re-runs
         # the loop verb.
         halt1 = asyncio.Event()
-        ff1 = Factory(
+        ff1 = TestFactory(
             make_test_logger(),
             saia_factory=PhaseFactory(halt1, "first", complete_calls),
             checkpoint_store=store,
         )
         flow1 = ff1.create().with_checkpointer().call(run_loop).then(after_step)
-        await flow1.run(
+        await run_flow(
+            flow1,
             halt=halt1,
             history="chain-resume",
             extra={"task": "saved-task", "conv": Conv(messages=["turn-1"])},
@@ -847,16 +869,17 @@ class TestPausedTurnInSnapshot:
         # Run 2: resume. Loop is re-dispatched, consumes paused_turn, SAIA
         # completes non-paused, chain moves on to after_step.
         halt2 = asyncio.Event()
-        ff2 = Factory(
+        ff2 = TestFactory(
             make_test_logger(),
             saia_factory=PhaseFactory(halt2, "resume", complete_calls),
             checkpoint_store=store,
         )
         flow2 = ff2.create().with_checkpointer().call(run_loop).then(after_step)
-        result = await flow2.run(
+        result = await run_flow(
+            flow2,
             halt=halt2,
             history="chain-resume",
-            resume="latest",
+            start=Resume("latest"),
             # Caller passes DIFFERENT task + conv on run 2 to prove the resume
             # path forwards the SAVED values from the envelope, not the ones
             # the verb happened to hand this dispatch.
@@ -923,7 +946,7 @@ class TestSaveOnHaltChain:
         self, store: MemoryStore
     ) -> None:
         """Chain flow with no iterate: halt set by step b → commit at c; resume lands at c."""
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         halt = asyncio.Event()
 
@@ -945,9 +968,9 @@ class TestSaveOnHaltChain:
             ctx.state.data["c"] = ctx.state.data["b"] + 1
             return ctx.state.data["c"]
 
-        ff = Factory(make_test_logger(), checkpoint_store=store)
+        ff = TestFactory(make_test_logger(), checkpoint_store=store)
         pre = ff.create().with_checkpointer().call(step_a).then(step_b).then(step_c)
-        await pre.run(halt=halt, history="chain-halt")
+        await run_flow(pre, halt=halt, history="chain-halt")
 
         commit = head_commit(store, "chain-halt")
         assert commit.meta.outcome == "halted"
@@ -958,7 +981,7 @@ class TestSaveOnHaltChain:
 
         halt.clear()
         resume = ff.create().with_checkpointer().call(step_a).then(step_b).then(step_c)
-        result = await resume.run(history="chain-halt", resume="latest")
+        result = await run_flow(resume, history="chain-halt", start=Resume("latest"))
         # step_c ran on resume; a and b restored from the halt commit.
         assert result == 3
 
@@ -981,13 +1004,13 @@ class TestSaveOnHaltChain:
         # No .with_checkpointer — halt check fires between chain steps but
         # _save_halt_checkpoint short-circuits at frame.checkpoint_ctx is None.
         # Run should complete without raising.
-        await flow.run(halt=halt)
+        await run_flow(flow, halt=halt)
 
     async def test_halt_before_branch_with_plain_verb_resumes_at_branch(
         self, store: MemoryStore
     ) -> None:
         """Halt before a Branch containing only plain verbs → resume runs the branch."""
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         halt = asyncio.Event()
 
@@ -1009,7 +1032,7 @@ class TestSaveOnHaltChain:
             ctx.state.data["c"] = prev + 100
             return ctx.state.data["c"]
 
-        ff = Factory(make_test_logger(), checkpoint_store=store)
+        ff = TestFactory(make_test_logger(), checkpoint_store=store)
         pre = (
             ff.create()
             .with_checkpointer()
@@ -1017,7 +1040,7 @@ class TestSaveOnHaltChain:
             .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
             .then(step_c)
         )
-        await pre.run(halt=halt, history="branch-halt")
+        await run_flow(pre, halt=halt, history="branch-halt")
 
         # Halt fired after step_a, commit saved at the branch position.
         commit = head_commit(store, "branch-halt")
@@ -1032,7 +1055,7 @@ class TestSaveOnHaltChain:
             .branch(when=lambda _p, _c: True, then=lambda f: f.call(branch_verb))
             .then(step_c)
         )
-        result = await resume.run(history="branch-halt", resume="latest")
+        result = await run_flow(resume, history="branch-halt", start=Resume("latest"))
         # 1 (from restored a) + 10 (branch_verb) + 100 (step_c) = 111
         assert result == 111
 
@@ -1040,7 +1063,7 @@ class TestSaveOnHaltChain:
         self, store: MemoryStore
     ) -> None:
         """Pre-set halt + checkpointer: checkpoint saved before second step; resume runs it."""
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         halt = asyncio.Event()
         halt.set()  # Pre-set before run
@@ -1055,9 +1078,9 @@ class TestSaveOnHaltChain:
             # Reads from state — halted resume runs step_b with no prev_result
             return sum(ctx.state.data["items"])
 
-        ff = Factory(make_test_logger(), checkpoint_store=store)
+        ff = TestFactory(make_test_logger(), checkpoint_store=store)
         pre = ff.create().with_checkpointer().call(step_a).then(step_b)
-        await pre.run([1, 2, 3], halt=halt, history="pre-set-halt")
+        await run_flow(pre, [1, 2, 3], halt=halt, history="pre-set-halt")
 
         # Checkpoint saved at step_b (halt observed after step_a)
         commit = head_commit(store, "pre-set-halt")
@@ -1066,14 +1089,14 @@ class TestSaveOnHaltChain:
         # Resume with halt cleared — step_b runs, reads items from state
         halt.clear()
         resume = ff.create().with_checkpointer().call(step_a).then(step_b)
-        result = await resume.run(history="pre-set-halt", resume="latest")
+        result = await run_flow(resume, history="pre-set-halt", start=Resume("latest"))
         assert result == 6  # sum([1, 2, 3])
 
     async def test_nested_flow_halt_does_not_clobber_outer_checkpoint(
         self, store: MemoryStore
     ) -> None:
         """Nested flow's halt doesn't emit checkpoint — only outer flow does."""
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         halt = asyncio.Event()
 
@@ -1098,11 +1121,11 @@ class TestSaveOnHaltChain:
             # Reads from state — halted resume runs with no prev_result
             return ctx.state.data.get("inner_b", 0) + 1000
 
-        ff = Factory(make_test_logger(), checkpoint_store=store)
+        ff = TestFactory(make_test_logger(), checkpoint_store=store)
         inner = ff.create().call(inner_a).then(inner_b)
 
         pre = ff.create().with_checkpointer().call(outer_a).call(inner).then(outer_b)
-        await pre.run(halt=halt, history="nested-halt")
+        await run_flow(pre, halt=halt, history="nested-halt")
 
         # Checkpoint saved at outer_b (halt observed between outer's call(inner) and outer_b)
         # NOT at inner_b (nested flow's chain-walk skips halt observation)
@@ -1113,7 +1136,7 @@ class TestSaveOnHaltChain:
         halt.clear()
         inner_resume = ff.create().call(inner_a).then(inner_b)
         resume = ff.create().with_checkpointer().call(outer_a).call(inner_resume).then(outer_b)
-        result = await resume.run(history="nested-halt", resume="latest")
+        result = await run_flow(resume, history="nested-halt", start=Resume("latest"))
         # inner_b ran before halt (state has inner_b=111), outer_b adds 1000
         assert result == 1111
 
@@ -1128,12 +1151,13 @@ class TestSaveOnHaltIterate:
 
         halt = asyncio.Event()
         halt.set()  # halt observed on the first loop-top check, before any body run.
-        await build_canonical_flow(
+        flow = build_canonical_flow(
             make_test_logger(),
             max_iters=5,
             halt_after_iteration=999,  # internal halt_check never fires; halt is pre-set externally.
-            store=store,
-        ).run(halt=halt, history="halt-iter-0")
+            checkpointed=True,
+        )
+        await run_flow(flow, halt=halt, history="halt-iter-0", store=store)
 
         commit = head_commit(store, "halt-iter-0")
         assert commit.meta.outcome == "halted"
@@ -1141,8 +1165,11 @@ class TestSaveOnHaltIterate:
 
         # Resume with halt cleared — completes the full iterate.
         halt.clear()
-        result = await build_canonical_flow(make_test_logger(), max_iters=5, store=store).run(
-            history="halt-iter-0", resume="latest"
+        result = await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=5, checkpointed=True),
+            history="halt-iter-0",
+            start=Resume("latest"),
+            store=store,
         )
         assert result["iterations_completed"] == 5
 
@@ -1152,12 +1179,17 @@ class TestSaveOnHaltIterate:
         """Halt after body N → halted commit overwrites the ok ref at iteration=N."""
 
         halt = asyncio.Event()
-        await build_canonical_flow(
-            make_test_logger(),
-            max_iters=5,
-            halt_after_iteration=2,
+        await run_flow(
+            build_canonical_flow(
+                make_test_logger(),
+                max_iters=5,
+                halt_after_iteration=2,
+                checkpointed=True,
+            ),
+            halt=halt,
+            history="halt-iter-mid",
             store=store,
-        ).run(halt=halt, history="halt-iter-mid")
+        )
 
         commit = head_commit(store, "halt-iter-mid")
         # Halt fired inside body 2's halt_check (iteration counter=2 by the time the loop-top
@@ -1167,8 +1199,11 @@ class TestSaveOnHaltIterate:
 
         # Resume completes the remaining iterations.
         halt.clear()
-        result = await build_canonical_flow(make_test_logger(), max_iters=5, store=store).run(
-            history="halt-iter-mid", resume="latest"
+        result = await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=5, checkpointed=True),
+            history="halt-iter-mid",
+            start=Resume("latest"),
+            store=store,
         )
         assert result["iterations_completed"] == 5
 
@@ -1212,8 +1247,10 @@ def _chain_from_head(store: MemoryStore, client_flow_id: str) -> list[FlowCommit
 class TestHistoryLineage:
     async def test_iterate_commits_form_one_chain(self, store: MemoryStore) -> None:
         """Per-iteration commits chain onto each other; the final-state commit is the head."""
-        await build_canonical_flow(make_test_logger(), max_iters=3, store=store).run(
-            history="lineage-iter"
+        await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=3, checkpointed=True),
+            history="lineage-iter",
+            store=store,
         )
 
         chain = _chain_from_head(store, "lineage-iter")
@@ -1235,13 +1272,13 @@ class TestHistoryLineage:
         body = Factory(make_test_logger()).create()
         body.call(touch)
         outer = (
-            Factory(make_test_logger(), checkpoint_store=store)
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
             .with_checkpoint_policy(on_map_item=True)
             .map(body, items=lambda _p, _c: [1, 2, 3, 4])
         )
-        await outer.run(history="lineage-map")
+        await run_flow(outer, history="lineage-map")
 
         chain = _chain_from_head(store, "lineage-map")
         assert {c.id for c in chain} == commit_ids(store, "lineage-map")
@@ -1251,18 +1288,26 @@ class TestHistoryLineage:
     async def test_resume_continues_the_same_history(self, store: MemoryStore) -> None:
         """A resumed run's first commit takes the halted run's last commit as parent."""
         halt = asyncio.Event()
-        await build_canonical_flow(
-            make_test_logger(),
-            max_iters=5,
-            halt_after_iteration=2,
+        await run_flow(
+            build_canonical_flow(
+                make_test_logger(),
+                max_iters=5,
+                halt_after_iteration=2,
+                checkpointed=True,
+            ),
+            halt=halt,
+            history="lineage-resume",
             store=store,
-        ).run(halt=halt, history="lineage-resume")
+        )
         halted_head = store.repo("lineage-resume").get_ref(HEAD_REF)
         assert halted_head is not None
 
         halt.clear()
-        await build_canonical_flow(make_test_logger(), max_iters=5, store=store).run(
-            history="lineage-resume", resume="latest"
+        await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=5, checkpointed=True),
+            history="lineage-resume",
+            start=Resume("latest"),
+            store=store,
         )
 
         chain = _chain_from_head(store, "lineage-resume")
@@ -1352,12 +1397,12 @@ class TestFlowRootHash:
             make_test_logger(),
             max_iters=4,
             halt_after_iteration=2,
-            store=store,
+            checkpointed=True,
         )
-        await flow.run(halt=halt, history="root-hash")
+        await run_flow(flow, halt=halt, history="root-hash", store=store)
         halt.clear()
-        resumed = build_canonical_flow(make_test_logger(), max_iters=4, store=store)
-        await resumed.run(history="root-hash", resume="latest")
+        resumed = build_canonical_flow(make_test_logger(), max_iters=4, checkpointed=True)
+        await run_flow(resumed, history="root-hash", start=Resume("latest"), store=store)
 
         chain = _chain_from_head(store, "root-hash")
         assert {c.meta.outcome for c in chain} == {"ok", "halted"}
@@ -1375,15 +1420,16 @@ class TestRunScopedCache:
             make_test_logger(),
             max_iters=4,
             halt_after_iteration=2,
-            store=store,
+            checkpointed=True,
         )
-        await flow.run(halt=halt, history="reused")
+        await run_flow(flow, halt=halt, history="reused", store=store)
         old = commit_ids(store, "reused")
         assert old
         store.delete_repo("reused")
 
         halt.clear()
-        await flow.run(halt=halt, history="reused")  # halts again, into a fresh history
+        # halts again, into a fresh history
+        await run_flow(flow, halt=halt, history="reused", store=store)
 
         history = History(store, "reused")
         head = await history.head()
@@ -1398,19 +1444,19 @@ class TestCompletionTag:
 
     async def test_unserializable_final_state_still_completes(self, store: MemoryStore) -> None:
         """A finished run whose state can't be serialized returns normally; no state is kept."""
-        from llm_gent.flow import Context, Factory, History, verb
+        from llm_gent.flow import Context, History, verb
 
         @verb
         async def attach(ctx: Context[dict[str, Any]], _prev: Any = None) -> str:
             ctx.state.data["handle"] = object()
             return "done"
 
-        result = await (
-            Factory(make_test_logger(), checkpoint_store=store)
+        result = await run_flow(
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
-            .call(attach)
-            .run(history="opaque-state")
+            .call(attach),
+            history="opaque-state",
         )
 
         assert result == "done"
@@ -1422,7 +1468,7 @@ class TestCompletionTag:
 
     async def test_final_state_commit_is_tagged_head(self, store: MemoryStore) -> None:
         """A halt-only run with no save points still leaves its final state at the head."""
-        from llm_gent.flow import Context, Factory, History, verb
+        from llm_gent.flow import Context, History, verb
         from llm_gent.flow.checkpoint import COMPLETE_TAG, COMPLETION_PRODUCER
 
         @verb
@@ -1430,12 +1476,13 @@ class TestCompletionTag:
             ctx.state.data["n"] += 1
             return ctx.state.data["n"]
 
-        await (
-            Factory(make_test_logger(), checkpoint_store=store)
+        await run_flow(
+            TestFactory(make_test_logger(), checkpoint_store=store)
             .create()
             .with_checkpointer()
-            .iterate(lambda body: body.call(bump), max_iters=3)
-            .run(state={"n": 0}, history="final-state")
+            .iterate(lambda body: body.call(bump), max_iters=3),
+            state={"n": 0},
+            history="final-state",
         )
 
         repo = store.repo("final-state")
@@ -1452,12 +1499,12 @@ class TestCompletionTag:
         """resume="latest" on a complete history runs fresh; its commits extend the history."""
         from llm_gent.flow.checkpoint import COMPLETE_TAG
 
-        flow = build_canonical_flow(make_test_logger(), max_iters=2, store=store)
-        await flow.run(history="rerun")
+        flow = build_canonical_flow(make_test_logger(), max_iters=2, checkpointed=True)
+        await run_flow(flow, history="rerun", store=store)
         repo = store.repo("rerun")
         first_end = repo.get_ref(HEAD_REF)
 
-        await flow.run(history="rerun", resume="latest")
+        await run_flow(flow, history="rerun", start=Resume("latest"), store=store)
 
         chain = _chain_from_head(store, "rerun")
         assert repo.get_ref(COMPLETE_TAG) == chain[0].id
@@ -1471,22 +1518,34 @@ class TestCompletionTag:
         from llm_gent.flow.checkpoint import COMPLETE_TAG
         from llm_gent.flow.testing.checkpoint import CanonicalCounter
 
-        await build_canonical_flow(make_test_logger(), max_iters=2, store=store).run(
-            history="tag-behind"
+        await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=2, checkpointed=True),
+            history="tag-behind",
+            store=store,
         )
         halt = asyncio.Event()
-        await build_canonical_flow(
-            make_test_logger(),
-            max_iters=5,
-            halt_after_iteration=2,
+        await run_flow(
+            build_canonical_flow(
+                make_test_logger(),
+                max_iters=5,
+                halt_after_iteration=2,
+                checkpointed=True,
+            ),
+            halt=halt,
+            history="tag-behind",
+            start=Resume("latest"),
             store=store,
-        ).run(halt=halt, history="tag-behind", resume="latest")
+        )
         repo = store.repo("tag-behind")
         assert repo.get_ref(COMPLETE_TAG) != repo.get_ref(HEAD_REF)
 
         # A fresh run would start from this fallback state (n=100); resume ignores it.
-        resumed = await build_canonical_flow(make_test_logger(), max_iters=5, store=store).run(
-            state=CanonicalCounter(n=100), history="tag-behind", resume="latest"
+        resumed = await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=5, checkpointed=True),
+            state=CanonicalCounter(n=100),
+            history="tag-behind",
+            start=Resume("latest"),
+            store=store,
         )
         # First run: 2 passes. Second run continues from its final state with its
         # own max_iters=5 and halts after its first pass; the resume runs its other 4.
@@ -1512,8 +1571,12 @@ class TestCompletionTag:
         await ctx.save_completion_commit(tree)
         assert store.repo("torn-completion").get_ref(COMPLETE_TAG) is None
 
-        result = await build_canonical_flow(make_test_logger(), max_iters=1, store=store).run(
-            state=CanonicalCounter(n=100), history="torn-completion", resume="latest"
+        result = await run_flow(
+            build_canonical_flow(make_test_logger(), max_iters=1, checkpointed=True),
+            state=CanonicalCounter(n=100),
+            history="torn-completion",
+            start=Resume("latest"),
+            store=store,
         )
         assert result["log"][0] == 8  # n=7 from $end, not the fallback n=100
 
@@ -1538,8 +1601,8 @@ class TestResumeDeterminism:
 
     async def test_resume_with_no_prior_checkpoint_starts_fresh(self, store: MemoryStore) -> None:
         """resume="latest" on a history with no ref falls back to a fresh run."""
-        flow = build_canonical_flow(make_test_logger(), max_iters=2, store=store)
-        result = await flow.run(history="never-saved", resume="latest")
+        flow = build_canonical_flow(make_test_logger(), max_iters=2, checkpointed=True)
+        result = await run_flow(flow, history="never-saved", start=Resume("latest"), store=store)
         assert result["iterations_completed"] == 2
 
     async def test_resume_after_clean_exit_starts_a_new_run_on_the_final_state(
@@ -1551,7 +1614,7 @@ class TestResumeDeterminism:
         iterate commit — would re-enter the run at that position and run
         the steps after it a second time.
         """
-        from llm_gent.flow import Context, Factory, History, verb
+        from llm_gent.flow import Context, History, verb
 
         tail_calls: list[int] = []
 
@@ -1567,20 +1630,20 @@ class TestResumeDeterminism:
 
         def _flow() -> Any:
             return (
-                Factory(make_test_logger(), checkpoint_store=store)
+                TestFactory(make_test_logger(), checkpoint_store=store)
                 .create()
                 .with_checkpointer()
                 .iterate(lambda body: body.call(bump), max_iters=3)
                 .call(tail)
             )
 
-        await _flow().run(state={"counter": 0}, history="complete-1")
+        await run_flow(_flow(), state={"counter": 0}, history="complete-1")
         assert tail_calls == [3]
         history = History(store, "complete-1")
         head = await history.head()
         assert head is not None and (await history.snapshot(head)).cursors == {}
         # A new run on the final state (counter=3): three more passes, then tail once.
-        await _flow().run(history="complete-1", resume="latest")
+        await run_flow(_flow(), history="complete-1", start=Resume("latest"))
         assert tail_calls == [3, 6], f"tail should fire once per run; got {tail_calls}"
 
     async def test_multiple_resume_boundaries(self, store: MemoryStore) -> None:
@@ -1603,7 +1666,7 @@ class TestResumeDeterminism:
         scope of its own). Without the cursor-path fix, _restore_carry would look up
         the parent's path and find nothing, causing the carry to reset to the run() arg.
         """
-        from llm_gent.flow import Context, Factory, verb
+        from llm_gent.flow import Context, verb
 
         halt = asyncio.Event()
         calls: list[tuple[int, int]] = []
@@ -1618,18 +1681,20 @@ class TestResumeDeterminism:
 
         def _flow() -> Any:
             return (
-                Factory(make_test_logger(), checkpoint_store=store)
+                TestFactory(make_test_logger(), checkpoint_store=store)
                 .create()
                 .with_checkpointer()
                 .iterate(lambda b: b.call(step), max_iters=4)
             )
 
-        await _flow().run(0, state={"iter": 0}, halt=halt, history="scopeless-carry")
+        await run_flow(_flow(), 0, state={"iter": 0}, halt=halt, history="scopeless-carry")
         assert calls == [(0, 0), (1, 10)]
 
         halt.clear()
         calls.clear()
-        result = await _flow().run(halt=halt, history="scopeless-carry", resume="latest")
+        result = await run_flow(
+            _flow(), halt=halt, history="scopeless-carry", start=Resume("latest")
+        )
         assert calls == [(2, 20), (3, 30)]
         assert result == 40
 
@@ -1646,18 +1711,18 @@ class TestResumeErrorPaths:
 
         # Seed HEAD pointing at a non-existent commit hash.
         store.write_ref("orphan-ref", HEAD_REF, "0" * 64, None)
-        flow = build_canonical_flow(make_test_logger(), max_iters=1, store=store)
+        flow = build_canonical_flow(make_test_logger(), max_iters=1, checkpointed=True)
         with pytest.raises(HistoryCorrupt, match="commit"):
-            await flow.run(history="orphan-ref", resume="latest")
+            await run_flow(flow, history="orphan-ref", start=Resume("latest"), store=store)
 
     async def test_resume_raises_when_tree_object_missing(self, store: MemoryStore) -> None:
         """Commit points at a tree that isn't stored → HistoryCorrupt, not a fresh run."""
         from llm_gent.flow import HistoryCorrupt
 
         _seed_dangling_commit(store, "orphan-tree", "d" * 64)
-        flow = build_canonical_flow(make_test_logger(), max_iters=1, store=store)
+        flow = build_canonical_flow(make_test_logger(), max_iters=1, checkpointed=True)
         with pytest.raises(HistoryCorrupt, match="tree"):
-            await flow.run(history="orphan-tree", resume="latest")
+            await run_flow(flow, history="orphan-tree", start=Resume("latest"), store=store)
 
     async def test_resume_raises_when_blob_missing(self, store: MemoryStore) -> None:
         """Tree entry references a blob that isn't stored → HistoryCorrupt, not a fresh run."""
@@ -1669,9 +1734,9 @@ class TestResumeErrorPaths:
         tree = Tree((TreeEntry("state", "blob", "c" * 64),))
         store.write_object("orphan-blob", tree.id, "tree", tree.serialize())
         _seed_dangling_commit(store, "orphan-blob", tree.id)
-        flow = build_canonical_flow(make_test_logger(), max_iters=1, store=store)
+        flow = build_canonical_flow(make_test_logger(), max_iters=1, checkpointed=True)
         with pytest.raises(HistoryCorrupt, match="blob"):
-            await flow.run(history="orphan-blob", resume="latest")
+            await run_flow(flow, history="orphan-blob", start=Resume("latest"), store=store)
 
 
 # ---------------------------------------------------------------------------
@@ -1690,7 +1755,7 @@ class TestScopedStateRoundTrip:
         inspecting the pre-resume commit's leaf blob and confirming the
         resume completes without a structural-drift error.
         """
-        from llm_gent.flow import Context, Factory, History, verb
+        from llm_gent.flow import Context, History, verb
 
         @verb
         async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
@@ -1705,11 +1770,11 @@ class TestScopedStateRoundTrip:
                 halt.set()
             return _prev
 
-        ff = Factory(make_test_logger(), checkpoint_store=store)
+        ff = TestFactory(make_test_logger(), checkpoint_store=store)
         inner = ff.create().iterate(lambda body: body.call(bump).then(maybe_halt), max_iters=5)
 
         outer_pre = ff.create().with_checkpointer().call(inner, state=lambda _p: {"counter": 0})
-        await outer_pre.run(state={"outer": True}, halt=halt, history="scoped-1")
+        await run_flow(outer_pre, state={"outer": True}, halt=halt, history="scoped-1")
 
         # The halt commit's snapshot holds the .call scope with counter=2.
         halted = await History(store, "scoped-1").head()
@@ -1721,7 +1786,7 @@ class TestScopedStateRoundTrip:
         # Resume — projected scope restores from the commit instead of
         # re-projecting to counter=0; run reaches max_iters=5 cleanly.
         outer_resume = ff.create().with_checkpointer().call(inner, state=lambda _p: {"counter": 0})
-        await outer_resume.run(history="scoped-1", resume="latest")
+        await run_flow(outer_resume, history="scoped-1", start=Resume("latest"))
 
     async def test_three_level_nested_scopes_survive_resume(self, store: MemoryStore) -> None:
         """3-level nested ``.call(state=)`` chain — intermediate scope restores.
@@ -1774,14 +1839,14 @@ class TestScopedStateRoundTrip:
             max_iters=5,
         )
 
-        ff = Factory(make_test_logger(), checkpoint_store=store)
+        ff = TestFactory(make_test_logger(), checkpoint_store=store)
         outer_pre = (
             ff.create()
             .with_checkpointer()
             .with_checkpoint_policy(on_iterate=True)
             .call(mid_flow, state=lambda _p: {})
         )
-        await outer_pre.run(state={"outer": True}, halt=halt, history="3-level-1")
+        await run_flow(outer_pre, state={"outer": True}, halt=halt, history="3-level-1")
         assert store.repo("3-level-1").get_ref(HEAD_REF) is not None
 
         # The head's snapshot holds the root, the middle (.call) scope and
@@ -1810,7 +1875,7 @@ class TestScopedStateRoundTrip:
             .with_checkpoint_policy(on_iterate=True)
             .call(mid_flow, state=lambda _p: {})
         )
-        await outer_resume.run(history="3-level-1", resume="latest")
+        await run_flow(outer_resume, history="3-level-1", start=Resume("latest"))
         # Inspect the newest commit under the iterate's node_path (the
         # final-state commit at "$end", written on clean exit, sits after it).
         final_commit = None
@@ -1834,7 +1899,7 @@ class TestScopedStateRoundTrip:
         be placed in ``child_state_data`` by ``_split_scopes`` so that
         ``_resume_iteration`` returns it correctly.
         """
-        from llm_gent.flow import Context, Factory, History, verb
+        from llm_gent.flow import Context, History, verb
 
         @verb
         async def bump(ctx: Context[dict[str, int]], _prev: Any = None) -> int:
@@ -1849,7 +1914,7 @@ class TestScopedStateRoundTrip:
                 halt.set()
             return _prev
 
-        ff = Factory(make_test_logger(), checkpoint_store=store)
+        ff = TestFactory(make_test_logger(), checkpoint_store=store)
 
         # Leaf iterate with its own state= projection (not inherited from .call)
         flow_pre = (
@@ -1861,7 +1926,7 @@ class TestScopedStateRoundTrip:
                 state=lambda _p: {"counter": 0},  # leaf iterate's own scope
             )
         )
-        await flow_pre.run(state={"root": True}, halt=halt, history="leaf-iterate-state")
+        await run_flow(flow_pre, state={"root": True}, halt=halt, history="leaf-iterate-state")
 
         # Verify the halt commit's snapshot has the iterate's scope
         history = History(store, "leaf-iterate-state")
@@ -1882,7 +1947,7 @@ class TestScopedStateRoundTrip:
                 state=lambda _p: {"counter": 0},
             )
         )
-        await flow_resume.run(history="leaf-iterate-state", resume="latest")
+        await run_flow(flow_resume, history="leaf-iterate-state", start=Resume("latest"))
 
         # Final commit should exist (run completed without structural-drift error)
         final = await history.head()

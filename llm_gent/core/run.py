@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""One run: what any execution has, whether it walks a flow or not.
+"""One run: what any execution a runner starts has, whether it walks a flow or not.
 
 A run executes in a task of its own; the caller awaits it for its result,
 holds it, or halts it. Every run reports to a logger and uses an
 :class:`~llm_gent.core.env.Environment`. What else it carries is its
-kind's: a flow run adds its signals, its history writer and its scopes.
+kind's: a flow run (:class:`llm_gent.flow.FlowRun`) adds its signals, its
+history writer and its scopes.
 """
 
 from __future__ import annotations
@@ -25,8 +26,8 @@ from .env import Environment
 class Run:
     """One execution: await it for its result, ``halt()`` it, check ``done``.
 
-    ``lg`` is the logger the run reports to and ``env`` what it may use.
-    ``halt_event`` is the event it observes to stop: set it, or call
+    ``lg`` is the logger of the runner that started it and ``env`` what it
+    may use. ``halt_event`` is the event it observes to stop: set it, or call
     :meth:`halt`. ``task`` executes the run once it has started. Cancelling
     the task that awaits the run cancels the run.
     """

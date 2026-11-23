@@ -4,14 +4,15 @@
 """One execution of a top-level Flow: the state that belongs to it, not to the flow.
 
 A :class:`~llm_gent.flow.Flow` is the structure of the work and can run
-many times at once. Everything one :meth:`~llm_gent.flow.Flow.run` call
-writes while it goes lives on its :class:`Run`: the live scopes and cursors
-its checkpoints are built from, the history writer, the signals it
-observes, where its halt was first seen and its hook bookkeeping. The run
-reaches every step through the walk's frame (``_Frame.run``).
+many times at once. Everything one run writes while it goes lives on its
+:class:`Run`: the live scopes and cursors its checkpoints are built from,
+the history writer, the signals it observes, where its halt was first seen
+and its hook bookkeeping. The run reaches every step through the walk's
+frame (``_Frame.run``).
 
 What any run has (logger, environment, halt, the task to await) is the
-generic :class:`~llm_gent.core.run.Run`; a flow run adds the rest.
+generic :class:`~llm_gent.core.run.Run`; a flow run adds the rest. It is
+what :meth:`~llm_gent.flow.FlowRunner.start` returns.
 """
 
 from __future__ import annotations
@@ -35,12 +36,15 @@ if TYPE_CHECKING:
 
 @dataclass(eq=False, kw_only=True)
 class Run(CoreRun):
-    """The state of one :meth:`~llm_gent.flow.Flow.run` call.
+    """One run of a flow: the handle :meth:`FlowRunner.start` returns, and its state.
 
-    ``flow`` is the top-level flow being run; ``lg`` and ``env`` are its
-    logger and environment. ``signals`` are the events its shortcut regions
-    observe; ``checkpoint_ctx`` writes its history, or is ``None`` without
-    a checkpoint store. ``scopes`` holds the run's live scopes and cursors.
+    ``await run`` gives the run's result (:data:`~llm_gent.flow.HALTED` when
+    the halt stopped it) or raises what the run raised.
+
+    ``flow`` is the top-level flow being run; ``lg`` and ``env`` are the
+    runner's logger and environment. ``signals`` are the events its shortcut
+    regions observe; ``checkpoint_ctx`` writes its history, or is ``None``
+    without one. ``scopes`` holds the run's live scopes and cursors.
     ``halt_at`` records where the halt was first observed, for the halt
     commit. ``hooks`` and ``info`` are the run's hook events and identity
     when any flow of the run has hooks; ``resumed_from`` is the commit the

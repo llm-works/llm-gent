@@ -200,7 +200,7 @@ def _pause(frame: _Frame, decision: Decision) -> None:
     if frame.halt is None:
         raise RuntimeError(
             f"{decision.hook} paused the run before a step, but the run has no halt: "
-            f"pass one with run(halt=...)"
+            f"pass one with start(flow, halt=...)"
         )
     frame.halt.set()
     raise Interrupted()
@@ -264,7 +264,7 @@ async def checkpoint_written(
 
 
 class RunHooks:
-    """The hooks of one :meth:`Flow.run`: builds its :class:`RunInfo`, calls the run events.
+    """The hooks of one :meth:`FlowRunner.start`: builds its :class:`RunInfo`, calls the run events.
 
     The run's info exists when any flow of the run has hooks, so hooks
     attached only to subflows still get it; ``before_run`` / ``after_run``
@@ -273,7 +273,7 @@ class RunHooks:
 
     def __init__(self, run: Run) -> None:
         flow = run.flow
-        self.hooks: Hooks | None = Hooks(flow._lg, flow._hooks) if flow._hooks else None
+        self.hooks: Hooks | None = Hooks(run.lg, flow._hooks) if flow._hooks else None
         self.info: RunInfo | None = None
         if any(f._hooks for f in iter_flows(flow)):
             ctx = run.checkpoint_ctx

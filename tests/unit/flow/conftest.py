@@ -8,9 +8,9 @@ from __future__ import annotations
 from appinfra.cas import Commit, Store
 
 from llm_gent.core import Role, SAIAFactory
-from llm_gent.flow import Factory, FlowCommit
+from llm_gent.flow import FlowCommit
 from llm_gent.flow.checkpoint import HEAD_REF
-from tests.helpers import make_test_logger
+from tests.helpers import TestFactory, make_test_logger
 
 
 ROLE_A = Role(name="a", backend="openai", model="gpt-4o-mini")
@@ -63,15 +63,15 @@ class StubFactory:
 
 def make_ff(
     saia_factory: SAIAFactory | None = None, *, checkpoint_store: Store | None = None
-) -> Factory:
-    """Return a fresh :class:`Factory` with a test logger + SAIAFactory.
+) -> TestFactory:
+    """Return a fresh :class:`TestFactory` with a test logger + SAIAFactory.
 
     Defaults to a fresh :class:`StubFactory` per call so tests that
     introspect the factory get an isolated instance. Pass ``saia_factory=``
     when the test needs to keep a reference to inspect after the run, and
     ``checkpoint_store=`` for flows whose runs keep a history.
     """
-    return Factory(
+    return TestFactory(
         make_test_logger(),
         saia_factory=saia_factory or StubFactory(),
         checkpoint_store=checkpoint_store,

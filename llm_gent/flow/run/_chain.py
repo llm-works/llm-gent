@@ -6,7 +6,7 @@
 Extracted from :class:`Flow` in :mod:`.flow`. A :class:`Chain` walks a
 Flow's ordered node list, threading each step's return into the next,
 and keeps its cursor — the step it is at and that step's input — where
-a checkpoint reads it. On ``resume="latest"`` the chain continues at the
+a checkpoint reads it. On ``Resume("latest")`` the chain continues at the
 cursor the checkpoint saved. After every step it observes the halt and,
 when set, stops: with the cursor on that step when the halt interrupted
 it, past it when the step completed. The stopped chain stays registered
@@ -80,7 +80,7 @@ class Chain:
     def cursor(self) -> dict[str, Any]:
         """The step this chain is at (its node id) and that step's input.
 
-        ``resume="latest"`` continues the chain at this step with this
+        ``Resume("latest")`` continues the chain at this step with this
         input (:meth:`_saved_step`). A step the chain stopped before also
         carries ``pending`` and the result it follows (``prev``).
         """
@@ -258,7 +258,7 @@ class Chain:
         structure decides where the run continues (an iterate's next pass,
         the parent chain's next step, or the end of the run).
 
-        The chain does not write the halt checkpoint: :meth:`Flow.run` writes
+        The chain does not write the halt checkpoint: :meth:`FlowRunner.start` writes
         it once everything has stopped, from the positions left registered.
         """
         if not is_halt_signaled(self.frame):

@@ -33,6 +33,7 @@ from llm_gent.flow import (
     verb,
 )
 from llm_gent.flow.state.snapshot import TURN
+from tests.helpers import env_of, run_flow
 
 from .conftest import ROLE_A, make_ff, make_test_logger
 
@@ -159,7 +160,7 @@ class TestFlowBodyIntegration:
         """The chain's positional reaches ``saia.complete(task, ...)``."""
         factory = _CompleteFactory()
         flow = make_ff(saia_factory=factory).create().call(Loop(ROLE_A))
-        result = await flow.run("hello")
+        result = await run_flow(flow, "hello")
         assert isinstance(result, _StubResult)
         assert factory.built[0].calls == [
             {
@@ -177,7 +178,7 @@ class TestFlowBodyIntegration:
         # Loop needs ctx.saia; a factoryless Flow raises at the accessor.
         flow = Flow(make_test_logger()).call(Loop(ROLE_A))
         with pytest.raises(RuntimeError, match="SAIAFactory"):
-            await flow.run("x")
+            await run_flow(flow, "x")
 
     def test_require_saia_raises_when_saia_is_none(self) -> None:
         """``_require_saia`` raises with informative message when ctx.saia is None."""
@@ -205,7 +206,7 @@ class TestSAIAResolution:
         factory = _CompleteFactory()
         loop = Loop(ROLE_A, saia=explicit)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert explicit.calls[0]["task"] == "t"
         assert factory.built == []  # factory never consulted
 
@@ -215,7 +216,7 @@ class TestSAIAResolution:
         explicit = _CompleteSAIA(ROLE_A)
         loop = Loop(ROLE_A, saia=explicit)
         flow = Flow(make_test_logger()).call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert explicit.calls[0]["task"] == "t"
 
     @pytest.mark.asyncio
@@ -224,7 +225,7 @@ class TestSAIAResolution:
         factory = _CompleteFactory()
         loop = Loop(ROLE_A)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert factory.built and factory.built[0].calls[0]["task"] == "t"
 
     def test_loop_factory_create_forwards_explicit_saia(self) -> None:
@@ -244,7 +245,7 @@ class TestHaltResolution:
         explicit = asyncio.Event()
         factory = _CompleteFactory()
         flow = make_ff(saia_factory=factory).create().call(Loop(ROLE_A, halt=explicit))
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert factory.built[0].calls[0]["abort_signal"] is explicit
 
     @pytest.mark.asyncio
@@ -253,7 +254,7 @@ class TestHaltResolution:
         ambient = asyncio.Event()
         factory = _CompleteFactory()
         flow = make_ff(saia_factory=factory).create().call(Loop(ROLE_A))
-        await flow.run("t", halt=ambient)
+        await run_flow(flow, "t", halt=ambient)
         assert factory.built[0].calls[0]["abort_signal"] is ambient
 
     @pytest.mark.asyncio
@@ -263,7 +264,7 @@ class TestHaltResolution:
         ambient = asyncio.Event()
         factory = _CompleteFactory()
         flow = make_ff(saia_factory=factory).create().call(Loop(ROLE_A, halt=explicit))
-        await flow.run("t", halt=ambient)
+        await run_flow(flow, "t", halt=ambient)
         assert factory.built[0].calls[0]["abort_signal"] is explicit
 
 
@@ -289,7 +290,7 @@ class TestLifecycleHooks:
 
         loop = Loop(ROLE_A, on_complete=on_complete, on_cost=on_cost)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert events == ["cost", "complete"]
 
     @pytest.mark.asyncio
@@ -306,7 +307,7 @@ class TestLifecycleHooks:
 
         loop = Loop(ROLE_A, on_executor_ready=on_ready, on_complete=on_complete)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         # on_executor_ready fires before on_complete (after saia.complete returned).
         assert events == ["ready:_CompleteSAIA", "complete"]
 
@@ -322,7 +323,7 @@ class TestLifecycleHooks:
 
         loop = Loop(ROLE_A, on_iteration=on_iter)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert turns == [(0, "turn-0"), (1, "turn-1"), (2, "turn-2")]
 
     @pytest.mark.asyncio
@@ -339,7 +340,7 @@ class TestLifecycleHooks:
 
         loop = Loop(ROLE_A, on_complete=on_complete, on_cost=on_cost)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert events == ["cost"]
 
     @pytest.mark.asyncio
@@ -354,7 +355,7 @@ class TestLifecycleHooks:
 
         loop = Loop(ROLE_A, on_complete=on_complete)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert events == ["complete"]
 
 
@@ -393,7 +394,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", conversation=conv)
+        await flow.dispatch("loop", "t", conversation=conv, env=env_of(flow))
         assert loop._paused_bytes is not None
         assert loop._paused_bytes == canonical_json(
             {"task": "t", "conversation": {"messages": ["hi", "there"], "n": 2}}
@@ -407,7 +408,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A)
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", conversation=conv)
+        await flow.dispatch("loop", "t", conversation=conv, env=env_of(flow))
         assert loop._paused_bytes is None
 
     @pytest.mark.asyncio
@@ -419,7 +420,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t")
+        await flow.dispatch("loop", "t", env=env_of(flow))
         assert loop._paused_bytes == canonical_json(
             {"task": "t", "conversation": {"messages": [], "n": 0}}
         )
@@ -431,7 +432,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t")
+        await flow.dispatch("loop", "t", env=env_of(flow))
         assert isinstance(factory.built[-1].calls[0]["conversation"], _StubConversation)
 
     @pytest.mark.asyncio
@@ -442,7 +443,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", conversation=conv)
+        await flow.dispatch("loop", "t", conversation=conv, env=env_of(flow))
         assert factory.built[-1].calls[0]["conversation"] is conv
 
     @pytest.mark.asyncio
@@ -452,7 +453,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A)
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t")
+        await flow.dispatch("loop", "t", env=env_of(flow))
         assert factory.built[-1].calls[0]["conversation"] is None
 
     @pytest.mark.asyncio
@@ -463,7 +464,7 @@ class TestPausedCapture:
         loop = Loop(ROLE_A, conversation_factory=_StubConversationFactory())
         flow = make_ff(saia_factory=factory).create()
         flow.register(loop, name="loop")
-        await flow.dispatch("loop", "t", conversation=conv)
+        await flow.dispatch("loop", "t", conversation=conv, env=env_of(flow))
         assert loop._paused_bytes is None
 
     @pytest.mark.asyncio
@@ -491,7 +492,7 @@ class TestPausedCapture:
 
         flow = make_ff(saia_factory=factory).create()
         flow.iterate(lambda body: body.call(body_verb), max_iters=2)
-        await flow.run()
+        await run_flow(flow)
         assert not convs, "both passes should have dispatched"
         assert not run_scopes[-1].holds_under((), TURN)
 
@@ -503,13 +504,23 @@ class TestPausedCapture:
         factory1 = _CompleteFactory(result=_StubResult(paused=True))
         flow1 = make_ff(saia_factory=factory1).create()
         flow1.register(loop, name="loop")
-        await flow1.dispatch("loop", "t", conversation=_StubConversation(messages=["a"]))
+        await flow1.dispatch(
+            "loop",
+            "t",
+            conversation=_StubConversation(messages=["a"]),
+            env=env_of(flow1),
+        )
         assert loop._paused_bytes is not None
         # Second dispatch: not paused → cleared.
         factory2 = _CompleteFactory()
         flow2 = make_ff(saia_factory=factory2).create()
         flow2.register(loop, name="loop")
-        await flow2.dispatch("loop", "t", conversation=_StubConversation(messages=["b"]))
+        await flow2.dispatch(
+            "loop",
+            "t",
+            conversation=_StubConversation(messages=["b"]),
+            env=env_of(flow2),
+        )
         assert loop._paused_bytes is None
 
 
@@ -551,7 +562,7 @@ class TestPausedAndCompleteReturn:
 
         loop = Loop(ROLE_A, on_complete=on_complete, on_paused=on_paused)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert events == ["paused:tool"]
 
     @pytest.mark.asyncio
@@ -564,7 +575,7 @@ class TestPausedAndCompleteReturn:
 
         loop = Loop(ROLE_A, on_complete=on_complete)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        got = await flow.run("t")
+        got = await run_flow(flow, "t")
         assert isinstance(got, dict)
         assert isinstance(got["wrapped"], _StubResult)
 
@@ -578,7 +589,7 @@ class TestPausedAndCompleteReturn:
 
         loop = Loop(ROLE_A, on_complete=on_complete)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        got = await flow.run("t")
+        got = await run_flow(flow, "t")
         assert isinstance(got, _StubResult)
 
     @pytest.mark.asyncio
@@ -591,7 +602,7 @@ class TestPausedAndCompleteReturn:
 
         loop = Loop(ROLE_A, on_paused=on_paused)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        got = await flow.run("t")
+        got = await run_flow(flow, "t")
         assert got == "paused-token:halt"
 
 
@@ -621,7 +632,7 @@ class TestExceptionalPaths:
         )
         flow = make_ff(saia_factory=factory).create().call(loop)
         with pytest.raises(asyncio.CancelledError):
-            await flow.run("t")
+            await run_flow(flow, "t")
         assert events == ["cancelled", "finally"]
 
     @pytest.mark.asyncio
@@ -648,7 +659,7 @@ class TestExceptionalPaths:
         )
         flow = make_ff(saia_factory=factory).create().call(loop)
         with pytest.raises(RuntimeError, match="boom"):
-            await flow.run("t")
+            await run_flow(flow, "t")
         assert events == [("failed", boom), "finally"]
 
     @pytest.mark.asyncio
@@ -665,7 +676,7 @@ class TestExceptionalPaths:
 
         loop = Loop(ROLE_A, on_complete=on_complete, on_finally=on_finally)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert events == ["complete", "finally"]
 
     @pytest.mark.asyncio
@@ -682,7 +693,7 @@ class TestExceptionalPaths:
 
         loop = Loop(ROLE_A, on_paused=on_paused, on_finally=on_finally)
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert events == ["paused", "finally"]
 
     @pytest.mark.asyncio
@@ -697,7 +708,7 @@ class TestExceptionalPaths:
         loop = Loop(ROLE_A, on_failed=on_failed)
         flow = make_ff(saia_factory=factory).create().call(loop)
         with pytest.raises(asyncio.CancelledError):
-            await flow.run("t")
+            await run_flow(flow, "t")
         assert called == []
 
 
@@ -757,7 +768,7 @@ class TestLoopFactory:
         loop = lf.create(ROLE_A)
         factory = _CompleteFactory()
         flow = make_ff(saia_factory=factory).create().call(loop)
-        await flow.run("t")
+        await run_flow(flow, "t")
         assert factory.built[0].calls[0]["abort_signal"] is halt
 
 
@@ -781,5 +792,5 @@ class TestChainedUse:
         factory = _CompleteFactory()
         loop = Loop(ROLE_A)
         flow = make_ff(saia_factory=factory).create().call(_extract_task).then(loop)
-        await flow.run({"task": "extract-me"})
+        await run_flow(flow, {"task": "extract-me"})
         assert factory.built[0].calls[0]["task"] == "extract-me"

@@ -18,7 +18,7 @@ Halt-observation contract:
 
 - Halt at tracker level N fires when N's own cap crosses.
 - Halt observation is a Flow-layer concern — a run has one halt
-  (:meth:`Flow.run` ``halt=``). A flow's budget
+  (:meth:`FlowRunner.start` ``halt=``). A flow's budget
   (``with_budget``) only tracks: its child tracker has no halt event, and
   the agent reads ``exceeded`` / ``urgent_wrapup`` to decide. A tracker
   given the run's halt event pauses the run when its budget is crossed.

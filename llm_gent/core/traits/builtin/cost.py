@@ -36,7 +36,7 @@ class CostTrait(BaseTrait):
         tracker = CostTracker(lg, pricing, budget=1.0, halt=halt_event)
         agent.add_trait(CostTrait(agent, tracker=tracker))
         flow.with_cost_tracker(tracker)
-        await flow.run(halt=halt_event)
+        await FlowRunner(lg).start(flow, halt=halt_event)
     """
 
     def __init__(self, agent: Agent, *, tracker: CostTracker) -> None:

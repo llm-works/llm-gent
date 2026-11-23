@@ -30,12 +30,13 @@ from llm_gent.flow import (
     History,
     Interrupted,
     Loop,
+    Resume,
     Skipped,
     verb,
 )
 from llm_gent.flow._node_id import _compute_node_ids
 from llm_gent.flow.state.snapshot import SIGNALS
-from tests.helpers import memory_store
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import make_test_logger
 
@@ -44,7 +45,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 def _ff(store: Any = None) -> Factory:
-    return Factory(make_test_logger(), checkpoint_store=store)
+    return TestFactory(make_test_logger(), checkpoint_store=store)
 
 
 def _top() -> Any:
@@ -89,26 +90,26 @@ class TestDeclaration:
     async def test_a_shortcut_on_an_undeclared_signal_raises_at_run_start(self) -> None:
         inner = _ff().create().with_shortcut("stop-early").call(_echo)
         with pytest.raises(RuntimeError, match="no such signal"):
-            await _top().call(inner).run(1, **_cut(asyncio.Event()))
+            await run_flow(_top().call(inner), 1, **_cut(asyncio.Event()))
 
     @pytest.mark.parametrize("bad", [None, "event", 1])
     async def test_a_signal_is_an_asyncio_event(self, bad: Any) -> None:
         with pytest.raises(TypeError, match="asyncio.Event"):
-            await _top().call(_echo).run(1, signals={"cut": bad})
+            await run_flow(_top().call(_echo), 1, signals={"cut": bad})
 
     async def test_signals_are_a_mapping(self) -> None:
         with pytest.raises(TypeError, match="mapping"):
-            await _top().call(_echo).run(1, signals=[asyncio.Event()])
+            await run_flow(_top().call(_echo), 1, signals=[asyncio.Event()])
 
     @pytest.mark.parametrize("bad", ["", 3])
     async def test_names_are_non_empty_strs(self, bad: Any) -> None:
         with pytest.raises(ValueError, match="signal's name"):
-            await _top().call(_echo).run(1, signals={bad: asyncio.Event()})
+            await run_flow(_top().call(_echo), 1, signals={bad: asyncio.Event()})
         with pytest.raises(ValueError, match="with_shortcut"):
             _ff().create().with_shortcut(bad)
 
     async def test_a_signal_nothing_cuts_on_is_accepted(self) -> None:
-        assert await _top().call(_echo).run(1, **_cut(asyncio.Event())) == 1
+        assert await run_flow(_top().call(_echo), 1, **_cut(asyncio.Event())) == 1
 
     @pytest.mark.parametrize("where", ["call", "iterate", "map", "branch", "deep"])
     async def test_a_region_inside_one_on_the_same_signal_raises_at_run_start(
@@ -127,13 +128,13 @@ class TestDeclaration:
         else:
             outer.call(_ff().create().call(_ff().create().call(inner)))
         with pytest.raises(RuntimeError, match="'inner' has with_shortcut\\('cut'\\) inside"):
-            await _top().call(outer).run(1, **_cut(asyncio.Event()))
+            await run_flow(_top().call(outer), 1, **_cut(asyncio.Event()))
 
     async def test_regions_on_different_signals_may_nest(self) -> None:
         inner = _ff().create().with_shortcut("skip").call(_echo)
         outer = _region().call(inner)
         flow = _top().call(outer)
-        assert await flow.run(1, **_cut(asyncio.Event(), skip=asyncio.Event())) == 1
+        assert await run_flow(flow, 1, **_cut(asyncio.Event(), skip=asyncio.Event())) == 1
 
     async def test_sibling_regions_on_one_signal_each_fast_forward(self) -> None:
         """The second region starts with the signal set and ends at once; the rest runs."""
@@ -142,7 +143,7 @@ class TestDeclaration:
         s = _steps(ran, cut, cut_in="a")
         first = _region().call(s["a"]).then(s["b"])
         second = _region().call(s["c"])
-        assert await _top().call(first).then(second).then(s["d"]).run("", **_cut(cut)) == "ad"
+        assert await run_flow(_top().call(first).then(second).then(s["d"]), "", **_cut(cut)) == "ad"
         assert ran == ["a", "d"]
 
 
@@ -178,7 +179,7 @@ class TestQueuedUntilTheRegion:
     async def test_where_the_cut_comes(self, cut_at: str, expected: list[str]) -> None:
         ran: list[str] = []
         cut = asyncio.Event()
-        await self._flow(ran, cut, cut_at).run(0, **_cut(cut))
+        await run_flow(self._flow(ran, cut, cut_at), 0, **_cut(cut))
         assert ran == expected
 
     async def test_steps_outside_the_region_never_see_the_cut(self) -> None:
@@ -198,7 +199,7 @@ class TestQueuedUntilTheRegion:
             return step
 
         flow = _top().call(make("a")).then(make("b")).then(_region().call(make("c")))
-        await flow.then(make("d")).run(0, halt=asyncio.Event(), **_cut(cut))
+        await run_flow(flow.then(make("d")), 0, halt=asyncio.Event(), **_cut(cut))
         assert seen == [("a", False, False), ("b", False, False), ("d", False, False)]
 
 
@@ -208,7 +209,7 @@ class TestChain:
         cut = asyncio.Event()
         s = _steps(ran, cut, cut_in="a")
         region = _region().call(s["a"]).then(s["b"]).then(s["c"])
-        assert await _top().call(region).then(s["d"]).run("", **_cut(cut)) == "ad"
+        assert await run_flow(_top().call(region).then(s["d"]), "", **_cut(cut)) == "ad"
         assert ran == ["a", "d"]
 
     async def test_a_region_starting_with_the_signal_set_passes_its_input_through(self) -> None:
@@ -216,7 +217,9 @@ class TestChain:
         cut = asyncio.Event()
         s = _steps(ran, cut, cut_in="a")
         region = _region().call(s["b"]).then(s["c"])
-        assert await _top().call(s["a"]).then(region).then(s["d"]).run("", **_cut(cut)) == "ad"
+        assert (
+            await run_flow(_top().call(s["a"]).then(region).then(s["d"]), "", **_cut(cut)) == "ad"
+        )
         assert ran == ["a", "d"]
 
     async def test_a_signal_set_after_the_region_ended_does_nothing(self) -> None:
@@ -224,7 +227,9 @@ class TestChain:
         cut = asyncio.Event()
         s = _steps(ran, cut, cut_in="b")
         region = _region().call(s["a"])
-        assert await _top().call(region).then(s["b"]).then(s["c"]).run("", **_cut(cut)) == "abc"
+        assert (
+            await run_flow(_top().call(region).then(s["b"]).then(s["c"]), "", **_cut(cut)) == "abc"
+        )
         assert ran == ["a", "b", "c"]
 
     async def test_flows_under_the_region_end_after_their_running_step(self) -> None:
@@ -233,7 +238,7 @@ class TestChain:
         s = _steps(ran, cut, cut_in="a")
         inner = _ff().create().call(s["a"]).then(s["b"])
         region = _region().call(inner).then(s["c"])
-        assert await _top().call(region).then(s["d"]).run("", **_cut(cut)) == "ad"
+        assert await run_flow(_top().call(region).then(s["d"]), "", **_cut(cut)) == "ad"
         assert ran == ["a", "d"]
 
     async def test_the_step_running_at_the_cut_finishes_once(self) -> None:
@@ -249,7 +254,7 @@ class TestChain:
             return x + "a"
 
         flow = _top().call(_region().call(a).then(_echo))
-        assert await flow.run("", halt=asyncio.Event(), **_cut(cut)) == "a"
+        assert await run_flow(flow, "", halt=asyncio.Event(), **_cut(cut)) == "a"
         assert ran == [(True, False)]
 
     async def test_interrupted_on_a_cut_alone_is_an_error(self) -> None:
@@ -262,7 +267,7 @@ class TestChain:
             raise Interrupted()
 
         with pytest.raises(RuntimeError, match="raised Interrupted while no halt is set"):
-            await _top().call(_region().call(a)).run("", **_cut(cut))
+            await run_flow(_top().call(_region().call(a)), "", **_cut(cut))
 
 
 class TestConclude:
@@ -273,7 +278,7 @@ class TestConclude:
         cut = asyncio.Event()
         s = _steps(ran, cut)
         region = _region().call(s["a"]).then(s["b"]).conclude(s["c"]).then(s["d"])
-        assert await _top().call(region).run("", **_cut(cut)) == "abcd"
+        assert await run_flow(_top().call(region), "", **_cut(cut)) == "abcd"
         assert ran == ["a", "b", "c", "d"]
 
     async def test_a_cut_skips_every_step_but_the_concluding_ones(self) -> None:
@@ -283,7 +288,7 @@ class TestConclude:
         s = _steps(ran, cut, cut_in="a")
         region = _region().call(s["a"]).then(s["b"]).conclude(s["c"]).then(s["d"])
         region.conclude(s["e"])
-        assert await _top().call(region).run("", **_cut(cut)) == "ace"
+        assert await run_flow(_top().call(region), "", **_cut(cut)) == "ace"
         assert ran == ["a", "c", "e"]
 
     async def test_a_region_entered_with_the_signal_set_runs_them_on_its_input(self) -> None:
@@ -291,7 +296,9 @@ class TestConclude:
         cut = asyncio.Event()
         s = _steps(ran, cut, cut_in="a")
         region = _region().call(s["b"]).conclude(s["c"])
-        assert await _top().call(s["a"]).then(region).then(s["d"]).run("", **_cut(cut)) == "acd"
+        assert (
+            await run_flow(_top().call(s["a"]).then(region).then(s["d"]), "", **_cut(cut)) == "acd"
+        )
         assert ran == ["a", "c", "d"]
 
     async def test_outside_a_region_it_is_then(self) -> None:
@@ -299,7 +306,7 @@ class TestConclude:
         cut = asyncio.Event()
         s = _steps(ran, cut, cut_in="a")
         flow = _top().call(s["a"]).then(s["b"]).conclude(s["c"])
-        assert await flow.run("", **_cut(cut)) == "abc"
+        assert await run_flow(flow, "", **_cut(cut)) == "abc"
         assert ran == ["a", "b", "c"]
 
     async def test_it_is_not_a_finally(self) -> None:
@@ -313,7 +320,7 @@ class TestConclude:
         s = _steps(ran, asyncio.Event())
         flow = _top().call(_region().call(boom).conclude(s["c"]))
         with pytest.raises(ValueError, match="boom"):
-            await flow.run("", **_cut(asyncio.Event()))
+            await run_flow(flow, "", **_cut(asyncio.Event()))
         assert ran == []
 
     async def test_started_items_run_theirs_and_unstarted_ones_nothing(self) -> None:
@@ -344,7 +351,7 @@ class TestConclude:
 
         item = _ff().create().call(first).then(second).conclude(close)
         region = _region().map(item, items=lambda _p, _c: [0, 1, 2], max_concurrency=2)
-        results = await _top().call(region).run(**_cut(cut))
+        results = await run_flow(_top().call(region), **_cut(cut))
         assert results[:2] == [0, 10] and isinstance(results[2], Skipped)
         assert sorted(ran) == ["close:0", "close:1", "first:0", "first:1"]
 
@@ -368,13 +375,15 @@ class TestConclude:
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=True)
-        assert await flow.run("", halt=halt, history="conclude-halt", **_cut(cut)) is HALTED
+        assert await run_flow(flow, "", halt=halt, history="conclude-halt", **_cut(cut)) is HALTED
         assert ran == ["a", "close"]
 
         ran.clear()
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=False)
-        resumed = flow.run("", halt=halt, history="conclude-halt", resume="latest", **_cut(cut))
+        resumed = run_flow(
+            flow, "", halt=halt, history="conclude-halt", start=Resume("latest"), **_cut(cut)
+        )
         assert await resumed == "a!d"
         assert ran == ["close", "d"]
 
@@ -425,7 +434,7 @@ class TestConclude:
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=True)
-        result = await flow.run("", halt=halt, history="halt-project", **_cut(cut))
+        result = await run_flow(flow, "", halt=halt, history="halt-project", **_cut(cut))
         assert result is HALTED
         assert ran == ["a", "close"]
         assert project_calls == []
@@ -434,7 +443,9 @@ class TestConclude:
         ran.clear()
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=False)
-        result = await flow.run("", halt=halt, history="halt-project", resume="latest", **_cut(cut))
+        result = await run_flow(
+            flow, "", halt=halt, history="halt-project", start=Resume("latest"), **_cut(cut)
+        )
         assert result == "a!"
         assert ran == []
         assert project_calls == []
@@ -459,7 +470,7 @@ class TestSignalSetInAStep:
             return x + "b"
 
         flow = _top().call(_region().call(a).then(b)).then(_echo)
-        assert await flow.run("", **_cut(cut)) == "a"
+        assert await run_flow(flow, "", **_cut(cut)) == "a"
         assert ran == ["a"]
 
     async def test_no_new_pass_starts(self) -> None:
@@ -474,7 +485,7 @@ class TestSignalSetInAStep:
             return n + 1
 
         flow = _top().with_shortcut("cut").iterate(lambda b: b.call(step), max_iters=5)
-        assert await flow.run(0, **_cut(cut)) == 2
+        assert await run_flow(flow, 0, **_cut(cut)) == 2
         assert ran == [0, 1]
 
     async def test_no_new_item_starts(self) -> None:
@@ -493,7 +504,7 @@ class TestSignalSetInAStep:
             .with_shortcut("cut")
             .map(lambda b: b.call(item), items=lambda *_: [0, 1, 2], max_concurrency=1)
         )
-        result = await flow.run(**_cut(cut))
+        result = await run_flow(flow, **_cut(cut))
         assert ran == [0]
         assert result[0] == 0 and all(isinstance(r, Skipped) for r in result[1:])
 
@@ -508,7 +519,7 @@ class TestContext:
             seen.append(ctx.halt)
             return x
 
-        await _top().call(step).then(_region().call(step)).run(1, halt=halt, **_cut(cut))
+        await run_flow(_top().call(step).then(_region().call(step)), 1, halt=halt, **_cut(cut))
         assert seen == [halt, halt]
 
     async def test_setting_the_halt_from_a_step_in_a_region_halts_the_run(self) -> None:
@@ -528,7 +539,7 @@ class TestContext:
             return x
 
         flow = _top().with_shortcut("cut").call(pause).then(after)
-        assert await flow.run("", halt=halt, **_cut(cut)) is HALTED
+        assert await run_flow(flow, "", halt=halt, **_cut(cut)) is HALTED
         assert ran == ["pause"]
 
 
@@ -628,7 +639,7 @@ class TestLoop:
         cut = asyncio.Event()
         saia = _CuttingSAIA(cut)
         out = _out()
-        assert await _loop_flow(saia, out).run("x", **_cut(cut)) == "done"
+        assert await run_flow(_loop_flow(saia, out), "x", **_cut(cut)) == "done"
         assert saia.calls == 1 and out["turn"] == ["x"]  # nothing ran again
         assert out["after"] == [_Result(paused=True, text="partial:x")]
         assert out["paused"] == [_Result(paused=True, text="partial:x")]
@@ -638,7 +649,7 @@ class TestLoop:
         cut = asyncio.Event()
         saia = _CuttingSAIA(cut, result_type=_BareResult)
         out = _out()
-        assert await _loop_flow(saia, out).run("x", **_cut(cut)) == "done"
+        assert await run_flow(_loop_flow(saia, out), "x", **_cut(cut)) == "done"
         assert out["after"] == [_BareResult(paused=True, text="partial:x")]
 
     async def test_with_the_halt_set_too_the_turn_is_held_and_not_continued(self) -> None:
@@ -648,13 +659,18 @@ class TestLoop:
         saia = _CuttingSAIA(cut, halt)
         out = _out()
         flow = _loop_flow(saia, out, store=store)
-        assert await flow.run("x", halt=halt, history="loop-cut", **_cut(cut)) is HALTED
+        assert await run_flow(flow, "x", halt=halt, history="loop-cut", **_cut(cut)) is HALTED
         assert out["after"] == []
 
         resumed = _out()
         flow = _loop_flow(saia, resumed, store=store)
-        result = await flow.run(
-            "x", halt=asyncio.Event(), history="loop-cut", resume="latest", **_cut(asyncio.Event())
+        result = await run_flow(
+            flow,
+            "x",
+            halt=asyncio.Event(),
+            history="loop-cut",
+            start=Resume("latest"),
+            **_cut(asyncio.Event()),
         )
         assert result == "done"
         assert saia.calls == 1  # the held turn was not continued
@@ -683,7 +699,7 @@ class TestPauseDuringFastForward:
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=True)
-        assert await flow.run("", halt=halt, history="ff-pause", **_cut(cut)) is HALTED
+        assert await run_flow(flow, "", halt=halt, history="ff-pause", **_cut(cut)) is HALTED
         assert ran == ["a"]
         head = await History(store, "ff-pause").head()
         assert head is not None and head.meta.outcome == "halted"
@@ -691,7 +707,9 @@ class TestPauseDuringFastForward:
         ran.clear()
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=False)
-        resumed = flow.run("", halt=halt, history="ff-pause", resume="latest", **_cut(cut))
+        resumed = run_flow(
+            flow, "", halt=halt, history="ff-pause", start=Resume("latest"), **_cut(cut)
+        )
         assert await resumed == "ad"
         assert ran == ["a", "d"]  # the halted step runs again; b and c are skipped
         assert cut.is_set()
@@ -715,7 +733,7 @@ class TestPauseDuringFastForward:
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, ran, arm=True)
-        assert await flow.run("", halt=halt, history="cut-before", **_cut(cut)) is HALTED
+        assert await run_flow(flow, "", halt=halt, history="cut-before", **_cut(cut)) is HALTED
         head = await History(store, "cut-before").head()
         assert head is not None
         assert (await History(store, "cut-before").snapshot(head)).cursors[""][SIGNALS] == ["cut"]
@@ -723,7 +741,10 @@ class TestPauseDuringFastForward:
         ran.clear()
         cut = asyncio.Event()
         flow = build(asyncio.Event(), cut, ran, arm=False)
-        assert await flow.run("", history="cut-before", resume="latest", **_cut(cut)) == "ad"
+        assert (
+            await run_flow(flow, "", history="cut-before", start=Resume("latest"), **_cut(cut))
+            == "ad"
+        )
         assert ran == ["d"]
 
     async def test_a_cut_writes_no_checkpoint_and_a_finished_run_records_no_signal(self) -> None:
@@ -732,7 +753,7 @@ class TestPauseDuringFastForward:
         ran: list[str] = []
         s = _steps(ran, cut, cut_in="a")
         flow = _ff(store).create().call(_region().call(s["a"]).then(s["b"]))
-        assert await flow.run("", history="cut-done", **_cut(cut)) == "a"
+        assert await run_flow(flow, "", history="cut-done", **_cut(cut)) == "a"
         history = History(store, "cut-done")
         assert [c.meta.outcome async for c in history.commits()] == ["ok"]
         head = await history.head()
@@ -754,7 +775,7 @@ class TestIterate:
             return n + 1
 
         flow = _top().with_shortcut("cut").iterate(lambda b: b.call(step), max_iters=5)
-        assert await flow.run(0, **_cut(cut)) == 2
+        assert await run_flow(flow, 0, **_cut(cut)) == 2
         assert ran == [0, 1]
 
     async def test_the_running_pass_ends_after_its_running_step(self) -> None:
@@ -772,7 +793,7 @@ class TestIterate:
             return await s["a"](ctx, x)
 
         region = _region().iterate(lambda b: b.call(a).then(s["b"]), max_iters=5)
-        assert await _top().call(region).run("", **_cut(cut)) == "aba"
+        assert await run_flow(_top().call(region), "", **_cut(cut)) == "aba"
         assert ran == ["a", "b", "a"]
 
 
@@ -801,7 +822,7 @@ class TestMap:
             .map(lambda b: b.call(item), items=lambda _p, _c: [0, 1, 2, 3], max_concurrency=2)
             .on_item_complete(on_complete)
         )
-        results = await flow.run(**_cut(cut))
+        results = await run_flow(flow, **_cut(cut))
         assert results[:2] == [0, 10]
         assert [r.item for r in results[2:]] == [2, 3]
         assert sum(isinstance(c, Skipped) for c in completed) == 2
@@ -836,7 +857,7 @@ class TestMap:
                 max_concurrency=2,
             )
         )
-        results = await flow.run(**_cut(cut))
+        results = await run_flow(flow, **_cut(cut))
         assert results[:2] == [0, 1] and isinstance(results[2], Skipped)
         assert sorted(ran) == ["first:0", "first:1"]
 
@@ -870,7 +891,7 @@ class TestMap:
             )
             .guard(guard)
         )
-        failure, skipped, done, unstarted = await flow.run(**_cut(cut))
+        failure, skipped, done, unstarted = await run_flow(flow, **_cut(cut))
         assert (ran, guarded) == ([0, 2], [0, 1, 2])
         assert isinstance(failure, Failure) and isinstance(failure.exception, ValueError)
         assert (skipped, done, unstarted) == (Skipped(item=1), 20, Skipped(item=3))
@@ -938,7 +959,7 @@ class TestNestedShape:
         """Pass 1 is cut while items 0 and 1 are in ``first``: they end there, item 2 and ``close`` are skipped."""
         cut = asyncio.Event()
         ran: list[str] = []
-        assert await self._flow(cut, ran, "first:1.1").run(None, **_cut(cut)) == "2 done"
+        assert await run_flow(self._flow(cut, ran, "first:1.1"), None, **_cut(cut)) == "2 done"
         pass_0 = [f"{s}:0.{n}" for n in range(3) for s in ("first", "second")]
         assert ran[:2] == ["prepare", "items:0"] and sorted(ran[2:8]) == sorted(pass_0)
         assert ran[8:10] == ["close:0", "items:1"]
@@ -948,7 +969,7 @@ class TestNestedShape:
     async def test_a_cut_before_the_region_waits_and_skips_it(self) -> None:
         cut = asyncio.Event()
         ran: list[str] = []
-        assert await self._flow(cut, ran, "prepare").run(None, **_cut(cut)) == "0 done"
+        assert await run_flow(self._flow(cut, ran, "prepare"), None, **_cut(cut)) == "0 done"
         assert ran == ["prepare", "finish"]
 
 
@@ -971,7 +992,7 @@ class TestSubtreeEndedEarly:
             lambda b: b.call(item), items=lambda _p, _c: [1, 2, 3], max_concurrency=1
         )
         flow = _ff(store).create().with_checkpointer().call(region)
-        results = await flow.run(history="cut-map", **_cut(cut))
+        results = await run_flow(flow, history="cut-map", **_cut(cut))
         assert ran == [1]
         assert results[0] == 1 and all(isinstance(r, Skipped) for r in results[1:])
         assert await History(store, "cut-map").is_complete()
@@ -1002,7 +1023,7 @@ class TestSubtreeEndedEarly:
 
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(halt, cut, arm=True)
-        assert await flow.run(0, halt=halt, history="cut-sub", **_cut(cut)) is HALTED
+        assert await run_flow(flow, 0, halt=halt, history="cut-sub", **_cut(cut)) is HALTED
         assert ran == ["step:0", "step:1", "last"]
         history = History(store, "cut-sub")
         head = await history.head()
@@ -1013,7 +1034,7 @@ class TestSubtreeEndedEarly:
         ran.clear()
         cut = asyncio.Event()
         flow = build(asyncio.Event(), cut, arm=False)
-        assert await flow.run(0, history="cut-sub", resume="latest", **_cut(cut)) == 2
+        assert await run_flow(flow, 0, history="cut-sub", start=Resume("latest"), **_cut(cut)) == 2
         assert ran == ["last"]
 
 
@@ -1089,7 +1110,7 @@ class TestDrain:
         cut = asyncio.Event()
         ran: list[str] = []
         seen: list[tuple[str, bool, bool]] = []
-        results = await self._flow(cut, ran, seen, drain=True).run(**_cut(cut))
+        results = await run_flow(self._flow(cut, ran, seen, drain=True), **_cut(cut))
 
         assert results[:2] == ["0", "1"] and isinstance(results[2], Skipped)
         for n in "01":  # the whole chain, the nested flow and both items of the nested map
@@ -1101,7 +1122,7 @@ class TestDrain:
     async def test_without_drain_started_items_end_after_their_running_step(self) -> None:
         cut = asyncio.Event()
         ran: list[str] = []
-        results = await self._flow(cut, ran, [], drain=False).run(**_cut(cut))
+        results = await run_flow(self._flow(cut, ran, [], drain=False), **_cut(cut))
 
         assert results[:2] == [0, 1] and isinstance(results[2], Skipped)
         assert sorted(ran) == ["fin", "first:0", "first:1"]
@@ -1130,7 +1151,7 @@ class TestDrain:
         )
         outer = _ff().create().with_shortcut("stop").call(drain)
         flow = _top().call(outer)
-        assert await flow.run(**_cut(cut, stop=stop)) == [0]
+        assert await run_flow(flow, **_cut(cut, stop=stop)) == [0]
         assert ran == ["first"]
 
     async def test_a_pass_resumed_while_draining_carries_its_skipped_items(self) -> None:
@@ -1181,13 +1202,15 @@ class TestDrain:
         ran: list[str] = []
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(cut, halt, True, ran)
-        assert await flow.run(halt=halt, history="drain-pass", **_cut(cut)) is HALTED
+        assert await run_flow(flow, halt=halt, history="drain-pass", **_cut(cut)) is HALTED
         assert ran == ["first:a"]
 
         ran.clear()
         cut, halt = asyncio.Event(), asyncio.Event()
         flow = build(cut, halt, False, ran)
-        result = await flow.run(halt=halt, history="drain-pass", resume="latest", **_cut(cut))
+        result = await run_flow(
+            flow, halt=halt, history="drain-pass", start=Resume("latest"), **_cut(cut)
+        )
         assert result == ["a", Skipped("b")]
         assert ran == ["second:a"]
 
@@ -1228,7 +1251,7 @@ class TestDrainLoop:
         out = _out()
         saia = _CuttingSAIA(cut)
         flow = _drained_turns(saia, out, memory_store())
-        results = await flow.run(halt=halt, history="drain-turn", **_cut(cut))
+        results = await run_flow(flow, halt=halt, history="drain-turn", **_cut(cut))
 
         assert out["after"] == [_Result(paused=False, text="partial:t0")]  # not aborted
         assert isinstance(results[1], Skipped) and out["turn"] == [0]
@@ -1239,15 +1262,15 @@ class TestDrainLoop:
         out = _out()
         saia = _CuttingSAIA(cut, halt)
         flow = _drained_turns(saia, out, store)
-        assert await flow.run(halt=halt, history="drain-turn", **_cut(cut)) is HALTED
+        assert await run_flow(flow, halt=halt, history="drain-turn", **_cut(cut)) is HALTED
         assert out["after"] == []
 
         cut = asyncio.Event()
         resumed = _out()
         saia = _CuttingSAIA(cut)
         flow = _drained_turns(saia, resumed, store)
-        results = await flow.run(
-            halt=asyncio.Event(), history="drain-turn", resume="latest", **_cut(cut)
+        results = await run_flow(
+            flow, halt=asyncio.Event(), history="drain-turn", start=Resume("latest"), **_cut(cut)
         )
 
         assert cut.is_set()  # the drain goes on
@@ -1301,7 +1324,7 @@ class TestNestedRegionsAndTurns:
             out,
         )
         top = _ff().create().call(flow)
-        await top.run(halt=asyncio.Event(), **_cut(cut, stop=stop))
+        await run_flow(top, halt=asyncio.Event(), **_cut(cut, stop=stop))
         return out
 
     @pytest.mark.parametrize(

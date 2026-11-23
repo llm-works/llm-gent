@@ -3,13 +3,15 @@
 
 """What a run may use: how roles become SAIA instances, and the traits.
 
-An :class:`Environment` owns nothing: the platform owns the clients and
-their lifecycle; an environment selects what a run uses of them. Everything
-that uses one environment shares its SAIA instances, one per role. That is
-safe because a SAIA holds configuration only (backend, tools and their
-executor, system prompt, guards): every call keeps its messages in the
-conversation it is passed. Work that needs SAIAs of its own (its own tools,
-its own directive) uses an environment of its own.
+An :class:`Environment` comes from whoever starts runs (a platform, an
+agent, a test), never from the structure being run. It owns nothing: the
+platform owns the clients and their lifecycle; an environment selects what
+a run uses of them. Runs that share an environment share its SAIA
+instances, one per role. That is safe because a SAIA holds configuration
+only (backend, tools and their executor, system prompt, guards): every call
+keeps its messages in the conversation it is passed. Work that needs SAIAs
+of its own (its own tools, its own directive) runs with an environment of
+its own.
 """
 
 from __future__ import annotations
@@ -63,12 +65,13 @@ class SAIAFactory(Protocol):
 class Environment:
     """The SAIA factory and traits a run uses, with one SAIA per role built on first use.
 
-    ``saia_factory`` builds a role's SAIA the first time :meth:`saia` is
-    asked for it; later asks get the same instance. Without one, work that
-    never asks for a SAIA runs, and an ask raises. ``traits`` is the
-    registry steps see as ``ctx.traits``.
+    ``saia_factory`` builds a role's SAIA the first time a step asks
+    (``ctx.saia``); later asks, from any run sharing this environment, get
+    the same instance. Without one, steps that never read ``ctx.saia`` run
+    and one that does raises. ``traits`` is what steps see as
+    ``ctx.traits``.
 
-    The cache is one ``dict`` per environment. Two tasks on one event loop
+    The cache is one ``dict`` per environment. Two runs on one event loop
     that ask for an unbuilt role at once may each build it; one of the two
     is kept, and both are configured alike.
     """
@@ -101,7 +104,9 @@ class Environment:
             return cached
         if self._saia_factory is None:
             raise RuntimeError(
-                f"the environment has no SAIAFactory to build a SAIA for role {role.name!r}"
+                f"the run's environment has no SAIAFactory to build a SAIA for role "
+                f"{role.name!r}: start the run on FlowRunner(lg, "
+                f"env=Environment(saia_factory=...))"
             )
         built = self._saia_factory.build(role)
         self._saia_by_role[role] = built

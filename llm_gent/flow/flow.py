@@ -5,28 +5,23 @@
 
 A :class:`Flow` plays two roles that share one object:
 
-1. **Runtime / registry.** Holds a :class:`SAIAFactory` (for turning roles
-   into saia instances, cached per-role), a shared user-owned ``state``
-   object, and an optional verb-by-name registry used by :meth:`dispatch`.
+1. **Registry.** An optional verb-by-name registry used by :meth:`dispatch`.
 
 2. **Composition graph.** A sequence of nodes built up via the fluent
    methods :meth:`call` / :meth:`then` / :meth:`rescue` / :meth:`after` /
-   :meth:`branch` / :meth:`iterate` / :meth:`map` and executed by
-   :meth:`run`. A node's target is either a verb (any callable carrying a
+   :meth:`branch` / :meth:`iterate` / :meth:`map` and executed by a
+   :class:`~llm_gent.flow.FlowRunner`. A node's target is either a verb (any callable carrying a
    ``.role``), another :class:`Flow`, or a control-flow primitive (branch,
-   iterate, map) whose bodies are themselves subflows. Subflows are
-   recursively run against the same runtime, so saia caching is shared
-   across the whole tree.
+   iterate, map) whose bodies are themselves subflows. Every flow of a run
+   uses the run's environment, so one SAIA per role serves the whole tree.
 
 Both roles are optional. A top-level flow that only serves as a verb
-registry never needs to call the fluent methods; a subflow that only exists
-to structure composition never needs a factory of its own — it borrows from
-the runtime it is executed under.
+registry never needs to call the fluent methods.
 
 At application boundaries, prefer :class:`Factory` from
-:mod:`.factory` — it captures the ambient ``lg`` and the app-wide
-:class:`SAIAFactory` once so per-subsystem construction reads as
-``f.create("grade").call(...)`` rather than repeating both at every site.
+:mod:`.factory` — it captures the ambient ``lg`` and the shared declarations
+once so per-subsystem construction reads as
+``f.create("grade").call(...)`` rather than repeating them at every site.
 Direct :class:`Flow` construction is still supported and is what the
 executor uses internally to materialize lambda-form subflows.
 
@@ -38,14 +33,14 @@ wrapper:
   :meth:`Flow.call`, :meth:`Flow.iterate`, and :meth:`Flow.map` project an
   isolated child payload for the block they contain and (optionally) merge it
   back when the block completes successfully.
-- ``ctx.state.root().data`` is the run-wide payload — the outermost
-  :meth:`run` invocation's ``state=`` argument (default: fresh empty
+- ``ctx.state.root().data`` is the run-wide payload — the run's
+  ``state=`` argument (default: fresh empty
   ``dict``). Every node in the tree reaches it via the same call regardless
   of nesting depth or per-scope projection.
 
 Execution (the run, the walk, scoped-state projection/merge, history
-writing) lives in :mod:`llm_gent.flow.run`, which imports this module; this
-module imports it only inside :meth:`Flow.run`, to start a run. The private dataclasses and the :class:`Failure`
+writing) lives in :mod:`llm_gent.flow.run`, which imports this module and
+is never imported by it. The private dataclasses and the :class:`Failure`
 sentinel live in :mod:`.nodes`. This module owns the :class:`Flow` class
 itself plus the builder-side helpers used by its fluent methods —
 :func:`_validate_target`, :func:`_require_state_for_merge`, and the eager
@@ -54,18 +49,17 @@ Buildable materializer :func:`_materialize`.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Mapping
+import functools
+from collections.abc import Callable
 from types import MappingProxyType
-from typing import Any, Self
+from typing import Any, ParamSpec, Self, TypeVar
 
-from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
-from ..core.env import Environment, SAIAFactory
+from ..core.env import Environment
 from ..core.role import Role
-from ..core.traits import Registry as TraitRegistry
+from ._node_id import iter_flows
 from ._shortcut import Shortcut, check_shortcut
 from ._validation import (
     _check_node_name,
@@ -77,8 +71,6 @@ from ._validation import (
 )
 from .checkpoint import (
     CheckpointPolicy,
-    ResumeMode,
-    Retention,
     checkpoint_tag,
 )
 from .context import Context
@@ -111,13 +103,37 @@ from .state import State, StateFactory
 from .structure import Structure
 
 
+P = ParamSpec("P")
+R_ = TypeVar("R_")
+
+
+def _builder(method: Callable[P, R_]) -> Callable[P, R_]:
+    """Mark a method that changes the flow: it raises once the flow has been started."""
+
+    @functools.wraps(method)
+    def guarded(*args: P.args, **kwargs: P.kwargs) -> R_:
+        _require_open(args[0], method.__name__)
+        return method(*args, **kwargs)
+
+    return guarded
+
+
+def _require_open(flow: Any, method: str) -> None:
+    """Raise when ``flow`` is frozen: it has been started, and its runs share its structure."""
+    if flow._frozen:
+        label = flow._name or "<anonymous>"
+        raise RuntimeError(
+            f"Flow {label!r} has been started and can no longer change (.{method}()): "
+            f"its runs share its structure; build the changed flow anew"
+        )
+
+
 class Flow:
     """Verb registry + role-routed dispatch + fluent composition graph.
 
-    A ``Flow`` used as the top-level runtime is constructed with a factory.
-    Subflows used only for composition can be constructed without one — at
-    :meth:`run` time they borrow the environment (SAIA factory, SAIA cache
-    and traits) of the flow that invoked them.
+    A flow is structure: what its runs may use (SAIA factory, traits) is
+    the run's environment, given to the runner that starts it, and every
+    flow of the run, nested ones included, uses that one.
 
     Subclassing is supported: every fluent method returns ``Self``, and
     the subflows a ``lambda b: ...`` body builds are of the enclosing
@@ -132,15 +148,12 @@ class Flow:
         lg: Logger,
         name: str = "",
         *,
-        saia_factory: SAIAFactory | None = None,
-        traits: TraitRegistry | None = None,
         state_factory: StateFactory[Any] | None = None,
-        checkpoint_store: Store | None = None,
     ) -> None:
         """Initialize a flow.
 
         Prefer :class:`Factory` at application boundaries — it captures
-        the ambient ``lg`` and the app-wide :class:`SAIAFactory` once so
+        the ambient ``lg`` and the shared declarations once so
         Flow-per-subsystem construction doesn't repeat them. Constructing
         :class:`Flow` directly is still supported; the executor uses it
         internally to materialize subflows built with the fluent lambda
@@ -150,20 +163,9 @@ class Flow:
             lg: Logger instance for tracing execution.
             name: Optional identifier — used in error messages and traces.
                 Also lets a flow serve as a named node inside a parent chain.
-            saia_factory: A :class:`SAIAFactory` that builds role-bound saia
-                instances. Required only when role-bound code accesses
-                ``ctx.saia`` — verbs that route LLM calls through their own
-                configuration can run without one. A subflow borrows the
-                factory from the runtime it executes under.
-            traits: Optional trait registry surfaced on every dispatched
-                :class:`Context` as ``ctx.traits``. When ``None``, verbs see
-                ``ctx.traits is None``. A subflow inherits the outer
-                runtime's registry (like the SAIA cache) via the same
-                internal handoff, so mounting on the top-level flow is
-                enough to reach every nested dispatch.
             state_factory: A :class:`StateFactory` for this flow's state:
-                ``state_factory.new()`` builds the state of a :meth:`run`
-                given no ``state=``, and ``state_factory.restore(...)``
+                ``state_factory.new()`` builds the state of a run started
+                without ``state=``, and ``state_factory.restore(...)``
                 rebuilds ``ctx.state.data`` from a checkpoint on resume. For
                 state that carries no runtime handles wrap the type in
                 :class:`TypeStateFactory`; for state that binds a Logger /
@@ -171,18 +173,13 @@ class Flow:
                 :class:`StateFactory` directly. ``None`` (default): a run
                 given no state gets a fresh empty ``dict``, which
                 round-trips through checkpoints as-is.
-            checkpoint_store: The :class:`appinfra.cas.Store` the runs of
-                this flow keep their histories in, when it runs as the
-                top-level flow: each :meth:`run` given a ``history=`` writes
-                the repository of that name. A flow running inside another
-                uses the top-level flow's store. ``None`` (default): runs
-                keep no history.
+
+        Where runs keep their histories is the runner's
+        (:class:`~llm_gent.flow.FlowRunner` ``store=``), not the flow's.
         """
         self._lg = lg
         self._name = name
-        self._env = Environment(saia_factory, traits)
         self._state_factory = state_factory
-        self._checkpoint_store = checkpoint_store
         self._shortcut: Shortcut | None = None
         self._resources: dict[ResourceKey[Any], Any] = {}
         self._resource_children: dict[ResourceKey[Any], dict[str, Any]] = {}
@@ -192,6 +189,7 @@ class Flow:
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._hooks: tuple[object, ...] = ()
         self._hooks_replace = False
+        self._frozen = False
 
     # -------------------------------------------------------------------------
     # Introspection
@@ -203,9 +201,20 @@ class Flow:
         return self._name
 
     @property
-    def traits(self) -> TraitRegistry | None:
-        """The trait registry this flow was constructed with, or ``None``."""
-        return self._env.traits
+    def frozen(self) -> bool:
+        """The flow has been started (or runs inside one that has): it no longer changes.
+
+        A started flow's runs share its nodes and declarations, so every
+        method that would change them raises from then on.
+        """
+        return self._frozen
+
+    def _freeze(self) -> None:
+        """Freeze this flow and every flow under it: called when a run of it starts."""
+        if self._frozen:
+            return
+        for flow in iter_flows(self):
+            flow._frozen = True
 
     @property
     def decl(self) -> Decl:
@@ -229,6 +238,7 @@ class Flow:
     # Registration
     # -------------------------------------------------------------------------
 
+    @_builder
     def register(self, verb: Any, name: str | None = None) -> None:
         """Register a verb under a name (default: the verb's ``__name__``).
 
@@ -271,6 +281,7 @@ class Flow:
         resources: Any = UNSET,
         scope_state: Any = UNSET,
         extra: Any = UNSET,
+        env: Environment | None = None,
         **kwargs: Any,
     ) -> Any:
         """Dispatch a registered verb by name, awaiting its result.
@@ -283,7 +294,7 @@ class Flow:
         Pass ``scope_state=ctx.state`` from an in-flight verb to hand the
         dispatched sibling the live scope payload. Omitting ``scope_state=``
         (or passing ``UNSET``) gives the sibling a fresh state, as a
-        :meth:`run` given no ``state=`` gets. A ``State`` instance passes
+        run started without ``state=`` gets. A ``State`` instance passes
         through as-is; any other value is wrapped with this flow's
         ``state_factory``.
 
@@ -298,6 +309,11 @@ class Flow:
         caller-supplied opaque dict to the dispatched sibling. Omitting
         (or passing ``UNSET``) yields a fresh empty dict at the sibling —
         ``dispatch`` has no flow-level ``.with_extra()`` fallback.
+
+        Pass ``env=ctx.env`` from an in-flight verb so the
+        sibling's ``ctx.saia`` and ``ctx.traits`` are the run's. Omitted, the
+        sibling has an empty environment: no traits, and ``ctx.saia``
+        raises for a role-bound verb.
         """
         if name not in self._verbs:
             raise KeyError(f"no verb registered under name {name!r}")
@@ -316,7 +332,7 @@ class Flow:
             role=verb.role,
             state=wrapped_state,
             flow=self,
-            traits=self._env.traits,
+            env=env if env is not None else Environment(),
             halt=effective_halt,
             extra=effective_extra,
             resources=self._dispatch_resources(resources, cost),
@@ -342,6 +358,7 @@ class Flow:
     # Fluent composition
     # -------------------------------------------------------------------------
 
+    @_builder
     def call(
         self,
         target: Any,
@@ -358,7 +375,7 @@ class Flow:
 
         ``target`` is a verb (any async callable carrying a ``.role``) or
         another :class:`Flow`. The first appended node receives the args
-        passed to :meth:`run`; each subsequent node receives the previous
+        passed to :meth:`FlowRunner.start`; each subsequent node receives the previous
         node's result (optionally reshaped by ``project``). Note: ``project``
         has no effect on the first node — there is no previous result to
         transform.
@@ -412,6 +429,7 @@ class Flow:
         )
         return self
 
+    @_builder
     def then(
         self,
         target: Any,
@@ -441,6 +459,7 @@ class Flow:
             name=name,
         )
 
+    @_builder
     def conclude(
         self,
         target: Any,
@@ -483,6 +502,7 @@ class Flow:
         self._nodes[-1].conclude = True
         return self
 
+    @_builder
     def rescue(self, policy: RescuePolicy) -> Self:
         """Attach a failure policy to the most recently appended node.
 
@@ -495,6 +515,7 @@ class Flow:
         self._nodes[-1].rescue = policy
         return self
 
+    @_builder
     def after(self, hook: AfterHook) -> Self:
         """Attach a success hook to the most recently appended node.
 
@@ -507,6 +528,7 @@ class Flow:
         self._nodes[-1].after = hook
         return self
 
+    @_builder
     def branch(
         self,
         *,
@@ -552,6 +574,7 @@ class Flow:
         self._nodes.append(node)
         return self
 
+    @_builder
     def iterate(
         self,
         body: Any,
@@ -603,7 +626,7 @@ class Flow:
 
         At least one of ``until`` or ``max_iters`` must be provided so the
         iteration is guaranteed to terminate. The run's halt
-        (:meth:`run` ``halt=``), if set, is checked between iterations and
+        (:meth:`FlowRunner.start` ``halt=``), if set, is checked between iterations and
         terminates the block gracefully once fired.
 
         Returns ``self`` for chaining.
@@ -634,6 +657,7 @@ class Flow:
         self._nodes.append(node)
         return self
 
+    @_builder
     def map(
         self,
         body: Any,
@@ -675,7 +699,7 @@ class Flow:
                 ``unanimous``, ``mean`` and ``weighted`` combine an
                 ensemble's votes.
             strict: ``True`` (default) → the first non-cancellation exception
-                propagates out of :meth:`run`. ``False`` → each failing item is
+                propagates out of the run. ``False`` → each failing item is
                 replaced by a :class:`Failure` sentinel in the results list so
                 the aggregator can partition successes from failures. Under
                 ``strict=False`` a state-projection failure is also wrapped
@@ -743,6 +767,7 @@ class Flow:
         self._nodes.append(node)
         return self
 
+    @_builder
     def guard(self, fn: GuardFn) -> Self:
         """Attach a per-item skip predicate to the preceding :meth:`map` node.
 
@@ -766,6 +791,7 @@ class Flow:
         target.guard = fn
         return self
 
+    @_builder
     def on_error(self, fn: OnErrorFn) -> Self:
         """Attach a per-item error hook to the preceding :meth:`map` node.
 
@@ -790,6 +816,7 @@ class Flow:
         target.on_error = fn
         return self
 
+    @_builder
     def on_item_complete(self, fn: OnItemCompleteFn) -> Self:
         """Attach a per-item completion hook to the preceding :meth:`map` node.
 
@@ -829,10 +856,11 @@ class Flow:
         target.on_item_complete = fn
         return self
 
+    @_builder
     def with_shortcut(self, signal: str, *, drain: bool = False) -> Self:
         """Let the run's ``signal`` cut this flow short: it fast-forwards to its end.
 
-        ``signal`` names one of the run's signals (:meth:`run`
+        ``signal`` names one of the run's signals (:meth:`FlowRunner.start`
         ``signals=``). While it is set, this flow and every flow under it
         fast-forward, skipping what they can:
 
@@ -880,6 +908,7 @@ class Flow:
         self._shortcut = check_shortcut(signal, drain)
         return self
 
+    @_builder
     def with_cost_tracker(self, tracker: CostTracker) -> Self:
         """Run every run of this flow on ``tracker``, reachable as ``ctx.cost``.
 
@@ -892,7 +921,7 @@ class Flow:
         the tracker is the flow's :data:`~llm_gent.flow.COST` resource (see
         :mod:`llm_gent.flow.resource.cost`). A hard
         stop is opt-in on the tracker side: pass the run's halt event to
-        both :meth:`CostTracker.__init__` (``halt=``) and :meth:`run`
+        both :meth:`CostTracker.__init__` (``halt=``) and :meth:`FlowRunner.start`
         (``halt=``), and the tracker sets it on the first cross into
         ``exceeded``, pausing the run. Without a tracker of its own a flow shares the
         enclosing one.
@@ -904,6 +933,7 @@ class Flow:
         """
         return self.with_resource(COST, check_cost_tracker(tracker))
 
+    @_builder
     def with_budget(self, budget: float) -> Self:
         """Give each run of this flow its own budget: a child tracker with that limit.
 
@@ -915,7 +945,7 @@ class Flow:
         ``urgent_wrapup`` for the agent to read through ``ctx.cost``; gent
         does not stop the run — the agent decides how to keep to its
         budget. A budget needs a tracker on this flow or an enclosing one:
-        :meth:`run` raises otherwise.
+        :meth:`FlowRunner.start` raises otherwise.
 
         The child's spend is in every checkpoint taken while the run is in
         progress, and restored when it resumes. ``with_resource(COST,
@@ -931,6 +961,7 @@ class Flow:
         """
         return self.with_resource(COST, budget=check_budget(budget))
 
+    @_builder
     def with_resource(
         self, key: ResourceKey[R], value: R | None = None, /, **child_args: Any
     ) -> Self:
@@ -972,6 +1003,7 @@ class Flow:
             self._resource_children[key] = dict(child_args)
         return self
 
+    @_builder
     def with_checkpointer(self, name: str | None = None) -> Self:
         """Declare that saves inside this flow write commits.
 
@@ -979,13 +1011,13 @@ class Flow:
         flow and its subtree; in a part of the run with no checkpointer on
         it or above it they write nothing. Declared on any flow — the top
         level or a subflow, a map body, an iterate body — the commits go to
-        the run's history (:meth:`run` ``history=``) and hold the whole
-        run; a checkpointer in a run without a history makes :meth:`run`
+        the run's history (:meth:`FlowRunner.start` ``history=``) and hold the whole
+        run; a checkpointer in a run without a history makes :meth:`FlowRunner.start`
         raise.
 
         A save belongs to the innermost checkpointer enclosing the step
         that saves. With ``name``, each such save also moves the tag
-        ``tags/<name>``: ``run(resume=name)`` goes back to the latest
+        ``tags/<name>``: ``start=Resume(name)`` goes back to the latest
         checkpoint that part took. Tag names are repo-global, one namespace
         with ``ctx.checkpoint(name)``; two flows with the same name share
         one tag.
@@ -1013,6 +1045,7 @@ class Flow:
         """
         return Structure.of(self).hash
 
+    @_builder
     def with_checkpoint_policy(
         self,
         policy: CheckpointPolicy | None = None,
@@ -1053,6 +1086,7 @@ class Flow:
             self._checkpoint_policy = CheckpointPolicy(**kwargs)
         return self
 
+    @_builder
     def with_hooks(self, *hooks: object, replace: bool = False) -> Self:
         """Attach hooks (:mod:`llm_gent.flow.hooks`) to this flow and every flow inside it.
 
@@ -1089,187 +1123,6 @@ class Flow:
                 f"{type(target).__name__}"
             )
         return target
-
-    # -------------------------------------------------------------------------
-    # Execution
-    # -------------------------------------------------------------------------
-
-    async def run(
-        self,
-        *args: Any,
-        state: Any = UNSET,
-        halt: asyncio.Event | None = None,
-        signals: Mapping[str, asyncio.Event] | None = None,
-        history: str | None = None,
-        retention: Retention = "retain",
-        resume: ResumeMode | str = "off",
-        restart: str | None = None,
-        extra: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute the composition graph as the top-level runtime.
-
-        The first node receives ``*args`` / ``**kwargs``. Each subsequent
-        node receives one positional — the previous node's result, optionally
-        transformed by its ``project`` callable.
-
-        A flow is the structure of the work: it can run many times, at once
-        too. What belongs to one run — its halt, its signals, its history
-        and everything it writes as it goes — is given here and kept per
-        run.
-
-        Cancellation is honored end-to-end: :class:`asyncio.CancelledError`
-        raised by any node (verb or subflow) propagates out of :meth:`run`
-        unchanged, past any ``rescue`` policy.
-
-        Args:
-            *args: Positional inputs to the first node.
-            halt: The run's halt: the app sets it to pause the whole run.
-                Every step sees it as ``ctx.halt``; a chain checks it after
-                each step, an iterate before each pass, a map before each
-                item. In-flight bodies are not interrupted — a verb that
-                needs mid-request cancellation reads ``ctx.halt`` itself.
-                A halted run returns :data:`HALTED`; its state is in the
-                halt checkpoint.
-            signals: The run's signals by name, events the app sets for
-                :meth:`with_shortcut` regions. Which are set is recorded in
-                every checkpoint the run takes, and resume sets them again
-                before the first step; a run that finishes records none.
-            history: The name of the run's history: the repository of the
-                flow's ``checkpoint_store`` its commits go to, and the one
-                ``resume`` / ``restart`` read. Owned by the caller; the
-                framework never assigns one. With a history the run writes
-                its halt checkpoint and, on a clean exit, its final state;
-                saves inside the run (``ctx.checkpoint()``, the checkpoint
-                policy) need a :meth:`with_checkpointer` on the saving flow
-                or above it. ``None`` (default): the run keeps no history.
-                One history has one writer at a time.
-            retention: What a fully successful run does with its history:
-                ``"retain"`` (default) keeps it and commits the final state
-                tagged ``complete``; ``"gc_on_success"`` deletes it.
-                Cancellation, a halt and an unhandled exception keep it
-                either way, for a later resume.
-            state: The payload to expose on ``ctx.state`` for this run.
-                Framework wraps it as :class:`State` (``ctx.state.data``
-                reaches the payload; ``ctx.state.root()`` reaches the
-                outermost scope from any subflow). Omitted → a fresh state
-                of this run's own: ``state_factory.new()`` when the flow has
-                a state factory, else an empty ``dict``. A resumed run's
-                state comes from the checkpoint; ``state`` is used only on
-                an empty history. Explicitly passing ``None`` is honored (the payload becomes
-                ``None`` and verbs must guard). ``state`` is a bound
-                parameter — it is not forwarded to the first node; verbs
-                needing it as a kwarg are rejected at :meth:`call` time.
-            extra: Caller-supplied per-invocation opaque dict reachable
-                via ``ctx.extra`` on every dispatch inside the run.
-                Escape hatch for handles the framework does not type
-                (tenant IDs, correlation IDs, request-scoped audit hooks,
-                per-run callbacks). Framework does not inspect the
-                contents and never persists them — ``extra`` never enters
-                a checkpoint Blob, Tree, or node content hash. On resume
-                the caller re-supplies at :meth:`run`; identity across
-                resume is not preserved. ``None`` (default) yields a
-                fresh empty dict at the verb.
-            resume: How to start from the checkpointed history
-                (:data:`~llm_gent.flow.checkpoint.ResumeMode`).
-                ``"off"`` (default) runs from ``state`` as given.
-                ``"latest"`` checks out the newest commit with state
-                (skipping commits without state) and continues
-                where it was: its root state replaces ``state``, every
-                scope comes back, and every chain, iterate and branch that
-                was running continues at its saved step, pass and arm, so
-                only the step running at the checkpoint runs again; a Loop
-                that paused mid-turn resumes that turn. Payloads are rebuilt
-                via ``state_factory`` when bound, else used as plain dicts.
-                On an empty history the run proceeds with ``state`` as
-                given, appending to the same history; a corrupt history
-                raises :class:`HistoryCorrupt`. A commit hash (as
-                ``ctx.checkpoint()`` returns) or a checkpoint name (as
-                ``ctx.checkpoint(name)`` took) selects one commit: the run
-                checks it out the same way and its commits continue from
-                there. Once the run commits, the commits after it leave
-                the history's line and stay resumable by hash until a prune
-                of the repository deletes them; a run that fails before
-                its first commit leaves ``HEAD`` where it was.
-                Halt, signals' events, cost tracker, saia, traits and logger
-                are never serialized: the resumed run uses the ones it is
-                given and the flow has now. ``max_iters`` is cumulative
-                across resumes (the pass counter is restored); a deadline
-                starts fresh. Resuming requires ``history``. Bound
-                parameter: not forwarded to the first node.
-            restart: Start over from a checkpointed commit's data:
-                ``"latest"`` (the commit ``resume="latest"`` would check
-                out), a commit hash or a checkpoint name. The run takes the
-                commit's root state in place of ``state`` and the
-                accounting of the resources this flow declares (its cost
-                tracker's spend); nothing else. Every chain starts at its
-                first step, no scope, paused turn or set signal comes back,
-                and per-run resources start fresh, so a flow whose
-                structure changed since the commit was written runs
-                normally — where ``resume`` would fail on a saved step the
-                flow no longer has. The run's commits are parented on the
-                commit, as with ``resume``. A commit older than the head
-                brings its resources back as they were then: spend recorded
-                after it is not counted. On an empty history ``"latest"``
-                runs from ``state`` as given. Not together with ``resume``;
-                needs ``history``. Bound parameter: not forwarded to the
-                first node.
-            **kwargs: Keyword inputs to the first node.
-
-        Returns the last step's result, or :data:`HALTED` when the halt
-        stopped the run before its end: a step that stops because of the
-        halt either completes or raises :class:`Interrupted`, and the run
-        then writes its halt checkpoint and returns. The halted run's state
-        is in that checkpoint; ``resume="latest"`` continues from it. A halt
-        set during the last step, which completed, does not stop the run: it
-        finishes and returns that step's result (``None`` included).
-
-        With a history, a fully successful run under
-        ``retention="retain"`` commits its final state (tagged
-        ``complete``); ``"gc_on_success"`` deletes the history instead. A
-        run that raises (or is cancelled) writes no commit: its history's
-        head stays its last save, which ``resume="latest"`` continues from.
-
-        Raises:
-            RuntimeError: The flow has no nodes to run, OR a ``history``
-                was given to a flow without a ``checkpoint_store``, OR a
-                resume mode or a restart was requested without a
-                ``history``, OR a flow declares :meth:`with_checkpointer`
-                in a run without a ``history``, OR a shortcut's signal is
-                not one of the run's ``signals`` or a flow under it
-                declares a shortcut on the same signal, OR
-                a flow in the tree has ``with_budget(...)`` with no cost
-                tracker on it or any flow enclosing it. Missing :class:`SAIAFactory` no longer raises at run
-                start — the error surfaces at the first ``ctx.saia``
-                access instead, so verbs that don't consume ``ctx.saia``
-                can run under a factoryless flow.
-            ValueError: ``resume`` is not a :data:`ResumeMode` value, a
-                commit hash or a valid checkpoint name, or ``restart``
-                is not ``"latest"``, a commit hash or a valid checkpoint
-                name; both are given; either names a commit or checkpoint
-                the history does not have, or a commit without state; a
-                signal's name is not a non-empty str; ``retention`` is not
-                ``"retain"`` or ``"gc_on_success"``.
-            TypeError: ``signals`` is not a mapping, or a signal is not an
-                :class:`asyncio.Event`.
-            appinfra.cas.InvalidNameError: ``history`` cannot name a
-                repository.
-        """
-        from .run._flow_run import run_flow
-
-        return await run_flow(
-            self,
-            args,
-            kwargs,
-            state=state,
-            halt=halt,
-            signals=signals,
-            history=history,
-            retention=retention,
-            resume=resume,
-            restart=restart,
-            extra=extra,
-        )
 
     # -------------------------------------------------------------------------
     # Internals

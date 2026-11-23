@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 from appinfra.cas import Blob, ObjectNotFoundError, Store, Tree, TreeEntry
 
-from llm_gent.flow import Context, Factory, FlowCommit, History, verb
-from tests.helpers import memory_store
+from llm_gent.flow import Context, FlowCommit, History, Resume, verb
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import make_test_logger
 
@@ -48,7 +48,7 @@ def _flow(store: Store, tag: str | None) -> Any:
         return x + 3
 
     return (
-        Factory(make_test_logger(), checkpoint_store=store)
+        TestFactory(make_test_logger(), checkpoint_store=store)
         .create()
         .with_checkpointer()
         .call(a)
@@ -68,11 +68,11 @@ async def _readable(history: History) -> None:
 
 class TestPrune:
     async def test_prunes_what_a_named_reset_left_behind(self, store: Store) -> None:
-        await _flow(store, "mid").run(1, history=NAME)
+        await run_flow(_flow(store, "mid"), 1, history=NAME)
         history = History(store, NAME)
         first_end = await history.head()
         assert first_end is not None
-        await _flow(store, None).run(history=NAME, resume="mid")
+        await run_flow(_flow(store, None), history=NAME, start=Resume("mid"))
 
         repo = store.repo(NAME)
         assert repo.prune(0) > 0
@@ -80,12 +80,12 @@ class TestPrune:
         await _readable(history)
         assert await history.checkpoint("mid") is not None
         # The history finished: latest starts again from its first step.
-        assert await _flow(store, None).run(1, history=NAME, resume="latest") == 23
+        assert await run_flow(_flow(store, None), 1, history=NAME, start=Resume("latest")) == 23
         assert repo.prune(0) == 0
 
     async def test_prunes_the_objects_of_a_commit_head_never_moved_to(self, store: Store) -> None:
         """A process that died before moving HEAD left a commit: kept while recent, then pruned."""
-        await _flow(store, None).run(1, history=NAME)
+        await run_flow(_flow(store, None), 1, history=NAME)
         repo = store.repo(NAME)
         before = set(store.list_objects(NAME))
         head = await History(store, NAME).head()
@@ -99,14 +99,14 @@ class TestPrune:
         assert set(store.list_objects(NAME)) == before
 
     async def test_a_history_without_garbage_loses_nothing(self, store: Store) -> None:
-        await _flow(store, "mid").run(1, history=NAME)
+        await run_flow(_flow(store, "mid"), 1, history=NAME)
         before = set(store.list_objects(NAME))
         assert store.repo(NAME).prune(0) == 0
         assert set(store.list_objects(NAME)) == before
         await _readable(History(store, NAME))
 
     async def test_a_corrupt_history_raises_and_deletes_nothing(self, store: Store) -> None:
-        await _flow(store, None).run(1, history=NAME)
+        await run_flow(_flow(store, None), 1, history=NAME)
         repo = store.repo(NAME)
         orphan = repo.put(Blob(b"x"))
         head = await History(store, NAME).head()

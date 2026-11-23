@@ -9,7 +9,7 @@ history's name separately, and re-plumb the name into every store call.
 :class:`appinfra.cas.Repo` and exposes the save operations the framework
 needs.
 
-A run has at most one context: the repository its ``run(history=...)``
+A run has at most one context: the repository its ``history=``
 names in the top-level flow's checkpoint store. Without one,
 ``frame.checkpoint_ctx is None`` and every save site skips; with one, saves
 inside the run also need a ``with_checkpointer()`` on the saving flow or
@@ -63,7 +63,8 @@ def check_checkpointers(root: Flow, history: str | None) -> None:
     if declaring is not None:
         raise RuntimeError(
             f"Flow {_label(declaring)} declares with_checkpointer() but the run of "
-            f"{_label(root)} has no history: pass run(history=...) to keep its checkpoints"
+            f"{_label(root)} has no history: pass start(flow, history=...) to keep its "
+            f"checkpoints"
         )
 
 
@@ -79,7 +80,7 @@ def _label(flow: Flow) -> str:
 class CheckpointContext:
     """The run's history repository bundled with the save operations that consume it.
 
-    Constructed by :meth:`Flow.run` for ``run(history=...)``, on the
+    Constructed by :meth:`FlowRunner.start` for a run's ``history=``, on the
     top-level flow's checkpoint store. Absent when the run has no history —
     save sites check ``frame.checkpoint_ctx is None`` and skip.
 

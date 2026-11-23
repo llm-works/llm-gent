@@ -87,7 +87,7 @@ it back and returns the count of steps it produced.
 from typing import Any
 from llm_gent import verb, Context
 from llm_gent.core import Role
-from llm_gent.flow import Factory
+from llm_gent.flow import Factory, FlowRunner
 
 planner = Role(name="planner", backend="anthropic", model="claude-sonnet-4-20250514")
 worker = Role(name="worker", backend="anthropic", model="claude-sonnet-4-20250514")
@@ -109,12 +109,29 @@ async def execute(ctx: Context, _prev: Any) -> int:
 
 ff = Factory(lg)  # lg: Logger — elided for brevity
 flow = ff.create("run").call(plan).call(execute)
-assert await flow.run("ship it") == 3  # the run gets a fresh {} as its state
+runner = FlowRunner(lg)
+assert await runner.start(flow, "ship it") == 3  # the run gets a fresh {} as its state
 ```
+
+A flow is structure: it never runs itself. `runner.start(flow, ...)` starts
+a run and returns it at once; awaiting the run gives its result. The same
+flow can run many times, at once too, so from its first start on it no
+longer changes: a builder method on a started flow, or on a flow under it,
+raises.
 
 `execute` did not need a two-argument signature; it read what it needed from
 `ctx.state.data`. Adding a third downstream verb that also needs `target` is
 free — the state is already there.
+
+What a run may use is the runner's, not the flow's:
+`FlowRunner(lg, env=Environment(saia_factory=..., traits=...))`, with
+`Environment` from `llm_gent.core`; steps read it as `ctx.env`. A
+verb's `ctx.saia` is the SAIA its role's `SAIAFactory.build(role)` returned,
+built once per role and shared by every run that shares the environment; a
+SAIA holds configuration only, so runs share it safely. `ctx.traits` is the
+environment's trait registry. Every flow of a run, nested ones included, sees
+the same environment. A run without one may still run verbs that never read
+`ctx.saia`.
 
 A `Role` can also be just a name, `Role(name="planner")`, when the app's
 `SAIAFactory` resolves the backend, model, temperature and max tokens itself
@@ -158,7 +175,7 @@ other than a single-hop hand-off:
   JSON, pydantic models, or objects with `to_dict()` and a classmethod
   `from_dict()`. The state type is declared via `state_factory=` on the
   factory (`TypeStateFactory(MyState)`); a run's state is
-  `run(state=...)`, and a run given none gets `state_factory.new()`
+  `start(flow, state=...)`, and a run given none gets `state_factory.new()`
   (else an empty `dict`). A resumed run takes its state from the
   checkpoint.
 - Aggregation across concurrent items. Under `.map(state=proj, merge=fn)`
@@ -172,7 +189,7 @@ Verifier's `judge` returns the verdict (so the chain can carry it) and
 also writes `ctx.data.reviews_agree` because the enclosing
 `.iterate(until=lambda _r, ctx: ctx.data.reviews_agree, ...)` reads state,
 not the return. Structured-agent's `triage` returns the `TriageResponse`
-(so `.run()` yields it as the flow's final value) and also writes
+(so the awaited run yields it as the flow's final value) and also writes
 `ctx.data.final_triage` because the state slot is what the checkpoint
 carries across resume. Neither pattern is redundant — each channel has a
 different consumer.
@@ -231,16 +248,17 @@ turn pauses) first. A chain's cursor stays on an interrupted step and
 moves past a completed one; a completed last step does not stop the
 chain. Chains, iterates and maps that stop before their end raise
 `Interrupted` to the step running them, and each part stays registered
-where it stopped. Once everything has stopped, `run()` writes one
+where it stopped. Once everything has stopped, the run writes one
 `halted` commit holding every position and returns `HALTED`: the halted
 run's state is in that commit. A halted history is never marked
 complete. A run whose last step completed returns that step's result —
 `None` included — even when the halt was set during it: it finished.
 
-A run has one halt, passed as `run(halt=event)`; every flow of the run
-observes it as `ctx.halt`. The halt belongs to the run, not the flow:
+A run has one halt, passed as `start(flow, halt=event)`; every flow of the
+run observes it as `ctx.halt`. The halt belongs to the run, not the flow:
 one flow run several times at once takes one event per run, and setting
-it pauses that run alone.
+it pauses that run alone. `run.halt()` on the run `start()` returned does
+the same, also for a run started without an event.
 
 A map's cursor is its item list — resolved once, never evaluated again
 on resume — and its done items with their results. On resume a
@@ -298,9 +316,9 @@ these identities), and records its hash as `flow_root_hash`:
 `Structure.diff(Structure.of(flow))` says which steps a flow
 today kept, added (and where) and removed.
 
-`run(restart=...)` starts over from a commit's data instead of
+`start=Restart(at)` starts over from a commit's data instead of
 continuing it. `"latest"`, a commit hash or a checkpoint name selects
-the commit as `resume` does, and the run's commits are parented on it.
+the commit as `Resume(at)` does, and the run's commits are parented on it.
 The run takes the commit's root state and the accounting of the
 resources the top-level flow declares (its cost tracker's spend), and
 nothing else: every chain starts at its first step, no scope, paused
@@ -312,12 +330,12 @@ left to do run again, and decide from state whether they have anything
 to do. A commit older than the head brings its resources back as they
 were then: spend recorded after it is not counted.
 
-`resume` continues the run where it stopped: the same code picks up
+`Resume` continues the run where it stopped: the same code picks up
 after a halt or a crash, and only the interrupted step runs again.
-`restart` runs it again from the top on the data it had: after a deploy
+`Restart` runs it again from the top on the data it had: after a deploy
 changed the flow, or to take a finished run further.
 
-| From the commit | `resume=` | `restart=` |
+| From the commit | `Resume(at)` | `Restart(at)` |
 |---|---|---|
 | Root state | restored | restored |
 | Declared resources (a cost tracker's spend) | restored | restored |
@@ -332,7 +350,7 @@ Current limits:
 
 - A deploy that inserts steps keeps positions valid; resuming into a
   flow that no longer has the saved step raises, naming its path
-  (`restart` starts such a history over from its data).
+  (`Restart` starts such a history over from its data).
   Reordering steps can make a step run again.
 - Adding `name=` to a step changes its node id (and its descendants').
   A checkpoint at that step fails to resume until the run completes.
@@ -344,8 +362,8 @@ of the flow is cut short — it skips what it can — and the run goes on
 after it, still ending with a result.
 
 Signals are named events the app sets, passed per run as
-`run(signals={name: event})`. `with_shortcut(name)` makes a flow a
-region the signal cuts short; `run()` raises when a region names a
+`start(flow, signals={name: event})`. `with_shortcut(name)` makes a flow a
+region the signal cuts short; `start()` raises when a region names a
 signal the run was not given:
 
 ```python
@@ -356,7 +374,7 @@ flow = (
     .then(loop)  # the region: the cut ends it
     .then(finish)  # runs as usual after it
 )
-await flow.run(halt=pause, signals={"cut": cut})
+await runner.start(flow, halt=pause, signals={"cut": cut})
 ```
 
 While the signal is set, the region and every flow under it
@@ -402,8 +420,8 @@ another region on the same signal (run start raises); regions on
 different signals may nest. A signal set inside a step, without
 awaiting, is seen at that step's boundary.
 
-A cut is not a halt: it writes no checkpoint, and `ctx.halt` — the
-run's halt, `None` without `run(halt=...)` — stays unset. A step that
+A cut is not a halt: it writes no checkpoint, and `ctx.halt`, the run's
+halt (`start(flow, halt=...)`, or the one `run.halt()` sets), stays unset. A step that
 stops for the halt raises `Interrupted` and runs again on resume; a
 step that ends early on a cut returns. Setting `ctx.halt` from a step
 pauses the whole run (a stop flag stored outside the process, say).
@@ -487,7 +505,7 @@ async def score(ctx, doc):
   below it, runs with `value`.
 - `with_resource(key, **args)` — each run of the flow (a map item, an
   iterate pass, a `.call`) runs with `child(**args)` of the enclosing
-  `key` resource; `run()` raises when there is none.
+  `key` resource; `start()` raises when there is none.
 - `with_resource(key, value, **args)` — each run runs with a child of
   `value`.
 
@@ -500,7 +518,7 @@ per-run child is kept while its run is in progress; a cut runs nothing
 again, so nothing is counted twice. What resume means for the accounting —
 continue, rebase, ignore — is the resource's own decision, made in
 `restore()`. Two keys with the same name in one flow's tree raise at
-`run()`: they would share one place in a checkpoint.
+`start()`: they would share one place in a checkpoint.
 
 A fluent name of the app's own — `flow.with_stats(...)` for
 `with_resource(STATS, ...)` — is `resource_method(STATS)`:
@@ -538,7 +556,7 @@ the cost API is sugar over it: `with_cost_tracker(t)` is
   rolls up, and every budget on the chain is tracked. A map body runs once
   per item, an iterate body once per pass, a subflow once per `.call`, so
   a budget on the body is a per-item, per-pass or per-call budget. A
-  budget needs a tracker on the flow or an enclosing one; `run()` raises
+  budget needs a tracker on the flow or an enclosing one; `start()` raises
   otherwise.
 - Neither — the run shares the enclosing tracker: map items compete for
   it.
@@ -609,13 +627,11 @@ own class.
 
 ### One history per run
 
-The checkpoint store is the flow's: `Flow(lg, checkpoint_store=store)`,
-or `Factory(lg, checkpoint_store=store)` for every flow it creates. The
-history is the run's: `run(history="session-42")` names it, so one flow
+The checkpoint store is the runner's: `FlowRunner(lg, store=store)`. The
+history is the run's: `start(flow, history="session-42")` names it, so one flow
 runs many histories, one per run, at once. Every commit the run writes
 holds the whole run and goes to that history, wherever in the flow tree
-it was taken — committing in a subdirectory commits the repo. A run uses
-its top-level flow's store; a nested flow's is not looked at.
+it was taken — committing in a subdirectory commits the repo.
 
 The store is an `appinfra.cas.Store`, and the history is its repository
 named by `history=`:
@@ -635,15 +651,20 @@ checkpointer on it or above it, `ctx.checkpoint()` and the checkpoint
 policy write commits; elsewhere they write nothing. A save belongs to the
 innermost checkpointer enclosing the step; `with_checkpointer("items")`
 also moves the tag `tags/items` to each of its saves, so
-`run(resume="items")` goes back to that part's latest checkpoint. Tag
-names are repo-global, shared with `ctx.checkpoint(name)`. `run()`
+`start=Resume("items")` goes back to that part's latest checkpoint. Tag
+names are repo-global, shared with `ctx.checkpoint(name)`. `start()`
 raises on a checkpointer in a run without `history=`, on `history=`
-without a store, and on `resume=` / `restart=` without `history=`.
+without a store, and on a `Resume` / `Restart` without `history=`.
 
 ```python
-ff = Factory(lg, checkpoint_store=store)
-flow = ff.create().call(prepare).map(lambda b: b.with_checkpointer("items").call(item), items=...)
-await flow.run(state=..., history="session-42")  # the run's state and repo
+runner = FlowRunner(lg, store=store)
+flow = (
+    Factory(lg)
+    .create()
+    .call(prepare)
+    .map(lambda b: b.with_checkpointer("items").call(item), items=...)
+)
+await runner.start(flow, state=..., history="session-42")  # the run's state and repo
 ```
 
 ### Checkpoint cadence
@@ -683,7 +704,7 @@ flow = (
     .with_checkpoint_policy(on_iterate=True, on_map_item=True)
     .iterate(body, max_iters=10)
 )
-await flow.run(state=..., history="history-42")
+await runner.start(flow, state=..., history="history-42")
 ```
 
 Halt-save and `ctx.checkpoint()` are unaffected by the policy — the
@@ -691,7 +712,7 @@ policy governs only implicit auto-saves.
 
 On a clean exit under the default `retain` retention, the framework also
 commits the run's final state and moves the `complete` tag to it
-(`run(..., retention="gc_on_success")` deletes the history instead). A
+(`start(flow, ..., retention="gc_on_success")` deletes the history instead). A
 history whose head is that commit is complete; the tag stays on the last
 finished run's final state when a later run halts past it. A final state
 that cannot be serialized is committed without state (and a warning is
@@ -699,23 +720,23 @@ logged) rather than failing the finished run.
 
 A run that raises — or is cancelled — writes no commit: the state at a
 failure may be half-updated, so the history's head stays at its last
-save, which is where `resume="latest"` continues. The steps that were
+save, which is where `Resume("latest")` continues. The steps that were
 running then run again.
 
 ### Resume
 
-`run(history=..., resume=...)` selects how a run starts from the history:
+`start(flow, history=..., start=...)` selects how a run starts from the history:
 
-- `"off"` (default) — start from `state=` as given; commits still append
+- `Fresh()` (default) — start from `state=` as given; commits still append
   to the history.
-- `"latest"` — check out the newest commit with state and continue every
+- `Resume("latest")` — check out the newest commit with state and continue every
   structure at its cursor (see above). Commits without state (a final
   state that could not be serialized) are skipped; walking past them is
   logged at warning level. On a
   finished history the run starts from its first step with the final
   state — the same call starts the next session of a long-lived agent.
   Iteration bounds count across runs.
-- `"<name>"` — check out the named checkpoint `ctx.checkpoint("<name>")`
+- `Resume("<name>")` — check out the named checkpoint `ctx.checkpoint("<name>")`
   took, the same way: the run's commits continue from there. Once the run
   commits, the commits written after the checkpoint leave the history's
   line (`"latest"` no longer sees them); a run that fails before its first
@@ -723,7 +744,7 @@ running then run again.
   `"latest"` and `"complete"` cannot name a checkpoint, nor can a string
   of a commit hash's form; an unknown name raises `ValueError` listing
   the names the history has.
-- `"<commit hash>"` — the same for any commit of the history.
+- `Resume("<commit hash>")` — the same for any commit of the history.
   `ctx.checkpoint()` returns the hash of the commit it wrote, named or
   not. A commit off the history's line after a reset stays resumable by
   hash until a prune of the repository deletes it.
@@ -772,8 +793,8 @@ snapshot tree with its cursors.
 ### Cleaning up a history
 
 Objects stay in the store when nothing reaches them any more: the commits
-written after a checkpoint once a run resumed from it with `resume=<name>`
-or `resume=<hash>` commits (resumable by hash until collected), and the objects of
+written after a checkpoint once a run resumed from it with `Resume(<name>)`
+or `Resume(<hash>)` commits (resumable by hash until collected), and the objects of
 a commit whose process died before moving `HEAD` to it. The framework never deletes them on its own;
 a prune of the history's repository does, keeping every ref and
 everything a ref reaches:

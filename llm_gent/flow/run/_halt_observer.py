@@ -8,10 +8,10 @@ after each step, an iterate before each pass, a map item before it
 starts. An LLM call in flight finishes (or its SAIA turn pauses) and
 its step ends. A structure that stops leaves its position registered
 and raises :class:`~llm_gent.flow.Interrupted` to the step running it;
-once everything has stopped, :meth:`Flow.run` writes the run's one halt
+once everything has stopped, the run writes its one halt
 checkpoint from those positions (:func:`~llm_gent.flow.run._resume.commit_halt`).
 
-A run has one halt, given to :meth:`~llm_gent.flow.Flow.run` (``halt=``).
+A run has one halt, given to :meth:`~llm_gent.flow.FlowRunner.start` (``halt=``).
 :func:`note_halt` records where it was first observed, for that commit's
 metadata.
 """

@@ -21,9 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** `Role` and `SAIAFactory` move to `llm_gent.core`; `llm_gent.flow` no longer
-  exports them.
-
 - Building from source requires setuptools `>= 77.0.3`; the package declares its license as the
   SPDX expression `Apache-2.0`.
 - A paused turn's messages are stored as an appinfra CAS `Vector`, one blob per message, so a turn
@@ -38,12 +35,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and memory clients every agent's traits share; `AgentFactory` takes it. Removed:
   `AgentFactory(lg)` and `PlatformContext.from_config(...)`. Agent, trait and tool factories are
   `Factory` in their subpackages; `llm_gent` exports them with the prefix.
-- Breaking: a Flow is a structure that runs many times at once. The checkpoint store is set on
-  `Flow(checkpoint_store=)` / `Factory(checkpoint_store=)`; state, halt, signals, history and
-  retention are `run()` arguments, and a run given no state gets a fresh one (`StateFactory.new()`,
-  else `{}`). Removed: `Flow(state=)` / `Flow.state` / `with_halt` / `with_signal` /
-  `with_checkpoint_store`, `Factory(state=, halt=)`, `Factory.with_halt`, and `Factory.create()`'s
-  `state=`, `halt=`, `checkpointer=` and `client_flow_id=`.
+- Breaking: a Flow is a structure that runs many times at once. State, halt, signals, history and
+  retention are `FlowRunner.start()` arguments, and a run given no state gets a fresh one
+  (`StateFactory.new()`, else `{}`). Removed: `Flow(state=)` / `Flow.state` / `with_halt` /
+  `with_signal` / `with_checkpoint_store`, `Factory(state=, halt=)`, `Factory.with_halt`, and
+  `Factory.create()`'s `state=`, `halt=`, `checkpointer=` and `client_flow_id=`.
+- Breaking: a flow never runs itself. `FlowRunner(lg).start(flow, ...)` starts a run and returns
+  it to await or `halt()`; `start=Fresh() | Resume(at) | Restart(at)` replaces `resume=` /
+  `restart=`. A started flow and the flows under it refuse further changes. Removed: `Flow.run()`
+  and `ResumeMode`.
+- Breaking: what a run may use is the runner's environment, `FlowRunner(lg, env=Environment(...))`,
+  shared by every run it starts and read as `ctx.env`. Removed: `saia_factory=` / `traits=` on
+  `Flow` and `Factory`, `Factory.with_saia_factory` / `with_traits` and `Flow.traits`;
+  `Flow.dispatch` takes `env=`.
+- Breaking: `Role` and `SAIAFactory` move to `llm_gent.core`; `llm_gent.flow` no longer exports
+  them.
+- Breaking: runs keep their histories in the runner's store, `FlowRunner(lg, store=)`. Removed:
+  `checkpoint_store=` on `Flow` and `Factory`, `Factory.with_checkpoint_store`.
+  `build_canonical_flow` takes `checkpointed=` for `store=`; `resume_in_subprocess` flow builders
+  take `(lg, **kwargs)`.
 
 ## [0.4.1] - 2026-11-01
 

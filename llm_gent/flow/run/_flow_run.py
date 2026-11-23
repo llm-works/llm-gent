@@ -3,18 +3,23 @@
 
 """One run of a top-level flow: check the inputs, start, walk, finish.
 
-The run's own objects (its :class:`~._run.Run`, the root scope, the
-position) are made here; the walk itself is :func:`~._executor.run_as_subflow`
-from the root.
+:func:`start_run` checks the inputs and makes the run's own objects (its
+:class:`~._run.Run`, the root scope, the position), then executes it in a
+task; the walk itself is :func:`~._executor.run_as_subflow` from the root.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, get_args
 
-from ..checkpoint import ResumeMode, Retention, checkpoint_tag, is_commit_hash
+from appinfra.cas import Store
+from appinfra.log import Logger
+
+from ...core.env import Environment
+from ..checkpoint import Retention
 from ..flow import Flow
 from ..hooks import Decision, HookDenied, RunOutcome
 from ..nodes import HALTED, UNSET, Interrupted
@@ -26,13 +31,24 @@ from ..structure import Structure
 from ._checkpoint_ctx import CheckpointContext, check_checkpointers
 from ._executor import run_as_subflow
 from ._hook_points import RunHooks
-from ._resume import Resume, apply_clean_exit_retention, commit_halt
+from ._resume import Checkout, apply_clean_exit_retention, commit_halt
 from ._run import Run
 from ._shortcut import check_shortcuts, check_signals, run_signals
 from .scope import Position, Scope, _Frame
+from .start import FRESH, Fresh, Restart, Resume, Start
 
 
-async def run_flow(
+@dataclass(frozen=True)
+class Wiring:
+    """What every run a runner starts shares: its logger, its environment, its history store."""
+
+    lg: Logger
+    env: Environment
+    store: Store | None
+
+
+def start_run(
+    wiring: Wiring,
     flow: Flow,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -42,17 +58,41 @@ async def run_flow(
     signals: Mapping[str, asyncio.Event] | None = None,
     history: str | None = None,
     retention: Retention = "retain",
-    resume: ResumeMode | str = "off",
-    restart: str | None = None,
+    start: Start = FRESH,
     extra: dict[str, Any] | None = None,
-) -> Any:
-    """Run ``flow`` as a top-level run; :meth:`Flow.run` documents the arguments."""
+) -> Run:
+    """Check a run of ``flow`` and start it in a task; :meth:`FlowRunner.start` documents it.
+
+    Every check runs here, before anything is read or written, so a
+    misconfigured run raises from this call and leaves no history behind.
+
+    Raises:
+        RuntimeError: No running event loop, besides the input checks.
+    """
+    asyncio.get_running_loop()
     run_signals_ = check_signals(signals)
-    _check_run_args(flow, resume, restart, run_signals_, history, retention)
-    run = _new_run(flow, halt, run_signals_, history, retention)
-    active_state, saved = await _start_state(
-        run, lambda: _wrap_top_state(flow, state), resume, restart
+    _check_run_args(wiring, flow, start, run_signals_, history, retention)
+    run = _new_run(wiring, flow, halt, run_signals_, history, retention)
+    # The checks passed: from here on the runs share the flow's structure.
+    flow._freeze()
+    run.task = asyncio.create_task(
+        _execute(run, state, start, extra, args, kwargs),
+        name=f"flow-run {flow._name or '<anonymous>'}",
     )
+    return run
+
+
+async def _execute(
+    run: Run,
+    state: Any,
+    start: Start,
+    extra: dict[str, Any] | None,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    """Start ``run`` from its state, walk it with its hooks, and return its result."""
+    flow = run.flow
+    active_state, saved = await _start_state(run, lambda: _wrap_top_state(flow, state), start)
     run.scopes.begin(active_state, saved)
     hooks = run.hooks = RunHooks(run)
     run.info = hooks.info
@@ -72,6 +112,7 @@ async def run_flow(
 
 
 def _new_run(
+    wiring: Wiring,
     flow: Flow,
     halt: asyncio.Event | None,
     signals: dict[str, asyncio.Event],
@@ -85,15 +126,13 @@ def _new_run(
     """
     ctx = None
     if history is not None:
-        assert flow._checkpoint_store is not None  # _check_history
-        ctx = CheckpointContext(
-            flow._checkpoint_store, history, lambda: Structure.of(flow), retention
-        )
+        assert wiring.store is not None  # _check_history
+        ctx = CheckpointContext(wiring.store, history, lambda: Structure.of(flow), retention)
     return Run(
-        lg=flow._lg,
-        env=flow._env,
-        halt_event=halt,
         flow=flow,
+        lg=wiring.lg,
+        env=wiring.env,
+        halt_event=halt,
         signals=signals,
         checkpoint_ctx=ctx,
     )
@@ -161,9 +200,9 @@ async def _stopped_before_run(hooks: RunHooks, decision: Decision) -> Any:
 
 
 def _check_run_args(
+    wiring: Wiring,
     flow: Flow,
-    resume: ResumeMode | str,
-    restart: str | None,
+    start: Start,
     signals: Mapping[str, asyncio.Event],
     history: str | None,
     retention: Retention,
@@ -177,64 +216,39 @@ def _check_run_args(
         raise RuntimeError(f"Flow {flow._name!r} has no nodes to run")
     if retention not in get_args(Retention):
         raise ValueError(f"retention must be 'retain' or 'gc_on_success'; got {retention!r}")
-    _check_history(flow, history)
-    _check_start(flow, resume, restart, history)
+    _check_history(wiring, flow, history)
+    _check_start(flow, start, history)
     check_checkpointers(flow, history)
     check_shortcuts(flow, signals)
     check_budgets_have_a_tracker(flow)
     check_resources(flow)
 
 
-def _check_history(flow: Flow, history: str | None) -> None:
-    """Reject a ``history`` on a flow without a checkpoint store."""
-    if history is not None and flow._checkpoint_store is None:
+def _check_history(wiring: Wiring, flow: Flow, history: str | None) -> None:
+    """Reject a ``history`` on a runner without a store to keep it in."""
+    if history is not None and wiring.store is None:
         raise RuntimeError(
-            f"Flow {flow._name or '<anonymous>'!r} was run with history={history!r} but has "
-            f"no checkpoint store: build it with checkpoint_store= (Flow or Factory)"
+            f"Flow {flow._name or '<anonymous>'!r} was started with history={history!r} but "
+            f"the runner has no store: build it with FlowRunner(lg, store=...)"
         )
 
 
-def _check_start(
-    flow: Flow, resume: ResumeMode | str, restart: str | None, history: str | None
-) -> None:
-    """Reject a bad ``resume`` or ``restart``, both together, or either without a history."""
-    if resume not in get_args(ResumeMode) and not is_commit_hash(resume):
-        _require_checkpoint_name(
-            resume,
-            f"resume must be one of {get_args(ResumeMode)}, a commit hash or a checkpoint name",
+def _check_start(flow: Flow, start: Start, history: str | None) -> None:
+    """Reject a ``start`` that is not a :data:`Start`, or one from a commit without a history."""
+    if not isinstance(start, Fresh | Resume | Restart):
+        raise TypeError(
+            f"start= takes Fresh(), Resume(at) or Restart(at); got {type(start).__name__}"
         )
-    if restart is not None:
-        if resume != "off":
-            raise ValueError(
-                f"run() takes resume or restart, not both; got resume={resume!r}, "
-                f"restart={restart!r}"
-            )
-        if restart != "latest" and not is_commit_hash(restart):
-            _require_checkpoint_name(
-                restart, "restart must be 'latest', a commit hash or a checkpoint name"
-            )
-    start = f"resume={resume!r}" if restart is None else f"restart={restart!r}"
-    if (resume != "off" or restart is not None) and history is None:
+    if not isinstance(start, Fresh) and history is None:
         label = flow._name or "<anonymous>"
         raise RuntimeError(
-            f"Flow {label!r} was run with {start} but no history: pass "
-            f"run(history=...) to name the history to start from"
+            f"Flow {label!r} was started with start={start!r} but no history: pass "
+            f"history= to name the history to start from"
         )
-
-
-def _require_checkpoint_name(value: Any, what: str) -> None:
-    """Raise ``ValueError`` led by ``what`` when ``value`` cannot name a checkpoint."""
-    try:
-        checkpoint_tag(value)
-    except ValueError as e:
-        raise ValueError(f"{what}; got {value!r} ({e})") from None
 
 
 async def _start_state(
-    run: Run,
-    fallback: Callable[[], State[Any]],
-    resume: ResumeMode | str,
-    restart: str | None,
+    run: Run, fallback: Callable[[], State[Any]], start: Start
 ) -> tuple[State[Any], Snapshot | None]:
     """The run's initial state and the snapshot it starts from (``None`` for a fresh run).
 
@@ -246,15 +260,15 @@ async def _start_state(
     Records on ``run`` the commit it checked out (``None`` for a fresh
     run) for the run's hook events.
     """
-    if resume == "off" and restart is None:
+    if isinstance(start, Fresh):
         return fallback(), None
-    checkout = Resume(run)
-    if restart is not None:
-        started = await checkout.restart(restart, fallback)
-    elif resume == "latest":
+    checkout = Checkout(run)
+    if isinstance(start, Restart):
+        started = await checkout.restart(start.at, fallback)
+    elif start.at == "latest":
         started = await checkout.checkout(fallback)
     else:
-        started = await checkout.checkout_at(resume)
+        started = await checkout.checkout_at(start.at)
     run.resumed_from = checkout.checked_out
     return started
 

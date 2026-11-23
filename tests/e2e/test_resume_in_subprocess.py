@@ -11,17 +11,23 @@ from pathlib import Path
 import pytest
 from appinfra.cas import FileStore
 
+from llm_gent.flow import Resume
 from llm_gent.flow.testing.checkpoint import build_canonical_flow, resume_in_subprocess
-from tests.helpers import file_store, make_test_logger
+from tests.helpers import file_store, make_test_logger, run_flow
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e]
 
 
 async def _halt_at_two(store: FileStore) -> None:
-    await build_canonical_flow(
-        make_test_logger(), max_iters=4, halt_after_iteration=2, store=store
-    ).run(halt=asyncio.Event(), history="xproc")
+    await run_flow(
+        build_canonical_flow(
+            make_test_logger(), max_iters=4, halt_after_iteration=2, checkpointed=True
+        ),
+        halt=asyncio.Event(),
+        history="xproc",
+        store=store,
+    )
 
 
 async def test_matches_in_process_resume(tmp_path: Path) -> None:
@@ -29,8 +35,11 @@ async def test_matches_in_process_resume(tmp_path: Path) -> None:
     await _halt_at_two(in_proc)
     await _halt_at_two(file_store(tmp_path / "xproc"))
 
-    expected = await build_canonical_flow(make_test_logger(), max_iters=4, store=in_proc).run(
-        history="xproc", resume="latest"
+    expected = await run_flow(
+        build_canonical_flow(make_test_logger(), max_iters=4, checkpointed=True),
+        history="xproc",
+        start=Resume("latest"),
+        store=in_proc,
     )
     result = resume_in_subprocess(
         store_module="appinfra.cas",

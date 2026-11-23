@@ -22,18 +22,18 @@ from llm_gent.core import Role
 from llm_gent.flow import (
     HALTED,
     Context,
-    Factory,
     Failure,
     Flow,
     History,
     Interrupted,
     Loop,
+    Resume,
     Skipped,
     Structure,
     majority,
     verb,
 )
-from tests.helpers import memory_store
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import ROLE_A, ROLE_B, make_ff, make_test_logger
 
@@ -64,17 +64,17 @@ def _flow() -> Flow:
 
 def _store_flow(store: Any) -> Flow:
     """Run it with ``history=NAME``."""
-    flow = Factory(make_test_logger(), checkpoint_store=store).create()
+    flow = TestFactory(make_test_logger(), checkpoint_store=store).create()
     return flow.with_checkpointer()
 
 
 @pytest.mark.asyncio
 class TestRunsEachMemberOnTheInput:
     async def test_the_results_in_member_order(self) -> None:
-        assert await _flow().map([add_one, add_two, double]).run(10) == [11, 12, 20]
+        assert await run_flow(_flow().map([add_one, add_two, double]), 10) == [11, 12, 20]
 
     async def test_aggregate_reduces_them(self) -> None:
-        assert await _flow().map([add_one, add_two], aggregate=sum).run(10) == 23
+        assert await run_flow(_flow().map([add_one, add_two], aggregate=sum), 10) == 23
 
     async def test_a_majority_vote(self) -> None:
         @verb
@@ -86,7 +86,7 @@ class TestRunsEachMemberOnTheInput:
             return "no"
 
         flow = _flow().map([yes, no, yes], aggregate=majority)
-        assert await flow.run() == "yes"
+        assert await run_flow(flow) == "yes"
 
     async def test_each_member_runs_under_its_own_role(self) -> None:
         @verb(role=ROLE_A)
@@ -97,7 +97,7 @@ class TestRunsEachMemberOnTheInput:
         async def see_b(ctx: Context[Any], _x: Any = None) -> Role | None:
             return ctx.role
 
-        assert await make_ff().create().map([see_a, see_b]).run() == [ROLE_A, ROLE_B]
+        assert await run_flow(make_ff().create().map([see_a, see_b])) == [ROLE_A, ROLE_B]
 
     async def test_members_share_the_step_s_state_without_a_projection(self) -> None:
         @verb
@@ -115,7 +115,7 @@ class TestRunsEachMemberOnTheInput:
             return dict(ctx.data)
 
         flow = make_ff().create().map([mark_a, mark_b]).then(observe)
-        assert await flow.run() == {"a": True, "b": True}
+        assert await run_flow(flow) == {"a": True, "b": True}
 
     async def test_members_see_the_run_s_halt_from_any_depth(self) -> None:
         halt = asyncio.Event()
@@ -126,7 +126,7 @@ class TestRunsEachMemberOnTheInput:
             seen.append(ctx.halt)
 
         inner = make_ff().create().map([capture, capture])
-        await make_ff().create().call(inner).run(halt=halt)
+        await run_flow(make_ff().create().call(inner), halt=halt)
         assert seen == [halt, halt]
 
 
@@ -153,7 +153,7 @@ class TestMapOptionsApply:
         async def boom(ctx: Context[Any], _x: Any = None) -> int:
             raise ValueError("boom")
 
-        first, failure = await _flow().map([add_one, boom], strict=False).run(1)
+        first, failure = await run_flow(_flow().map([add_one, boom], strict=False), 1)
         assert first == 2
         assert isinstance(failure, Failure) and failure.item == 1
 
@@ -163,11 +163,11 @@ class TestMapOptionsApply:
             raise ValueError("boom")
 
         with pytest.raises(ValueError, match="boom"):
-            await _flow().map([add_one, boom]).run(1)
+            await run_flow(_flow().map([add_one, boom]), 1)
 
     async def test_a_guard_skips_members(self) -> None:
         flow = _flow().map([add_one, add_two]).guard(lambda x, _c: x > 5)
-        assert await flow.run(1) == [Skipped(item=1), Skipped(item=1)]
+        assert await run_flow(flow, 1) == [Skipped(item=1), Skipped(item=1)]
 
     async def test_max_concurrency_runs_them_one_at_a_time(self) -> None:
         order: list[str] = []
@@ -184,7 +184,7 @@ class TestMapOptionsApply:
             return run
 
         flow = _flow().map([member("a"), member("b")], max_concurrency=1)
-        assert await flow.run() == ["a", "b"]
+        assert await run_flow(flow) == ["a", "b"]
         assert order == ["+a", "-a", "+b", "-b"]
 
     async def test_a_shortcut_skips_members_that_had_not_started(self) -> None:
@@ -201,7 +201,7 @@ class TestMapOptionsApply:
             return "second"
 
         flow = make_ff().create().with_shortcut("cut").map([first, second], max_concurrency=1)
-        assert await flow.run(signals={"cut": cut}) == ["first", Skipped(item=None)]
+        assert await run_flow(flow, signals={"cut": cut}) == ["first", Skipped(item=None)]
 
 
 ROLE = Role(name="r", backend="openai", model="none")
@@ -271,12 +271,16 @@ class TestResume:
         store = memory_store()
         halt = asyncio.Event()
         ran: list[str] = []
-        assert await _judges(store, _SAIA(halt), ran).run("x", halt=halt, history=NAME) is HALTED
+        assert (
+            await run_flow(_judges(store, _SAIA(halt), ran), "x", halt=halt, history=NAME) is HALTED
+        )
         assert ran == ["quick", "talk"]
 
         ran.clear()
         saia = _SAIA(None)
-        result = await _judges(store, saia, ran).run("x", history=NAME, resume="latest")
+        result = await run_flow(
+            _judges(store, saia, ran), "x", history=NAME, start=Resume("latest")
+        )
         assert ran == ["talk"]
         assert saia.calls == [("x", ["half:x"], True)]
         assert result == "quick:x + answer:x"
@@ -303,11 +307,11 @@ class TestResume:
             body.map(voters, aggregate=max, max_concurrency=1)
             return _store_flow(store).iterate(body, max_iters=3)
 
-        assert await build().run(0, halt=halt, history=NAME) is HALTED
+        assert await run_flow(build(), 0, halt=halt, history=NAME) is HALTED
         assert [r for r in runs if r[0] == 2] == [(2, "a")]
 
         runs.clear()
-        assert await build().run(history=NAME, resume="latest") == 3
+        assert await run_flow(build(), history=NAME, start=Resume("latest")) == 3
         assert [r for r in runs if r[0] == 2] == [(2, "b"), (2, "c")]
         assert sorted(r for r in runs if r[0] == 3) == [(3, "a"), (3, "b"), (3, "c")]
 
@@ -330,13 +334,17 @@ class TestResume:
 
         first = [member("a"), member("b", halts=True), member("c")]
         halted = _store_flow(store).map(first, max_concurrency=1)
-        assert await halted.run(1, halt=halt, history=NAME) is HALTED
+        assert await run_flow(halted, 1, halt=halt, history=NAME) is HALTED
         assert ran == ["a", "b"]
 
         ran.clear()
         reordered = [member("c"), member("new"), member("a")]
         resumed = _store_flow(store).map(reordered, max_concurrency=1)
-        assert await resumed.run(history=NAME, resume="latest") == ["c:1", "new:1", "a:1"]
+        assert await run_flow(resumed, history=NAME, start=Resume("latest")) == [
+            "c:1",
+            "new:1",
+            "a:1",
+        ]
         assert ran == ["c", "new"]
 
     async def test_a_checkpoint_inside_a_member_writes_a_commit(self) -> None:
@@ -348,7 +356,7 @@ class TestResume:
             return x
 
         flow = _store_flow(store).map([saves, double], aggregate=sum)
-        assert await flow.run(3, history=NAME) == 9
+        assert await run_flow(flow, 3, history=NAME) == 9
         commit = await History(store, NAME).checkpoint("in-member")
         assert commit is not None
         snapshot = await History(store, NAME).snapshot(commit)
@@ -370,7 +378,7 @@ class TestResume:
 
         flow = _store_flow(store).map([handle, stop])
         with pytest.raises(TypeError, match=r"cursor at '.*/done'"):
-            await flow.run(halt=halt, history=NAME)
+            await run_flow(flow, halt=halt, history=NAME)
 
 
 @verb

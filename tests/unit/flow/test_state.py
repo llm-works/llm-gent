@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import Factory, Failure, State, StateDataclass, TypeStateFactory, verb
+from tests.helpers import TestFactory, run_flow
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, make_ff, make_test_logger
 
@@ -24,7 +25,7 @@ class _Tally(StateDataclass):
 
 
 def _factory(state_factory: Any) -> Factory:
-    return Factory(make_test_logger(), saia_factory=StubFactory(), state_factory=state_factory)
+    return TestFactory(make_test_logger(), saia_factory=StubFactory(), state_factory=state_factory)
 
 
 # -----------------------------------------------------------------------------
@@ -36,7 +37,7 @@ class TestStateWrapper:
     """``ctx.state`` is always a :class:`State`; the payload is on ``.data``."""
 
     async def test_default_payload_is_empty_dict(self) -> None:
-        """Top-level Flow.run with no state kwarg → ctx.state.data == {}."""
+        """Top-level FlowRunner.start with no state kwarg → ctx.state.data == {}."""
         seen: list[object] = []
 
         @verb(role=ROLE_A)
@@ -45,7 +46,7 @@ class TestStateWrapper:
 
         ff = make_ff()
         flow = ff.create("top").call(check)
-        await flow.run()
+        await run_flow(flow)
 
         assert len(seen) == 1
         assert isinstance(seen[0], State)
@@ -64,8 +65,8 @@ class TestStateWrapper:
         ff = make_ff()
         flow = ff.create("top").call(touch)
 
-        await flow.run()
-        await flow.run()
+        await run_flow(flow)
+        await run_flow(flow)
 
         assert len(captured) == 2
         assert captured[0] is not captured[1]
@@ -81,7 +82,7 @@ class TestStateWrapper:
 
         ff = make_ff()
         flow = ff.create("top").call(check)
-        await flow.run(state=supplied)
+        await run_flow(flow, state=supplied)
 
         assert seen[0] is supplied
 
@@ -100,7 +101,7 @@ class TestStateWrapper:
 
         ff = make_ff()
         flow = ff.create("top").call(check)
-        await flow.run(state=bag)
+        await run_flow(flow, state=bag)
 
         assert seen[0] is bag
 
@@ -114,7 +115,7 @@ class TestStateWrapper:
 
         ff = make_ff()
         flow = ff.create("top").call(check)
-        await flow.run(state=None)
+        await run_flow(flow, state=None)
 
         assert seen == [None]
 
@@ -128,8 +129,8 @@ class TestStateWrapper:
             seen.append(ctx.state.data)
 
         flow = _factory(TypeStateFactory(_Tally)).create("top").call(check)
-        await flow.run()
-        await flow.run()
+        await run_flow(flow)
+        await run_flow(flow)
 
         assert [type(s) for s in seen] == [_Tally, _Tally]
         assert seen[0] is not seen[1]
@@ -147,7 +148,7 @@ class TestStateWrapper:
             seen.append(ctx.state.data)
 
         flow = _factory(TypeStateFactory(_Tally)).create("top").call(check)
-        await asyncio.gather(flow.run(), flow.run())
+        await asyncio.gather(run_flow(flow), run_flow(flow))
 
         assert seen[0] is not seen[1]
         assert [s.n for s in seen] == [1, 1]
@@ -168,8 +169,8 @@ class TestStateWrapper:
 
         flow = _factory(_NeedsInputs()).create("top").call(check)
         with pytest.raises(TypeError, match=r"pass run\(state=\.\.\.\)"):
-            await flow.run()
-        await flow.run(state={"given": True})
+            await run_flow(flow)
+        await run_flow(flow, state={"given": True})
 
     async def test_prewrapped_state_passed_through(self) -> None:
         """A caller-constructed :class:`State` is used verbatim (not re-wrapped)."""
@@ -182,7 +183,7 @@ class TestStateWrapper:
 
         ff = make_ff()
         flow = ff.create("top").call(check)
-        await flow.run(state=outer)
+        await run_flow(flow, state=outer)
 
         assert seen[0] is outer
 
@@ -245,7 +246,7 @@ class TestStateNavigation:
         top = ff.create("top").call(top_verb).call(inner, state=lambda _p: {"scoped": True})
 
         outer = {"budget": 500}
-        await top.run(state=outer)
+        await run_flow(top, state=outer)
 
         assert captured[0] == ("top", outer)
         assert captured[1] == ("inner", outer)
@@ -268,7 +269,7 @@ class TestStateNavigation:
         top = ff.create("top").call(top_verb).call(inner)
 
         outer = {"budget": 500}
-        await top.run(state=outer)
+        await run_flow(top, state=outer)
 
         assert captured[0] is captured[1]
         assert captured[0].is_root is True
@@ -286,7 +287,7 @@ class TestStateNavigation:
         top = ff.create("top").branch(when=lambda _prev, _ctx: True, then=lambda f: f.call(hit))
 
         outer = {"key": "value"}
-        await top.run("input", state=outer)
+        await run_flow(top, "input", state=outer)
 
         assert seen == [outer]
 
@@ -303,7 +304,7 @@ class TestStateNavigation:
         top = ff.create("top").iterate(lambda f: f.call(hit), max_iters=3, state=lambda _p: {})
 
         outer = {"key": "value"}
-        await top.run("input", state=outer)
+        await run_flow(top, "input", state=outer)
 
         assert len(seen) == 3
         assert all(s is outer for s in seen)
@@ -321,7 +322,7 @@ class TestStateNavigation:
         top = ff.create("top").map(lambda f: f.call(hit), state=lambda _p: {})
 
         outer = {"key": "value"}
-        await top.run([1, 2, 3], state=outer)
+        await run_flow(top, [1, 2, 3], state=outer)
 
         assert len(seen) == 3
         assert all(s is outer for s in seen)
@@ -336,7 +337,7 @@ class TestStateNavigation:
 
         ff = make_ff()
         flow = ff.create("top").call(check)
-        await flow.run()
+        await run_flow(flow)
 
         s = captured[0]
         assert s.root() is s
@@ -364,7 +365,7 @@ class TestScopedStateSharing:
         inner = ff.create("inner").call(inner_verb)
         top = ff.create("top").call(inner)
 
-        await top.run(state=parent_state)
+        await run_flow(top, state=parent_state)
 
         assert parent_state["from_inner"] is True
 
@@ -380,7 +381,7 @@ class TestScopedStateSharing:
         parent_state: dict = {}
         top = ff.create("top").iterate(lambda f: f.call(bump), max_iters=4)
 
-        await top.run("seed", state=parent_state)
+        await run_flow(top, "seed", state=parent_state)
 
         assert parent_state == {"count": 4}
 
@@ -401,7 +402,7 @@ class TestScopedStateProjection:
         inner = ff.create("inner").call(inner_verb)
         top = ff.create("top").call(inner, state=lambda _parent: {})
 
-        await top.run(state=parent_state)
+        await run_flow(top, state=parent_state)
 
         assert parent_state == {"parent_key": "kept"}
 
@@ -421,7 +422,7 @@ class TestScopedStateProjection:
         inner = ff.create("inner").call(inner_verb)
         top = ff.create("top").call(inner, state=lambda _parent: {}, merge=merge)
 
-        await top.run(state=parent_state)
+        await run_flow(top, state=parent_state)
 
         assert parent_state == {"fold": 7}
 
@@ -445,7 +446,7 @@ class TestScopedStateProjection:
         top = ff.create("top").call(inner, state=lambda _parent: {}, merge=merge)
 
         with pytest.raises(RuntimeError, match="boom"):
-            await top.run(state=parent_state)
+            await run_flow(top, state=parent_state)
 
         assert merged == []
         assert parent_state == {}
@@ -467,7 +468,7 @@ class TestScopedStateProjection:
         inner = ff.create("inner").call(inner_verb)
         top = ff.create("top").call(inner, state=project)
 
-        await top.run(state=parent_state)
+        await run_flow(top, state=parent_state)
 
         assert received == [parent_state]
 
@@ -493,7 +494,7 @@ class TestScopedStateProjection:
             merge=merge,
         )
 
-        await top.run("seed", state=parent_state)
+        await run_flow(top, "seed", state=parent_state)
 
         assert snapshots == [{"count": 1}, {"count": 2}, {"count": 3}]
         assert parent_state == {"unrelated": True, "final_count": 3}
@@ -522,7 +523,7 @@ class TestScopedStateProjection:
         )
 
         with pytest.raises(RuntimeError, match="boom"):
-            await top.run("seed", state=parent_state)
+            await run_flow(top, "seed", state=parent_state)
 
         assert merged == []
 
@@ -544,7 +545,7 @@ class TestScopedStateProjection:
             state=lambda _parent: {},
         )
 
-        await top.run("seed", state=parent_state)
+        await run_flow(top, "seed", state=parent_state)
 
         assert counts == [1, 2, 3]
         assert parent_state == {"count": 999}
@@ -567,7 +568,7 @@ class TestScopedStateProjection:
             state=lambda _parent: {},
         )
 
-        await top.run([1, 2, 3], state=parent_state)
+        await run_flow(top, [1, 2, 3], state=parent_state)
 
         seen.sort(key=lambda p: p[0])
         assert seen == [(1, {"item": 1}), (2, {"item": 2}), (3, {"item": 3})]
@@ -595,7 +596,7 @@ class TestScopedStateProjection:
             strict=False,
         )
 
-        results = await top.run([1, 2, 3], state=parent_state)
+        results = await run_flow(top, [1, 2, 3], state=parent_state)
 
         assert results[0] == 1
         assert isinstance(results[1], Failure)
@@ -627,7 +628,7 @@ class TestStateProjectionAsync:
         inner = ff.create("inner").call(inner_verb)
         top = ff.create("top").call(inner, state=async_state, merge=async_merge)
 
-        await top.run(state=parent_state)
+        await run_flow(top, state=parent_state)
 
         assert parent_state == {"carried": True}
 

@@ -10,9 +10,9 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import HALTED, Context, Factory, Flow, History, verb
+from llm_gent.flow import HALTED, Context, Factory, Flow, History, Resume, verb
 from llm_gent.flow.hooks import Hook
-from tests.helpers import memory_store
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import make_test_logger
 
@@ -41,7 +41,7 @@ class TestConcurrentRuns:
         seen: dict[str, list[str | None]] = {"a": [], "b": []}
         flow = _probe_flow(asyncio.Barrier(2), seen)
 
-        await asyncio.gather(flow.run("a"), flow.run("b"))
+        await asyncio.gather(run_flow(flow, "a"), run_flow(flow, "b"))
 
         a_before, a_after = seen["a"]
         b_before, b_after = seen["b"]
@@ -57,8 +57,8 @@ class TestConcurrentRuns:
         halt_a, halt_b = asyncio.Event(), asyncio.Event()
 
         results = await asyncio.gather(
-            flow.run("a", state={}, halt=halt_a, history="a"),
-            flow.run("b", state={}, halt=halt_b, history="b"),
+            run_flow(flow, "a", state={}, halt=halt_a, history="a"),
+            run_flow(flow, "b", state={}, halt=halt_b, history="b"),
         )
         assert results == [HALTED, "b:b"]
         assert not halt_b.is_set()
@@ -69,7 +69,7 @@ class TestConcurrentRuns:
             roots = [(await history.snapshot(c)).root async for c in history.commits()]
             assert roots and all(root == {"tag": tag} for root in roots)
 
-        assert await flow.run(state={}, history="a", resume="latest") == "a:a"
+        assert await run_flow(flow, state={}, history="a", start=Resume("latest")) == "a:a"
         assert await a.is_complete()
 
 
@@ -94,5 +94,5 @@ def _two_histories_flow(store: Any, barrier: asyncio.Barrier) -> Flow:
     async def second(ctx: Context[dict[str, Any]], tag: str) -> str:
         return f"{tag}:{ctx.state.data['tag']}"
 
-    ff = Factory(make_test_logger(), checkpoint_store=store)
+    ff = TestFactory(make_test_logger(), checkpoint_store=store)
     return ff.create().with_checkpointer().call(first).then(second)

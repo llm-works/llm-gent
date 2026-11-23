@@ -12,6 +12,7 @@ import pytest
 from appinfra.testing import FakeClock
 
 from llm_gent.flow import HALTED, Context, Failure, Flow, Skipped, verb
+from tests.helpers import run_flow
 
 from .conftest import ROLE_A, StubFactory, make_ff
 
@@ -76,7 +77,7 @@ class TestBranchExecution:
             then=lambda f: f.call(_double),
             else_=lambda f: f.call(_plus_one),
         )
-        assert await flow.run(5) == 10
+        assert await run_flow(flow, 5) == 10
 
     @pytest.mark.asyncio
     async def test_false_runs_else_arm(self) -> None:
@@ -87,7 +88,7 @@ class TestBranchExecution:
             then=lambda f: f.call(_double),
             else_=lambda f: f.call(_plus_one),
         )
-        assert await flow.run(-3) == -2  # (-3)+1
+        assert await run_flow(flow, -3) == -2  # (-3)+1
 
     @pytest.mark.asyncio
     async def test_false_without_else_passes_prev_through(self) -> None:
@@ -97,7 +98,7 @@ class TestBranchExecution:
             when=lambda _p, _c: False,
             then=lambda f: f.call(_double),
         )
-        assert await flow.run(7) == 7
+        assert await run_flow(flow, 7) == 7
 
     @pytest.mark.asyncio
     async def test_when_receives_prev_and_ctx(self) -> None:
@@ -113,7 +114,7 @@ class TestBranchExecution:
 
         flow = make_ff().create()
         flow.call(_identity).branch(when=when, then=lambda f: f.call(_double))
-        await flow.run(4, state={"k": "v"})
+        await run_flow(flow, 4, state={"k": "v"})
         assert seen == {"prev": 4, "state": {"k": "v"}, "role": None}
 
     @pytest.mark.asyncio
@@ -127,7 +128,7 @@ class TestBranchExecution:
 
         flow = make_ff().create()
         flow.call(_identity).branch(when=when, then=lambda f: f.call(_double))
-        assert await flow.run(3) == 6
+        assert await run_flow(flow, 3) == 6
 
     @pytest.mark.asyncio
     async def test_named_flow_as_then(self) -> None:
@@ -135,7 +136,7 @@ class TestBranchExecution:
         then_flow = make_ff().create("double").call(_double)
         flow = make_ff().create()
         flow.call(_identity).branch(when=lambda _p, _c: True, then=then_flow)
-        assert await flow.run(6) == 12
+        assert await run_flow(flow, 6) == 12
 
     @pytest.mark.asyncio
     async def test_bare_verb_as_then_and_else(self) -> None:
@@ -146,14 +147,14 @@ class TestBranchExecution:
             then=_double,
             else_=_plus_one,
         )
-        assert await flow.run(3) == 6
+        assert await run_flow(flow, 3) == 6
         flow2 = make_ff().create()
         flow2.call(_identity).branch(
             when=lambda prev, _c: prev > 0,
             then=_double,
             else_=_plus_one,
         )
-        assert await flow2.run(-1) == 0
+        assert await run_flow(flow2, -1) == 0
 
     @pytest.mark.asyncio
     async def test_rescue_catches_arm_exception(self) -> None:
@@ -170,7 +171,7 @@ class TestBranchExecution:
             then=lambda f: f.call(boom),
             rescue=lambda exc, _prev, _c: f"rescued:{exc}",
         )
-        assert await flow.run(0) == "rescued:arm-failed"
+        assert await run_flow(flow, 0) == "rescued:arm-failed"
 
     @pytest.mark.asyncio
     async def test_cancellation_propagates_through_arm(self) -> None:
@@ -196,7 +197,7 @@ class TestBranchExecution:
             rescue=rescue,
         )
         with pytest.raises(asyncio.CancelledError):
-            await flow.run(0)
+            await run_flow(flow, 0)
         assert rescued is False
 
 
@@ -235,14 +236,14 @@ class TestIterateExecution:
         """With only ``max_iters``, the loop runs exactly N iterations."""
         flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(_double), max_iters=3)
-        assert await flow.run(1) == 8  # 1→2→4→8
+        assert await run_flow(flow, 1) == 8  # 1→2→4→8
 
     @pytest.mark.asyncio
     async def test_result_is_last_iteration(self) -> None:
         """The loop's output is the last iteration's return value."""
         flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(_plus_one), max_iters=5)
-        assert await flow.run(0) == 5
+        assert await run_flow(flow, 0) == 5
 
     @pytest.mark.asyncio
     async def test_until_stops_iteration_post_check(self) -> None:
@@ -261,7 +262,7 @@ class TestIterateExecution:
 
         flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(tick), until=until, max_iters=10)
-        assert await flow.run(None) == 3
+        assert await run_flow(flow, None) == 3
         assert counter["n"] == 3
 
     @pytest.mark.asyncio
@@ -273,7 +274,7 @@ class TestIterateExecution:
             until=lambda _r, _c: False,
             max_iters=4,
         )
-        assert await flow.run(0) == 4
+        assert await run_flow(flow, 0) == 4
 
     @pytest.mark.asyncio
     async def test_until_sees_state_mutation(self) -> None:
@@ -292,7 +293,7 @@ class TestIterateExecution:
         flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(push), until=until, max_iters=10)
         state: dict[str, Any] = {"items": []}
-        await flow.run(0, state=state)
+        await run_flow(flow, 0, state=state)
         assert state["items"] == [0, 1, 2]
 
     @pytest.mark.asyncio
@@ -304,7 +305,7 @@ class TestIterateExecution:
             until=lambda result, _ctx: result >= 3,
             max_iters=10,
         )
-        assert await flow.run(0) == 3
+        assert await run_flow(flow, 0) == 3
 
     @pytest.mark.asyncio
     async def test_async_until_awaited(self) -> None:
@@ -324,14 +325,14 @@ class TestIterateExecution:
 
         flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(tick), until=until, max_iters=10)
-        assert await flow.run(None) == 2
+        assert await run_flow(flow, None) == 2
 
     @pytest.mark.asyncio
     async def test_bare_verb_as_body(self) -> None:
         """A bare ``@verb`` is auto-wrapped as the loop body."""
         flow = make_ff().create()
         flow.call(_identity).iterate(_plus_one, max_iters=4)
-        assert await flow.run(0) == 4
+        assert await run_flow(flow, 0) == 4
 
     @pytest.mark.asyncio
     async def test_named_flow_as_body(self) -> None:
@@ -339,7 +340,7 @@ class TestIterateExecution:
         body = make_ff().create("step").call(_plus_one)
         flow = make_ff().create()
         flow.call(_identity).iterate(body, max_iters=3)
-        assert await flow.run(10) == 13
+        assert await run_flow(flow, 10) == 13
 
     @pytest.mark.asyncio
     async def test_deadline_stops_between_iterations(self, fake_clock: FakeClock) -> None:
@@ -354,7 +355,7 @@ class TestIterateExecution:
 
         flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(slow), max_iters=100, deadline=0.12)
-        result = await flow.run(0)
+        result = await run_flow(flow, 0)
         # Passes start at 0, 50 and 100ms; the next would start at 150ms, past the deadline.
         # Real time only adds to each pass, so it can only end sooner.
         assert 1 <= result <= 3
@@ -383,7 +384,7 @@ class TestIterateExecution:
             rescue=rescue,
         )
         with pytest.raises(asyncio.CancelledError):
-            await flow.run(None)
+            await run_flow(flow, None)
         assert rescued is False
 
 
@@ -406,7 +407,7 @@ class TestMapExecution:
 
         flow = make_ff().create()
         flow.call(make_list).map(lambda f: f.call(_double))
-        assert await flow.run() == [2, 4, 6]
+        assert await run_flow(flow) == [2, 4, 6]
 
     @pytest.mark.asyncio
     async def test_items_callable_receives_prev_and_ctx(self) -> None:
@@ -421,7 +422,7 @@ class TestMapExecution:
 
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double), items=items)
-        assert await flow.run(3, state={"tag": "s"}) == [0, 2, 4]
+        assert await run_flow(flow, 3, state={"tag": "s"}) == [0, 2, 4]
         assert seen == {"prev": 3, "state": {"tag": "s"}}
 
     @pytest.mark.asyncio
@@ -441,7 +442,7 @@ class TestMapExecution:
 
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(reversed_finish))
-        assert await flow.run([0, 1, 2, 3]) == [0, 1, 2, 3]
+        assert await run_flow(flow, [0, 1, 2, 3]) == [0, 1, 2, 3]
         assert completion == [3, 2, 1, 0]
 
     @pytest.mark.asyncio
@@ -449,7 +450,7 @@ class TestMapExecution:
         """``aggregate=sum`` returns the reduced value instead of the list."""
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double), aggregate=sum)
-        assert await flow.run([1, 2, 3, 4]) == 20  # sum of doubles
+        assert await run_flow(flow, [1, 2, 3, 4]) == 20  # sum of doubles
 
     @pytest.mark.asyncio
     async def test_async_aggregate_is_awaited(self) -> None:
@@ -461,7 +462,7 @@ class TestMapExecution:
 
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double), aggregate=total)
-        assert await flow.run([1, 2, 3]) == 12
+        assert await run_flow(flow, [1, 2, 3]) == 12
 
     @pytest.mark.asyncio
     async def test_async_items_is_awaited(self) -> None:
@@ -473,14 +474,14 @@ class TestMapExecution:
 
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double), items=items)
-        assert await flow.run(3) == [0, 2, 4]
+        assert await run_flow(flow, 3) == [0, 2, 4]
 
     @pytest.mark.asyncio
     async def test_empty_items_returns_empty_list(self) -> None:
         """An empty item source produces an empty result list."""
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double))
-        assert await flow.run([]) == []
+        assert await run_flow(flow, []) == []
 
     @pytest.mark.asyncio
     async def test_strict_true_propagates_first_exception(self) -> None:
@@ -496,7 +497,7 @@ class TestMapExecution:
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(maybe_fail))
         with pytest.raises(ValueError, match="bad:2"):
-            await flow.run([1, 2, 3])
+            await run_flow(flow, [1, 2, 3])
 
     @pytest.mark.asyncio
     async def test_strict_false_wraps_failures_in_failure_sentinel(self) -> None:
@@ -511,7 +512,7 @@ class TestMapExecution:
 
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(maybe_fail), strict=False)
-        results = await flow.run([1, 2, 3])
+        results = await run_flow(flow, [1, 2, 3])
         assert results[0] == 10
         assert isinstance(results[1], Failure)
         assert isinstance(results[1].exception, ValueError)
@@ -532,7 +533,7 @@ class TestMapExecution:
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(cancel_at_two), strict=False)
         with pytest.raises(asyncio.CancelledError):
-            await flow.run([1, 2, 3])
+            await run_flow(flow, [1, 2, 3])
 
     @pytest.mark.asyncio
     async def test_non_iterable_items_raises(self) -> None:
@@ -540,7 +541,7 @@ class TestMapExecution:
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(_double))
         with pytest.raises(TypeError, match="iterable"):
-            await flow.run(42)
+            await run_flow(flow, 42)
 
     @pytest.mark.asyncio
     async def test_named_flow_as_body(self) -> None:
@@ -548,7 +549,7 @@ class TestMapExecution:
         body = make_ff().create("double").call(_double)
         flow = make_ff().create()
         flow.call(_identity).map(body)
-        assert await flow.run([2, 5]) == [4, 10]
+        assert await run_flow(flow, [2, 5]) == [4, 10]
 
     @pytest.mark.asyncio
     async def test_body_receives_item_as_single_positional(self) -> None:
@@ -561,14 +562,14 @@ class TestMapExecution:
 
         flow = make_ff().create()
         flow.call(_identity).map(lambda f: f.call(wrap))
-        assert await flow.run([7, 8]) == [{"x": 7}, {"x": 8}]
+        assert await run_flow(flow, [7, 8]) == [{"x": 7}, {"x": 8}]
 
     @pytest.mark.asyncio
     async def test_module_verb_as_body(self) -> None:
         """A bare module-level ``@verb`` is auto-wrapped as the map body."""
         flow = make_ff().create()
         flow.call(_identity).map(_double)
-        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+        assert await run_flow(flow, [1, 2, 3]) == [2, 4, 6]
 
     @pytest.mark.asyncio
     async def test_bound_instance_method_verb_as_body(self) -> None:
@@ -588,7 +589,7 @@ class TestMapExecution:
         instance = Doubler(offset=100)
         flow = make_ff().create()
         flow.call(_identity).map(instance.scale)
-        assert await flow.run([1, 2, 3]) == [102, 104, 106]
+        assert await run_flow(flow, [1, 2, 3]) == [102, 104, 106]
 
     @pytest.mark.asyncio
     async def test_non_verb_callable_still_treated_as_builder(self) -> None:
@@ -603,7 +604,7 @@ class TestMapExecution:
 
         flow = make_ff().create()
         flow.call(_identity).map(build_body)
-        assert await flow.run([1, 2]) == [2, 4]
+        assert await run_flow(flow, [1, 2]) == [2, 4]
         assert len(witnessed) == 1  # invoked once at materialize time
 
 
@@ -620,7 +621,7 @@ class TestMapGuard:
         """A False verdict skips the body and lands ``Skipped(item)`` in that slot."""
         flow = make_ff().create()
         flow.call(_identity).map(_double).guard(lambda item, _ctx: item != 2)
-        results = await flow.run([1, 2, 3])
+        results = await run_flow(flow, [1, 2, 3])
         assert results[0] == 2
         assert isinstance(results[1], Skipped)
         assert results[1].item == 2
@@ -631,7 +632,7 @@ class TestMapGuard:
         """A truthy verdict runs the body unchanged."""
         flow = make_ff().create()
         flow.call(_identity).map(_double).guard(lambda _item, _ctx: True)
-        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+        assert await run_flow(flow, [1, 2, 3]) == [2, 4, 6]
 
     @pytest.mark.asyncio
     async def test_guard_reads_projected_state(self) -> None:
@@ -649,7 +650,7 @@ class TestMapGuard:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double, state=project).guard(guard)
-        results = await flow.run([50, 150, 25])
+        results = await run_flow(flow, [50, 150, 25])
         assert results[0] == 100
         assert isinstance(results[1], Skipped)
         assert results[2] == 50
@@ -666,7 +667,7 @@ class TestMapGuard:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double).guard(guard)
-        results = await flow.run([1, 2, 3])
+        results = await run_flow(flow, [1, 2, 3])
         assert results[0] == 2
         assert isinstance(results[1], Skipped)
         assert results[2] == 6
@@ -694,7 +695,7 @@ class TestMapGuard:
             merge=merge,
         ).guard(lambda item, _ctx: item != 2)
         parent: dict[str, list[int]] = {"seen": []}
-        await flow.run(items, state=parent)
+        await run_flow(flow, items, state=parent)
         assert sorted(merged) == [1, 3]  # only survivors merged, skipped item excluded
         assert sorted(parent["seen"]) == [1, 3]
 
@@ -710,7 +711,7 @@ class TestMapGuard:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double, strict=False).guard(exploding_guard)
-        results = await flow.run([1, 2, 3])
+        results = await run_flow(flow, [1, 2, 3])
         assert results[0] == 2
         assert isinstance(results[1], Failure)
         assert isinstance(results[1].exception, ValueError)
@@ -744,7 +745,7 @@ class TestMapOnError:
         flow = make_ff().create()
         flow.call(_identity).map(blow).on_error(on_err)
         with pytest.raises(ValueError, match="bad:2"):
-            await flow.run([1, 2, 3])
+            await run_flow(flow, [1, 2, 3])
         assert (ValueError, 2) in observed
 
     @pytest.mark.asyncio
@@ -766,7 +767,7 @@ class TestMapOnError:
 
         flow = make_ff().create()
         flow.call(_identity).map(blow, strict=False).on_error(on_err)
-        results = await flow.run([1, 2, 3, 4])
+        results = await run_flow(flow, [1, 2, 3, 4])
         assert results[0] == 1
         assert isinstance(results[1], Failure)
         assert results[2] == 3
@@ -789,7 +790,7 @@ class TestMapOnError:
         flow = make_ff().create()
         flow.call(_identity).map(blow).on_error(on_err)
         with pytest.raises(ValueError, match="original"):
-            await flow.run([1])
+            await run_flow(flow, [1])
 
 
 # -----------------------------------------------------------------------------
@@ -811,7 +812,7 @@ class TestMapOnItemComplete:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double).on_item_complete(hook)
-        results = await flow.run([1, 2, 3])
+        results = await run_flow(flow, [1, 2, 3])
         assert results == [2, 4, 6]
         assert sorted(observed) == [(1, 2), (2, 4), (3, 6)]
 
@@ -834,7 +835,7 @@ class TestMapOnItemComplete:
         flow = make_ff().create()
         flow.call(_identity).map(blow).on_item_complete(hook)
         with pytest.raises(ValueError, match="bad:2"):
-            await flow.run([1, 2, 3])
+            await run_flow(flow, [1, 2, 3])
         failures = [o for o in observed if isinstance(o, Failure)]
         assert len(failures) == 1
         assert failures[0].item == 2
@@ -859,7 +860,7 @@ class TestMapOnItemComplete:
 
         flow = make_ff().create()
         flow.call(_identity).map(blow, strict=False).on_item_complete(hook)
-        results = await flow.run([1, 2, 3, 4])
+        results = await run_flow(flow, [1, 2, 3, 4])
         assert results[0] == 1 and results[2] == 3
         assert isinstance(results[1], Failure) and isinstance(results[3], Failure)
         assert len(observed) == 4
@@ -876,7 +877,7 @@ class TestMapOnItemComplete:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double).guard(lambda i, _c: i != 2).on_item_complete(hook)
-        results = await flow.run([1, 2, 3])
+        results = await run_flow(flow, [1, 2, 3])
         assert results[0] == 2 and results[2] == 6
         assert isinstance(results[1], Skipped) and results[1].item == 2
         skipped = [o for o in observed if isinstance(o, Skipped)]
@@ -895,7 +896,7 @@ class TestMapOnItemComplete:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double).on_item_complete(hook)
-        assert await flow.run([1, 2, 3], halt=halt) is HALTED
+        assert await run_flow(flow, [1, 2, 3], halt=halt) is HALTED
         assert observed == []
 
     @pytest.mark.asyncio
@@ -923,7 +924,7 @@ class TestMapOnItemComplete:
 
         flow = make_ff().create()
         flow.call(_identity).map(bump, state=project, merge=merge).on_item_complete(hook)
-        await flow.run([1, 2, 3])
+        await run_flow(flow, [1, 2, 3])
         # Each hook call sees at least its own item's merge — post-merge order.
         assert min(seen_after_merge) >= 1
 
@@ -937,7 +938,7 @@ class TestMapOnItemComplete:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double).on_item_complete(hook)
-        results = await flow.run([1, 2, 3])
+        results = await run_flow(flow, [1, 2, 3])
         assert results == [2, 4, 6]
 
     @pytest.mark.asyncio
@@ -960,7 +961,7 @@ class TestMapOnItemComplete:
         flow = make_ff().create()
         flow.call(_identity).map(_double, state=project, merge=bad_merge).on_item_complete(hook)
         with pytest.raises(ValueError, match="merge-failed"):
-            await flow.run([1])
+            await run_flow(flow, [1])
         assert len(observed) == 1
         assert isinstance(observed[0], Failure)
         assert isinstance(observed[0].exception, ValueError)
@@ -986,7 +987,7 @@ class TestMapOnItemComplete:
         flow.call(_identity).map(
             _double, strict=False, state=project, merge=bad_merge
         ).on_item_complete(hook)
-        results = await flow.run([1, 2])
+        results = await run_flow(flow, [1, 2])
         assert len(results) == 2
         assert all(isinstance(r, Failure) for r in results)
         assert len(observed) == 2
@@ -1079,7 +1080,7 @@ class TestMapMaxConcurrency:
         """Without max_concurrency= the default behavior is unbounded gather."""
         flow = make_ff().create()
         flow.call(_identity).map(_double)
-        assert await flow.run([1, 2, 3]) == [2, 4, 6]
+        assert await run_flow(flow, [1, 2, 3]) == [2, 4, 6]
 
     @pytest.mark.asyncio
     async def test_caps_concurrent_in_flight_items(self) -> None:
@@ -1087,7 +1088,7 @@ class TestMapMaxConcurrency:
         slow, peak = _peak_tracker(2)
         flow = make_ff().create()
         flow.call(_identity).map(slow, max_concurrency=2)
-        results = await flow.run([1, 2, 3, 4, 5])
+        results = await run_flow(flow, [1, 2, 3, 4, 5])
         assert results == [1, 2, 3, 4, 5]
         assert peak[0] == 2
 
@@ -1106,7 +1107,7 @@ class TestMapMaxConcurrency:
 
         flow = make_ff().create()
         flow.call(_identity).map(track, max_concurrency=1)
-        await flow.run([1, 2, 3])
+        await run_flow(flow, [1, 2, 3])
         # Serial: every start is followed by its matching stop before the next start.
         assert order == [1, -1, 2, -2, 3, -3]
 
@@ -1143,7 +1144,7 @@ class TestMapComputedConcurrency:
     async def test_computed_cap_limits_items_in_flight(self) -> None:
         slow, peak = _peak_tracker(2)
         flow = make_ff().create().call(_identity).map(slow, max_concurrency=lambda _i, _c: 2)
-        assert await flow.run([1, 2, 3, 4, 5]) == [1, 2, 3, 4, 5]
+        assert await run_flow(flow, [1, 2, 3, 4, 5]) == [1, 2, 3, 4, 5]
         assert peak[0] == 2
 
     @pytest.mark.asyncio
@@ -1155,7 +1156,7 @@ class TestMapComputedConcurrency:
             return 1
 
         flow = make_ff().create().map(_double, items=lambda _p, _c: [1, 2, 3], max_concurrency=cap)
-        assert await flow.run(state={"remaining": 3}) == [2, 4, 6]
+        assert await run_flow(flow, state={"remaining": 3}) == [2, 4, 6]
         assert calls == [([1, 2, 3], {"remaining": 3})]
 
     @pytest.mark.asyncio
@@ -1164,7 +1165,7 @@ class TestMapComputedConcurrency:
             raise AssertionError("no item to run")
 
         flow = make_ff().create().call(_identity).map(_double, max_concurrency=cap)
-        assert await flow.run([]) == []
+        assert await run_flow(flow, []) == []
 
     @pytest.mark.parametrize("bad", [0, -1, True, 1.5, "2", None])
     @pytest.mark.asyncio
@@ -1183,7 +1184,7 @@ class TestMapComputedConcurrency:
             .map(body, max_concurrency=lambda _i, _c: bad, name="items")
         )
         with pytest.raises(ValueError, match=r"map 'items': max_concurrency must be an int >= 1"):
-            await flow.run([1, 2])
+            await run_flow(flow, [1, 2])
         assert ran == []
 
     def test_a_non_callable_non_int_is_rejected_at_build_time(self) -> None:
@@ -1197,7 +1198,7 @@ class TestMapComputedConcurrency:
 
 
 class TestRunHalt:
-    """``Flow.run(halt=event)`` threads ``ctx.halt`` through every node.
+    """``FlowRunner.start(halt=event)`` threads ``ctx.halt`` through every node.
 
     Once the event fires, a map runs no more queued items, an iterate runs
     no more passes, and verbs may observe ``ctx.halt`` directly. A run the
@@ -1218,12 +1219,12 @@ class TestRunHalt:
             return None
 
         halted = make_ff().create().call(stop).then(nothing)
-        assert await halted.run(1, halt=halt) is HALTED
+        assert await run_flow(halted, 1, halt=halt) is HALTED
         assert repr(HALTED) == "HALTED"
 
         halt.clear()
         finished = make_ff().create().call(_identity).then(nothing)
-        assert await finished.run(1, halt=halt) is None
+        assert await run_flow(finished, 1, halt=halt) is None
 
     @pytest.mark.asyncio
     async def test_a_halt_set_during_the_last_step_does_not_stop_the_run(self) -> None:
@@ -1236,7 +1237,7 @@ class TestRunHalt:
             return x + 1
 
         flow = make_ff().create().call(_identity).then(last)
-        assert await flow.run(1, halt=halt) == 2
+        assert await run_flow(flow, 1, halt=halt) == 2
 
     @pytest.mark.asyncio
     async def test_pre_set_halt_skips_every_map_item(self) -> None:
@@ -1253,7 +1254,7 @@ class TestRunHalt:
 
         flow = make_ff().create()
         flow.call(_identity).map(track)
-        assert await flow.run([1, 2, 3], halt=halt) is HALTED
+        assert await run_flow(flow, [1, 2, 3], halt=halt) is HALTED
         assert ran == []
 
     @pytest.mark.asyncio
@@ -1272,7 +1273,7 @@ class TestRunHalt:
 
         flow = make_ff().create()
         flow.call(_identity).map(track, max_concurrency=1)
-        assert await flow.run([1, 2, 3, 4], halt=halt) is HALTED
+        assert await run_flow(flow, [1, 2, 3, 4], halt=halt) is HALTED
         assert ran == [1]
 
     @pytest.mark.asyncio
@@ -1292,7 +1293,7 @@ class TestRunHalt:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double, state=project, merge=merge)
-        await flow.run([1, 2, 3], halt=halt)
+        await run_flow(flow, [1, 2, 3], halt=halt)
         assert merged == []
 
     @pytest.mark.asyncio
@@ -1301,7 +1302,7 @@ class TestRunHalt:
         halt = asyncio.Event()  # never set
         flow = make_ff().create()
         flow.call(_identity).map(_double)
-        assert await flow.run([1, 2, 3], halt=halt) == [2, 4, 6]
+        assert await run_flow(flow, [1, 2, 3], halt=halt) == [2, 4, 6]
 
     @pytest.mark.asyncio
     async def test_halt_stops_iterate_between_iterations(self) -> None:
@@ -1320,7 +1321,7 @@ class TestRunHalt:
         flow = make_ff().create()
         flow.call(_identity).iterate(lambda f: f.call(tick), max_iters=10)
         # The pass that set the halt completes; the iterate stops before the next.
-        assert await flow.run(1, halt=halt) is HALTED
+        assert await run_flow(flow, 1, halt=halt) is HALTED
         assert ticks == [1, 2]
 
     @pytest.mark.asyncio
@@ -1338,7 +1339,7 @@ class TestRunHalt:
 
         flow = make_ff().create()
         flow.call(check)
-        await flow.run(42, halt=halt)
+        await run_flow(flow, 42, halt=halt)
         assert seen == [True]
 
     @pytest.mark.asyncio
@@ -1358,7 +1359,7 @@ class TestRunHalt:
 
         outer = make_ff().create()
         outer.call(_identity).map(inner)
-        results = await outer.run([1, 2, 3], halt=halt)
+        results = await run_flow(outer, [1, 2, 3], halt=halt)
         # Inner verbs ran (no short-circuit) and saw the run's halt.
         assert results == [2, 4, 6]
         assert observed == [halt, halt, halt]
@@ -1411,7 +1412,7 @@ class TestMapProjectionErrors:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double, state=blow, strict=False)
-        results = await flow.run([1, 2, 3])
+        results = await run_flow(flow, [1, 2, 3])
         assert len(results) == 3
         for i, item in enumerate([1, 2, 3]):
             assert isinstance(results[i], Failure)
@@ -1435,7 +1436,7 @@ class TestMapProjectionErrors:
 
         flow = make_ff().create()
         flow.call(_identity).map(_double, state=blow, strict=False).on_error(on_err)
-        await flow.run([1, 2], state={"parent": True})
+        await run_flow(flow, [1, 2], state={"parent": True})
         assert sorted(observed) == [(RuntimeError, 1), (RuntimeError, 2)]
         # Projection failed → on_error sees parent state, not (non-existent) child
         assert all(s == {"parent": True} for s in observed_states)
@@ -1451,7 +1452,7 @@ class TestMapProjectionErrors:
         flow = make_ff().create()
         flow.call(_identity).map(_double, state=blow)
         with pytest.raises(RuntimeError, match="proj-boom"):
-            await flow.run([1])
+            await run_flow(flow, [1])
 
 
 # -----------------------------------------------------------------------------
@@ -1474,4 +1475,4 @@ class TestBuildable:
         flow_cb = make_ff(saia_factory=saia).create()
         flow_cb.call(_identity).branch(when=lambda _p, _c: True, then=lambda f: f.call(_double))
 
-        assert await flow_named.run(4) == await flow_cb.run(4) == 8
+        assert await run_flow(flow_named, 4) == await run_flow(flow_cb, 4) == 8

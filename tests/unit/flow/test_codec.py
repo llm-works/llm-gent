@@ -23,16 +23,16 @@ from pydantic import BaseModel
 from llm_gent.flow import (
     HALTED,
     Context,
-    Factory,
     Failure,
     Interrupted,
     RestoredError,
+    Resume,
     Skipped,
     verb,
 )
 from llm_gent.flow.state import StateDataclass
 from llm_gent.flow.state.codec import decode, encode
-from tests.helpers import memory_store
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import make_test_logger
 
@@ -246,16 +246,18 @@ class TestInAFlow:
                 return Pairs(pairs=[*carry.pairs, (f"n{n}", "a")], fixed=carry.fixed)
 
             return (
-                Factory(make_test_logger(), checkpoint_store=store)
+                TestFactory(make_test_logger(), checkpoint_store=store)
                 .create()
                 .iterate(lambda b: b.call(grow), max_iters=3)
             )
 
         start = Pairs(fixed=("x",))
-        assert await build(True, []).run(start, halt=asyncio.Event(), history="tuples") is HALTED
+        assert (
+            await run_flow(build(True, []), start, halt=asyncio.Event(), history="tuples") is HALTED
+        )
 
         seen: list[Pairs] = []
-        result = await build(False, seen).run(start, history="tuples", resume="latest")
+        result = await run_flow(build(False, seen), start, history="tuples", start=Resume("latest"))
         assert seen[0] == Pairs(pairs=[("n0", "a")], fixed=("x",))
         assert result == Pairs(pairs=[("n0", "a"), ("n1", "a"), ("n2", "a")], fixed=("x",))
 
@@ -283,7 +285,7 @@ class TestInAFlow:
                 seen.append(results)
                 return results
 
-            ff = Factory(make_test_logger(), checkpoint_store=store)
+            ff = TestFactory(make_test_logger(), checkpoint_store=store)
             batch = (
                 ff.create()
                 .map(lambda b: b.call(work), items=lambda *_: ["a", "skip", "boom"], strict=False)
@@ -296,10 +298,10 @@ class TestInAFlow:
                 .iterate(lambda b: b.call(batch).then(keep), max_iters=2)
             )
 
-        assert await build(True, []).run(halt=asyncio.Event(), history="sentinels") is HALTED
+        assert await run_flow(build(True, []), halt=asyncio.Event(), history="sentinels") is HALTED
 
         seen: list[Any] = []
-        result = await build(False, seen).run(history="sentinels", resume="latest")
+        result = await run_flow(build(False, seen), history="sentinels", start=Resume("latest"))
         assert seen == [result]
         item, skipped, failure = result
         assert item == "a" and skipped == Skipped("skip")

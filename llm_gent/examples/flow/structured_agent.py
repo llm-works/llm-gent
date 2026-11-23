@@ -51,8 +51,8 @@ from appinfra.log import quick_console_logger
 from pydantic import BaseModel, ConfigDict
 
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
-from llm_gent.core import Role
-from llm_gent.flow import Context, Factory, StateDataclass, TypeStateFactory, verb
+from llm_gent.core import Environment, Role
+from llm_gent.flow import Context, Factory, FlowRunner, StateDataclass, TypeStateFactory, verb
 
 
 # ── schemas ──────────────────────────────────────────────────────────
@@ -200,7 +200,8 @@ async def main() -> int:
     """Run the classify → triage flow on a canned bug report."""
     lg = quick_console_logger("structured-agent-example", config={"level": "warning"})
     saia_factory = StructuredStubSAIAFactory(_demo_scripts())
-    ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(BugReportState))
+    ff = Factory(lg, state_factory=TypeStateFactory(BugReportState))
+    runner = FlowRunner(lg, env=Environment(saia_factory=saia_factory))
 
     report = (
         "Excel export crashes the app when I try to export a workbook "
@@ -210,7 +211,7 @@ async def main() -> int:
     flow.call(classify).call(triage)
 
     print(f"Report: {report}\n")
-    final = await flow.run(state=BugReportState(report=report))
+    final = await runner.start(flow, state=BugReportState(report=report))
     print("\n=== triage complete ===")
     print(f"owner:       {final.owner_team}")
     print(f"escalate:    {final.needs_escalation}")
