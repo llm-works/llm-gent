@@ -7,13 +7,14 @@ These tests require an LLM server at localhost:18100 that supports JSON mode.
 Tests are skipped if no server is available.
 """
 
+from collections.abc import Iterator
+
 import httpx
 import pytest
 from appinfra.log import LogConfig, LoggerFactory
 from pydantic import BaseModel
 
-from llm_gent.core.llm.types import Message
-from llm_gent.core.traits.builtin.llm import LLMTrait
+from llm_gent.core.llm.caller import Caller
 
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
@@ -56,38 +57,21 @@ class TestStructuredOutputE2E:
     """E2E tests for structured output with real LLM responses."""
 
     @pytest.fixture
-    def trait(self):
-        """Create LLMTrait connected to LLM server."""
-        from unittest.mock import Mock
-
+    def caller(self) -> Iterator[Caller]:
+        """A Caller on a router connected to the LLM server."""
         from llm_infer.client import Factory as LLMClientFactory
 
         lg = LoggerFactory.create_root(LogConfig.from_params(level="warning"))
+        config = {"type": "openai_compatible", "base_url": LLM_BASE_URL, "model": LLM_MODEL}
+        caller = Caller(lg, LLMClientFactory(lg).from_config(config))
+        yield caller
+        caller.close()
 
-        # Create a mock agent with required lg property and no attached traits
-        mock_agent = Mock()
-        mock_agent.lg = lg
-        mock_agent.get_trait.return_value = None
-
-        config = {
-            "type": "openai_compatible",
-            "base_url": LLM_BASE_URL,
-            "model": LLM_MODEL,
-            "temperature": 0.0,
-        }
-        router = LLMClientFactory(lg).from_config(config)
-        trait = LLMTrait(mock_agent, router, config, owns_router=True)
-        trait.on_start()
-        yield trait
-        trait.on_stop()
-
-    def test_math_problem_structured_output(self, trait: LLMTrait):
+    def test_math_problem_structured_output(self, caller: Caller):
         """Test structured output with a simple math problem."""
-        messages = [
-            Message(role="user", content="What is 15 + 27? Give the numeric answer."),
-        ]
+        messages = [{"role": "user", "content": "What is 15 + 27? Give the numeric answer."}]
 
-        result = trait.complete(messages, output_schema=MathAnswer)
+        result = caller.chat(messages, temperature=0.0, output_schema=MathAnswer)
 
         # Verify parsing succeeded and types are correct
         assert result.parsed is not None
@@ -95,16 +79,16 @@ class TestStructuredOutputE2E:
         assert isinstance(result.parsed.answer, int)
         assert isinstance(result.parsed.explanation, str)
 
-    def test_sentiment_structured_output(self, trait: LLMTrait):
+    def test_sentiment_structured_output(self, caller: Caller):
         """Test structured output with sentiment analysis."""
         messages = [
-            Message(
-                role="user",
-                content="Analyze the sentiment of: 'I love this product, it's amazing!'",
-            ),
+            {
+                "role": "user",
+                "content": "Analyze the sentiment of: 'I love this product, it's amazing!'",
+            },
         ]
 
-        result = trait.complete(messages, output_schema=Sentiment)
+        result = caller.chat(messages, temperature=0.0, output_schema=Sentiment)
 
         # Verify parsing succeeded and types are correct
         assert result.parsed is not None

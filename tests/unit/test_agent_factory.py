@@ -10,8 +10,8 @@ from appinfra.log import Logger
 
 from llm_gent.core.agent import Agent
 from llm_gent.core.agent import Factory as AgentFactory
+from llm_gent.core.errors import ConfigError
 from llm_gent.core.traits.builtin.directive import DirectiveTrait
-from llm_gent.core.traits.builtin.llm import LLMTrait
 from tests.helpers import make_platform
 
 
@@ -41,22 +41,24 @@ class TestAgentFactoryConstruction:
         assert AgentFactory.agent_class is Agent
 
 
-class TestSharedClients:
-    """Agents built on one platform share its router."""
+class TestModelAccess:
+    """Models are the platform's: an agent config configures none."""
 
-    def test_agents_share_the_platform_router(self, platform):
-        factory = AgentFactory(platform)
-        config = {"traits": {"required": ["llm"]}}
+    def test_llm_key_raises(self, platform):
+        config = {"identity": {"name": "a"}, "llm": "anthropic"}
 
-        first = factory.from_config({"identity": {"name": "a"}, **config})
-        second = factory.from_config({"identity": {"name": "b"}, **config})
+        with pytest.raises(ConfigError, match="'llm' key"):
+            AgentFactory(platform).from_config(config)
 
-        assert first.require_trait(LLMTrait).router is platform.llm
-        assert second.require_trait(LLMTrait).router is platform.llm
+    def test_llm_trait_name_is_unknown(self, platform):
+        config = {"identity": {"name": "a"}, "traits": {"required": ["llm"]}}
+
+        with pytest.raises(ConfigError):
+            AgentFactory(platform).from_config(config)
 
     def test_agent_does_not_close_the_shared_router(self, platform):
         agent = AgentFactory(platform).from_config(
-            {"identity": {"name": "a"}, "traits": {"required": ["llm"]}}
+            {"identity": {"name": "a"}, "directive": "d", "traits": {"required": ["directive"]}}
         )
 
         agent.start()

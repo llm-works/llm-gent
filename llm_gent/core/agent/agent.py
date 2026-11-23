@@ -231,16 +231,16 @@ class Agent:
 
         The caller's live references to the ejected trait become stale after
         this call — its ``on_stop`` has fired, and for ownership-carrying
-        traits like :class:`LLMTrait` with ``owns_router=True`` its
+        traits like :class:`MemoryTrait` with ``owns_chat_client=True`` its
         resources are closed. Re-fetch via :meth:`get_trait` or
         :meth:`require_trait` to obtain a usable reference.
 
-        Typical pairing with ``LLMTrait.with_router``::
+        Typical pairing with ``MemoryTrait.with_chat_client``::
 
             agent.replace_trait(
-                agent.require_trait(LLMTrait).with_router(other_router)
+                agent.require_trait(MemoryTrait).with_chat_client(other_client)
             )
-            llm = agent.require_trait(LLMTrait)  # reload
+            memory = agent.require_trait(MemoryTrait)  # reload
 
         Args:
             trait: The trait instance to register or use as a replacement.

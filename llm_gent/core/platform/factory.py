@@ -86,13 +86,7 @@ class Factory:
         except Exception:
             close_resources(self._lg, owned)
             raise
-        trait_factory = TraitFactory(
-            self._lg,
-            router_config,
-            router,
-            memory_config=settings.memory,
-            memory=memory,
-        )
+        trait_factory = TraitFactory(self._lg, router, memory_config=settings.memory, memory=memory)
         self._lg.debug(
             "platform built",
             extra={"default": router_config.get("default"), "memory": memory is not None},
@@ -164,7 +158,9 @@ class _DisposeOnClose:
     """Closes a kelt :class:`Database` by disposing its engine and pool."""
 
     def __init__(self, database: Database) -> None:
+        """Wrap ``database``; nothing is disposed until :meth:`close`."""
         self._database = database
 
     def close(self) -> None:
+        """Dispose the database's engine and connection pool."""
         self._database.dispose()

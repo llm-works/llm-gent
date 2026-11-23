@@ -5,15 +5,17 @@
 
 from __future__ import annotations
 
+import time
+import uuid
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from ...core.llm.types import Message
+from ...core.llm.caller import Caller
+from ...core.llm.types import CompletionResult
 
 
 if TYPE_CHECKING:
     from ...core.agent import Agent
-    from ...core.llm.types import CompletionResult
 
 
 class HTTPHandler:
@@ -26,52 +28,67 @@ class HTTPHandler:
     HTTP server infrastructure (that's HTTPTrait's job).
     """
 
-    def __init__(self, agent: Agent) -> None:
+    def __init__(self, agent: Agent, caller: Caller) -> None:
         """Initialize handler.
 
         Args:
             agent: The agent instance this handler operates on.
+            caller: The model calls ``complete`` makes (over the platform's router).
         """
         self.agent = agent
+        self._caller = caller
         # Track response IDs for feedback validation (bounded FIFO to prevent memory leaks)
         self._response_ids: OrderedDict[str, None] = OrderedDict()
         self._max_response_ids = 1000
 
     def complete(self, query: str, system_prompt: str | None = None) -> CompletionResult:
-        """Complete a query using LLMTrait.
+        """Complete ``query`` with one model call, as the agent.
+
+        The agent's directive, when it has one, leads the system message;
+        ``system_prompt`` follows it.
 
         Args:
             query: The query to complete.
-            system_prompt: Optional system prompt override.
+            system_prompt: Optional system prompt added after the directive.
 
         Returns:
             CompletionResult with response data.
-
-        Raises:
-            RuntimeError: If LLMTrait is not attached.
         """
-        from ...core.traits.builtin.llm import LLMTrait
+        messages: list[dict[str, Any]] = []
+        system = self._system_message(system_prompt)
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": query})
 
-        llm_trait = self.agent.get_trait(LLMTrait)
-        if llm_trait is None:
-            raise RuntimeError("LLMTrait not attached")
-
-        # Build messages from HTTP API format
-        messages: list[Message] = []
-        if system_prompt:
-            messages.append(Message(role="system", content=system_prompt))
-        messages.append(Message(role="user", content=query))
-
-        result = llm_trait.complete(messages=messages)
+        started = time.monotonic()
+        call = self._caller.chat(messages=messages)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        usage = call.usage or {}
+        result = CompletionResult(
+            id=str(uuid.uuid4()),
+            content=call.content,
+            model=call.model,
+            tokens_used=usage.get("total_tokens", 0),
+            latency_ms=latency_ms,
+            tool_calls=call.tool_calls,
+            adapter=call.adapter,
+        )
 
         # Track response_id for feedback validation (bounded FIFO)
-        if hasattr(result, "id") and result.id:
-            self._response_ids[result.id] = None
-            # Evict oldest entries if over limit
-            while len(self._response_ids) > self._max_response_ids:
-                self._response_ids.popitem(last=False)
-
+        self._response_ids[result.id] = None
+        while len(self._response_ids) > self._max_response_ids:
+            self._response_ids.popitem(last=False)
         return result
+
+    def _system_message(self, system_prompt: str | None) -> str | None:
+        """The agent's directive followed by ``system_prompt``; ``None`` when neither is set."""
+        from ...core.traits.builtin.directive import DirectiveTrait
+
+        directive = self.agent.get_trait(DirectiveTrait)
+        parts = [directive.directive.prompt] if directive is not None else []
+        if system_prompt:
+            parts.append(system_prompt)
+        return "\n\n".join(parts) or None
 
     def remember(self, fact: str, category: str | None = None) -> int:
         """Store a fact using MemoryTrait.

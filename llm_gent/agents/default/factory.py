@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from appinfra import DotDict
 
 from ...core.agent import Factory as BaseFactory
+from ...core.llm.caller import Caller
 from ...core.platform import Platform
 from ...core.tools.names import ToolName
 from ...core.traits import TraitName
@@ -76,6 +77,10 @@ class Factory(BaseFactory):
 
             self._backend = SAIAAdapter(client=self._platform.llm)
         return self._backend
+
+    def from_config(self, config: dict[str, Any]) -> Agent:
+        """Build a prompt agent from a plain dict config; see :meth:`create`."""
+        return self.create(config)
 
     def create(
         self,
@@ -166,8 +171,8 @@ class Factory(BaseFactory):
         from ...core.traits.builtin.http import HTTPConfig, HTTPTrait
         from .http import HTTPHandler
 
-        # Create HTTPHandler to handle protocol methods
-        handler = HTTPHandler(agent)
+        # Create HTTPHandler to handle protocol methods; its model calls use the platform's router
+        handler = HTTPHandler(agent, Caller(self._lg, self._platform.llm))
 
         # Parse HTTP config (dict with host, port, title, description)
         http_config = HTTPConfig(**http_config_dict)

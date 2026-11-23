@@ -38,27 +38,28 @@ push. `requires-python = ">=3.11"`.
 ```python
 from appinfra.log import create_lg
 
-from llm_gent import AgentFactory, LLMTrait, PlatformFactory
+from llm_gent import PlatformFactory
+from llm_gent.agents.default import Factory as PromptAgentFactory
 
 lg = create_lg("my-agent", "info")
 
 llm = {"backends": {"local": {"base_url": "http://localhost:8000/v1", "model": "default"}}}
 with PlatformFactory(lg).from_config({"llm": llm}) as platform:
-    agent = AgentFactory(platform).from_config(
+    agent = PromptAgentFactory(platform).from_config(
         {
             "identity": {"name": "my-agent"},
             "directive": "You are a helpful assistant.",
-            "traits": {"required": ["llm", "directive"]},
+            "tools": {"complete_task": {}},
         }
     )
     agent.start()
-    result = agent.require_trait(LLMTrait).complete([{"role": "user", "content": "Hello!"}])
-    print(result.content)
+    print(agent.ask("Hello!"))
     agent.stop()
 ```
 
 The platform builds the model router once from the packaged `etc/llm.yaml`, with the `llm`
-settings merged on top, and every agent built on it shares that router. A runnable version of
+settings merged on top, and every agent built on it shares that router. The agent's directive is
+the system prompt of its SAIA, which answers by calling `complete_task`. A runnable version of
 this example lives at `llm_gent/examples/quickstart.py`. Pass `--smoke` to run it on llm-infer's
 scripted model (no real backend contacted).
 
@@ -76,7 +77,6 @@ Traits provide specific capabilities to agents:
 
 | Trait | Purpose |
 |-------|---------|
-| `LLMTrait` | LLM completions with multi-backend routing |
 | `DirectiveTrait` | System prompts and agent instructions |
 | `StorageTrait` | PostgreSQL persistence with migrations |
 | `RatingTrait` | Automated LLM-based content evaluation |

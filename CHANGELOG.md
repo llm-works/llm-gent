@@ -58,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a child of `tracker`, and a resumed run restores its spend into its own child, never into
   `tracker`. `CostTracker.exceeded`, `urgent_wrapup` and `remaining` count ancestors' caps.
   Removed: `Flow.with_cost_tracker`, `Factory(cost_tracker=)` / `with_cost_tracker`.
+- Breaking: model access is the platform's, not a trait. `LLMTrait`, `LLMConfig` and
+  `TraitName.LLM` are removed; a plain call is `Caller(lg, platform.llm).chat(...)`, which takes
+  `output_schema=` for structured output. An agent config with an `llm` key raises `ConfigError`.
 
 ## [0.4.1] - 2026-11-01
 

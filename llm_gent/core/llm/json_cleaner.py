@@ -145,7 +145,7 @@ Phase 2: Structure Cleaning (clean_parsed)
 
 USAGE
 -----
-Called automatically by LLMTrait._clean_and_parse_json() when parsing structured outputs.
+Called by llm_gent.core.llm.structured.parse_structured() when parsing structured outputs.
 The expected_fields parameter (from Pydantic model) guides the unwrapping heuristics.
 
     cleaner = JSONCleaner()

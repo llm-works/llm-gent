@@ -7,7 +7,6 @@ from .conversation import ConversationTrait, ConversationTraitConfig
 from .cost import CostTrait
 from .directive import Directive, DirectiveTrait, MethodTrait
 from .http import HTTPConfig, HTTPTrait
-from .llm import LLMConfig, LLMTrait
 from .memory import MemoryConfig, MemoryTrait
 from .rating import RatingConfig, RatingTrait
 from .saia import SAIAConfig, SAIATrait
@@ -36,9 +35,6 @@ __all__ = [
     "ManifestNotFoundError",
     "TrainingConfig",
     "TrainingTrait",
-    # LLM
-    "LLMConfig",
-    "LLMTrait",
     # Rating
     "RatingConfig",
     "RatingTrait",

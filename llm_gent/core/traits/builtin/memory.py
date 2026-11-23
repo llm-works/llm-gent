@@ -18,10 +18,10 @@ from llm_kelt.memory.atomic import EmbeddingFilter, Fact
 from llm_kelt.memory.isolation import ClientContext
 from llm_kelt.scoped_client import ScopedClient
 
+from ...llm.config import resolve_llm_defaults
 from ...llm.types import CompletionResult
 from ...runnable import ExecutionResult
 from ..base import BaseTrait
-from .llm import _resolve_llm_defaults
 
 
 if TYPE_CHECKING:
@@ -85,7 +85,7 @@ class MemoryTrait(BaseTrait):
         })
         agent = AgentFactory(platform).from_config({
             "identity": {"name": "my-agent"},
-            "traits": {"required": ["llm", "memory"]},
+            "traits": {"required": ["memory"]},
         })
         agent.start()
 
@@ -184,7 +184,7 @@ class MemoryTrait(BaseTrait):
                 "has_embedder": self._embedder is not None,
             },
         )
-        self._llm_defaults = _resolve_llm_defaults(self.config.get("llm") or DotDict())
+        self._llm_defaults = resolve_llm_defaults(self.config.get("llm") or DotDict())
         self.agent.lg.trace(
             "memory trait started",
             extra={
@@ -222,7 +222,7 @@ class MemoryTrait(BaseTrait):
     def with_chat_client(self, chat_client: ChatClient) -> Self:
         """Return a new trait bound to ``chat_client``, detached from the registry.
 
-        Immutable-view fluent (mirrors ``LLMTrait.with_router``): ``self`` stays
+        Immutable-view fluent (as ``with_embedder`` and ``with_database``): ``self`` stays
         canonical for ``agent.get_trait(MemoryTrait)`` and its chat client is
         unchanged. The returned instance shares ``agent``, ``config``,
         ``database``, and ``embedder`` but is not registered.

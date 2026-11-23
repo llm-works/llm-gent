@@ -152,21 +152,17 @@ def make_platform(
     router: Any = None,
     saia_factory: SAIAFactory | None = None,
     traits: TraitRegistry | None = None,
-    llm_config: Mapping[str, Any] | None = None,
     memory_config: Mapping[str, Any] | None = None,
     memory: MemoryResources | None = None,
 ) -> Platform:
     """A platform on stub clients, built directly: no config file read, no client built.
 
-    ``router`` defaults to a ``MagicMock``; ``llm_config`` is the router config
-    the trait factory hands LLM traits. Without ``saia_factory`` the platform
+    ``router`` defaults to a ``MagicMock``. Without ``saia_factory`` the platform
     builds no SAIA, as one from ``PlatformFactory`` without one; without
     ``traits`` its registry is empty.
     """
     router = router if router is not None else MagicMock()
-    trait_factory = TraitFactory(
-        lg, llm_config or {}, router, memory_config=memory_config, memory=memory
-    )
+    trait_factory = TraitFactory(lg, router, memory_config=memory_config, memory=memory)
     return Platform(
         lg,
         llm=router,
