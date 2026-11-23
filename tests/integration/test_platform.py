@@ -16,6 +16,9 @@ from tests.helpers import make_platform, make_test_logger
 
 pytestmark = pytest.mark.integration
 
+_DEADLINE = 5.0
+"""Seconds a signalled wait may take before the test fails instead of hanging."""
+
 
 def test_packaged_config_has_a_default_backend():
     config = packaged_llm_config()
@@ -66,12 +69,17 @@ def test_concurrent_first_requests_build_a_role_once():
     got: list[Any] = []
     first = threading.Thread(target=lambda: got.append(platform.saia(role)))
     second = threading.Thread(target=lambda: got.append(platform.saia(role)))
+    # The deadlines are the failure path only: every wait below is signalled in a passing run.
     first.start()
-    entered.wait()
-    second.start()
-    contended.wait()  # the second request is at the lock while the first builds
-    release.set()
-    first.join()
-    second.join()
+    try:
+        assert entered.wait(timeout=_DEADLINE), "the first build never started"
+        second.start()
+        assert contended.wait(timeout=_DEADLINE), "the second request never reached the lock"
+    finally:
+        release.set()
+        first.join(timeout=_DEADLINE)
+        if second.ident is not None:
+            second.join(timeout=_DEADLINE)
+    assert not first.is_alive() and not second.is_alive()
     assert built == [role]
     assert got[0] is got[1]
