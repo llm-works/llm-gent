@@ -8,13 +8,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from appinfra import DotDict
 
+from llm_gent.core.agent import Identity
 from llm_gent.core.errors import ConfigError
 from llm_gent.core.traits import TraitName
 from llm_gent.core.traits.builtin.directive import Directive, DirectiveTrait, MethodTrait
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.training import TrainingTrait
 from llm_gent.core.traits.factory import Factory as TraitFactory
-from llm_gent.core.traits.factory import MemoryResources
 
 
 pytestmark = pytest.mark.unit
@@ -96,63 +96,60 @@ class TestCreateDirectiveTrait:
 
 @pytest.fixture
 def memory():
-    """The platform's shared memory clients."""
-    return MemoryResources(database=MagicMock(), chat_client=MagicMock(), embedder=MagicMock())
+    """The platform's shared memory trait, on a patched kelt client."""
+    with patch("llm_gent.core.traits.builtin.memory.KeltClient"):
+        yield MemoryTrait(
+            MagicMock(),
+            DotDict({"schema": {"name": "platform"}}),
+            database=MagicMock(),
+            chat_client=MagicMock(),
+        )
 
 
-@pytest.fixture
-def mock_kelt():
-    """Patch the kelt client MemoryTrait composes; nothing touches a database."""
-    with (
-        patch("llm_gent.core.traits.builtin.memory.KeltClient") as kelt,
-        patch("llm_gent.core.traits.builtin.memory.ContextBuilder"),
-    ):
-        # MagicMock intercepts `.assertions` for its assertion helpers; assign explicitly.
-        instance = MagicMock()
-        instance.atomic = MagicMock()
-        instance.atomic.assertions = MagicMock()
-        kelt.return_value = instance
-        yield kelt
-
-
-class TestCreateMemoryTrait:
-    """Tests for TraitFactory.create_memory_trait(): the platform's memory clients, not owned."""
-
-    def test_none_config_raises(self, factory, mock_agent):
-        with pytest.raises(ConfigError, match="Memory configuration required"):
-            factory.create_memory_trait(mock_agent, mock_agent.identity, None)
-
-    def test_missing_db_raises(self, factory, mock_agent):
-        config = DotDict({"embedder_url": "http://localhost:9000"})
-        with pytest.raises(ConfigError, match="missing required 'db' field"):
-            factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+class TestCreateMemory:
+    """_create_memory: the platform's memory, viewed as the agent's identity."""
 
     def test_platform_without_memory_raises(self, factory, mock_agent):
-        config = DotDict({"db": {"url": "postgresql://localhost/test"}})
         with pytest.raises(ConfigError, match="platform built with memory"):
-            factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+            factory._create_memory(mock_agent)
 
-    def test_uses_shared_clients(self, router, memory, mock_agent, mock_kelt):
+    def test_views_the_shared_memory_as_the_agent(self, router, memory):
         factory = TraitFactory(MagicMock(), router, memory=memory)
-        config = DotDict({"db": {"url": "postgresql://localhost/test"}})
+        agent = MagicMock(config=DotDict({}), identity=Identity("jokester"))
 
-        trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+        trait = factory._create_memory(agent)
 
         assert isinstance(trait, MemoryTrait)
-        assert trait._database is memory.database
-        assert trait._client is memory.chat_client
-        assert trait._embedder is memory.embedder
-        assert trait._owns_chat_client is False
-        assert trait._owns_embedder is False
+        assert trait is not memory
+        assert trait.identity == Identity("jokester")
+        assert trait.default_schema == "platform"
+        assert trait.database is memory.database
 
-    def test_defaults_applied(self, router, memory, mock_agent, mock_kelt):
+    def test_agent_kelt_schema_overrides_the_platform_schema(self, router, memory):
         factory = TraitFactory(MagicMock(), router, memory=memory)
-        config = DotDict({"db": {"url": "postgresql://localhost/test"}})
+        agent = MagicMock(
+            config=DotDict({"kelt": {"schema": {"name": "custom", "enforce": True}}}),
+            identity=Identity("a"),
+        )
 
-        trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
+        trait = factory._create_memory(agent)
 
-        assert trait.config.embedder_model == "default"
-        assert trait.config.embedder_timeout == 30.0
+        assert trait.default_schema == "custom"
+        assert memory.default_schema == "platform"
+
+    def test_agent_kelt_schema_without_a_name_means_public(self, router, memory):
+        factory = TraitFactory(MagicMock(), router, memory=memory)
+        agent = MagicMock(
+            config=DotDict({"kelt": {"schema": {"enforce": True}}}), identity=Identity("a")
+        )
+
+        assert factory._create_memory(agent).default_schema == "public"
+
+    def test_without_an_agent_kelt_schema_the_platform_schema_is_kept(self, router, memory):
+        factory = TraitFactory(MagicMock(), router, memory=memory)
+        agent = MagicMock(config=DotDict({"kelt": {"schema": {}}}), identity=Identity("a"))
+
+        assert factory._create_memory(agent).default_schema == "platform"
 
 
 class TestCreateTrainingTrait:
@@ -222,34 +219,6 @@ class TestCreateStorage:
 
         trait = factory._create_storage(mock_agent)
         assert isinstance(trait, StorageTrait)
-
-
-class TestCreateMemoryRouting:
-    """Tests for _create_memory with the platform's memory settings."""
-
-    def test_no_memory_config_raises(self, factory, mock_agent):
-        mock_agent.config = DotDict({})
-        with pytest.raises(ConfigError, match="Memory configuration required"):
-            factory._create_memory(mock_agent)
-
-    def test_merges_agent_kelt_schema(self, router):
-        memory_config = {
-            "db": {"url": "postgresql://localhost/test"},
-            "schema": {"name": "default"},
-        }
-        factory_inst = TraitFactory(MagicMock(), router, memory_config=memory_config)
-
-        mock_agent = MagicMock()
-        mock_agent.config = DotDict({"kelt": {"schema": {"name": "custom", "enforce": True}}})
-        mock_agent.identity = MagicMock()
-
-        with patch.object(factory_inst, "create_memory_trait") as mock_create:
-            mock_create.return_value = MagicMock()
-            factory_inst._create_memory(mock_agent)
-
-            config_passed = mock_create.call_args[0][2]
-            assert config_passed["schema"] == {"name": "custom", "enforce": True}
-        assert memory_config["schema"] == {"name": "default"}
 
 
 class TestCreateTrainingRouting:

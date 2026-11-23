@@ -52,7 +52,7 @@ def mock_kelt():
 @pytest.fixture
 def storage(mock_logger, mock_kelt):
     """AgentStorage with a registered FakeTable."""
-    s = AgentStorage(mock_logger, mock_kelt)
+    s = AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
     # Bypass real create-table call
     with patch.object(FakeTable.__table__, "create"):
         s.register_table(FakeTable)
@@ -66,13 +66,13 @@ def storage(mock_logger, mock_kelt):
 
 class TestInit:
     def test_valid_context_key(self, mock_logger, mock_kelt):
-        storage = AgentStorage(mock_logger, mock_kelt)
+        storage = AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
         assert storage._registered_tables == {}
 
     def test_none_context_key_raises(self, mock_logger, mock_kelt):
         mock_kelt.context.context_key = None
-        with pytest.raises(ValueError, match="requires isolation context"):
-            AgentStorage(mock_logger, mock_kelt)
+        with pytest.raises(ValueError, match="isolation context with context_key"):
+            AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ class TestProperties:
 
 class TestRegisterTable:
     def test_registers_and_creates_table(self, mock_logger, mock_kelt):
-        s = AgentStorage(mock_logger, mock_kelt)
+        s = AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
 
         with patch.object(FakeTable.__table__, "create") as mock_create:
             s.register_table(FakeTable)
@@ -105,7 +105,7 @@ class TestRegisterTable:
 
     def test_validate_rejects_non_agent_table(self, mock_logger, mock_kelt):
         """register_table delegates to validate_agent_table which rejects bad classes."""
-        s = AgentStorage(mock_logger, mock_kelt)
+        s = AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
 
         with pytest.raises(ValueError, match="must inherit from AgentTable"):
             s.register_table(MagicMock)  # type: ignore[arg-type]
@@ -118,7 +118,7 @@ class TestRegisterTable:
 
 class TestSelect:
     def test_unregistered_table_raises(self, mock_logger, mock_kelt):
-        s = AgentStorage(mock_logger, mock_kelt)
+        s = AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
         with pytest.raises(ValueError, match="Table not registered"):
             s.select(FakeTable)
 
@@ -144,7 +144,7 @@ class TestSelect:
 
 class TestInsert:
     def test_unregistered_table_raises(self, mock_logger, mock_kelt):
-        s = AgentStorage(mock_logger, mock_kelt)
+        s = AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
         with pytest.raises(ValueError, match="Table not registered"):
             s.insert(FakeTable, text="hello")
 
@@ -195,7 +195,7 @@ class TestExecute:
 
 class TestUpdate:
     def test_unregistered_table_raises(self, mock_logger, mock_kelt):
-        s = AgentStorage(mock_logger, mock_kelt)
+        s = AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
         with pytest.raises(ValueError, match="Table not registered"):
             s.update(FakeTable, 1, text="new")
 
@@ -228,7 +228,7 @@ class TestUpdate:
 
 class TestDelete:
     def test_unregistered_table_raises(self, mock_logger, mock_kelt):
-        s = AgentStorage(mock_logger, mock_kelt)
+        s = AgentStorage(mock_logger, mock_kelt.database, mock_kelt.context)
         with pytest.raises(ValueError, match="Table not registered"):
             s.delete(FakeTable, 1)
 

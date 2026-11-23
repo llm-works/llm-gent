@@ -8,52 +8,32 @@ Dependency-inversion pattern
 
 Traits receive their external dependencies through the constructor; they
 import no resource factory of their own. :class:`PlatformFactory` builds the
-shared clients once per platform (the model router, and the memory database,
-chat client and embedder) and gives them to this factory, which injects them
-into each trait it builds with ``owns_*=False``: the platform closes them,
-not the trait. Model access is not a trait: every agent reaches the
-platform's router (``platform.llm``, ``Platform.saia``).
+shared clients once per platform (the model router, and the memory trait
+over the memory database, chat client and embedder) and gives them to this
+factory; the platform closes the clients. Model access is not a trait: every
+agent reaches the platform's router (``platform.llm``, ``Platform.saia``).
 
-Runtime override
-----------------
-
-Each dependency-owning trait exposes per-resource fluent overrides
-(``.with_chat_client``, ``.with_embedder``, ``.with_database``,
-``.with_train_factory``) that return a new instance
-bound to the injected resource, detached from the agent's trait registry
-and with ``owns_*=False``. Use ``agent.replace_trait(new)`` for a
-persistent swap.
+An agent's memory is a view of the platform's one :class:`MemoryTrait`,
+bound to the agent's identity (``MemoryTrait.view``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from appinfra import DotDict
 from appinfra.log import Logger
-from llm_infer.client import ChatClient, EmbeddingClient
-from llm_kelt.core import Database
+from llm_infer.client import ChatClient
 
 from .base import Trait
 
 
 if TYPE_CHECKING:
-    from ..agent import Agent, Identity
+    from ..agent import Agent
     from . import TraitName
     from .builtin.directive import Directive, DirectiveTrait, MethodTrait
-    from .builtin.memory import MemoryConfig, MemoryTrait
+    from .builtin.memory import MemoryTrait
     from .builtin.training import TrainingTrait
-
-
-@dataclass(frozen=True)
-class MemoryResources:
-    """The memory clients a platform shares: its database, chat client and embedder."""
-
-    database: Database
-    chat_client: ChatClient
-    embedder: EmbeddingClient | None = None
 
 
 class Factory:
@@ -73,7 +53,7 @@ class Factory:
         router: ChatClient,
         *,
         memory_config: Mapping[str, Any] | None = None,
-        memory: MemoryResources | None = None,
+        memory: MemoryTrait | None = None,
     ) -> None:
         """Initialize the factory with the platform's shared clients.
 
@@ -81,7 +61,7 @@ class Factory:
             lg: Logger instance.
             router: The platform's shared router; rating calls go through it.
             memory_config: The platform's memory settings, or None.
-            memory: The platform's shared memory clients, or None without a
+            memory: The platform's shared memory trait, or None without a
                 memory database.
         """
         from . import TraitName
@@ -135,20 +115,22 @@ class Factory:
         return self.create_directive_trait(agent, agent.config.get("directive"))
 
     def _create_memory(self, agent: Agent) -> MemoryTrait:
-        """Route to create_memory_trait.
+        """The platform's memory, viewed as the agent's identity.
 
-        Merges the platform's memory settings with the agent's ``kelt`` config
-        (its schema override).
+        A non-empty ``kelt.schema`` on the agent replaces the platform's
+        schema: its ``name``, or ``public`` without one. Without it the
+        agent shares the platform's schema.
+
+        Raises:
+            ConfigError: The platform was built without memory.
         """
-        memory_config: DotDict | None = (
-            DotDict(dict(self._memory_config)) if self._memory_config else None
-        )
+        from ..errors import ConfigError
 
-        agent_kelt = agent.config.get("kelt", {})
-        if agent_kelt and memory_config and agent_kelt.get("schema"):
-            memory_config["schema"] = agent_kelt["schema"]
-
-        return self.create_memory_trait(agent, agent.identity, memory_config)
+        if self._memory is None:
+            raise ConfigError("Memory trait requires a platform built with memory configuration")
+        schema = (agent.config.get("kelt") or {}).get("schema")
+        name = (schema.get("name") or "public") if schema else None
+        return self._memory.view(agent.identity, schema=name)
 
     def _create_training(self, agent: Agent) -> TrainingTrait:
         """Route to create_training_trait.
@@ -213,68 +195,6 @@ class Factory:
             )
 
         return DirectiveTrait(agent, directive)
-
-    def create_memory_trait(
-        self, agent: Agent, identity: Identity | None, memory_config: MemoryConfig | None
-    ) -> MemoryTrait:
-        """Create a MemoryTrait on the platform's shared memory clients.
-
-        The database, chat client and embedder are the platform's; the trait
-        does not close them (``owns_chat_client=False``, ``owns_embedder=False``).
-
-        Args:
-            agent: Agent the trait is for.
-            identity: Agent's identity for memory addressing.
-            memory_config: Memory settings (``db``, ``schema``, ``llm``, ...).
-
-        Returns:
-            Configured MemoryTrait.
-
-        Raises:
-            ConfigError: If memory_config is None or missing required fields, or
-                the platform has no memory clients.
-        """
-        from ..errors import ConfigError
-        from .builtin.memory import MemoryTrait
-
-        config = self._build_memory_config(identity, memory_config)
-        if self._memory is None:
-            raise ConfigError("Memory trait requires a platform built with memory configuration")
-
-        return MemoryTrait(
-            agent,
-            config,
-            database=self._memory.database,
-            chat_client=self._memory.chat_client,
-            embedder=self._memory.embedder,
-            owns_chat_client=False,
-            owns_embedder=False,
-        )
-
-    def _build_memory_config(
-        self, identity: Identity | None, memory_config: MemoryConfig | None
-    ) -> MemoryConfig:
-        """Validate and normalize the caller's memory config."""
-        from ..errors import ConfigError
-        from .builtin.memory import MemoryConfig
-
-        if not memory_config:
-            raise ConfigError("Memory configuration required but not provided")
-        if "db" not in memory_config:
-            raise ConfigError("Memory configuration missing required 'db' field")
-        if identity is None:
-            raise ConfigError("Memory configuration requires identity")
-
-        return MemoryConfig(
-            identity=identity,
-            schema=memory_config.get("schema"),
-            llm=memory_config.get("llm", {}),
-            db=memory_config["db"],
-            embedder_url=memory_config.get("embedder_url"),
-            embedder_model=memory_config.get("embedder_model", "default"),
-            embedder_timeout=memory_config.get("embedder_timeout", 30.0),
-            training=memory_config.get("training"),
-        )
 
     def create_training_trait(
         self, agent: Agent, source_config: dict[str, Any] | None

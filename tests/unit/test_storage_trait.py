@@ -69,8 +69,10 @@ class TestStorageTrait:
 
         mock_agent.require_trait.assert_called_once_with(MemoryTrait)
 
-        # Verify AgentStorage was created with logger and kelt client
-        mock_agent_storage_class.assert_called_once_with(mock_agent.lg, mock_memory_trait.kelt)
+        # AgentStorage works on the memory database, isolated by the memory view's context
+        mock_agent_storage_class.assert_called_once_with(
+            mock_agent.lg, mock_memory_trait.database, mock_memory_trait.kelt.context
+        )
 
         # Verify storage was set
         assert trait._storage == mock_storage_instance

@@ -51,9 +51,12 @@ class AtomicFactsBackend:
         self._schema = schema
 
     def _table(self, name: str, schema: str | None = None) -> str:
-        """Get schema-qualified table name."""
+        """The table name, qualified by the schema when one is given (``public`` included).
+
+        Without a schema the name resolves through the database's search path.
+        """
         effective_schema = schema or self._schema
-        if effective_schema and effective_schema != "public":
+        if effective_schema:
             return f"{validate_schema_name(effective_schema)}.{name}"
         return name
 

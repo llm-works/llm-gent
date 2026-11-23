@@ -5,35 +5,34 @@
 
 from __future__ import annotations
 
+import copy
+import uuid
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 from appinfra import DotDict
+from appinfra.log import Logger
 from llm_infer.client import ChatClient, ChatResponse, EmbeddingClient
 from llm_kelt import Client as KeltClient
-from llm_kelt import SchemaMode
+from llm_kelt import ClientView, SchemaMode
 from llm_kelt.core import Database
 from llm_kelt.core.types import ScoredEntity
-from llm_kelt.inference import ContextBuilder
 from llm_kelt.memory.atomic import EmbeddingFilter, Fact
 from llm_kelt.memory.isolation import ClientContext
-from llm_kelt.scoped_client import ScopedClient
 
 from ...llm.config import resolve_llm_defaults
 from ...llm.types import CompletionResult
 from ...runnable import ExecutionResult
-from ..base import BaseTrait
 
 
 if TYPE_CHECKING:
-    from ...agent import Agent, Identity
+    from ...agent import Identity
 
 
 # Type alias for Memory configuration
 MemoryConfig = DotDict
-"""Memory configuration as DotDict.
+"""The platform's memory settings, as DotDict.
 
 Expected fields:
-    identity: Resolved Identity (required).
     schema: Schema config dict with 'name' (default: {"name": "public"}).
     llm: LLM configuration for learned completions.
     db: Database configuration dict (with url, extensions, etc.).
@@ -43,14 +42,25 @@ Expected fields:
     training: Kelt training configuration dict (default_profiles, etc.).
 """
 
+_UNBOUND = (
+    "MemoryTrait is the platform's shared instance; call view(identity) for an identity's memory"
+)
 
-class MemoryTrait(BaseTrait):
-    """Memory capability trait for kelt-backed facts, feedback, and learned completions.
 
-    Wraps llm_kelt.Client, ChatClient, and EmbeddingClient to provide
-    memory-enabled completions with fact injection and feedback capture.
+class MemoryTrait:
+    """Kelt-backed facts, feedback, and learned completions; one per platform.
 
-    Capabilities:
+    The platform builds one MemoryTrait over its memory clients and one kelt
+    client, so the database schema is prepared once however many agents
+    there are. Memory is per identity: :meth:`view` binds the shared trait
+    to an identity (a kelt context key) and, optionally, another schema.
+    A view shares every client and does no database I/O; it is what an
+    agent holds (``agent.require_trait(MemoryTrait)``) and what a flow step
+    takes from ``ctx.traits.require(MemoryTrait).view(identity)``.
+
+    Memory operations need a view; on the shared instance they raise.
+
+    Capabilities (on a view):
         - complete(): Generate completions with automatic fact injection
         - remember(): Store facts about the user
         - recall(): Search facts by semantic similarity
@@ -58,25 +68,13 @@ class MemoryTrait(BaseTrait):
         - record_preference(): Record preference pairs for training
         - record_solution(): Record execution solutions
 
-    Adapter-manifest-driven schema resolution lives in TrainingTrait (training.py).
-
-    Dependency ownership: the trait imports no external factory. Database,
-    ChatClient, and EmbeddingClient are injected at construction. Two seams:
-
-    - Platform (standard path): the platform builds the three clients once
-      from its memory settings and closes them; ``TraitFactory`` injects them
-      into every agent's MemoryTrait with ``owns_chat_client=False`` and
-      ``owns_embedder=False``.
-    - Direct injection (test / advanced): pass ``chat_client``, ``embedder``,
-      or ``database`` yourself; with ``owns_*=True`` the trait closes the
-      client on ``on_stop``, otherwise the caller does. See
-      ``.with_chat_client()``, ``.with_embedder()``, and ``.with_database()``
-      for immutable-view fluent overrides.
+    The platform owns the database, chat client and embedder; the trait
+    closes none of them. Adapter-manifest-driven schema resolution lives in
+    TrainingTrait (training.py).
 
     Example:
         from llm_gent import AgentFactory, PlatformFactory
 
-        # Standard construction — the platform builds the shared clients.
         platform = PlatformFactory(lg).from_config({
             "memory": {
                 "db": {"url": "postgresql://localhost/kelt"},
@@ -87,242 +85,95 @@ class MemoryTrait(BaseTrait):
             "identity": {"name": "my-agent"},
             "traits": {"required": ["memory"]},
         })
-        agent.start()
-
-        # Learned completion with fact injection
-        result = agent.get_trait(MemoryTrait).complete("What do I prefer?")
-
-    Lifecycle:
-        - ``__init__``: composes ``KeltClient`` and ``ContextBuilder`` from the
-          injected database, chat client, and embedder.
-        - ``on_start()``: resolves LLM defaults from config (no client build).
-        - ``on_stop()``: closes the chat client / embedder iff the matching
-          ``owns_*`` flag is True.
+        result = agent.require_trait(MemoryTrait).complete("What do I prefer?")
     """
 
     def __init__(
         self,
-        agent: Agent,
+        lg: Logger,
         config: MemoryConfig,
         *,
         database: Database,
         chat_client: ChatClient,
         embedder: EmbeddingClient | None = None,
-        owns_chat_client: bool = False,
-        owns_embedder: bool = False,
     ) -> None:
-        """Initialize memory trait with injected clients.
+        """Build the shared trait and its kelt client over the platform's clients.
 
         Args:
-            agent: The agent this trait belongs to.
-            config: Memory configuration (identity, schema, llm defaults, etc.).
-            database: Live ``Database``. Built by ``TraitFactory`` in the
-                standard path; may be a stub for tests.
-            chat_client: Live ``ChatClient`` for learned completions.
-            embedder: Live ``EmbeddingClient`` for RAG, or None if no embedder
-                is configured.
-            owns_chat_client: If True, ``on_stop`` closes ``chat_client``. Set
-                by ``TraitFactory`` for factory-built clients. Callers that
-                inject their own client keep this False and clean up themselves.
-            owns_embedder: Same semantic for ``embedder``.
+            lg: Logger instance.
+            config: The platform's memory settings (schema, llm, training, ...).
+            database: The platform's ``Database``; may be a stub for tests.
+            chat_client: The platform's ``ChatClient`` for learned completions.
+            embedder: The platform's ``EmbeddingClient`` for RAG, or None.
         """
-        super().__init__(agent)
+        self._lg = lg
         self.config = config
         self._database = database
         self._client = chat_client
         self._embedder = embedder
-        self._owns_chat_client = owns_chat_client
-        self._owns_embedder = owns_embedder
-        self._llm_defaults: dict[str, Any] = {}
-        self._kelt: KeltClient = self._create_kelt_client(database, embedder, chat_client)
-        self._context: ContextBuilder = ContextBuilder(self._kelt.atomic.assertions)
-
-    def _create_kelt_client(
-        self, database: Database, embedder: EmbeddingClient | None, llm_client: ChatClient | None
-    ) -> KeltClient:
-        """Create schema-agnostic kelt client.
-
-        Args:
-            database: Database instance.
-            embedder: EmbeddingClient instance (None if not configured).
-            llm_client: LLM client instance (None if not configured).
-
-        Returns:
-            KeltClient scoped to default_schema. Use client.with_schema("X")
-            to override for specific operations.
-        """
-        identity = self._resolve_identity()
-        if identity is None:
-            raise ValueError("MemoryConfig must have identity set")
-
-        # Use default_schema for default operations; callers can override with with_schema()
-        context = ClientContext(context_key=identity.context_key, schema_name=self.default_schema)
-
-        return KeltClient(
-            lg=self.agent.lg,
+        self._platform_schema = _schema_name(config.get("schema"), database.schema)
+        self._schema = self._platform_schema
+        self._llm_defaults: dict[str, Any] = resolve_llm_defaults(config.get("llm") or DotDict())
+        self._root = KeltClient(
+            lg=lg,
             database=database,
-            context=context,
+            context=ClientContext(schema_name=self._schema),
             embedder=embedder,
-            llm_client=llm_client,
+            llm_client=chat_client,
             schema_mode=SchemaMode.ENSURE,
-            training_config=self.config.get("training"),
+            training_config=config.get("training"),
         )
+        self._identity: Identity | None = None
+        self._kelt: ClientView | None = None
 
-    def _resolve_identity(self) -> Identity | None:
-        """Resolve Identity from config."""
-        identity: Identity | None = self.config.get("identity")
-        return identity
+    def view(self, identity: Identity, *, schema: str | None = None) -> Self:
+        """This memory bound to ``identity``, on ``schema`` (default: the platform's).
+
+        The view shares the clients and the kelt client; it does no database
+        I/O. A schema other than the platform's is prepared once, on the
+        first store access of any view that names it.
+        """
+        bound = copy.copy(self)
+        bound._identity = identity
+        bound._schema = schema or self._platform_schema
+        bound._kelt = self._root.view(identity.context_key, schema_name=bound._schema)
+        return bound
 
     def on_start(self) -> None:
-        """Resolve config-derived LLM defaults. Clients are already injected."""
-        self.agent.lg.trace(
-            "starting memory trait...",
-            extra={
-                "agent": self.agent.name,
-                "owns_chat_client": self._owns_chat_client,
-                "owns_embedder": self._owns_embedder,
-                "has_embedder": self._embedder is not None,
-            },
-        )
-        self._llm_defaults = resolve_llm_defaults(self.config.get("llm") or DotDict())
-        self.agent.lg.trace(
-            "memory trait started",
-            extra={
-                "agent": self.agent.name,
-                "owns_chat_client": self._owns_chat_client,
-                "owns_embedder": self._owns_embedder,
-            },
-        )
+        """Nothing to start: the clients are the platform's and already built."""
 
     def on_stop(self) -> None:
-        """Close the chat client and embedder iff this trait owns their lifecycles."""
-        self.agent.lg.trace(
-            "stopping memory trait...",
-            extra={
-                "agent": self.agent.name,
-                "owns_chat_client": self._owns_chat_client,
-                "owns_embedder": self._owns_embedder,
-            },
-        )
-        try:
-            if self._owns_chat_client:
-                self._client.close()
-        finally:
-            if self._owns_embedder and self._embedder is not None:
-                self._embedder.close()
-        self.agent.lg.trace(
-            "memory trait stopped",
-            extra={
-                "agent": self.agent.name,
-                "closed_chat_client": self._owns_chat_client,
-                "closed_embedder": self._owns_embedder and self._embedder is not None,
-            },
-        )
-
-    def with_chat_client(self, chat_client: ChatClient) -> Self:
-        """Return a new trait bound to ``chat_client``, detached from the registry.
-
-        Immutable-view fluent (as ``with_embedder`` and ``with_database``): ``self`` stays
-        canonical for ``agent.get_trait(MemoryTrait)`` and its chat client is
-        unchanged. The returned instance shares ``agent``, ``config``,
-        ``database``, and ``embedder`` but is not registered.
-
-        Ownership: ``owns_chat_client`` on the returned trait is False. The
-        caller owns the injected client's lifecycle. For a persistent swap,
-        call ``agent.replace_trait(new)``.
-        """
-        new = type(self)(
-            self.agent,
-            self.config,
-            database=self._database,
-            chat_client=chat_client,
-            embedder=self._embedder,
-            owns_chat_client=False,
-            owns_embedder=False,
-        )
-        self.agent.lg.debug(
-            "memory trait detached with new chat client",
-            extra={"agent": self.agent.name, "detached_from_registry": True},
-        )
-        return new
-
-    def with_embedder(self, embedder: EmbeddingClient | None) -> Self:
-        """Return a new trait bound to ``embedder``, detached from the registry.
-
-        See ``.with_chat_client()`` for the ownership and registry semantics.
-        """
-        new = type(self)(
-            self.agent,
-            self.config,
-            database=self._database,
-            chat_client=self._client,
-            embedder=embedder,
-            owns_chat_client=False,
-            owns_embedder=False,
-        )
-        self.agent.lg.debug(
-            "memory trait detached with new embedder",
-            extra={
-                "agent": self.agent.name,
-                "detached_from_registry": True,
-                "has_embedder": embedder is not None,
-            },
-        )
-        return new
-
-    def with_database(self, database: Database) -> Self:
-        """Return a new trait bound to ``database``, detached from the registry.
-
-        See ``.with_chat_client()`` for the ownership and registry semantics.
-        Database has no owned lifecycle on this trait; ownership stays with
-        whoever built it (``TraitFactory`` in the standard path).
-        """
-        new = type(self)(
-            self.agent,
-            self.config,
-            database=database,
-            chat_client=self._client,
-            embedder=self._embedder,
-            owns_chat_client=False,
-            owns_embedder=False,
-        )
-        self.agent.lg.debug(
-            "memory trait detached with new database",
-            extra={"agent": self.agent.name, "detached_from_registry": True},
-        )
-        return new
+        """Nothing to stop: the platform closes the clients."""
 
     # =========================================================================
     # Schema-aware client access
     # =========================================================================
 
-    def get_client_for_schema(self, schema: str) -> ScopedClient:
-        """Get a scoped client for a specific schema.
+    def get_client_for_schema(self, schema: str) -> ClientView:
+        """This view's identity on ``schema``; the schema is prepared on first use."""
+        return self._root.view(self._bound_identity().context_key, schema_name=schema)
 
-        Uses the new with_schema() API for per-operation schema selection.
-        Schema and tables are created lazily on first use.
-
-        Args:
-            schema: PostgreSQL schema name.
-
-        Returns:
-            ScopedClient configured for the specified schema.
-
-        Raises:
-            RuntimeError: If trait not started.
-        """
-        return self.kelt.with_schema(schema)
+    @property
+    def identity(self) -> Identity | None:
+        """The identity this view is bound to; None on the shared instance."""
+        return self._identity
 
     @property
     def default_schema(self) -> str:
-        """Default schema name from config (schema.name), falling back to 'public'."""
-        schema_config = self.config.get("schema") or {}
-        return str(schema_config.get("name") or "public")
+        """The schema this memory reads and writes: the view's, else the platform's."""
+        return self._schema
 
     @property
-    def kelt(self) -> KeltClient:
-        """Access the kelt client."""
+    def kelt(self) -> ClientView:
+        """The kelt client scoped to this view's identity and schema."""
+        if self._kelt is None:
+            raise RuntimeError(_UNBOUND)
         return self._kelt
+
+    @property
+    def database(self) -> Database:
+        """The platform's memory database."""
+        return self._database
 
     @property
     def embedder(self) -> EmbeddingClient | None:
@@ -338,6 +189,12 @@ class MemoryTrait(BaseTrait):
     def client(self) -> ChatClient:
         """Access the LLM router."""
         return self._client
+
+    def _bound_identity(self) -> Identity:
+        """The view's identity; raises on the shared instance."""
+        if self._identity is None:
+            raise RuntimeError(_UNBOUND)
+        return self._identity
 
     # =========================================================================
     # Completions
@@ -369,6 +226,7 @@ class MemoryTrait(BaseTrait):
         Returns:
             CompletionResult with response and metadata.
         """
+        self._bound_identity()  # a completion is made as an identity, facts or not
         prompt = self._build_completion_prompt(
             system_prompt, query, include_facts, rag, rag_top_k, rag_min_similarity
         )
@@ -414,8 +272,6 @@ class MemoryTrait(BaseTrait):
 
     def _response_to_result(self, response: ChatResponse) -> CompletionResult:
         """Convert LLM response to CompletionResult."""
-        import uuid
-
         tokens_used = 0
         if response.usage:
             tokens_used = response.usage.total_tokens or (
@@ -495,7 +351,7 @@ class MemoryTrait(BaseTrait):
             min_similarity: Minimum similarity threshold (0-1).
             categories: Filter to these categories (None = all). Deprecated: use embedding_filter.
             embedding_filter: EmbeddingFilter for flexible filtering (recommended).
-            schema: PostgreSQL schema to search in (uses with_schema for scoping).
+            schema: PostgreSQL schema to search in (default: this view's).
 
         Returns:
             List of ScoredEntity[Fact] sorted by similarity.
@@ -506,8 +362,8 @@ class MemoryTrait(BaseTrait):
         if self._embedder is None:
             raise ValueError("recall() requires embedder - configure embedder_url in MemoryConfig")
 
+        client = self.kelt if schema is None else self.get_client_for_schema(schema)
         embedding = self._embedder.embed(query)
-        client = self.kelt if schema is None else self.kelt.with_schema(schema)
         return client.atomic.embeddings.search_similar(
             query=embedding.embedding,
             model=self._embedder.model,
@@ -537,7 +393,7 @@ class MemoryTrait(BaseTrait):
         Returns:
             System prompt with facts appended.
         """
-        return self._context.build_system_prompt(
+        return self.kelt.context_builder.build_system_prompt(
             base_prompt=base_prompt,
             categories=categories,
             max_facts=max_facts,
@@ -570,7 +426,7 @@ class MemoryTrait(BaseTrait):
         scored_facts = self.recall(query, top_k=top_k, min_similarity=min_similarity)
         facts = [sf.entity for sf in scored_facts]
 
-        return self._context.build_system_prompt_from_facts(
+        return self.kelt.context_builder.build_system_prompt_from_facts(
             base_prompt=base_prompt,
             facts=facts,
         )
@@ -660,3 +516,12 @@ class MemoryTrait(BaseTrait):
             category="execution",
             source="agent",
         )
+
+
+def _schema_name(schema_config: dict[str, Any] | None, database_schema: str | None) -> str:
+    """The schema a memory config names (``schema.name``), else the database's, else ``public``.
+
+    An explicit schema that differs from the database's still fails in kelt's
+    schema-conflict check.
+    """
+    return str((schema_config or {}).get("name") or database_schema or "public")

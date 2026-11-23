@@ -103,7 +103,7 @@ class RatingTrait(BaseTrait):
         )
 
         # Attach traits; rating calls go through the platform's router
-        agent.add_trait(MemoryTrait(agent, memory_config))
+        agent.add_trait(platform.traits.require(MemoryTrait).view(agent.identity))
         agent.add_trait(RatingTrait(agent, platform.llm, rating_config))
         agent.start()
 
@@ -155,10 +155,10 @@ class RatingTrait(BaseTrait):
         caller = LLMCaller(self.agent.lg, self._router)
         self._service = RatingService(self.agent.lg, caller)
 
-        # Get schema from MemoryTrait config for backend operations
-        schema_config = memory_trait.config.get("schema", {})
-        schema = str(schema_config.get("name")) if schema_config.get("name") else None
-        self._backend = AtomicFactsBackend(self.agent.lg, memory_trait.kelt.database, schema)
+        # The backend works in the schema the agent's memory view uses
+        self._backend = AtomicFactsBackend(
+            self.agent.lg, memory_trait.database, memory_trait.default_schema
+        )
 
         self._parse_config()
         self._log_started()

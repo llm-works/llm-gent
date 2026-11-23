@@ -144,7 +144,7 @@ class TrainingTrait(BaseTrait):
     def with_train_factory(self, train_factory: TrainFactory) -> Self:
         """Return a new trait bound to ``train_factory``, detached from the registry.
 
-        Immutable-view fluent (mirrors ``MemoryTrait.with_chat_client``): ``self``
+        Immutable-view fluent (as ``SAIATrait.with_saia``): ``self``
         stays canonical for ``agent.get_trait(TrainingTrait)`` and its factory
         is unchanged. ``owns_train_factory`` on the returned trait is False;
         the caller retains ownership. For a persistent swap, call
