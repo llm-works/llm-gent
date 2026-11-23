@@ -120,7 +120,7 @@ class Context(Generic[T]):
     a step that stops before finishing raises :class:`Interrupted` and
     runs again on resume. :meth:`Flow.map` and :meth:`Flow.iterate`
     observe it at their natural boundaries automatically. Setting it from
-    a step pauses the whole run (:meth:`FlowRunner.start` returns ``HALTED``).
+    a step pauses the whole run (awaiting the run gives ``HALTED``).
 
     A cut (:meth:`Flow.with_shortcut`) does not set it; see
     :attr:`fast_forward`.

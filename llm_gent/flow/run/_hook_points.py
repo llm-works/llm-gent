@@ -273,7 +273,7 @@ class RunHooks:
 
     def __init__(self, run: Run) -> None:
         flow = run.flow
-        self.hooks: Hooks | None = Hooks(flow._lg, flow._hooks) if flow._hooks else None
+        self.hooks: Hooks | None = Hooks(run.lg, flow._hooks) if flow._hooks else None
         self.info: RunInfo | None = None
         if any(f._hooks for f in iter_flows(flow)):
             ctx = run.checkpoint_ctx

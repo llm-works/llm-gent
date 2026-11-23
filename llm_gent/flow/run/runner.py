@@ -61,6 +61,7 @@ class Runner:
     def start(
         self,
         flow: Flow,
+        /,
         *args: Any,
         state: Any = UNSET,
         halt: asyncio.Event | None = None,
@@ -81,7 +82,8 @@ class Runner:
         propagates out unchanged, past any ``rescue`` policy.
 
         Args:
-            flow: The flow to run. A flow can run many times, at once too.
+            flow: The flow to run, positional-only so a first node may take a
+                ``flow`` keyword. A flow can run many times, at once too.
             *args: Positional inputs to the first node.
             state: The payload ``ctx.state`` exposes for this run, wrapped as
                 :class:`~llm_gent.flow.State` (``ctx.state.data`` reaches

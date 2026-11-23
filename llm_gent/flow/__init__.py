@@ -64,7 +64,8 @@ Public surface (what a run may use and how roles become SAIA instances,
   ``Flow.guard`` on a ``Flow.map`` node
 - :class:`Interrupted` — raised by a step that stops because of the halt
   before finishing its work, so it runs again on resume
-- :data:`HALTED` — what ``FlowRunner.start`` returns when the halt stopped the run
+- :data:`HALTED` — what awaiting the run ``FlowRunner.start`` returns gives when the halt
+  stopped it
 - :data:`UNSET` — "no value here" sentinel (distinct from ``None``), used by
   :meth:`FlowRunner.start`'s ``state=`` default and by rescue callbacks'
   ``pending_input`` positional

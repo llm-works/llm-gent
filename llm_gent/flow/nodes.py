@@ -14,7 +14,8 @@ item whose :meth:`Flow.guard` predicate returned falsy; :data:`UNSET`
 (with its :class:`Unset` type), the "no value here" sentinel used by
 :meth:`FlowRunner.start`'s ``state=`` default and by rescue policies'
 ``pending_input`` positional; and :data:`HALTED` (with its :class:`Halted`
-type), what :meth:`FlowRunner.start` returns when the halt stopped the run.
+type), what awaiting the run :meth:`FlowRunner.start` returns gives when the
+halt stopped it.
 
 Depends only on :mod:`.context` and :mod:`.state`; :class:`Flow` is
 referenced solely inside string-form annotations (via
@@ -90,9 +91,11 @@ class Halted:
 
 
 HALTED: Final[Halted] = Halted()
-"""What :meth:`FlowRunner.start` returns when the halt stopped the run before its end.
+"""What awaiting a run gives when the halt stopped it before its end.
 
-The run wrote its halt checkpoint; ``Resume("latest")`` continues it. A run
+A run with a history (its runner's store and ``history=``) wrote its halt
+checkpoint, and ``Resume("latest")`` continues it; a run without one keeps no
+checkpoint. A run
 whose last step completed returns that step's result — ``None`` included —
 also when the halt was set during that step: it finished.
 """

@@ -189,8 +189,8 @@ Settings live where their lifetime is:
 |---|---|
 | `state_factory`, flow class, resource methods | The flow `Factory` |
 | Trait registry, `SAIAFactory` (the `Environment`), CAS store | The runner; in the target design the environment comes from the agent |
-| Halt, signals, resource instances (cost tracker), history name, start | `start()` |
-| Declarations about part of the tree: checkpointer, checkpoint policy, shortcut, budget | The flow |
+| Halt, signals, history name, start | `start()` |
+| Declarations about part of the tree: checkpointer, checkpoint policy, shortcut, budget, resource instances (`with_resource`, the cost tracker by `with_cost_tracker`) | The flow |
 
 A run's history is named by the caller (`history=`); in the target design the name joins the
 agent's identity, so runs of a shared flow keep separate histories and `start=Resume("latest")`

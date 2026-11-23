@@ -20,10 +20,10 @@ python -m llm_gent.examples.flow.durable_resume --smoke
 ```
 
 The two real invocations must be separate processes — that is the point. The store lives at
-`~/.cache/llm-gent-durable-resume`. An invocation resumes with `flow.run(resume="latest")` when
-the history's head is a halt commit, and starts fresh (`resume="off"`) on an empty history or a
-finished one. A third invocation therefore starts a new cycle on the same history; `--reset` wipes
-the store first.
+`~/.cache/llm-gent-durable-resume`. An invocation resumes with
+`runner.start(flow, history=..., start=Resume("latest"))` when the history's head is a halt commit,
+and starts fresh (`start=Fresh()`) on an empty history or a finished one. A third invocation
+therefore starts a new cycle on the same history; `--reset` wipes the store first.
 
 ## The flow
 
@@ -71,8 +71,8 @@ Sequence inside the process:
    turn, so the step counts as interrupted: it stopped before finishing its work.
 6. The body chain sees the halt after that step and stops, its cursor on the interrupted step; the
    iterate stops in pass 0. Each stays registered where it stopped. Once the run has unwound,
-   `run()` writes the halt commit from those positions and returns `HALTED`: the halted run's
-   state is in the halt commit.
+   the run writes the halt commit from those positions and awaiting it gives `HALTED`: the
+   halted run's state is in the halt commit.
 
 ## Run 2 — resumes the paused turn
 
@@ -88,7 +88,7 @@ Sequence inside the process:
 The first topic is summarized with no `lookup_reference` line: the model's first completion in
 run 2 is the one run 1 never got to make. Sequence:
 
-1. `resume="latest"` checks out the newest commit with usable state — the halt commit — and
+1. `Resume("latest")` checks out the newest commit with usable state — the halt commit — and
    restores `Digest` from its snapshot through `TypeStateFactory(Digest)`.
 2. The top-level chain continues at the iterate; the iterate continues in pass 0 with its carried
    value; the body chain continues at `summarize` with the input it had.
@@ -134,12 +134,12 @@ Refs are named pointers to commits, as in git, moved by compare-and-set: a write
 the ref still points where the writer expects, so a second writer on the same history raises
 `ConcurrentWriteError` instead of forking it.
 
-- `HEAD` — the newest commit. Every new commit is parented on it; `resume="latest"` starts its
+- `HEAD` — the newest commit. Every new commit is parented on it; `Resume("latest")` starts its
   walk from it.
 - `tags/complete` — the final state of the last run that finished. It stays put while later runs
   append past it (`History.last_complete()`).
 - `tags/<name>` — a named checkpoint: `ctx.checkpoint("name")` tags the commit it writes, and
-  `run(resume="name")` checks it out; `run(resume=<commit hash>)` checks out any commit (see
+  `start=Resume("name")` checks it out; `start=Resume(<commit hash>)` checks out any commit (see
   [Named checkpoints](#named-checkpoints)).
 
 The script reads the history through `History(store, CLIENT_FLOW_ID)` rather than the store:
@@ -162,8 +162,8 @@ tree 208196f5…
   `FlowCommit`: `id`, `tree`, `parents` and the parsed `meta`.
 - `node_path` — where the halt was observed: the `summarize` step inside the iterate. Metadata
   only; where the run continues is in the snapshot's cursors.
-- `outcome: "halted"` — written when the halt stopped the run. `resume="latest"` does not branch on it:
-  it checks out the newest commit that has state.
+- `outcome: "halted"` — written when the halt stopped the run. `Resume("latest")` does not branch
+  on it: it checks out the newest commit that has state.
 
 ### Snapshot
 
@@ -220,10 +220,10 @@ run 2 read `HEAD` before its first commit and parented on it.
 Written on clean exit when the history's retention is `retain` (the default). A finished run has no
 running structure, so the snapshot holds the root scope (and the run's cost tracker, when it has
 one). `HEAD` always holds the state the
-last run ended with, and `resume="latest"` on a finished history starts from its first step with
+last run ended with, and `Resume("latest")` on a finished history starts from its first step with
 that state. If the final state cannot be serialized, the commit is written with an empty tree and
 a warning is logged: the history is still complete, but carries no final state. With
-`run(..., retention="gc_on_success")` the history is deleted instead.
+`start(..., retention="gc_on_success")` the history is deleted instead.
 
 ## Where a run stops and continues
 
@@ -232,8 +232,8 @@ a step that stops before finishing its work raises `Interrupted` (a Loop call th
 turn counts as interrupted without raising). A chain that sees the halt after a step stops: its
 cursor stays on an interrupted step and moves past a completed one. Chains, iterates and maps that
 stop early raise `Interrupted` to the step running them, each staying registered where it stopped.
-Once everything has stopped — every map item, at any depth — `run()` writes the one halt commit
-from those positions and returns `None`.
+Once everything has stopped — every map item, at any depth — the run writes the one halt commit
+from those positions, and awaiting it gives `HALTED`.
 
 **Only the interrupted step runs again.** Resume continues every structure at its cursor, so
 completed steps and passes do not run again. The step that was interrupted runs again with the
@@ -265,11 +265,12 @@ async def review(ctx, draft):
     ...
 
 
-await flow.run(resume="before-review")
+runner = FlowRunner(lg, store=store)
+await runner.start(flow, history="history-42", start=Resume("before-review"))
 ```
 
 `ctx.checkpoint(name)` writes a checkpoint like any other — the chain running the step is at that
-step — and tags it `tags/<name>`; taking it again moves the tag. `run(resume=name)` checks the
+step — and tags it `tags/<name>`; taking it again moves the tag. `Resume(name)` checks the
 tagged commit out as `latest` checks out the newest one, so the step that took the checkpoint runs
 again with the input it had. The run's commits continue from that commit: once the run commits, the
 commits written after the checkpoint leave the history's line — `latest` no longer sees them. A run
@@ -280,22 +281,22 @@ the commit it wrote, named or not, and `History.head()` gives the newest one:
 
 ```python
 halted = (await History(store, "history-42").head()).id
-await flow.run(
-    resume="before-review"
-)  # the run continues there; once it commits, the halted commit leaves the line
-await flow.run(resume=halted)  # the run continues from the halted commit
+# the run continues there; once it commits, the halted commit leaves the line
+await runner.start(flow, history="history-42", start=Resume("before-review"))
+# the run continues from the halted commit
+await runner.start(flow, history="history-42", start=Resume(halted))
 ```
 
 A commit left off the line stays resumable by hash, and a named one by its name, until a prune
 of the repository deletes what no ref reaches.
 
-`run(restart=...)` takes the same `"latest"`, hash or name but starts over from the commit instead
+`Restart(...)` takes the same `"latest"`, hash or name but starts over from the commit instead
 of continuing it: only its root state and the run's declared resources (the cost tracker's spend)
 come back, and the run starts at its first step. It runs even when the flow no longer has the step
 a checkpoint was taken at.
 
 `"off"`, `"latest"` and `"complete"` cannot name a checkpoint, nor can a string of 64 lowercase hex
-characters, the form of a commit hash. `run(resume=...)` with a hash or a name the history does
+characters, the form of a commit hash. `Resume(...)` with a hash or a name the history does
 not have raises `ValueError`; for a name, the error lists the checkpoint names the history has
 (`History.checkpoint_names()`).
 

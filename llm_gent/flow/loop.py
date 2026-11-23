@@ -655,7 +655,8 @@ class LoopFactory:
 
     The ``SAIAFactory`` on this factory is held for future
     standalone-Loop use (not required today — Flow-body Loops read
-    ``ctx.saia`` from the enclosing flow's factory). Consumers are free
+    ``ctx.saia`` from the run's environment, ``FlowRunner(lg, env=...)``).
+    Consumers are free
     to pass ``saia_factory=None`` when they only wire Loops into Flows.
     """
 
@@ -675,7 +676,7 @@ class LoopFactory:
                 ``with_*`` derivations.
             saia_factory: Optional :class:`SAIAFactory`. Reserved for
                 standalone-Loop use; Flow-body Loops read ``ctx.saia``
-                from the enclosing Flow's factory.
+                from the run's environment (``FlowRunner(lg, env=...)``).
             halt: Optional :class:`asyncio.Event` used as the default
                 halt for every built Loop. Per-``create`` overrides
                 win (same explicit-wins rule the Loop itself uses).

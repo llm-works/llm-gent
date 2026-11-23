@@ -56,6 +56,14 @@ class TestStart:
         runs = [runner.start(flow, i) for i in range(5)]
         assert await asyncio.gather(*runs) == [0, 2, 4, 6, 8]
 
+    async def test_a_flow_keyword_reaches_the_first_node(self) -> None:
+        @verb
+        async def consume(ctx: Context[Any], *, flow: str) -> str:
+            return flow
+
+        graph = make_ff().create("c").call(consume)
+        assert await FlowRunner(LG).start(graph, flow="input") == "input"
+
     def test_needs_a_running_event_loop(self) -> None:
         with pytest.raises(RuntimeError, match="no running event loop"):
             FlowRunner(LG).start(make_ff().create("d").call(double), 1)

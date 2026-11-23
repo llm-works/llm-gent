@@ -420,8 +420,8 @@ another region on the same signal (run start raises); regions on
 different signals may nest. A signal set inside a step, without
 awaiting, is seen at that step's boundary.
 
-A cut is not a halt: it writes no checkpoint, and `ctx.halt` — the
-run's halt, `None` without `start(flow, halt=...)` — stays unset. A step that
+A cut is not a halt: it writes no checkpoint, and `ctx.halt`, the run's
+halt (`start(flow, halt=...)`, or the one `run.halt()` sets), stays unset. A step that
 stops for the halt raises `Interrupted` and runs again on resume; a
 step that ends early on a cut returns. Setting `ctx.halt` from a step
 pauses the whole run (a stop flag stored outside the process, say).
