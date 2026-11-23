@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `checkpoint_store=` on `Flow` and `Factory`, `Factory.with_checkpoint_store`.
   `build_canonical_flow` takes `checkpointed=` for `store=`; `resume_in_subprocess` flow builders
   take `(lg, **kwargs)`.
+- Breaking: a run's cost tracker is the run's: `FlowRunner.start(flow, cost=tracker)` runs it on
+  a child of `tracker`, and a resumed run restores its spend into its own child, never into
+  `tracker`. `CostTracker.exceeded`, `urgent_wrapup` and `remaining` count ancestors' caps.
+  Removed: `Flow.with_cost_tracker`, `Factory(cost_tracker=)` / `with_cost_tracker`.
 
 ## [0.4.1] - 2026-11-01
 

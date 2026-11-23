@@ -338,14 +338,15 @@ class Context(Generic[T]):
     def cost(self) -> CostTracker | None:
         """The run's cost tracker — ``resource(COST, None)`` — or ``None``.
 
-        Set with :meth:`Flow.with_cost_tracker`; a run of a flow with
-        :meth:`Flow.with_budget` gets a child of it with that budget. Verbs
-        record LLM and operation costs via ``ctx.cost.track(...)``;
-        ``ctx.cost.spent`` is the cost so far and ``ctx.cost.budget`` the
-        limit it is checked against. The tracker enforces its budget and,
-        when configured with a halt event, trips it on the first cross into
-        ``exceeded``; ancestors in the tracker chain do the same on their own
-        budgets. Subflows inherit the outer runtime's tracker.
+        The run's own tracker, a child of :meth:`FlowRunner.start`
+        ``cost=``; a run of a flow with :meth:`Flow.with_budget` gets a
+        child of the enclosing tracker with that budget. Verbs record LLM
+        and operation costs via ``ctx.cost.track(...)``; ``ctx.cost.spent``
+        is the cost so far, and ``ctx.cost.exceeded`` /
+        ``ctx.cost.remaining`` read every budget on the chain up to the
+        caller's tracker. A tracker configured with a halt event trips it on
+        the first cross of its own budget. Subflows share the enclosing
+        tracker unless they declare a budget.
         """
         return self.resource(COST, None)
 

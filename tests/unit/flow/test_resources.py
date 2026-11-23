@@ -533,26 +533,25 @@ class TestCostIsAResource:
             return x
 
         sub = _ff().create().with_budget(2.0).call(step)
-        await run_flow(_ff().create().with_cost_tracker(root).call(step).then(sub), 1)
+        await run_flow(_ff().create().call(step).then(sub), 1, cost=root)
         (top, top_key), (child, child_key) = seen
-        assert top is root and top_key is root
-        assert child is child_key and child.parent is root and child.budget == 2.0
+        assert top is top_key and top.parent is root
+        assert child is child_key and child.parent is top and child.budget == 2.0
 
-    async def test_dispatch_cost_replaces_or_removes_the_tracker(self) -> None:
-        own = CostTracker(make_test_logger(), PricingConfig())
-        other = CostTracker(make_test_logger(), PricingConfig())
+    async def test_dispatch_cost_sets_or_removes_the_tracker(self) -> None:
+        tracker = CostTracker(make_test_logger(), PricingConfig())
         seen: list[Any] = []
 
         @verb
         async def step(ctx: Context[Any]) -> None:
             seen.append(ctx.cost)
 
-        flow = _ff().create().with_cost_tracker(own)
+        flow = _ff().create()
         flow.register(step)
         await flow.dispatch("step")
-        await flow.dispatch("step", cost=other)
+        await flow.dispatch("step", cost=tracker)
         await flow.dispatch("step", cost=None)
-        assert seen == [own, other, None]
+        assert seen == [None, tracker, None]
 
 
 class TestValidation:

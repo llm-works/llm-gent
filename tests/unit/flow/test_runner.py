@@ -191,7 +191,6 @@ _CHANGES: dict[str, Any] = {
     "on_error": lambda f: f.on_error(lambda *_: None),
     "on_item_complete": lambda f: f.on_item_complete(lambda *_: None),
     "with_shortcut": lambda f: f.with_shortcut("cut"),
-    "with_cost_tracker": lambda f: f.with_cost_tracker(None),
     "with_budget": lambda f: f.with_budget(1.0),
     "with_resource": lambda f: f.with_resource(COST),
     "with_checkpointer": lambda f: f.with_checkpointer(),

@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Cost tracking as flow context — ``with_cost_tracker`` / ``with_budget``, resume.
+"""Cost tracking in a run — ``start(cost=)`` / ``with_budget``, resume.
 
-A ``with_budget(limit)`` flow runs each of its runs (a map item, an
-iterate pass, a ``.call``) on a child of its cost tracker with that budget;
-crossing the budget latches the child's ``exceeded`` / ``urgent_wrapup``
-and the run carries on — the agent decides. A budgeted run's child is in
-the checkpoints taken while it runs and restored when it resumes; the
-tracker a flow declares is saved at that flow's path (the top-level one
-through the completion commit) and restored on resume. "A fresh process"
-here is a new Flow and a new CostTracker over the same store.
+A run started with ``cost=tracker`` tracks its cost on a tracker of its
+own, a child of ``tracker``: spend rolls up, the run's accounting is the
+run's. A ``with_budget(limit)`` flow runs each of its runs (a map item, an
+iterate pass, a ``.call``) on a child of the enclosing tracker with that
+budget; crossing it latches ``exceeded`` / ``urgent_wrapup`` and the run
+carries on — the agent decides. The run's tracker is saved with the
+top-level flow's resources (through the completion commit) and a resumed
+run restores it into its own new tracker, never into the one it was
+started with; a budgeted run's child is saved while that run is in
+progress. "A fresh process" here is a new Flow and a new CostTracker over
+the same store.
 """
 
 from __future__ import annotations
@@ -24,7 +27,19 @@ import pytest
 from llm_gent.core import Role
 from llm_gent.core.cost import PricingConfig
 from llm_gent.core.cost import Tracker as CostTracker
-from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, Loop, Resume, verb
+from llm_gent.flow import (
+    COST,
+    HALTED,
+    Context,
+    Factory,
+    FlowRunner,
+    History,
+    Interrupted,
+    Loop,
+    ResourceKey,
+    Resume,
+    verb,
+)
 from llm_gent.flow.state.snapshot import RESOURCES
 from tests.helpers import TestFactory, memory_store, run_flow
 
@@ -50,9 +65,69 @@ def _ff(store: Any = None) -> Factory:
     return TestFactory(make_test_logger(), checkpoint_store=store)
 
 
-class TestAppTrackerAcrossResume:
+class TestRunTracker:
+    async def test_the_run_tracks_its_cost_on_a_child_of_the_tracker_it_is_given(self) -> None:
+        caller = _tracker()
+        seen: list[Any] = []
+
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            seen.append(ctx.cost)
+            _spend(ctx, 0.5)
+            return x
+
+        run = FlowRunner(make_test_logger()).start(_ff().create().call(step), 1, cost=caller)
+        assert await run == 1
+        assert seen == [run.cost]
+        assert run.cost is not None and run.cost.parent is caller
+        assert run.cost.spent == caller.spent == 0.5
+
+    async def test_each_run_gets_a_tracker_of_its_own(self) -> None:
+        caller = _tracker()
+        seen: list[Any] = []
+
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            seen.append(ctx.cost)
+            _spend(ctx, x)
+            return x
+
+        flow = _ff().create().call(step)
+        assert await asyncio.gather(run_flow(flow, 1, cost=caller), run_flow(flow, 2, cost=caller))
+        assert seen[0] is not seen[1] and {t.spent for t in seen} == {1.0, 2.0}
+        assert caller.spent == 3.0
+
+    async def test_without_cost_the_run_tracks_none(self) -> None:
+        seen: list[Any] = []
+
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            seen.append(ctx.cost)
+            return x
+
+        run = FlowRunner(make_test_logger()).start(_ff().create().call(step), 1)
+        assert await run == 1
+        assert seen == [None] and run.cost is None
+
+    async def test_a_run_under_an_exhausted_caller_sees_exceeded(self) -> None:
+        caller = _tracker(1.0)
+        caller.track("llm", override_cost=1.0)
+        seen: list[tuple[bool, float | None]] = []
+
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            assert ctx.cost is not None
+            seen.append((ctx.cost.exceeded, ctx.cost.remaining))
+            return x
+
+        sub = _ff().create().with_budget(5.0).call(step)
+        assert await run_flow(_ff().create().call(step).then(sub), 1, cost=caller) == 1
+        assert seen == [(True, 0.0), (True, 0.0)]
+
+
+class TestRunTrackerAcrossResume:
     @staticmethod
-    def _flow(store: Any, tracker: CostTracker, seen: list[float]) -> Any:
+    def _flow(store: Any, seen: list[CostTracker]) -> Any:
         """``a`` spends 2 (llm), ``b`` 3 (op) and sets the run's halt, ``c`` 1 (llm)."""
 
         @verb
@@ -71,53 +146,53 @@ class TestAppTrackerAcrossResume:
             if ctx.halt is not None and ctx.halt.is_set():
                 raise Interrupted()
             assert ctx.cost is not None
-            seen.append(ctx.cost.spent)
+            seen.append(ctx.cost)
             _spend(ctx, 1.0)
             return x
 
-        return (
-            _ff(store)
-            .create()
-            .with_checkpointer()
-            .with_cost_tracker(tracker)
-            .call(a)
-            .then(b)
-            .then(c)
-        )
+        return _ff(store).create().with_checkpointer().call(a).then(b).then(c)
 
-    async def test_the_running_cost_comes_back_after_a_halt(self) -> None:
+    async def test_the_run_s_cost_comes_back_and_the_caller_sees_only_the_new_spend(
+        self,
+    ) -> None:
         store = memory_store()
+        first = _tracker()
+        halt = asyncio.Event()
         assert (
-            await run_flow(self._flow(store, _tracker(), []), 1, halt=asyncio.Event(), history=NAME)
-            is HALTED
+            await run_flow(self._flow(store, []), 1, cost=first, halt=halt, history=NAME) is HALTED
         )
+        assert first.spent == 5.0
 
-        fresh = _tracker(10.0)
-        seen: list[float] = []
-        flow = self._flow(store, fresh, seen)
-        assert await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event()) == 1
-        assert seen == [5.0]
-        assert fresh.spent == 6.0
-        assert fresh.costs_by_op == {"llm": 3.0, "op": 3.0}
+        fresh = _tracker()
+        seen: list[CostTracker] = []
+        flow = self._flow(store, seen)
+        resumed = await run_flow(
+            flow, cost=fresh, history=NAME, start=Resume("latest"), halt=asyncio.Event()
+        )
+        assert resumed == 1
+        assert seen[0].parent is fresh
+        assert seen[0].spent == 6.0 and seen[0].costs_by_op == {"llm": 3.0, "op": 3.0}
+        assert fresh.spent == 1.0 and fresh.costs_by_op == {"llm": 1.0}
 
-    async def test_a_per_session_budget_is_set_on_the_restored_spend(self) -> None:
-        """Spend is cumulative; the app reads it from the history and sets this session's limit."""
+    async def test_a_per_session_budget_is_the_session_tracker_s_own(self) -> None:
+        """The history's 5.0 so far is the run's; this session's tracker counts only its own."""
         store = memory_store()
-        await run_flow(self._flow(store, _tracker(), []), 1, halt=asyncio.Event(), history=NAME)
+        halt = asyncio.Event()
+        await run_flow(self._flow(store, []), 1, cost=_tracker(), halt=halt, history=NAME)
         history = History(store, NAME)
         head = await history.head()
         assert head is not None
-        so_far = (await history.snapshot(head)).cursors[""][RESOURCES]["cost"]["spent"]
-        assert so_far == 5.0
+        assert (await history.snapshot(head)).cursors[""][RESOURCES]["cost"]["spent"] == 5.0
 
-        session = _tracker(so_far + 1.5)
+        session = _tracker(1.5)
         await run_flow(
-            self._flow(store, session, []),
+            self._flow(store, []),
+            cost=session,
             history=NAME,
             start=Resume("latest"),
             halt=asyncio.Event(),
         )
-        assert session.spent == 6.0 and not session.exceeded
+        assert session.spent == 1.0 and not session.exceeded
 
     async def test_a_hard_stop_is_the_app_s_choice(self) -> None:
         """A tracker built with the run's halt pauses the run when its budget is crossed."""
@@ -135,25 +210,29 @@ class TestAppTrackerAcrossResume:
             seen.append(1.0)
             return x
 
-        flow = _ff(store).create().with_cost_tracker(_tracker(1.5, halt=halt)).call(a).then(b)
-        assert await run_flow(flow, 1, halt=halt, history=NAME) is HALTED
+        flow = _ff(store).create().call(a).then(b)
+        tracker = _tracker(1.5, halt=halt)
+        assert await run_flow(flow, 1, cost=tracker, halt=halt, history=NAME) is HALTED
         assert seen == []
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "halted"
 
-    async def test_a_finished_run_s_spend_carries_into_the_next_session(self) -> None:
-        """The completion commit holds the tracker: the next session continues the total."""
+    async def test_a_finished_run_s_spend_carries_into_the_next_run_of_the_history(
+        self,
+    ) -> None:
+        """The completion commit holds the run's tracker: the next run continues the total."""
         store = memory_store()
+        seen: list[CostTracker] = []
 
         @verb
         async def a(ctx: Context[Any], x: int) -> int:
+            assert ctx.cost is not None
+            seen.append(ctx.cost)
             _spend(ctx, 2.0)
             return x
 
-        def flow(tracker: CostTracker) -> Any:
-            return _ff(store).create().with_checkpointer().with_cost_tracker(tracker).call(a)
-
-        await run_flow(flow(_tracker()), 1, history=NAME)
+        flow = _ff(store).create().with_checkpointer().call(a)
+        await run_flow(flow, 1, cost=_tracker(), history=NAME)
         history = History(store, NAME)
         assert await history.is_complete()
         head = await history.head()
@@ -161,19 +240,20 @@ class TestAppTrackerAcrossResume:
         assert (await history.snapshot(head)).cursors[""][RESOURCES]["cost"]["spent"] == 2.0
 
         fresh = _tracker()
-        await run_flow(flow(fresh), 1, history=NAME, start=Resume("latest"))
-        assert fresh.spent == 4.0
+        await run_flow(flow, 1, cost=fresh, history=NAME, start=Resume("latest"))
+        assert seen[1].spent == 4.0 and fresh.spent == 2.0
 
-    async def test_a_tracker_every_flow_inherits_is_restored_once(self) -> None:
-        """A Factory(cost_tracker=) puts the same tracker on every flow: one position, at the top.
+    async def test_the_run_s_tracker_is_restored_once_where_nested_flows_share_it(self) -> None:
+        """Nested flows share the run's tracker: it has one position, at the top.
 
         Restoring it again where a nested flow starts would overwrite the
         spend recorded since the run's start.
         """
         store = memory_store()
+        seen: list[CostTracker] = []
 
-        def build(tracker: CostTracker, arm: bool) -> Any:
-            ff = TestFactory(make_test_logger(), cost_tracker=tracker, checkpoint_store=store)
+        def build(arm: bool) -> Any:
+            ff = _ff(store)
 
             @verb
             async def a(ctx: Context[Any], x: int) -> int:
@@ -182,6 +262,8 @@ class TestAppTrackerAcrossResume:
 
             @verb
             async def b(ctx: Context[Any], x: int) -> int:
+                assert ctx.cost is not None
+                seen.append(ctx.cost)
                 _spend(ctx, 2.0)
                 if arm:
                     ctx.halt.set()  # type: ignore[union-attr]
@@ -191,238 +273,76 @@ class TestAppTrackerAcrossResume:
             inner = ff.create().call(b)
             return ff.create().call(a).then(inner)
 
-        assert (
-            await run_flow(build(_tracker(), arm=True), 1, halt=asyncio.Event(), history=NAME)
-            is HALTED
-        )
+        halt = asyncio.Event()
+        assert await run_flow(build(True), 1, cost=_tracker(), halt=halt, history=NAME) is HALTED
         snapshot = await History(store, NAME).snapshot(await History(store, NAME).head())
         assert [p for p, c in snapshot.cursors.items() if RESOURCES in c] == [""]
 
         fresh = _tracker()
-        assert (
-            await run_flow(
-                build(fresh, arm=False),
-                1,
-                history=NAME,
-                start=Resume("latest"),
-                halt=asyncio.Event(),
-            )
-            == 1
+        resumed = await run_flow(
+            build(False), 1, cost=fresh, history=NAME, start=Resume("latest"), halt=asyncio.Event()
         )
-        assert fresh.spent == pytest.approx(3.0 + 2.0)  # 3.0 restored, b again: 2.0
+        assert resumed == 1
+        assert seen[-1].spent == pytest.approx(3.0 + 2.0)  # 3.0 restored, b again: 2.0
+        assert fresh.spent == pytest.approx(2.0)
 
 
-class _SessionTracker(CostTracker):
-    """Charges each session only its own spend: keeps the session's baseline in its snapshot."""
+class _Owned(CostTracker):
+    """A tracker whose children are of its own class, so the run's tracker and budgets are too."""
 
-    def __init__(self, session: str, allowance: float, halt: asyncio.Event | None = None) -> None:
-        super().__init__(make_test_logger(), PricingConfig(), allowance, halt=halt)
-        self.session = session
-        self.allowance = allowance
-        self.baseline = 0.0
-
-    @property
-    def session_spent(self) -> float:
-        return self.spent - self.baseline
-
-    def snapshot(self) -> dict[str, Any]:
-        return {**super().snapshot(), "session": self.session, "baseline": self.baseline}
-
-    def restore(self, data: dict[str, Any]) -> None:
-        same = data["session"] == self.session
-        self.baseline = data["baseline"] if same else data["spent"]
-        self.update_budget(self.baseline + self.allowance)
-        super().restore(data)
+    def child(
+        self,
+        budget: float | None = None,
+        *,
+        on_cost: Any = None,
+        halt: asyncio.Event | None = None,
+    ) -> CostTracker:
+        return type(self)(self._lg, self._pricing, budget, parent=self, on_cost=on_cost, halt=halt)
 
 
 class TestTrackerSubclassAcrossResume:
-    """What resume does to the spend is the tracker's: gent hands back what its snapshot() saved."""
-
-    @staticmethod
-    def _flow(
-        store: Any,
-        tracker: CostTracker,
-        seen: dict[str, float],
-        stop_after: str | None = None,
-    ) -> Any:
-        """Steps ``a``..``d`` record the session's spend so far, then spend 1.0 each.
-
-        The step named ``stop_after`` sets the run's halt; the next one stops on it.
-        """
-
-        def step(ctx: Context[Any], name: str) -> None:
-            if ctx.halt is not None and ctx.halt.is_set():
-                raise Interrupted()
-            assert isinstance(ctx.cost, _SessionTracker)
-            seen[name] = ctx.cost.session_spent
-            _spend(ctx, 1.0)
-            if name == stop_after:
-                ctx.halt.set()  # type: ignore[union-attr]
-
-        @verb
-        async def a(ctx: Context[Any], x: int) -> int:
-            step(ctx, "a")
-            return x
-
-        @verb
-        async def b(ctx: Context[Any], x: int) -> int:
-            step(ctx, "b")
-            return x
-
-        @verb
-        async def c(ctx: Context[Any], x: int) -> int:
-            step(ctx, "c")
-            return x
-
-        @verb
-        async def d(ctx: Context[Any], x: int) -> int:
-            step(ctx, "d")
-            return x
-
-        return (
-            _ff(store)
-            .create()
-            .with_checkpointer()
-            .with_cost_tracker(tracker)
-            .call(a)
-            .then(b)
-            .then(c)
-            .then(d)
-        )
-
-    async def test_a_new_session_mid_flow_is_charged_only_its_own_spend(self) -> None:
-        store = memory_store()
-        first = _SessionTracker("s1", 10.0)
-        assert (
-            await run_flow(self._flow(store, first, {}, "b"), 1, halt=asyncio.Event(), history=NAME)
-            is HALTED
-        )
-        assert first.session_spent == 2.0
-
-        second = _SessionTracker("s2", 10.0)
-        seen: dict[str, float] = {}
-        flow = self._flow(store, second, seen)
-        assert await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event()) == 1
-        assert seen == {"c": 0.0, "d": 1.0}
-        assert second.spent == 4.0 and second.session_spent == 2.0
-
-    async def test_a_resume_in_the_same_session_keeps_its_baseline(self) -> None:
-        store = memory_store()
-        first = self._flow(store, _SessionTracker("s1", 10.0), {}, "a")
-        await run_flow(first, 1, halt=asyncio.Event(), history=NAME)
-        s2 = _SessionTracker("s2", 10.0)
-        flow = self._flow(store, s2, {}, "c")
-        assert (
-            await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event())
-            is HALTED
-        )
-        assert s2.baseline == 1.0 and s2.session_spent == 2.0
-
-        again = _SessionTracker("s2", 10.0)
-        flow = self._flow(store, again, {})
-        assert await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event()) == 1
-        assert again.baseline == 1.0
-        assert again.spent == 4.0 and again.session_spent == 3.0
-
-    async def test_the_session_after_a_finished_run_is_rebased_on_its_total(self) -> None:
-        store = memory_store()
-        await run_flow(
-            self._flow(store, _SessionTracker("s1", 10.0), {}),
-            1,
-            halt=asyncio.Event(),
-            history=NAME,
-        )
-
-        second = _SessionTracker("s2", 10.0)
-        await run_flow(
-            self._flow(store, second, {}),
-            1,
-            history=NAME,
-            start=Resume("latest"),
-            halt=asyncio.Event(),
-        )
-        assert second.spent == 8.0 and second.session_spent == 4.0
-
-    async def test_a_cap_raised_before_the_base_restore_does_not_fire_the_halt(self) -> None:
-        """Restored spend over the session's allowance: the rebased cap keeps the run going."""
-        store = memory_store()
-        first = self._flow(store, _SessionTracker("s1", 10.0), {}, "c")
-        await run_flow(first, 1, halt=asyncio.Event(), history=NAME)
-
-        halt = asyncio.Event()
-        second = _SessionTracker("s2", 2.5, halt=halt)
-        assert (
-            await run_flow(
-                self._flow(store, second, {}), history=NAME, start=Resume("latest"), halt=halt
-            )
-            == 1
-        )
-        assert not halt.is_set() and not second.exceeded
-        assert second.budget == 5.5 and second.session_spent == 1.0
+    """What resume does to the run's spend is its tracker's: gent hands back its snapshot()."""
 
     async def test_a_restore_that_ignores_the_saved_spend_starts_from_its_own(self) -> None:
-        """Saved 5.0 over a cap of 4.0: ignored, so the run neither halts nor counts it."""
+        """Saved 5.0: ignored by the run's tracker, so the run neither counts nor halts on it."""
 
-        class Ignoring(CostTracker):
+        class Ignoring(_Owned):
             def restore(self, data: dict[str, Any]) -> None:
                 pass
 
         store = memory_store()
-        flow = TestAppTrackerAcrossResume._flow
+        flow = TestRunTrackerAcrossResume._flow
+        halt = asyncio.Event()
         assert (
-            await run_flow(flow(store, _tracker(), []), 1, halt=asyncio.Event(), history=NAME)
-            is HALTED
+            await run_flow(flow(store, []), 1, cost=_tracker(), halt=halt, history=NAME) is HALTED
         )
 
         halt = asyncio.Event()
-        fresh = Ignoring(make_test_logger(), PricingConfig(), 4.0, halt=halt)
-        seen: list[float] = []
-        assert (
-            await run_flow(
-                flow(store, fresh, seen), history=NAME, start=Resume("latest"), halt=halt
-            )
-            == 1
+        caller = Ignoring(make_test_logger(), PricingConfig(), 4.0, halt=halt)
+        seen: list[CostTracker] = []
+        resumed = await run_flow(
+            flow(store, seen), cost=caller, history=NAME, start=Resume("latest"), halt=halt
         )
-        assert seen == [0.0]
-        assert fresh.spent == 1.0 and not halt.is_set()
+        assert resumed == 1
+        assert type(seen[0]) is Ignoring and seen[0].spent == 1.0
+        assert caller.spent == 1.0 and not halt.is_set()
 
-    async def test_a_child_override_puts_budgeted_runs_on_the_subclass(self) -> None:
-        class Owned(CostTracker):
-            def child(
-                self,
-                budget: float | None = None,
-                *,
-                on_cost: Any = None,
-                halt: asyncio.Event | None = None,
-            ) -> CostTracker:
-                return Owned(
-                    self._lg, self._pricing, budget, parent=self, on_cost=on_cost, halt=halt
-                )
-
-        root = Owned(make_test_logger(), PricingConfig())
+    async def test_a_child_override_puts_the_run_and_its_budgets_on_the_subclass(self) -> None:
+        root = _Owned(make_test_logger(), PricingConfig())
         seen: dict[int, Any] = {}
         costs = {0: [0.2, 0.3], 1: [0.1, 0.1]}
-        assert await run_flow(_item_flow(root, costs, seen)) == [0, 10]
-        assert all(type(t) is Owned and t.parent is root for t in seen.values())
+        assert await run_flow(_item_flow(costs, seen), cost=root) == [0, 10]
+        assert all(type(t) is _Owned and type(t.parent) is _Owned for t in seen.values())
+        assert all(t.parent.parent is root for t in seen.values())
 
     async def test_a_budgeted_run_s_child_restores_through_the_subclass(self) -> None:
         """Items halted mid-way resume on the subclass's children, through their restore()."""
         restored: list[dict[str, Any]] = []
 
-        class Recording(CostTracker):
-            def child(
-                self,
-                budget: float | None = None,
-                *,
-                on_cost: Any = None,
-                halt: asyncio.Event | None = None,
-            ) -> CostTracker:
-                return Recording(
-                    self._lg, self._pricing, budget, parent=self, on_cost=on_cost, halt=halt
-                )
-
+        class Recording(_Owned):
             def snapshot(self) -> dict[str, Any]:
-                return {**super().snapshot(), "tag": "item" if self.parent else "root"}
+                is_run = self.parent is not None and self.parent.parent is None
+                return {**super().snapshot(), "tag": "run" if is_run else "item"}
 
             def restore(self, data: dict[str, Any]) -> None:
                 restored.append(data)
@@ -433,20 +353,21 @@ class TestTrackerSubclassAcrossResume:
 
         store = memory_store()
         costs = {0: [0.3, 0.2], 1: [0.4, 0.1]}
-        flow1 = _item_flow(root(), costs, {}, arm=True, store=store)
-        assert await run_flow(flow1, halt=asyncio.Event(), history=NAME) is HALTED
+        flow1 = _item_flow(costs, {}, arm=True, store=store)
+        halt = asyncio.Event()
+        assert await run_flow(flow1, cost=root(), halt=halt, history=NAME) is HALTED
 
         before: dict[int, float] = {}
-        flow2 = _item_flow(root(), costs, {}, before_second=before, store=store)
-        assert await run_flow(
-            flow2, history=NAME, start=Resume("latest"), halt=asyncio.Event()
-        ) == [0, 10]
-        assert sorted(d["tag"] for d in restored) == ["item", "item", "root"]
+        flow2 = _item_flow(costs, {}, before_second=before, store=store)
+        resumed = await run_flow(
+            flow2, cost=root(), history=NAME, start=Resume("latest"), halt=asyncio.Event()
+        )
+        assert resumed == [0, 10]
+        assert sorted(d["tag"] for d in restored) == ["item", "item", "run"]
         assert before == {0: pytest.approx(0.3), 1: pytest.approx(0.4)}
 
 
 def _item_flow(
-    root: CostTracker,
     costs: dict[int, list[float]],
     seen: dict[int, Any],
     *,
@@ -487,7 +408,7 @@ def _item_flow(
     flow = _ff(store).create()
     if store is not None:
         flow = flow.with_checkpointer()
-    return flow.with_cost_tracker(root).map(
+    return flow.map(
         lambda b: b.with_budget(cap).call(first).then(second),
         items=lambda _p, _c: sorted(costs),
     )
@@ -498,9 +419,10 @@ class TestItemBudgets:
         root = _tracker()
         seen: dict[int, Any] = {}
         costs = {0: [0.2, 0.3], 1: [0.1, 0.1]}
-        assert await run_flow(_item_flow(root, costs, seen)) == [0, 10]
+        assert await run_flow(_item_flow(costs, seen), cost=root) == [0, 10]
         assert seen[0] is not seen[1]
-        assert all(t.parent is root and t.budget == 1.0 for t in seen.values())
+        assert seen[0].parent is seen[1].parent and seen[0].parent.parent is root
+        assert all(t.budget == 1.0 for t in seen.values())
         assert seen[0].spent == pytest.approx(0.5)
         assert root.spent == pytest.approx(0.7)
 
@@ -509,12 +431,12 @@ class TestItemBudgets:
         root = _tracker()
         seen: dict[int, Any] = {}
         costs = {0: [0.2, 0.3], 1: [1.5, 9.0], 2: [0.1, 0.1]}
-        assert await run_flow(_item_flow(root, costs, seen)) == [0, 10, 20]
+        assert await run_flow(_item_flow(costs, seen), cost=root) == [0, 10, 20]
         assert seen[1].exceeded and seen[1].urgent_wrapup
         assert not seen[0].exceeded
         assert root.spent == pytest.approx(0.5 + 10.5 + 0.2)
 
-    async def test_items_share_the_tracker_without_a_cap_of_their_own(self) -> None:
+    async def test_items_share_the_run_s_tracker_without_a_cap_of_their_own(self) -> None:
         root = _tracker()
         seen: list[Any] = []
 
@@ -523,54 +445,52 @@ class TestItemBudgets:
             seen.append(ctx.cost)
             return item
 
-        flow = (
-            _ff()
-            .create()
-            .with_cost_tracker(root)
-            .map(lambda b: b.call(step), items=lambda _p, _c: [0, 1])
-        )
-        await run_flow(flow)
-        assert seen == [root, root]
+        flow = _ff().create().map(lambda b: b.call(step), items=lambda _p, _c: [0, 1])
+        await run_flow(flow, cost=root)
+        assert seen[0] is seen[1] and seen[0].parent is root
 
 
 class TestItemBudgetsAcrossHalt:
     async def test_budgeted_item_stops_on_the_run_halt_and_resumes_with_its_spend(self) -> None:
-        """Each item resumes on a child with its spend; the run's tracker continues its total."""
+        """Each item resumes on a child with its spend; the caller sees only the new spend."""
         store = memory_store()
         costs = {0: [0.3, 0.2], 1: [0.4, 0.1]}
 
         root1 = _tracker()
-        flow1 = _item_flow(root1, costs, {}, arm=True, store=store)
-        assert await run_flow(flow1, halt=asyncio.Event(), history=NAME) is HALTED
+        flow1 = _item_flow(costs, {}, arm=True, store=store)
+        halt = asyncio.Event()
+        assert await run_flow(flow1, cost=root1, halt=halt, history=NAME) is HALTED
         assert root1.spent == pytest.approx(0.7)
 
         root2 = _tracker()
         seen2: dict[int, Any] = {}
         before: dict[int, float] = {}
-        flow2 = _item_flow(root2, costs, seen2, before_second=before, store=store)
-        assert await run_flow(
-            flow2, history=NAME, start=Resume("latest"), halt=asyncio.Event()
-        ) == [0, 10]
+        flow2 = _item_flow(costs, seen2, before_second=before, store=store)
+        resumed = await run_flow(
+            flow2, cost=root2, history=NAME, start=Resume("latest"), halt=asyncio.Event()
+        )
+        assert resumed == [0, 10]
         assert seen2 == {}  # no first step ran again
         assert before == {0: pytest.approx(0.3), 1: pytest.approx(0.4)}
-        # 0.7 restored; the items' restored spend does not roll up a second time.
-        assert root2.spent == pytest.approx(0.7 + 0.3)
+        assert root2.spent == pytest.approx(0.3)
 
     async def test_an_item_resumed_over_its_budget_runs_with_exceeded_latched(self) -> None:
         """Item 0 halted at 0.9; resumed under a budget of 0.5 it carries on, exceeded."""
         store = memory_store()
         costs = {0: [0.9, 0.1], 1: [0.1, 0.1]}
-        flow1 = _item_flow(_tracker(), costs, {}, arm=True, store=store)
-        assert await run_flow(flow1, halt=asyncio.Event(), history=NAME) is HALTED
+        flow1 = _item_flow(costs, {}, arm=True, store=store)
+        halt = asyncio.Event()
+        assert await run_flow(flow1, cost=_tracker(), halt=halt, history=NAME) is HALTED
 
         root2 = _tracker()
         before: dict[int, float] = {}
-        flow2 = _item_flow(root2, costs, {}, before_second=before, cap=0.5, store=store)
-        assert await run_flow(
-            flow2, history=NAME, start=Resume("latest"), halt=asyncio.Event()
-        ) == [0, 10]
+        flow2 = _item_flow(costs, {}, before_second=before, cap=0.5, store=store)
+        resumed = await run_flow(
+            flow2, cost=root2, history=NAME, start=Resume("latest"), halt=asyncio.Event()
+        )
+        assert resumed == [0, 10]
         assert before == {0: pytest.approx(0.9), 1: pytest.approx(0.1)}
-        assert root2.spent == pytest.approx(1.0 + 0.2)
+        assert root2.spent == pytest.approx(0.2)
 
 
 @dataclass
@@ -640,14 +560,13 @@ class TestLoopInABudgetedItem:
         flow = (
             _ff()
             .create()
-            .with_cost_tracker(root)
             .map(
                 lambda b: b.with_budget(1.0).call(work),
                 items=lambda _p, _c: ["a", "b"],
                 max_concurrency=1,
             )
         )
-        assert await run_flow(flow) == ["done:a", "done:b"]
+        assert await run_flow(flow, cost=root) == ["done:a", "done:b"]
         assert saia.paused == []
         assert saia.trackers["b"].exceeded and not saia.trackers["a"].exceeded
         assert root.spent == pytest.approx(0.3 + 0.3 + 1.5 + 1.5)
@@ -664,15 +583,10 @@ class TestPassAndCallBudgets:
             _spend(ctx, 0.5)
             return x + 1
 
-        flow = (
-            _ff()
-            .create()
-            .with_cost_tracker(root)
-            .iterate(lambda b: b.with_budget(1.0).call(step), max_iters=3)
-        )
-        assert await run_flow(flow, 0) == 3
+        flow = _ff().create().iterate(lambda b: b.with_budget(1.0).call(step), max_iters=3)
+        assert await run_flow(flow, 0, cost=root) == 3
         assert len({id(t) for t in seen}) == 3
-        assert all(t.parent is root and t.spent == 0.5 for t in seen)
+        assert all(t.parent.parent is root and t.spent == 0.5 for t in seen)
         assert root.spent == pytest.approx(1.5)
 
     async def test_call_budget_is_per_call_and_a_crossing_carries_on(self) -> None:
@@ -698,9 +612,9 @@ class TestPassAndCallBudgets:
             ran.append(f"after:{prev}")
             return prev
 
-        flow = _ff().create().with_cost_tracker(root).call(sub).then(after)
-        assert await run_flow(flow, 0.5) == 0.5
-        assert await run_flow(flow, 2.0) == 2.0
+        flow = _ff().create().call(sub).then(after)
+        assert await run_flow(flow, 0.5, cost=root) == 0.5
+        assert await run_flow(flow, 2.0, cost=root) == 2.0
         assert ran == ["check", "after:0.5", "check", "after:2.0"]
         assert [c.exceeded for c in children] == [False, True]
         assert root.spent == pytest.approx(2.5)
@@ -724,8 +638,8 @@ class TestPassAndCallBudgets:
 
         inner = ff.create().call(spend).then(check)
         sub = ff.create().with_budget(1.0).call(inner)
-        flow = ff.create().with_cost_tracker(_tracker()).call(sub)
-        assert await run_flow(flow, 0.5, halt=halt) is HALTED
+        flow = ff.create().call(sub)
+        assert await run_flow(flow, 0.5, cost=_tracker(), halt=halt) is HALTED
         assert ran == []
 
     async def test_map_total_through_a_budgeted_enclosing_flow(self) -> None:
@@ -747,8 +661,8 @@ class TestPassAndCallBudgets:
             .with_budget(1.0)
             .map(lambda b: b.call(item), items=lambda _p, _c: [0, 1, 2, 3], max_concurrency=1)
         )
-        flow = _ff().create().with_cost_tracker(root).call(budgeted_map)
-        assert await run_flow(flow) == [0, 1, 2, 3]
+        flow = _ff().create().call(budgeted_map)
+        assert await run_flow(flow, cost=root) == [0, 1, 2, 3]
         assert len({id(t) for t in trackers}) == 1 and trackers[0].exceeded
         assert root.spent == pytest.approx(1.6)
 
@@ -777,8 +691,8 @@ class TestCostAcrossShortcut:
             return x
 
         region = _ff().create().with_budget(5.0).with_shortcut("cut").call(a).then(b)
-        flow = _ff().create().with_cost_tracker(root).call(region)
-        assert await run_flow(flow.then(after), 1, signals={"cut": cut}) == 1
+        flow = _ff().create().call(region).then(after)
+        assert await run_flow(flow, 1, cost=root, signals={"cut": cut}) == 1
         assert root.spent == pytest.approx(1.5)
 
     async def test_started_budgeted_items_end_with_their_spend(self) -> None:
@@ -807,8 +721,8 @@ class TestCostAcrossShortcut:
 
         region = _ff().create().with_shortcut("cut")
         region.map(item, items=lambda _p, _c: [0, 1], max_concurrency=2)
-        flow = _ff().create().with_cost_tracker(root).call(region)
-        assert await run_flow(flow, signals={"cut": cut}) == [0, 1]
+        flow = _ff().create().call(region)
+        assert await run_flow(flow, cost=root, signals={"cut": cut}) == [0, 1]
         assert root.spent == pytest.approx(2 * 0.2)
 
 
@@ -817,8 +731,9 @@ class TestCostAcrossCrash:
         """Spend after the last save is not in any checkpoint: the redone step records it again."""
         store = memory_store()
         seen: list[float] = []
+        run_trackers: list[CostTracker] = []
 
-        def build(root: CostTracker, fail: bool) -> Any:
+        def build(fail: bool) -> Any:
             @verb
             async def a(ctx: Context[Any], x: int) -> int:
                 _spend(ctx, 1.0)
@@ -826,30 +741,33 @@ class TestCostAcrossCrash:
 
             @verb
             async def b(ctx: Context[Any], x: int) -> int:
-                assert ctx.cost is not None
+                assert ctx.cost is not None and ctx.cost.parent is not None
                 await ctx.checkpoint()  # the save: b is the step running at it
                 seen.append(ctx.cost.spent)
+                run_trackers.append(ctx.cost.parent)
                 _spend(ctx, 2.0)
                 if fail:
                     raise RuntimeError("process died")
                 return x
 
             sub = _ff().create().with_budget(10.0).call(a).then(b)
-            return _ff(store).create().with_checkpointer().with_cost_tracker(root).call(sub)
+            return _ff(store).create().with_checkpointer().call(sub)
 
         with pytest.raises(RuntimeError, match="process died"):
-            await run_flow(build(_tracker(), fail=True), 1, history=NAME)
+            await run_flow(build(fail=True), 1, cost=_tracker(), history=NAME)
 
         root2 = _tracker()
-        assert (
-            await run_flow(build(root2, fail=False), 1, history=NAME, start=Resume("latest")) == 1
+        resumed = await run_flow(
+            build(fail=False), 1, cost=root2, history=NAME, start=Resume("latest")
         )
+        assert resumed == 1
         assert seen == [pytest.approx(1.0), pytest.approx(1.0)]  # b's first spend was lost
-        assert root2.spent == pytest.approx(1.0 + 2.0)  # the total at the save, then b again
+        assert run_trackers[-1].spent == pytest.approx(1.0 + 2.0)  # the total at the save, b again
+        assert root2.spent == pytest.approx(2.0)
 
 
 class TestValidation:
-    async def test_budget_without_a_cost_tracker_raises_at_run_start(self) -> None:
+    async def test_budget_in_a_run_without_cost_raises_at_run_start(self) -> None:
         ran: list[str] = []
 
         @verb
@@ -863,12 +781,12 @@ class TestValidation:
             .call(step)
             .map(lambda b: b.with_budget(1.0).call(step), items=lambda _p, _c: [1])
         )
-        with pytest.raises(RuntimeError, match="no cost tracker"):
+        with pytest.raises(RuntimeError, match="the run tracks no cost: start it with"):
             await run_flow(flow, 1)
         assert ran == []
 
-    async def test_a_budget_on_a_flow_with_its_own_tracker_is_a_child_of_it(self) -> None:
-        own = _tracker()
+    async def test_a_budget_on_the_top_flow_is_a_child_of_the_run_s_tracker(self) -> None:
+        caller = _tracker()
         seen: list[Any] = []
 
         @verb
@@ -877,10 +795,35 @@ class TestValidation:
             _spend(ctx, 0.25)
             return x
 
-        flow = _ff().create().with_cost_tracker(own).with_budget(1.0).call(step)
-        assert await run_flow(flow, 1) == 1
-        assert seen[0].parent is own and seen[0].budget == 1.0
-        assert own.spent == pytest.approx(0.25)
+        flow = _ff().create().with_budget(1.0).call(step)
+        assert await run_flow(flow, 1, cost=caller) == 1
+        assert seen[0].budget == 1.0 and seen[0].parent.parent is caller
+        assert caller.spent == pytest.approx(0.25)
+
+    async def test_a_tracker_on_the_flow_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="a cost tracker is the run's, not the flow's"):
+            _ff().create().with_resource(COST, _tracker())
+
+    async def test_a_tracker_on_the_factory_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="a cost tracker is the run's, not the flow's"):
+            Factory(make_test_logger()).with_resource(COST, _tracker())
+
+    @staticmethod
+    def _flow_with_own_cost_key() -> Any:
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            return x
+
+        own: ResourceKey[CostTracker] = ResourceKey("cost")
+        return _ff().create().with_resource(own, _tracker()).call(step)
+
+    async def test_a_flow_key_named_like_the_run_s_tracker_raises_at_start(self) -> None:
+        """Both would be saved under one name in a checkpoint."""
+        with pytest.raises(ValueError, match="two resource keys are named 'cost'"):
+            FlowRunner(make_test_logger()).start(self._flow_with_own_cost_key(), 1, cost=_tracker())
+
+    async def test_the_name_is_free_in_a_run_without_cost(self) -> None:
+        assert await run_flow(self._flow_with_own_cost_key(), 1) == 1
 
     @pytest.mark.parametrize("bad", [0, -1.0, float("inf"), float("nan")])
     async def test_budget_must_be_finite_and_positive(self, bad: float) -> None:
@@ -892,7 +835,11 @@ class TestValidation:
         with pytest.raises(TypeError, match="with_budget takes a number"):
             _ff().create().with_budget(bad)
 
-    @pytest.mark.parametrize("bad", [1.0, None, "tracker"])
-    async def test_cost_tracker_must_be_a_cost_tracker(self, bad: Any) -> None:
-        with pytest.raises(TypeError, match="with_cost_tracker takes a CostTracker"):
-            _ff().create().with_cost_tracker(bad)
+    @pytest.mark.parametrize("bad", [1.0, "tracker"])
+    async def test_cost_must_be_a_cost_tracker(self, bad: Any) -> None:
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            return x
+
+        with pytest.raises(TypeError, match=r"start\(cost=\) takes a CostTracker"):
+            await run_flow(_ff().create().call(step), 1, cost=bad)

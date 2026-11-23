@@ -17,6 +17,7 @@ from typing import Any
 from appinfra.cas import Store
 from appinfra.log import Logger
 
+from ...core.cost import Tracker as CostTracker
 from ...core.env import Environment
 from ..checkpoint import Retention
 from ..flow import Flow
@@ -64,6 +65,7 @@ class Runner:
         /,
         *args: Any,
         state: Any = UNSET,
+        cost: CostTracker | None = None,
         halt: asyncio.Event | None = None,
         signals: Mapping[str, asyncio.Event] | None = None,
         history: str | None = None,
@@ -94,6 +96,13 @@ class Runner:
                 takes its state from the commit; ``state`` is used only on
                 an empty history. Explicit ``None`` is honored (verbs must
                 guard). Not forwarded to the first node.
+            cost: The tracker the run's cost rolls up to. The run tracks
+                its cost on a child of it (``ctx.cost``, :attr:`Run.cost`),
+                and its flows' :meth:`Flow.with_budget` children are made
+                from that. The run's child is in its checkpoints and is
+                what a resumed run restores, so the spend over the run's
+                history is the run's own and ``cost`` itself is never
+                rewritten. ``None``: the run tracks no cost.
             halt: The run's halt: set it, or call :meth:`Run.halt`, to pause
                 the whole run. Every step sees it as ``ctx.halt``; a chain
                 checks it after each step, an iterate before each pass, a
@@ -141,11 +150,12 @@ class Runner:
                 declares :meth:`Flow.with_checkpointer` in a run without a
                 ``history``; a shortcut's signal that is not one of the
                 run's ``signals``, or a region holding another on the same
-                signal; a ``with_budget(...)`` with no cost tracker on its
-                flow or above it.
+                signal; a ``with_budget(...)`` in a run started without
+                ``cost``.
             ValueError: A signal's name is not a non-empty str;
                 ``retention`` is not ``"retain"`` or ``"gc_on_success"``.
             TypeError: ``start`` is not a :data:`~llm_gent.flow.Start`;
+                ``cost`` is not a :class:`~llm_gent.core.cost.Tracker`;
                 ``signals`` is not a mapping, or a signal is not an
                 :class:`asyncio.Event`.
             appinfra.cas.InvalidNameError: ``history`` cannot name a
@@ -161,6 +171,7 @@ class Runner:
             args,
             kwargs,
             state=state,
+            cost=cost,
             halt=halt,
             signals=signals,
             history=history,

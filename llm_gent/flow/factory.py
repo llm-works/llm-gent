@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 from appinfra.log import Logger
 
-from ..core.cost import Tracker as CostTracker
 from .resource import R, ResourceKey, check_resource, resource_method
+from .resource.cost import check_not_a_tracker
 from .state import StateFactory
 
 
@@ -47,7 +47,6 @@ class Factory(Generic[F]):
         self: Factory[Flow],
         lg: Logger,
         *,
-        cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
         flow_class: None = None,
     ) -> None: ...
@@ -57,7 +56,6 @@ class Factory(Generic[F]):
         self,
         lg: Logger,
         *,
-        cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
         flow_class: type[F],
     ) -> None: ...
@@ -66,18 +64,16 @@ class Factory(Generic[F]):
         self,
         lg: Logger,
         *,
-        cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
         flow_class: type[Any] | None = None,
     ) -> None:
         """Capture the shared settings for subsequent :meth:`create` calls.
 
+        A cost tracker is not one of them: it is the run's
+        (:meth:`FlowRunner.start` ``cost=``).
+
         Args:
             lg: Logger threaded into every :class:`Flow` this factory builds.
-            cost_tracker: Optional :class:`CostTracker` attached via
-                :meth:`Flow.with_cost_tracker` on every built flow. Wire once at
-                the factory to thread the same cost tracker through an
-                entire agent shape.
             state_factory: Optional :class:`StateFactory` threaded into
                 every :class:`Flow`'s ``state_factory=`` slot: ``new()``
                 builds the state of a run given no ``state=``, ``restore()``
@@ -90,7 +86,6 @@ class Factory(Generic[F]):
                 signature. ``None`` (default) builds :class:`Flow`.
         """
         self._lg = lg
-        self._cost_tracker = cost_tracker
         self._state_factory = state_factory
         self._flow_class = flow_class
         self._resources: dict[ResourceKey[Any], Any] = {}
@@ -110,8 +105,6 @@ class Factory(Generic[F]):
                 chain.
         """
         flow = self._class()(self._lg, name, state_factory=self._state_factory)
-        if self._cost_tracker is not None:
-            flow.with_cost_tracker(self._cost_tracker)
         for key, value in self._resources.items():
             flow.with_resource(key, value)
         return flow
@@ -153,9 +146,12 @@ class Factory(Generic[F]):
         Raises:
             TypeError: ``key`` is not a :class:`ResourceKey`, or ``value``
                 does not implement ``snapshot()`` and ``restore(data)``.
-            ValueError: ``value`` is ``None``.
+            ValueError: ``value`` is ``None``; ``key`` is
+                :data:`~llm_gent.flow.COST` (the run's tracker is
+                :meth:`FlowRunner.start` ``cost=``).
         """
         check_resource(key, value, {})
+        check_not_a_tracker(key, value)
         return self._replace(resources={**self._resources, key: value})
 
     def with_resource_method(self, name: str, key: ResourceKey[Any]) -> Factory[F]:
@@ -186,16 +182,6 @@ class Factory(Generic[F]):
         if current is None and hasattr(self._class(), name):
             raise ValueError(f"{name!r} is already an attribute of the flow class")
         return self._replace(resource_methods={**self._resource_methods, name: key})
-
-    def with_cost_tracker(self, tracker: CostTracker) -> Factory[F]:
-        """Return a new :class:`Factory` whose cost tracker is swapped.
-
-        Every other captured slot carries over. Every subsequently created
-        :class:`Flow` gets ``tracker`` attached via
-        :meth:`Flow.with_cost_tracker` — one wiring reaches every layer that
-        observes ``ctx.cost``.
-        """
-        return self._replace(cost_tracker=tracker)
 
     def with_state_factory(self, state_factory: StateFactory[Any] | None) -> Factory[F]:
         """Return a new :class:`Factory` whose state factory is swapped.

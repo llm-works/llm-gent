@@ -4,8 +4,9 @@
 """One run: what any execution a runner starts has, whether it walks a flow or not.
 
 A run executes in a task of its own; the caller awaits it for its result,
-holds it, or halts it. Every run reports to a logger and uses an
-:class:`~llm_gent.core.env.Environment`. What else it carries is its
+holds it, or halts it. Every run reports to a logger, uses an
+:class:`~llm_gent.core.env.Environment` and may track its cost on a
+tracker of its own. What else it carries is its
 kind's: a flow run (:class:`llm_gent.flow.FlowRun`) adds its signals, its
 history writer and its scopes.
 """
@@ -19,6 +20,7 @@ from typing import Any
 
 from appinfra.log import Logger
 
+from .cost import Tracker as CostTracker
 from .env import Environment
 
 
@@ -27,13 +29,17 @@ class Run:
     """One execution: await it for its result, ``halt()`` it, check ``done``.
 
     ``lg`` is the logger of the runner that started it and ``env`` what it
-    may use. ``halt_event`` is the event it observes to stop: set it, or call
+    may use. ``cost`` is the run's own cost tracker, a child of the tracker
+    the run was started with, so the spend rolls up to it while the run's
+    own accounting stays the run's; ``None`` when the run tracks no cost.
+    ``halt_event`` is the event it observes to stop: set it, or call
     :meth:`halt`. ``task`` executes the run once it has started. Cancelling
     the task that awaits the run cancels the run.
     """
 
     lg: Logger
     env: Environment
+    cost: CostTracker | None = None
     halt_event: asyncio.Event | None = None
     task: asyncio.Task[Any] | None = None
 

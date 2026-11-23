@@ -302,13 +302,13 @@ not have raises `ValueError`; for a name, the error lists the checkpoint names t
 
 ## Cost across resume
 
-The example tracks no cost. With a budget per item — `with_budget(limit)` on a map body, under a
-`with_cost_tracker(tracker)` — each item's child tracker is in the halt commit at that item's path
+The example tracks no cost. With a budget per item — `with_budget(limit)` on a map body, in a run
+started with `cost=tracker` — each item's child tracker is in the halt commit at that item's path
 (`run_resources` → `cost`: spend so far, and spend by op), and run 2 restores it before the item
-continues: the item
-has what is left of its budget, not the whole budget again. The run's own tracker is in every
-commit, `$end` included, and restored on every resume: its spend is the total over the whole
-history.
+continues: the item has what is left of its budget, not the whole budget again. The run's own
+tracker, a child of `tracker`, is in every commit, `$end` included, and restored on every resume
+into the new run's own tracker: its spend is the total over the whole history, while `tracker`
+sees only what each run spends.
 See `docs/index.md`, "Cost and budgets".
 
 ## Two contracts the example depends on

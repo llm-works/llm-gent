@@ -60,7 +60,10 @@ class Tracker:
     cost recorded via :meth:`track` (or reported from a descendant)
     updates this tracker's ``spent`` and ``costs_by_op`` and, when
     this tracker's own cap crosses on that record, fires ``halt`` (if
-    any) and latches ``urgent_wrapup``.
+    any) and latches ``urgent_wrapup``. ``exceeded``, ``urgent_wrapup``
+    and ``remaining`` also read the ancestors: a cost recorded here counts
+    against every cap on the chain, so a child under an exhausted parent
+    is exhausted too.
 
     Single-writer expectation: :meth:`_record_cost` is not
     synchronized. Concurrent :meth:`track` calls under one tracker
@@ -81,7 +84,7 @@ class Tracker:
         leaf.track("some-model", input_tokens=1000, output_tokens=100)
 
         if leaf.urgent_wrapup:
-            ...   # leaf has hit its own cap
+            ...   # leaf, mid or outer has hit its cap
         if mid.exceeded:
             ...   # mid crossed its $3 — mid_halt already set
     """
@@ -106,9 +109,8 @@ class Tracker:
                 implementation; consumers plug their own for dynamic
                 pricing.
             budget: Optional cap. When set, must be > 0. When ``None``
-                this tracker is uncapped — ``exceeded`` is always
-                False and ``urgent_wrapup`` never latches from cap
-                crossing.
+                this tracker has no cap of its own: ``exceeded`` and
+                ``urgent_wrapup`` follow its ancestors' caps only.
             parent: Optional parent tracker; costs recorded here also
                 update the parent (recursively).
             on_cost: Optional per-tracker callback fired on every cost
@@ -149,22 +151,35 @@ class Tracker:
 
     @property
     def remaining(self) -> float | None:
-        """``budget - spent`` clamped at zero, or ``None`` when uncapped."""
-        if self._budget is None:
-            return None
-        return max(0.0, self._budget - self._spent)
+        """What can still be spent here before a cap on the chain is reached.
+
+        The smallest ``budget - spent`` (clamped at zero) over this tracker
+        and its ancestors, since a cost recorded here counts against every
+        one of them; ``None`` when none of them is capped.
+        """
+        own = None if self._budget is None else max(0.0, self._budget - self._spent)
+        above = None if self._parent is None else self._parent.remaining
+        if own is None or above is None:
+            return own if above is None else above
+        return min(own, above)
 
     @property
     def exceeded(self) -> bool:
-        """Whether this tracker's spend has reached or crossed its cap."""
-        if self._budget is None:
-            return False
-        return self._spent >= self._budget
+        """Whether this tracker's spend, or an ancestor's, has reached its cap.
+
+        A cost recorded here counts against every ancestor, so a child of
+        an exhausted parent is exhausted too.
+        """
+        return self._own_exceeded() or (self._parent is not None and self._parent.exceeded)
+
+    def _own_exceeded(self) -> bool:
+        """This tracker's own cap is reached: what fires its halt and latches its wrap-up."""
+        return self._budget is not None and self._spent >= self._budget
 
     @property
     def urgent_wrapup(self) -> bool:
-        """Soft signal — this tracker's own cap has been crossed."""
-        return self._urgent_wrapup
+        """Soft signal — this tracker's cap, or an ancestor's, has been crossed (or forced)."""
+        return self._urgent_wrapup or (self._parent is not None and self._parent.urgent_wrapup)
 
     @urgent_wrapup.setter
     def urgent_wrapup(self, value: bool) -> None:
@@ -316,7 +331,7 @@ class Tracker:
             raise ValueError(f"restored spend must be finite, got {spent} / {costs_by_op}")
         self._spent = spent
         self._costs_by_op = costs_by_op
-        if self.exceeded:
+        if self._own_exceeded():
             self._urgent_wrapup = True
             if self._halt is not None:
                 self._halt.set()
@@ -342,10 +357,10 @@ class Tracker:
         callbacks below it in that top-down order but leaves all
         prior accounting intact.
         """
-        was_exceeded = self.exceeded
+        was_exceeded = self._own_exceeded()
         self._spent += cost
         self._costs_by_op[op_name] = self._costs_by_op.get(op_name, 0.0) + cost
-        if not was_exceeded and self.exceeded:
+        if not was_exceeded and self._own_exceeded():
             if self._halt is not None:
                 self._halt.set()
             self._urgent_wrapup = True

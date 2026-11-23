@@ -18,13 +18,14 @@ from typing import Any, get_args
 from appinfra.cas import Store
 from appinfra.log import Logger
 
+from ...core.cost import Tracker as CostTracker
 from ...core.env import Environment
 from ..checkpoint import Retention
 from ..flow import Flow
 from ..hooks import Decision, HookDenied, RunOutcome
 from ..nodes import HALTED, UNSET, Interrupted
 from ..resource._runtime import check_resources
-from ..resource.cost import check_budgets_have_a_tracker
+from ..resource.cost import COST, check_budgets_have_a_tracker, check_cost_tracker
 from ..state import State
 from ..state.snapshot import Snapshot
 from ..structure import Structure
@@ -54,6 +55,7 @@ def start_run(
     kwargs: dict[str, Any],
     *,
     state: Any = UNSET,
+    cost: CostTracker | None = None,
     halt: asyncio.Event | None = None,
     signals: Mapping[str, asyncio.Event] | None = None,
     history: str | None = None,
@@ -71,8 +73,12 @@ def start_run(
     """
     asyncio.get_running_loop()
     run_signals_ = check_signals(signals)
-    _check_run_args(wiring, flow, start, run_signals_, history, retention)
+    if cost is not None:
+        check_cost_tracker(cost)
+    _check_run_args(wiring, flow, start, run_signals_, history, retention, cost is not None)
     run = _new_run(wiring, flow, halt, run_signals_, history, retention)
+    # The run's own tracker: its spend rolls up to ``cost``, its accounting is the run's.
+    run.cost = None if cost is None else cost.child()
     # The checks passed: from here on the runs share the flow's structure.
     flow._freeze()
     run.task = asyncio.create_task(
@@ -206,11 +212,13 @@ def _check_run_args(
     signals: Mapping[str, asyncio.Event],
     history: str | None,
     retention: Retention,
+    tracked: bool,
 ) -> None:
     """Reject an empty flow, a bad start, a history without a store, a bad shortcut, a lone cap.
 
-    Runs before anything is read or written, so a misconfigured run
-    leaves no new history behind.
+    ``tracked``: the run was started with a cost tracker. Runs before
+    anything is read or written, so a misconfigured run leaves no new
+    history behind.
     """
     if not flow._nodes:
         raise RuntimeError(f"Flow {flow._name!r} has no nodes to run")
@@ -220,8 +228,8 @@ def _check_run_args(
     _check_start(flow, start, history)
     check_checkpointers(flow, history)
     check_shortcuts(flow, signals)
-    check_budgets_have_a_tracker(flow)
-    check_resources(flow)
+    check_budgets_have_a_tracker(flow, tracked=tracked)
+    check_resources(flow, provided=frozenset({COST}) if tracked else frozenset())
 
 
 def _check_history(wiring: Wiring, flow: Flow, history: str | None) -> None:

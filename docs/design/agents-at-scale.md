@@ -6,9 +6,10 @@ what each agent holds, and how flows run for agents.
 Status: the target design, built in steps. Implemented: the platform package (`Config`,
 `Factory`, `Context`) with the shared clients injected into traits, and agents built on a
 platform; the scope a flow runs in as a fold of its declarations, the generic run and its
-environment, and flow runs started by a runner (section 6). Not yet: the platform's `SAIAFactory`,
-shared trait instances with per-agent state, `platform.with_trait_registry`, agents supplying a
-run's environment and identity, and the API in section 8.
+environment, flow runs started by a runner, and the run's own cost tracker (section 6). Not yet:
+the platform's `SAIAFactory`, shared trait instances with per-agent state,
+`platform.with_trait_registry`, agents supplying a run's environment and identity, and the API in
+section 8.
 
 ## 1. Goals
 
@@ -189,8 +190,8 @@ Settings live where their lifetime is:
 |---|---|
 | `state_factory`, flow class, resource methods | The flow `Factory` |
 | Trait registry, `SAIAFactory` (the `Environment`), CAS store | The runner; in the target design the environment comes from the agent |
-| Halt, signals, history name, start | `start()` |
-| Declarations about part of the tree: checkpointer, checkpoint policy, shortcut, budget, resource instances (`with_resource`, the cost tracker by `with_cost_tracker`) | The flow |
+| Halt, signals, history name, start, cost tracker | `start()` |
+| Declarations about part of the tree: checkpointer, checkpoint policy, shortcut, budget, resource instances (`with_resource`) | The flow |
 
 A run's history is named by the caller (`history=`); in the target design the name joins the
 agent's identity, so runs of a shared flow keep separate histories and `start=Resume("latest")`
@@ -210,10 +211,11 @@ tools, its own directive) uses an environment of its own. The runner holds one; 
 starts, and every step of every flow in it, uses that one.
 
 The generic `Run` is what any execution has, with or without Flow: its logger, its environment,
-its halt event and the task that executes it. It is awaited for its result, halted with `halt()`,
-and reports `done`. A flow run extends it with what exists only because a flow nests and
-checkpoints its scopes: the flow, its signals, its history writer, its live scopes and cursors,
-and its hook bookkeeping. Without Flow there is one scope, the root, and nothing to fold.
+its cost tracker, its halt event and the task that executes it. It is awaited for its result,
+halted with `halt()`, and reports `done`. A flow run extends it with what exists only because a
+flow nests and checkpoints its scopes: the flow, its signals, its history writer, its live scopes
+and cursors, and its hook bookkeeping. Without Flow there is one scope, the root, and nothing to
+fold.
 
 ### Runner and run
 
@@ -225,6 +227,7 @@ run = runner.start(
     flow,
     "input",  # the first node's arguments
     state=s,  # the root scope's state
+    cost=tracker,  # the run's spend rolls up here
     halt=h,  # the run's halt
     history="k",  # the repository of the runner's store the run's commits go to
     start=Resume("latest"),  # Fresh() (default), Resume(at) or Restart(at)
@@ -238,6 +241,19 @@ snapshot: `Fresh()` from `state`, `Resume(at)` continuing where the run was at a
 `Restart(at)` from the commit's root state with every position cleared; `at` is `"latest"`, a
 commit hash or a checkpoint name. A run is awaited for its result (`HALTED` when its halt stopped
 it), halted with `run.halt()`, and reports `done`; cancelling the task that awaits it cancels it.
+
+### Cost
+
+A cost tracker is the run's, never the flow's: one on the structure would be shared by every run
+of it. `start(flow, cost=tracker)` gives the run a tracker of its own, `tracker.child()`, as the
+root's `COST` resource; `with_budget(limit)` gives each run of a flow a child of the enclosing
+tracker with that budget. Spend rolls up the chain, and `exceeded`, `urgent_wrapup` and
+`remaining` read every budget on it, so a run under an exhausted agent or session tracker sees it.
+
+The run's own tracker is saved with the top-level flow's resources, through the completion commit,
+and a resumed run restores it into a new tracker of its own. The caller's tracker is never
+restored into: it sees only what the runs it is given to spend, while the run's tracker holds the
+history's total. A budgeted run's child is saved while that run is in progress.
 
 ### Scopes: the fold
 

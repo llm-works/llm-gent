@@ -5,8 +5,8 @@
 
 Wraps a :class:`CostTracker` for lifecycle management via the agent
 Registry. Trait use is optional: consumers can build a :class:`CostTracker`
-directly and pass it to :meth:`Flow.with_cost_tracker` without going
-through the trait. The trait adds:
+directly and pass it to :meth:`FlowRunner.start` (``cost=``) without
+going through the trait. The trait adds:
 
 - Agent-mounted access (``agent.require_trait(CostTrait).tracker``).
 - ``on_stop`` emits a final summary log with total spend and budget.
@@ -35,8 +35,7 @@ class CostTrait(BaseTrait):
 
         tracker = CostTracker(lg, pricing, budget=1.0, halt=halt_event)
         agent.add_trait(CostTrait(agent, tracker=tracker))
-        flow.with_cost_tracker(tracker)
-        await FlowRunner(lg).start(flow, halt=halt_event)
+        await FlowRunner(lg).start(flow, cost=tracker, halt=halt_event)
     """
 
     def __init__(self, agent: Agent, *, tracker: CostTracker) -> None:
