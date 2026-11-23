@@ -27,20 +27,28 @@ class AskTool(GatewayTool):
             "question",
             help="Question to ask the agent",
         )
+        parser.add_argument(
+            "--session",
+            help="Session to continue, as an earlier ask printed it (default: a new session)",
+        )
         super().add_args(parser)
 
     def run(self, **kwargs: Any) -> int:
         name = self.args.name
+        body = {"question": self.args.question}
+        if self.args.session:
+            body["session"] = self.args.session
         data = self._request(
             "POST",
             f"/agents/{name}/ask",
             timeout=60.0,  # Longer timeout for LLM responses
             agent=name,
-            body={"question": self.args.question},
+            body=body,
         )
         if data is None:
             return 1
 
         agent_response = data.get("response", "")
         print(f"\n{name}: {agent_response}\n")
+        print(f"session: {data.get('session', '')}")
         return 0

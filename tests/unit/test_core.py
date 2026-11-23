@@ -12,6 +12,7 @@ from appinfra.service import State
 from llm_gent.bus.protocol import AskResponse, FeedbackResponse
 from llm_gent.runtime.core import Core
 from llm_gent.runtime.handle import AgentHandle
+from llm_gent.runtime.handler import Answer
 
 
 pytestmark = pytest.mark.unit
@@ -210,16 +211,28 @@ class TestCoreAsk:
             core.ask("test-agent", "question")
 
     def test_ask_success(self, core, registry):
-        """Ask returns response string from channel."""
+        """Ask returns the response and its session from the channel."""
         handle = _register_agent(registry)
         handle.state = State.RUNNING
 
         mock_channel = MagicMock()
-        mock_channel.submit.return_value = AskResponse(id="x", response="hello")
+        mock_channel.submit.return_value = AskResponse(id="x", response="hello", session="s-1")
         core._channels["test-agent"] = mock_channel
 
         result = core.ask("test-agent", "question")
-        assert result == "hello"
+        assert result == Answer(response="hello", session="s-1")
+
+    def test_ask_passes_the_session(self, core, registry):
+        """A session given to ask goes out on the request."""
+        handle = _register_agent(registry)
+        handle.state = State.RUNNING
+        mock_channel = MagicMock()
+        mock_channel.submit.return_value = AskResponse(id="x", response="hi", session="s-1")
+        core._channels["test-agent"] = mock_channel
+
+        core.ask("test-agent", "question", session="s-1")
+
+        assert mock_channel.submit.call_args[0][0].session == "s-1"
 
 
 class TestCoreFeedback:

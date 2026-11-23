@@ -83,7 +83,7 @@ def run(self: Any) -> int:
             answer = agent.ask("Say hello.")
         finally:
             agent.stop()
-    print(f"agent said: {answer}")
+    print(f"agent said: {answer.content}")
     return 0
 
 

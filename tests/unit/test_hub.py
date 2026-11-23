@@ -24,6 +24,7 @@ from llm_gent.bus.protocol import (
 from llm_gent.bus.transport import WorkerBusConfig
 from llm_gent.hub import Hub, HubConfig
 from llm_gent.hub.registry import AgentType
+from llm_gent.runtime.handler import Answer
 
 
 pytestmark = pytest.mark.unit
@@ -288,12 +289,12 @@ class TestHubAskFeedback:
         from llm_gent.bus.protocol import AskResponse
 
         mock_channel = MagicMock()
-        mock_channel.submit.return_value = AskResponse(id="x", response="hello")
+        mock_channel.submit.return_value = AskResponse(id="x", response="hello", session="s-1")
         hub._channels["agent-1"] = mock_channel
 
-        result = hub.ask("agent-1", "question")
-        assert result == "hello"
-        mock_channel.submit.assert_called_once()
+        result = hub.ask("agent-1", "question", session="s-1")
+        assert result == Answer(response="hello", session="s-1")
+        assert mock_channel.submit.call_args[0][0].session == "s-1"
 
     def test_ask_unknown_agent_raises(self, hub):
         """Ask raises KeyError for unknown agent."""
@@ -318,13 +319,13 @@ class TestHubAskFeedback:
             hub.ask("agent-1", "question")
 
     def test_ask_non_ask_response_returns_empty(self, hub):
-        """Ask returns empty string when response is not AskResponse."""
+        """Ask returns an empty answer when response is not AskResponse."""
         mock_channel = MagicMock()
         mock_channel.submit.return_value = MagicMock(spec=[])  # not AskResponse
         hub._channels["agent-1"] = mock_channel
 
         result = hub.ask("agent-1", "question")
-        assert result == ""
+        assert result == Answer(response="", session="")
 
     def test_feedback_failure_raises_runtime_error(self, hub):
         """Feedback raises RuntimeError when agent returns failure."""

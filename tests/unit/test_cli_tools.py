@@ -48,7 +48,20 @@ def make_tool(
 @pytest.mark.parametrize(
     ("cls", "args", "method", "path", "body"),
     [
-        (AskTool, {"name": "a", "question": "q"}, "POST", "/agents/a/ask", {"question": "q"}),
+        (
+            AskTool,
+            {"name": "a", "question": "q", "session": None},
+            "POST",
+            "/agents/a/ask",
+            {"question": "q"},
+        ),
+        (
+            AskTool,
+            {"name": "a", "question": "q", "session": "s-1"},
+            "POST",
+            "/agents/a/ask",
+            {"question": "q", "session": "s-1"},
+        ),
         (StartTool, {"name": "a"}, "POST", "/agents/a/start", None),
         (StopTool, {"name": "a"}, "POST", "/agents/a/stop", None),
         (

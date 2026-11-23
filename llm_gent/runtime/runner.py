@@ -42,7 +42,7 @@ from ..bus.protocol import (
     ShutdownResponse,
     UnregisterRequest,
 )
-from .handler import Handler
+from .handler import Answer, Handler
 
 
 if TYPE_CHECKING:
@@ -277,8 +277,8 @@ class BaseAgentRunner(ABC):
     def _handle_ask(self, request: AskRequest) -> AskResponse:
         """Handle ask request via handler."""
         try:
-            response_text = self._handler.on_ask(request.question)
-            return AskResponse(id=request.id, response=response_text)
+            answer = self._handler.on_ask(request.question, request.session)
+            return AskResponse(id=request.id, response=answer.response, session=answer.session)
         except Exception as e:
             return AskResponse(id=request.id, success=False, error=str(e))
 
@@ -349,8 +349,9 @@ class _AgentHandler:
     def __init__(self, agent: RunnableAgent) -> None:
         self._agent = agent
 
-    def on_ask(self, question: str) -> str:
-        return self._agent.ask(question)
+    def on_ask(self, question: str, session: str | None) -> Answer:
+        result = self._agent.ask(question, session)
+        return Answer(response=result.content, session=result.session)
 
     def on_feedback(self, message: str) -> None:
         self._agent.record_feedback(message)

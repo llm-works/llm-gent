@@ -266,6 +266,8 @@ class AskRequest(Request):
     tier: ClassVar[MessageTier] = MessageTier.APPLICATION
 
     question: str
+    session: str | None = None
+    """The session to continue, as an earlier response returned it; ``None`` opens one."""
 
 
 class AskResponse(Response):
@@ -275,6 +277,8 @@ class AskResponse(Response):
     tier: ClassVar[MessageTier] = MessageTier.APPLICATION
 
     response: str = ""
+    session: str = ""
+    """The session the question ran in; pass it back to continue."""
 
 
 class FeedbackRequest(Request):

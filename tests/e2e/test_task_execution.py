@@ -110,7 +110,8 @@ class TestAgentExecutionE2E:
         """Test agent ask() method."""
         response = agent.ask("Say hello in exactly 3 words.")
 
-        assert len(response) > 0
+        assert len(response.content) > 0
+        assert response.session
 
     def test_agent_run_once(self, agent):
         """Test agent run_once() method."""
@@ -123,7 +124,7 @@ class TestAgentExecutionE2E:
         """Test agent with tools can answer questions."""
         response = agent_with_tools.ask("What tools do you have available?")
 
-        assert len(response) > 0
+        assert len(response.content) > 0
 
     def test_agent_cycle_count(self, agent):
         """Test that cycle count increments."""

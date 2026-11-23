@@ -92,10 +92,10 @@ Every capability is a trait. What a trait holds splits in two:
 
 - **The trait (shared):** clients, pools, caches, config. One instance per trait type per
   process, in the platform's registry, built by `TraitFactory`.
-- **Per-agent state:** what differs per agent: directive text, conversation history, budget,
-  Memory's identity-scoped view. The trait defines its state type and creates it per agent; the
-  agent holds these state objects keyed by trait. Calls pass the agent:
-  `llm.complete(agent, messages)`, `conversation.add_turn(agent, user, reply)`.
+- **Per-agent state:** what differs per agent: directive text, budget, Memory's identity-scoped
+  view. The trait defines its state type and creates it per agent; the agent holds these state
+  objects keyed by trait. Calls pass the agent: `llm.complete(agent, messages)`. An agent's
+  conversations are not trait state: they are its sessions (see Conversations).
 
 An agent costs only the state objects of the traits it uses.
 
@@ -108,7 +108,6 @@ An agent costs only the state objects of the traits it uses.
 | Training | Adapter lookup | None |
 | Tools | Tool registry, tools keyed by name and config | The tool names the agent may use; memory tools take the Memory view |
 | Directive, Method | Prompt assembly | Directive and method text |
-| Conversation | Compaction config and compactor | Message history |
 | Cost | Pricing | Budget and tracker |
 
 SAIA is not a trait: the platform's `SAIAFactory` builds one SAIA per role, with the role taken
@@ -129,8 +128,14 @@ items in one run holds 100. A `Loop` takes the conversation from its step or, wi
 the run's snapshot at the call's path and continued from there on resume. A conversation that
 continues across steps is kept in the run's state, so it is checkpointed with the run.
 
-The Conversation trait's per-agent history is the agent's own chat: one sequence per agent, for
-an agent that holds one conversation at a time.
+An agent's own chats are its sessions. A session is one conversation under an id the agent
+issues: `agent.ask(question)` opens one, and `agent.ask(question, session=id)` continues it; an
+id the agent did not issue is refused. An agent holds any number of sessions, none of them
+special; asks in one session run one at a time, asks in different sessions side by side. With a
+memory database, sessions persist in kelt's session storage under the agent's `context_key`,
+name and the session id, so an id is valid only at the agent that issued it, and an idle session
+can leave memory and reload on its next ask. The agent config's `conversation` section sets the
+conversations' limits.
 
 ### Thread-safety contract
 

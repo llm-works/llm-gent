@@ -158,6 +158,9 @@ class AskAgentRequest(Request):
 
     agent_name: str = Field(description="Name of the agent")
     question: str = Field(description="Question to ask")
+    session: str | None = Field(
+        default=None, description="Session to continue, as a response returned it; none opens one"
+    )
 
 
 class AskAgentResponse(Response):
@@ -166,6 +169,7 @@ class AskAgentResponse(Response):
     message_type: ClassVar[str] = "ask_agent_response"
 
     response: str = ""
+    session: str = ""
 
 
 # =============================================================================

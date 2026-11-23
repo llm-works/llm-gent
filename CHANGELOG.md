@@ -66,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MemoryTrait.view(identity)`. Removed: `MemoryTrait(agent, ...)`, its `owns_*` flags and
   `with_*` swaps, `TraitFactory.create_memory_trait`, `MemoryResources`. `AgentStorage` takes
   `(lg, database, context)`.
+- Breaking: an agent's asks run in sessions. `ask(question, session=None)` returns the
+  `ExecutionResult`, whose `session` id continues the conversation; ids are issued by the agent,
+  and an unknown one raises `SessionNotFoundError`. The serve API and `Hub.ask` carry the session.
+  `ConversationTrait` is removed; the `conversation` section configures the sessions.
 
 ### Fixed
 

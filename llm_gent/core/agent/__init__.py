@@ -7,6 +7,7 @@ from .agent import Agent
 from .factory import Factory
 from .identity import Identity
 from .runnable import RunnableAgent
+from .session import Session, SessionConfig, Sessions
 from .types import ExecutionResult
 
 
@@ -16,4 +17,7 @@ __all__ = [
     "ExecutionResult",
     "Identity",
     "RunnableAgent",
+    "Session",
+    "SessionConfig",
+    "Sessions",
 ]

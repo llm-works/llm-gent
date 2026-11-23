@@ -319,7 +319,9 @@ class TestHTTPTraitHandleRequest:
         from llm_gent.agents.default import Agent as DefaultAgent
 
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
         # Use registry's register method to add mock traits
         agent._traits.register(mock_memory_trait)
@@ -506,7 +508,9 @@ class TestHTTPTraitHandleRequest:
 
         # Create agent with traits
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
         agent._traits.register(mock_memory_trait)
 
@@ -544,7 +548,9 @@ class TestHTTPTraitHandleRequest:
         from llm_gent.agents.default.http import HTTPHandler
 
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
         http_trait = HTTPTrait(agent, handler=HTTPHandler(agent, caller))
 

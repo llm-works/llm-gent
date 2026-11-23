@@ -290,6 +290,27 @@ class TestAskAgentRoute:
         assert response.status_code == 200
         assert response.json()["response"] == "Agent response"
 
+    async def test_ask_carries_the_session(self, client, mock_ipc_channel):
+        """The session goes to the agent, and the one the answer ran in comes back."""
+        mock_ipc_channel.submit.return_value = AskAgentResponse(
+            id="1", response="Agent response", session="s-1"
+        )
+
+        response = await client.post("/agents/test/ask", json={"question": "q", "session": "s-1"})
+
+        assert response.json()["session"] == "s-1"
+        assert mock_ipc_channel.submit.call_args[0][1].session == "s-1"
+
+    async def test_ask_in_an_unknown_session_is_a_client_error(self, client, mock_ipc_channel):
+        """An unknown session is a 400, not a missing agent."""
+        mock_ipc_channel.submit.return_value = AskAgentResponse(
+            id="1", success=False, error="Agent test ask failed: no session 's-x'"
+        )
+
+        response = await client.post("/agents/test/ask", json={"question": "q", "session": "s-x"})
+
+        assert response.status_code == 400
+
     async def test_ask_nonexistent(self, client, mock_ipc_channel):
         """Ask returns 404 for nonexistent agent."""
         mock_ipc_channel.submit.return_value = AskAgentResponse(

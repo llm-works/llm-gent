@@ -58,15 +58,17 @@ class AgentListResponse(BaseModel):
 
 
 class AskRequest(BaseModel):
-    """Ask question request."""
+    """Ask question request; ``session`` continues a session an earlier response returned."""
 
     question: str
+    session: str | None = None
 
 
 class AskResponse(BaseModel):
-    """Ask question response."""
+    """Ask question response; ``session`` is the session the question ran in."""
 
     response: str
+    session: str
 
 
 class FeedbackRequest(BaseModel):
@@ -194,11 +196,13 @@ async def _stop_agent(name: str, request: Request) -> AgentInfoResponse:
 
 async def _ask_agent(name: str, body: AskRequest, request: Request) -> AskResponse:
     """Ask an agent a question."""
-    req = AskAgentRequest(id=str(uuid4()), agent_name=name, question=body.question)
+    req = AskAgentRequest(
+        id=str(uuid4()), agent_name=name, question=body.question, session=body.session
+    )
     resp = await request.app.state.ipc_channel.submit(req.id, req)
     resp = cast(AskAgentResponse, resp)
     _check_response(resp, name)
-    return AskResponse(response=resp.response)
+    return AskResponse(response=resp.response, session=resp.session)
 
 
 async def _feedback_agent(name: str, body: FeedbackRequest, request: Request) -> FeedbackResponse:

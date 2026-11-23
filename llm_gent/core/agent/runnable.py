@@ -36,8 +36,8 @@ class RunnableAgent(Agent, Runnable):
         ...
 
     @abstractmethod
-    def ask(self, question: str) -> str:
-        """Answer one interactive question and return the response text."""
+    def ask(self, question: str, session: str | None = None) -> ExecutionResult:
+        """Answer one question in a session (``None``: a new one); the answer carries its id."""
         ...
 
     @abstractmethod

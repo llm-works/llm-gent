@@ -21,7 +21,8 @@ from llm_gent.bus.protocol import (
     ShutdownResponse,
 )
 from llm_gent.bus.transport import WorkerBusConfig
-from llm_gent.runtime.handler import Handler
+from llm_gent.core.agent import ExecutionResult
+from llm_gent.runtime.handler import Answer, Handler
 from llm_gent.runtime.runner import AgentRunner, ManagedAgentRunner, _AgentHandler
 
 
@@ -63,9 +64,9 @@ class MockHandler:
         self.feedback_calls: list[str] = []
         self.shutdown_called = False
 
-    def on_ask(self, question: str) -> str:
+    def on_ask(self, question: str, session: str | None) -> Answer:
         self.ask_calls.append(question)
-        return self.ask_response
+        return Answer(response=self.ask_response, session=session or "s-new")
 
     def on_feedback(self, message: str) -> None:
         self.feedback_calls.append(message)
@@ -128,14 +129,14 @@ class TestAgentHandler:
     """Tests for the _AgentHandler adapter that wraps Agent as Handler."""
 
     def test_on_ask_delegates_to_agent(self, mock_agent):
-        """on_ask calls agent.ask()."""
-        mock_agent.ask.return_value = "hello"
+        """on_ask calls agent.ask() in the session and answers with the result's session."""
+        mock_agent.ask.return_value = ExecutionResult(success=True, content="hello", session="s-1")
         adapter = _AgentHandler(mock_agent)
 
-        result = adapter.on_ask("question?")
+        result = adapter.on_ask("question?", "s-1")
 
-        assert result == "hello"
-        mock_agent.ask.assert_called_once_with("question?")
+        assert result == Answer(response="hello", session="s-1")
+        mock_agent.ask.assert_called_once_with("question?", "s-1")
 
     def test_on_feedback_delegates_to_agent(self, mock_agent):
         """on_feedback calls agent.record_feedback()."""
@@ -640,8 +641,10 @@ class TestManagedRequestHandling:
     """Tests for ManagedAgentRunner request dispatch (via _AgentHandler adapter)."""
 
     def test_handle_ask(self, managed_runner, mock_agent):
-        """Ask request calls agent.ask() and returns response."""
-        mock_agent.ask.return_value = "Test answer"
+        """Ask request calls agent.ask() and returns response and session."""
+        mock_agent.ask.return_value = ExecutionResult(
+            success=True, content="Test answer", session="s-new"
+        )
         req = AskRequest(question="What?")
 
         resp = managed_runner._handle_request(req)
@@ -649,7 +652,8 @@ class TestManagedRequestHandling:
         assert isinstance(resp, AskResponse)
         assert resp.success is True
         assert resp.response == "Test answer"
-        mock_agent.ask.assert_called_once_with("What?")
+        assert resp.session == "s-new"
+        mock_agent.ask.assert_called_once_with("What?", None)
 
     def test_handle_ask_error(self, managed_runner, mock_agent):
         """Ask request returns error response on exception."""

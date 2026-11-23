@@ -148,16 +148,20 @@ class Factory:
         if variables:
             config = _substitute_in_dict(config, variables)
 
-        # Instantiate agent (agent resolves identity from config)
-        agent = self.agent_class(
-            lg=self._lg,
-            config=config,
-        )
+        agent = self._new_agent(self.agent_class, config)
 
         # Create and attach traits (all handled uniformly)
         self._attach_traits(agent, config)
 
         return agent
+
+    def _new_agent(self, agent_class: type[Agent], config: DotDict) -> Agent:
+        """An ``agent_class`` instance on ``config``; it resolves its identity from the config.
+
+        A factory whose agent class takes more than the logger and config
+        overrides this.
+        """
+        return agent_class(lg=self._lg, config=config)
 
     def _attach_traits(self, agent: Agent, config: DotDict) -> None:
         """Create and attach traits for the agent.

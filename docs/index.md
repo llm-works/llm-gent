@@ -45,9 +45,15 @@ with PlatformFactory(lg).from_config({"llm": llm_config}) as platform:  # Shared
         }
     )
     agent.start()  # Initialize all traits
-    answer = agent.ask("Hello!")
+    first = agent.ask("Hello!")  # opens a session
+    again = agent.ask("And once more?", session=first.session)  # continues it
     agent.stop()  # Cleanup all traits
 ```
+
+Every ask runs in a session: one conversation, under an id the agent issues.
+Asking without `session` opens a new one; the answer's `session` continues it.
+An id the agent did not issue raises `SessionNotFoundError`. Sessions persist
+in the platform's memory database when it has one, and in memory otherwise.
 
 The platform holds what agents share (the model router, memory clients) and
 closes it at the end of the `with` block. Every agent built on it reaches models

@@ -17,7 +17,7 @@ from appinfra.service import State
 
 from .core import Core
 from .handle import AgentHandle, AgentInfo
-from .handler import Handler
+from .handler import Answer, Handler
 from .messages import AgentMessage, AgentResponse, MessageType
 from .registry import AgentRegistry
 from .runner import AgentRunner, ManagedAgentRunner
@@ -31,6 +31,7 @@ __all__ = [
     # Core types
     "AgentHandle",
     "AgentInfo",
+    "Answer",
     "AgentRegistry",
     "AgentRunner",
     "Core",

@@ -49,14 +49,16 @@ class Runnable(ABC):
         ...
 
     @abstractmethod
-    def ask(self, question: str) -> str:
-        """Ask a question and get a response.
+    def ask(self, question: str, session: str | None = None) -> ExecutionResult:
+        """Ask a question, in a session, and get the answer.
 
         Args:
             question: The question to ask.
+            session: The id of the session to continue, as an earlier answer
+                returned it; ``None`` opens a new session.
 
         Returns:
-            Response string.
+            The answer; its ``session`` continues the conversation.
         """
         ...
 
