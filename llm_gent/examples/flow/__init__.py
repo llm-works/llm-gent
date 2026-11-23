@@ -6,7 +6,7 @@
 Demonstrates the Flow substrate directly: typed state, ``.iterate``,
 checkpointed pause/resume, and multi-role composition. See the
 sibling ``llm_gent.examples`` modules (``quickstart``, ``external_agent``)
-for the older ``AgentFactory`` + ``LLMTrait`` surface.
+for agents built with ``AgentFactory``.
 
 Modules:
 

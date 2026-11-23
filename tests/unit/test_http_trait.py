@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from appinfra import DotDict
 
-from llm_gent import CompletionResult, HTTPConfig, HTTPTrait
+from llm_gent import HTTPConfig, HTTPTrait
+from llm_gent.core.llm.caller import CallResult
 from llm_gent.runtime.server.http import HTTPServer, HTTPServerConfig
 from llm_gent.runtime.server.protocol.v1 import (
     CompleteRequest,
@@ -274,20 +275,19 @@ class TestHTTPTraitHandleRequest:
         return MagicMock()
 
     @pytest.fixture
-    def mock_llm_trait(self):
-        """Create mock LLMTrait."""
-        from llm_gent.core.traits.builtin.llm import LLMTrait
-
-        return create_mock_trait(
-            LLMTrait,
-            complete=CompletionResult(
-                id="resp-123",
-                content="Hello!",
-                model="gpt-4",
-                tokens_used=25,
-                latency_ms=100,
-            ),
+    def caller(self):
+        """A Caller stand-in whose model replies "Hello!"."""
+        caller = MagicMock()
+        caller.chat.return_value = CallResult(
+            content="Hello!",
+            model="gpt-4",
+            usage={"total_tokens": 25},
+            tool_calls=None,
+            adapter=None,
+            dry_run=False,
+            raw_response=None,
         )
+        return caller
 
     @pytest.fixture
     def mock_memory_trait(self):
@@ -314,7 +314,7 @@ class TestHTTPTraitHandleRequest:
         )
 
     @pytest.fixture
-    def agent(self, mock_logger, mock_llm_trait, mock_memory_trait):
+    def agent(self, mock_logger, mock_memory_trait):
         """Create a test agent with mocked traits."""
         from llm_gent.agents.default import Agent as DefaultAgent
 
@@ -322,16 +322,15 @@ class TestHTTPTraitHandleRequest:
             lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
         )
         # Use registry's register method to add mock traits
-        agent._traits.register(mock_llm_trait)
         agent._traits.register(mock_memory_trait)
         return agent
 
     @pytest.fixture
-    def http_trait(self, agent):
+    def http_trait(self, agent, caller):
         """Create HTTPTrait attached to agent."""
         from llm_gent.agents.default.http import HTTPHandler
 
-        return HTTPTrait(agent, handler=HTTPHandler(agent))
+        return HTTPTrait(agent, handler=HTTPHandler(agent, caller))
 
     def test_handle_health_request(self, http_trait):
         req = HealthRequest(id="req-1")
@@ -351,8 +350,44 @@ class TestHTTPTraitHandleRequest:
         assert isinstance(resp, CompleteResponse)
         assert resp.id == "req-1"
         assert resp.success is True
-        assert resp.response_id == "resp-123"
+        assert resp.response_id
         assert resp.content == "Hello!"
+        assert resp.model == "gpt-4"
+        assert resp.tokens_used == 25
+
+    def test_complete_response_ids_are_unique(self, http_trait):
+        first = http_trait.handle_request(CompleteRequest(id="req-1", query="Hello"))
+        second = http_trait.handle_request(CompleteRequest(id="req-2", query="Hello"))
+
+        assert first.response_id != second.response_id
+
+    def test_complete_sends_only_the_query_without_directive(self, http_trait, caller):
+        http_trait.handle_request(CompleteRequest(id="req-1", query="Hello"))
+
+        assert caller.chat.call_args.kwargs["messages"] == [{"role": "user", "content": "Hello"}]
+
+    def test_complete_directive_leads_the_system_message(self, http_trait, agent, caller):
+        from llm_gent.core.traits.builtin.directive import DirectiveTrait
+
+        agent.add_trait(DirectiveTrait(agent, "You are terse."))
+        req = CompleteRequest(id="req-1", query="Hello", system_prompt="Answer in French.")
+
+        http_trait.handle_request(req)
+
+        assert caller.chat.call_args.kwargs["messages"] == [
+            {"role": "system", "content": "You are terse.\n\nAnswer in French."},
+            {"role": "user", "content": "Hello"},
+        ]
+
+    def test_complete_system_prompt_alone(self, http_trait, caller):
+        req = CompleteRequest(id="req-1", query="Hello", system_prompt="Answer in French.")
+
+        http_trait.handle_request(req)
+
+        assert caller.chat.call_args.kwargs["messages"][0] == {
+            "role": "system",
+            "content": "Answer in French.",
+        }
 
     def test_handle_remember_request(self, http_trait, mock_memory_trait):
         mock_memory_trait.remember.return_value = 42
@@ -379,10 +414,12 @@ class TestHTTPTraitHandleRequest:
     def test_handle_feedback_request(self, http_trait, mock_memory_trait):
         # First complete a request to track the response
         complete_req = CompleteRequest(id="req-1", query="Hello")
-        http_trait.handle_request(complete_req)
+        completed = http_trait.handle_request(complete_req)
 
         # Then provide feedback
-        feedback_req = FeedbackRequest(id="req-2", response_id="resp-123", signal="positive")
+        feedback_req = FeedbackRequest(
+            id="req-2", response_id=completed.response_id, signal="positive"
+        )
         resp = http_trait.handle_request(feedback_req)
 
         assert isinstance(resp, FeedbackResponse)
@@ -402,9 +439,9 @@ class TestHTTPTraitHandleRequest:
         assert resp.success is False
         assert "Unknown message type" in resp.error
 
-    def test_handle_complete_request_error(self, http_trait, mock_llm_trait):
+    def test_handle_complete_request_error(self, http_trait, caller):
         # Make LLM raise an exception
-        mock_llm_trait.complete.side_effect = ValueError("LLM error")
+        caller.chat.side_effect = ValueError("LLM error")
         req = CompleteRequest(id="req-1", query="Hello")
 
         resp = http_trait.handle_request(req)
@@ -450,7 +487,6 @@ class TestHTTPTraitHandleRequest:
     def test_handle_recall_request_success(self, mock_logger):
         """Verify successful recall returns facts serialized correctly."""
         from llm_gent.agents.default import Agent as DefaultAgent
-        from llm_gent.core.traits.builtin.llm import LLMTrait
         from llm_gent.core.traits.builtin.memory import MemoryTrait
         from llm_gent.runtime.server.protocol.v1 import RecallResponse
 
@@ -464,7 +500,6 @@ class TestHTTPTraitHandleRequest:
         mock_scored_entity.score = 0.85
 
         # Create mock traits with correct type for registry lookup
-        mock_llm_trait = create_mock_trait(LLMTrait)
         mock_memory_trait = create_mock_trait(
             MemoryTrait, recall={"return_value": [mock_scored_entity]}, has_embedder=True
         )
@@ -473,13 +508,12 @@ class TestHTTPTraitHandleRequest:
         agent = DefaultAgent(
             lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
         )
-        agent._traits.register(mock_llm_trait)
         agent._traits.register(mock_memory_trait)
 
         # Create HTTPTrait with handler
         from llm_gent.agents.default.http import HTTPHandler
 
-        handler = HTTPHandler(agent)
+        handler = HTTPHandler(agent, MagicMock())
         http_trait = HTTPTrait(agent, handler=handler)
 
         req = RecallRequest(id="req-1", query="programming")
@@ -504,26 +538,21 @@ class TestHTTPTraitHandleRequest:
         assert resp.success is False
         assert "Unknown response_id" in resp.error
 
-    def test_handle_complete_agent_without_complete(self, mock_logger):
-        """Verify error when agent doesn't support complete() (missing LLMTrait)."""
+    def test_handle_complete_agent_without_traits(self, mock_logger, caller):
+        """An agent with no traits still completes: model access is the caller's."""
         from llm_gent.agents.default import Agent as DefaultAgent
         from llm_gent.agents.default.http import HTTPHandler
 
-        # Create agent without LLMTrait
         agent = DefaultAgent(
             lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
         )
+        http_trait = HTTPTrait(agent, handler=HTTPHandler(agent, caller))
 
-        # Create HTTPTrait with handler (handler will fail when LLMTrait is missing)
-        handler = HTTPHandler(agent)
-        http_trait = HTTPTrait(agent, handler=handler)
-
-        req = CompleteRequest(id="req-1", query="Hello")
-        resp = http_trait.handle_request(req)
+        resp = http_trait.handle_request(CompleteRequest(id="req-1", query="Hello"))
 
         assert isinstance(resp, CompleteResponse)
-        assert resp.success is False
-        assert "LLMTrait not attached" in resp.error
+        assert resp.success is True
+        assert resp.content == "Hello!"
 
 
 class TestHTTPTraitLifecycle:

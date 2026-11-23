@@ -231,16 +231,14 @@ class Agent:
 
         The caller's live references to the ejected trait become stale after
         this call — its ``on_stop`` has fired, and for ownership-carrying
-        traits like :class:`LLMTrait` with ``owns_router=True`` its
-        resources are closed. Re-fetch via :meth:`get_trait` or
-        :meth:`require_trait` to obtain a usable reference.
+        traits like :class:`SAIATrait` with ``owns_saia=True`` it releases
+        what it owns. Re-fetch via :meth:`get_trait` or :meth:`require_trait`
+        to obtain a usable reference.
 
-        Typical pairing with ``LLMTrait.with_router``::
+        Typical pairing with ``SAIATrait.with_saia``::
 
-            agent.replace_trait(
-                agent.require_trait(LLMTrait).with_router(other_router)
-            )
-            llm = agent.require_trait(LLMTrait)  # reload
+            agent.replace_trait(agent.require_trait(SAIATrait).with_saia(other_saia))
+            saia_trait = agent.require_trait(SAIATrait)  # reload
 
         Args:
             trait: The trait instance to register or use as a replacement.

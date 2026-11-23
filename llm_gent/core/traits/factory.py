@@ -11,19 +11,15 @@ import no resource factory of their own. :class:`PlatformFactory` builds the
 shared clients once per platform (the model router, and the memory database,
 chat client and embedder) and gives them to this factory, which injects them
 into each trait it builds with ``owns_*=False``: the platform closes them,
-not the trait.
-
-One exception builds a client here: an agent whose config overrides ``llm``
-(another default backend, or backend settings such as an adapter) gets a
-router of its own, built from the platform's router config with the
-override merged in, and owned by its trait (``owns_router=True``).
+not the trait. Model access is not a trait: every agent reaches the
+platform's router (``platform.llm``, ``Platform.saia``).
 
 Runtime override
 ----------------
 
 Each dependency-owning trait exposes per-resource fluent overrides
-(``.with_router``, ``.with_chat_client``, ``.with_embedder``,
-``.with_database``, ``.with_train_factory``) that return a new instance
+(``.with_chat_client``, ``.with_embedder``, ``.with_database``,
+``.with_train_factory``) that return a new instance
 bound to the injected resource, detached from the agent's trait registry
 and with ``owns_*=False``. Use ``agent.replace_trait(new)`` for a
 persistent swap.
@@ -40,7 +36,6 @@ from appinfra.log import Logger
 from llm_infer.client import ChatClient, EmbeddingClient
 from llm_kelt.core import Database
 
-from ..llm.config import merge_llm_config
 from .base import Trait
 
 
@@ -48,7 +43,6 @@ if TYPE_CHECKING:
     from ..agent import Agent, Identity
     from . import TraitName
     from .builtin.directive import Directive, DirectiveTrait, MethodTrait
-    from .builtin.llm import LLMConfig, LLMTrait
     from .builtin.memory import MemoryConfig, MemoryTrait
     from .builtin.training import TrainingTrait
 
@@ -69,13 +63,13 @@ class Factory:
 
     Example:
         platform = PlatformFactory(lg).from_config({})
-        llm_trait = platform.trait_factory.create(TraitName.LLM, agent)
+        # reads agent.config["directive"]; needs no platform clients
+        directive_trait = platform.trait_factory.create(TraitName.DIRECTIVE, agent)
     """
 
     def __init__(
         self,
         lg: Logger,
-        llm_config: Mapping[str, Any],
         router: ChatClient,
         *,
         memory_config: Mapping[str, Any] | None = None,
@@ -85,8 +79,7 @@ class Factory:
 
         Args:
             lg: Logger instance.
-            llm_config: The platform's router config; the defaults LLM traits read.
-            router: The platform's shared router.
+            router: The platform's shared router; rating calls go through it.
             memory_config: The platform's memory settings, or None.
             memory: The platform's shared memory clients, or None without a
                 memory database.
@@ -94,20 +87,23 @@ class Factory:
         from . import TraitName
 
         self._lg = lg
-        self._llm_config = DotDict(llm_config)
         self._router = router
         self._memory_config = memory_config
         self._memory = memory
 
         self._creators: dict[TraitName, Callable[..., Trait]] = {
             TraitName.DIRECTIVE: self._create_directive,
-            TraitName.LLM: self._create_llm,
             TraitName.MEMORY: self._create_memory,
             TraitName.RATING: self._create_rating,
             TraitName.STORAGE: self._create_storage,
             TraitName.METHOD: self._create_method,
             TraitName.TRAINING: self._create_training,
         }
+
+    @property
+    def has_memory(self) -> bool:
+        """The platform's memory clients are built, so a MemoryTrait can be created."""
+        return self._memory is not None
 
     def create(
         self,
@@ -137,23 +133,6 @@ class Factory:
     def _create_directive(self, agent: Agent) -> DirectiveTrait:
         """Route to create_directive_trait."""
         return self.create_directive_trait(agent, agent.config.get("directive"))
-
-    def _create_llm(self, agent: Agent) -> LLMTrait:
-        """An LLM trait on the shared router, or on a router of its own when the agent overrides llm.
-
-        Agent config formats:
-            llm: anthropic                    # Select backend (simplest)
-            llm: { default: anthropic }       # Explicit default
-            llm: { default: local, backends: { local: { adapter: x } } }  # Select + override
-        """
-        from .builtin.llm import LLMTrait
-
-        override = agent.config.get("llm")
-        if not override:
-            return LLMTrait(agent, self._router, self._llm_config, owns_router=False)
-        if isinstance(override, str):
-            override = {"default": override}
-        return self.create_llm_trait(agent, DotDict(merge_llm_config(self._llm_config, override)))
 
     def _create_memory(self, agent: Agent) -> MemoryTrait:
         """Route to create_memory_trait.
@@ -189,9 +168,7 @@ class Factory:
         """Route to create_rating_trait."""
         from .builtin.rating import RatingTrait
 
-        rating_config = agent.config.get("rating")
-        # RatingTrait uses LLMTrait for LLM access (no separate client needed)
-        return RatingTrait(agent, rating_config)
+        return RatingTrait(agent, self._router, agent.config.get("rating"))
 
     def _create_storage(self, agent: Agent) -> Trait:
         """Route to create_storage_trait."""
@@ -202,37 +179,6 @@ class Factory:
     def _create_method(self, agent: Agent) -> MethodTrait:
         """Route to create_method_trait."""
         return self.create_method_trait(agent, agent.config.get("method"))
-
-    def create_llm_trait(self, agent: Agent, llm_config: LLMConfig | None) -> LLMTrait:
-        """Create an LLMTrait with a router of its own, built from ``llm_config``.
-
-        The trait owns the router (``owns_router=True``) and closes it on stop.
-        Agents without an llm override use the platform's shared router instead.
-
-        Args:
-            agent: Agent the trait is for.
-            llm_config: LLM backend configuration dict.
-
-        Returns:
-            Configured LLMTrait instance with a trait-owned router.
-
-        Raises:
-            ConfigError: If llm_config is None or empty.
-        """
-        from llm_infer.client import Factory as LLMClientFactory
-
-        from ..errors import ConfigError
-        from .builtin.llm import LLMTrait
-
-        if not llm_config:
-            raise ConfigError("LLM configuration required but not provided")
-
-        self._lg.trace(
-            "building agent LLM router...",
-            extra={"agent": agent.name, "default": llm_config.get("default")},
-        )
-        router = LLMClientFactory(agent.lg).from_config(llm_config)
-        return LLMTrait(agent, router, llm_config, owns_router=True)
 
     def create_directive_trait(
         self, agent: Agent, config: str | dict[str, Any] | Directive | None

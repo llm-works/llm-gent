@@ -9,10 +9,8 @@ import pytest
 from appinfra import DotDict
 
 from llm_gent.core.errors import ConfigError
-from llm_gent.core.llm.config import merge_llm_config
 from llm_gent.core.traits import TraitName
 from llm_gent.core.traits.builtin.directive import Directive, DirectiveTrait, MethodTrait
-from llm_gent.core.traits.builtin.llm import LLMTrait
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.training import TrainingTrait
 from llm_gent.core.traits.factory import Factory as TraitFactory
@@ -20,15 +18,6 @@ from llm_gent.core.traits.factory import MemoryResources
 
 
 pytestmark = pytest.mark.unit
-
-
-LLM_CONFIG = {
-    "default": "anthropic",
-    "backends": {
-        "anthropic": {"adapter": "openai", "base_url": "https://api.anthropic.com"},
-        "local": {"adapter": "openai", "base_url": "http://localhost:8000"},
-    },
-}
 
 
 @pytest.fixture
@@ -40,7 +29,7 @@ def router():
 @pytest.fixture
 def factory(router):
     """A TraitFactory on a shared router, without memory."""
-    return TraitFactory(MagicMock(), LLM_CONFIG, router)
+    return TraitFactory(MagicMock(), router)
 
 
 @pytest.fixture
@@ -68,9 +57,8 @@ class TestCreate:
         trait = factory.create(TraitName.DIRECTIVE, mock_agent)
         assert isinstance(trait, DirectiveTrait)
 
-    def test_routes_to_llm_creator(self, factory, mock_agent):
-        trait = factory.create(TraitName.LLM, mock_agent)
-        assert isinstance(trait, LLMTrait)
+    def test_llm_is_not_a_trait(self):
+        assert "llm" not in {name.value for name in TraitName}
 
     def test_routes_to_method_creator(self, factory, mock_agent):
         mock_agent.config = DotDict({"method": "Step 1, Step 2"})
@@ -104,137 +92,6 @@ class TestCreateDirectiveTrait:
     def test_invalid_type_raises(self, factory, mock_agent):
         with pytest.raises(ConfigError, match="must be str, dict, or Directive"):
             factory.create_directive_trait(mock_agent, 42)
-
-
-class TestCreateLLMTrait:
-    """Tests for TraitFactory.create_llm_trait(): a trait with a router of its own."""
-
-    def test_none_config_raises(self, factory, mock_agent):
-        with pytest.raises(ConfigError, match="LLM configuration required"):
-            factory.create_llm_trait(mock_agent, None)
-
-    def test_builds_router_and_injects(self, factory, mock_agent):
-        config = DotDict({"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}})
-
-        with patch("llm_infer.client.Factory") as mock_factory:
-            mock_router = MagicMock()
-            mock_factory.return_value.from_config.return_value = mock_router
-
-            trait = factory.create_llm_trait(mock_agent, config)
-
-            mock_factory.assert_called_once_with(mock_agent.lg)
-            mock_factory.return_value.from_config.assert_called_once_with(config)
-            assert isinstance(trait, LLMTrait)
-            assert trait.router is mock_router
-            assert trait._owns_router is True
-
-
-class TestCreateLLMRouting:
-    """_create_llm: the shared router, or a router of the agent's own when it overrides llm."""
-
-    def test_no_override_uses_shared_router(self, factory, router, mock_agent):
-        trait = factory.create(TraitName.LLM, mock_agent)
-
-        assert trait.router is router
-        assert trait._owns_router is False
-        assert trait.config["default"] == "anthropic"
-
-    def test_string_shorthand_selects_backend(self, factory):
-        mock_agent = MagicMock()
-        mock_agent.config = DotDict({"llm": "local"})
-
-        with patch.object(factory, "create_llm_trait") as mock_create:
-            mock_create.return_value = MagicMock()
-            factory._create_llm(mock_agent)
-
-            config_passed = mock_create.call_args[0][1]
-            assert config_passed["default"] == "local"
-            assert "anthropic" in config_passed["backends"]
-
-    def test_dict_override_merges(self, factory):
-        mock_agent = MagicMock()
-        mock_agent.config = DotDict(
-            {"llm": {"default": "local", "backends": {"local": {"adapter": "custom"}}}}
-        )
-
-        with patch.object(factory, "create_llm_trait") as mock_create:
-            mock_create.return_value = MagicMock()
-            factory._create_llm(mock_agent)
-
-            config_passed = mock_create.call_args[0][1]
-            assert config_passed["default"] == "local"
-            assert config_passed["backends"]["local"]["adapter"] == "custom"
-            assert config_passed["backends"]["local"]["base_url"] == "http://localhost:8000"
-
-
-class TestMergeLLMConfig:
-    """Tests for merge_llm_config()."""
-
-    def test_override_existing_backend(self):
-        base = {
-            "default": "anthropic",
-            "backends": {
-                "anthropic": {"adapter": "openai", "base_url": "https://api.anthropic.com"}
-            },
-        }
-        override = {"backends": {"anthropic": {"base_url": "https://custom.endpoint.com"}}}
-
-        result = merge_llm_config(base, override)
-
-        assert result["backends"]["anthropic"]["adapter"] == "openai"
-        assert result["backends"]["anthropic"]["base_url"] == "https://custom.endpoint.com"
-
-    def test_add_new_backend(self):
-        base = {"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}}
-        override = {"backends": {"custom": {"adapter": "vllm", "base_url": "http://custom:8000"}}}
-
-        result = merge_llm_config(base, override)
-
-        assert result["backends"]["custom"]["adapter"] == "vllm"
-        assert result["backends"]["anthropic"]["adapter"] == "openai"
-
-    def test_top_level_keys_merged(self):
-        base = {"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}}
-        override = {"default": "local", "temperature": 0.7}
-
-        result = merge_llm_config(base, override)
-
-        assert result["default"] == "local"
-        assert result["temperature"] == 0.7
-
-    def test_override_backends_only_in_override(self):
-        result = merge_llm_config({"default": "anthropic"}, {"backends": {"new": {"adapter": "t"}}})
-
-        assert result["backends"]["new"]["adapter"] == "t"
-
-    def test_none_backend_skipped(self):
-        base = {"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}}
-
-        result = merge_llm_config(base, {"backends": {"anthropic": None}})
-
-        assert result["backends"]["anthropic"]["adapter"] == "openai"
-
-    def test_none_backend_absent_from_base_skipped(self):
-        base = {"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}}
-
-        result = merge_llm_config(base, {"backends": {"new": None}})
-
-        assert "new" not in result["backends"]
-
-    def test_empty_override_keeps_base(self):
-        base = {"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}}
-
-        assert merge_llm_config(base, {}) == base
-
-    def test_does_not_mutate_inputs(self):
-        base = {"default": "anthropic", "backends": {"anthropic": {"adapter": "openai"}}}
-        override = {"backends": {"anthropic": {"adapter": "custom"}, "new": {"adapter": "n"}}}
-
-        result = merge_llm_config(base, override)
-        result["backends"]["new"]["adapter"] = "changed"
-
-        assert base["backends"]["anthropic"]["adapter"] == "openai"
-        assert override["backends"]["new"]["adapter"] == "n"
 
 
 @pytest.fixture
@@ -276,7 +133,7 @@ class TestCreateMemoryTrait:
             factory.create_memory_trait(mock_agent, mock_agent.identity, config)
 
     def test_uses_shared_clients(self, router, memory, mock_agent, mock_kelt):
-        factory = TraitFactory(MagicMock(), LLM_CONFIG, router, memory=memory)
+        factory = TraitFactory(MagicMock(), router, memory=memory)
         config = DotDict({"db": {"url": "postgresql://localhost/test"}})
 
         trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
@@ -289,7 +146,7 @@ class TestCreateMemoryTrait:
         assert trait._owns_embedder is False
 
     def test_defaults_applied(self, router, memory, mock_agent, mock_kelt):
-        factory = TraitFactory(MagicMock(), LLM_CONFIG, router, memory=memory)
+        factory = TraitFactory(MagicMock(), router, memory=memory)
         config = DotDict({"db": {"url": "postgresql://localhost/test"}})
 
         trait = factory.create_memory_trait(mock_agent, mock_agent.identity, config)
@@ -344,6 +201,11 @@ class TestCreateRating:
         trait = factory._create_rating(mock_agent)
         assert isinstance(trait, RatingTrait)
 
+    def test_rating_calls_go_through_the_shared_router(self, factory, router, mock_agent):
+        trait = factory._create_rating(mock_agent)
+
+        assert trait._router is router
+
     def test_rating_with_none_config(self, factory, mock_agent):
         from llm_gent.core.traits.builtin.rating import RatingTrait
 
@@ -375,7 +237,7 @@ class TestCreateMemoryRouting:
             "db": {"url": "postgresql://localhost/test"},
             "schema": {"name": "default"},
         }
-        factory_inst = TraitFactory(MagicMock(), LLM_CONFIG, router, memory_config=memory_config)
+        factory_inst = TraitFactory(MagicMock(), router, memory_config=memory_config)
 
         mock_agent = MagicMock()
         mock_agent.config = DotDict({"kelt": {"schema": {"name": "custom", "enforce": True}}})
@@ -406,7 +268,7 @@ class TestCreateTrainingRouting:
             "schema": {"name": "platform"},
             "adapters": {"lora": {"base_path": "/data/adapters"}},
         }
-        factory_inst = TraitFactory(MagicMock(), LLM_CONFIG, router, memory_config=memory_config)
+        factory_inst = TraitFactory(MagicMock(), router, memory_config=memory_config)
 
         mock_agent = MagicMock()
         mock_agent.config = DotDict({})
@@ -420,7 +282,7 @@ class TestCreateTrainingRouting:
             "schema": {"name": "platform"},
             "adapters": {"lora": {"base_path": "/data/adapters"}},
         }
-        factory_inst = TraitFactory(MagicMock(), LLM_CONFIG, router, memory_config=memory_config)
+        factory_inst = TraitFactory(MagicMock(), router, memory_config=memory_config)
 
         mock_agent = MagicMock()
         mock_agent.config = DotDict({"kelt": {"schema": {"name": "agent"}}})

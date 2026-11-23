@@ -26,8 +26,8 @@ For runtime override, expose an immutable-view fluent
 detached from the agent's registry; a caller wanting a persistent swap
 calls ``agent.replace_trait(new)``.
 
-Worked examples: ``LLMTrait`` (router), ``MemoryTrait`` (database, chat
-client, embedder), ``TrainingTrait`` (train factory).
+Worked examples: ``MemoryTrait`` (database, chat client, embedder),
+``TrainingTrait`` (train factory).
 """
 
 from __future__ import annotations

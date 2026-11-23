@@ -10,24 +10,28 @@
 - :class:`PlatformFactory` builds the platform: the model router every agent
   shares, from the packaged ``etc/llm.yaml`` with ``--base-url`` / ``--model``
   on its ``local`` backend.
-- :meth:`AgentFactory.from_config` builds a plain :class:`Agent` on that
-  platform, with the traits ``traits.required`` names.
-- ``DirectiveTrait`` prepends its directive as a system message on
-  ``LLMTrait.complete()``.
+- The prompt-agent factory (:class:`llm_gent.agents.default.Factory`) builds
+  an agent on that platform from a config: its ``directive`` becomes the
+  system prompt of the agent's SAIA, which runs over the platform's router.
+- ``agent.ask()`` runs one task; the agent answers by calling its
+  ``complete_task`` tool.
 
 Pass ``--smoke`` to run on llm-infer's scripted client instead of a backend.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Any
 
 from appinfra.app import AppBuilder
 from llm_infer.client import ChatRequest, ChatResponse
 from llm_infer.client import Factory as LLMInferFactory
+from llm_infer.schemas.openai import FunctionCall, ToolCall
 
-from llm_gent import AgentFactory, LLMTrait, PlatformFactory
+from llm_gent import PlatformFactory
+from llm_gent.agents.default import Factory as PromptAgentFactory
 
 
 app = (
@@ -42,8 +46,14 @@ app = (
 
 
 def _smoke_answer(request: ChatRequest) -> ChatResponse:
-    """The ``--smoke`` model's reply."""
-    return ChatResponse(content="Hello from the scripted model!")
+    """The ``--smoke`` model's reply: it completes the task with a greeting."""
+    arguments = {"status": "done", "conclusion": "Hello from the scripted model!"}
+    call = ToolCall(
+        id="call-1",
+        type="function",
+        function=FunctionCall(name="complete_task", arguments=json.dumps(arguments)),
+    )
+    return ChatResponse(content="", tool_calls=[call])
 
 
 def _llm_config(base_url: str | None, model: str | None) -> dict[str, Any]:
@@ -61,21 +71,19 @@ def run(self: Any) -> int:
     if self.args.smoke:
         factory = factory.with_llm(LLMInferFactory(self.lg).scripted(_smoke_answer))
     with factory.from_config({"llm": _llm_config(self.args.base_url, self.args.model)}) as platform:
-        agent = AgentFactory(platform).from_config(
+        agent = PromptAgentFactory(platform).from_config(
             {
                 "identity": {"name": "hello-agent"},
                 "directive": "You are a concise assistant.",
-                "traits": {"required": ["llm", "directive"]},
+                "tools": {"complete_task": {}},
             }
         )
         agent.start()
         try:
-            result = agent.require_trait(LLMTrait).complete(
-                [{"role": "user", "content": "Say hello."}]
-            )
+            answer = agent.ask("Say hello.")
         finally:
             agent.stop()
-    print(f"agent said: {result.content}")
+    print(f"agent said: {answer}")
     return 0
 
 

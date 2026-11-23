@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from appinfra import DotDict
+from llm_infer.client import ChatClient
 
 from ...memory.rating import (
     AtomicFactsBackend,
@@ -101,9 +102,9 @@ class RatingTrait(BaseTrait):
             auto=True
         )
 
-        # Attach traits
+        # Attach traits; rating calls go through the platform's router
         agent.add_trait(MemoryTrait(agent, memory_config))
-        agent.add_trait(RatingTrait(agent, rating_config))
+        agent.add_trait(RatingTrait(agent, platform.llm, rating_config))
         agent.start()
 
         # Rate content
@@ -119,15 +120,18 @@ class RatingTrait(BaseTrait):
     def __init__(
         self,
         agent: Agent,
+        router: ChatClient,
         config: RatingConfig | None = None,
     ) -> None:
         """Initialize rating trait.
 
         Args:
             agent: The agent this trait belongs to.
+            router: The model router rating calls go through (the platform's).
             config: Rating configuration (None = use defaults).
         """
         super().__init__(agent)
+        self._router = router
         self.config = config or RatingConfig()
         self._providers: list[ProviderConfig] = []
         self._criteria: dict[str, CriteriaConfig] = {}  # fact_type -> CriteriaConfig
@@ -139,19 +143,16 @@ class RatingTrait(BaseTrait):
         """Initialize rating service and backend.
 
         Raises:
-            TraitNotFoundError: If MemoryTrait or LLMTrait are not attached.
+            TraitNotFoundError: If MemoryTrait is not attached.
         """
         from ...llm import Caller as LLMCaller
-        from .llm import LLMTrait
         from .memory import MemoryTrait
 
         self.agent.lg.trace("starting rating trait...", extra={"agent": self.agent.name})
-        # Require dependencies
         memory_trait = self.agent.require_trait(MemoryTrait)
-        llm_trait = self.agent.require_trait(LLMTrait)
 
-        # Initialize rating service and backend with LLMCaller wrapper
-        caller = LLMCaller(self.agent.lg, llm_trait.router)
+        # Rating calls go through the platform's router, wrapped for logging
+        caller = LLMCaller(self.agent.lg, self._router)
         self._service = RatingService(self.agent.lg, caller)
 
         # Get schema from MemoryTrait config for backend operations
@@ -447,11 +448,6 @@ class RatingTrait(BaseTrait):
         Returns:
             List of rating results from each provider.
         """
-        from .llm import LLMTrait
-
-        # Verify LLMTrait is available
-        self.agent.require_trait(LLMTrait)
-
         results = []
         enabled_providers = [
             p for p in self._providers if p.enabled and p.provider_type == ProviderType.LLM

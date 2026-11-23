@@ -12,8 +12,6 @@ from .builtin import (
     DirectiveTrait,
     HTTPConfig,
     HTTPTrait,
-    LLMConfig,
-    LLMTrait,
     ManifestNotFoundError,
     MemoryConfig,
     MemoryTrait,
@@ -40,7 +38,6 @@ class TraitName(StrEnum):
 
     COST = "cost"
     DIRECTIVE = "directive"
-    LLM = "llm"
     MEMORY = "memory"
     HTTP = "http"
     RATING = "rating"
@@ -55,7 +52,6 @@ class TraitName(StrEnum):
 ALL_TRAITS: list[TraitName] = [
     TraitName.COST,
     TraitName.DIRECTIVE,
-    TraitName.LLM,
     TraitName.MEMORY,
     TraitName.HTTP,
     TraitName.RATING,
@@ -86,9 +82,6 @@ __all__ = [
     # HTTP
     "HTTPConfig",
     "HTTPTrait",
-    # LLM
-    "LLMConfig",
-    "LLMTrait",
     # Memory
     "MemoryConfig",
     "MemoryTrait",

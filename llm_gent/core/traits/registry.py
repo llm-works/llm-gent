@@ -44,12 +44,12 @@ class Registry:
         # Traits are built by the platform's TraitFactory, which injects the
         # platform's shared clients (router, memory clients) into each trait.
         factory = platform.trait_factory
-        agent.add_trait(factory.create(TraitName.LLM, agent))
+        agent.add_trait(factory.create(TraitName.DIRECTIVE, agent))
         agent.add_trait(factory.create(TraitName.MEMORY, agent))
 
         # Access traits by type through agent
-        llm_trait = agent.get_trait(LLMTrait)
-        if llm_trait:
+        directive_trait = agent.get_trait(DirectiveTrait)
+        if directive_trait:
             # Use the trait
             pass
 

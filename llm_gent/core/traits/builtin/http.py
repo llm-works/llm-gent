@@ -186,7 +186,7 @@ class HTTPTrait(BaseTrait):
     def with_server(self, server: HTTPServer) -> Self:
         """Return a new trait bound to ``server``, detached from the registry.
 
-        Immutable-view fluent (mirrors ``LLMTrait.with_router``): ``self``
+        Immutable-view fluent (mirrors ``MemoryTrait.with_chat_client``): ``self``
         stays canonical for ``agent.get_trait(HTTPTrait)`` and its server is
         unchanged. ``owns_server`` on the returned trait is False; the caller
         retains stop responsibility. For a persistent swap, call

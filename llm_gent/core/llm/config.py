@@ -35,3 +35,23 @@ def merge_llm_config(base: Mapping[str, Any], override: Mapping[str, Any]) -> di
         if key != "backends":
             result[key] = copy.deepcopy(value)
     return result
+
+
+def resolve_llm_defaults(config: Mapping[str, Any]) -> dict[str, Any]:
+    """The model, temperature, max_tokens and adapter of ``config``'s default backend.
+
+    ``config`` is a router config (``default`` plus ``backends``), or a single
+    backend's settings without the ``backends`` wrapper.
+    """
+    backends = config.get("backends") or {}
+    if not backends:
+        selected: Mapping[str, Any] = config
+    else:
+        default_name = config.get("default") or next(iter(backends))
+        selected = backends.get(default_name) or {}
+    return {
+        "model": selected.get("model", "default"),
+        "temperature": selected.get("temperature", 0.7),
+        "max_tokens": selected.get("max_tokens"),
+        "adapter": selected.get("adapter"),
+    }

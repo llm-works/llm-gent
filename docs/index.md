@@ -24,7 +24,6 @@ Traits provide specific capabilities to agents:
 
 | Trait | Purpose |
 |-------|---------|
-| `LLMTrait` | LLM completions with multi-backend routing |
 | `DirectiveTrait` | System prompts and agent instructions |
 | `StorageTrait` | PostgreSQL persistence with schema migrations |
 | `RatingTrait` | Automated LLM-based content evaluation |
@@ -34,25 +33,27 @@ Traits provide specific capabilities to agents:
 ### Lifecycle
 
 ```python
-from llm_gent import AgentFactory, LLMTrait, PlatformFactory
+from llm_gent import PlatformFactory
+from llm_gent.agents.default import Factory as PromptAgentFactory
 
 with PlatformFactory(lg).from_config({"llm": llm_config}) as platform:  # Shared clients
-    agent = AgentFactory(platform).from_config(
+    agent = PromptAgentFactory(platform).from_config(
         {
             "identity": {"name": "my-agent"},
-            "traits": {"required": ["llm"]},
+            "directive": "You are a helpful assistant.",
+            "tools": {"complete_task": {}},
         }
     )
     agent.start()  # Initialize all traits
-    llm = agent.require_trait(LLMTrait)
-    result = llm.complete([{"role": "user", "content": "Hello!"}])
+    answer = agent.ask("Hello!")
     agent.stop()  # Cleanup all traits
 ```
 
 The platform holds what agents share (the model router, memory clients) and
-closes it at the end of the `with` block. Agents built on it use these clients;
-an agent whose config sets `llm` (another backend or adapter) gets a router of
-its own.
+closes it at the end of the `with` block. Every agent built on it reaches models
+through that router: SAIA for agents, `llm_gent.core.llm.Caller` for a plain
+call. An agent config has no `llm` section; backends are configured on the
+platform.
 
 For cycle-driven agents (`agent.run_once()`), use `RunnableAgent` — set
 `agent_class = RunnableAgent` on an `AgentFactory` subclass, or subclass

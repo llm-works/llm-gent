@@ -4,12 +4,13 @@
 """Framework-level LLM wrapper with logging and dry-run support.
 
 Sits between llm-infer client and the rest of the framework:
-    llm-infer/ChatClient -> llm-gent/Caller -> llm-gent/LLMTrait (agents)
-                                             -> RatingService (CLI)
+    llm-infer/ChatClient -> llm-gent/Caller -> plain calls (an agent's HTTP /complete)
+                                             -> RatingService (rating trait, CLI)
 
 Provides:
 - Trace logging of full request/response
 - Dry-run mode (log without sending)
+- Structured output (``output_schema=``)
 - Single place for framework-level LLM concerns
 """
 
@@ -19,6 +20,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from llm_infer.client.types import AdapterInfo
+from pydantic import BaseModel
+
+from .structured import RESPONSE_FORMAT, parse_structured, with_schema_instruction
 
 
 if TYPE_CHECKING:
@@ -37,6 +41,7 @@ class CallResult:
     adapter: AdapterInfo | None  # LoRA adapter info (None if not requested)
     dry_run: bool  # True if this was a dry-run (no actual LLM call)
     raw_response: ChatResponse | None  # None in dry-run mode
+    parsed: BaseModel | None = None  # The validated reply, for a call with output_schema
 
 
 def log_response(lg: Logger, response: ChatResponse) -> None:
@@ -115,6 +120,7 @@ class Caller:
         backend: str | None = None,
         adapter: str | None = None,
         extra_body: dict[str, Any] | None = None,
+        output_schema: type[BaseModel] | None = None,
     ) -> CallResult:
         """Call LLM with logging and optional dry-run.
 
@@ -127,10 +133,41 @@ class Caller:
             backend: Specific backend to use.
             adapter: LoRA adapter.
             extra_body: Extra request body parameters.
+            output_schema: A model the reply must match. The request asks for
+                JSON matching it, and the result's ``parsed`` is the validated
+                reply (``None`` in dry-run mode).
 
         Returns:
             CallResult with response content and metadata.
+
+        Raises:
+            ValueError: Both ``tools`` and ``output_schema`` are given.
+            StructuredOutputError: The reply does not parse as, or match, ``output_schema``.
         """
+        if output_schema is not None:
+            if tools:
+                raise ValueError("Cannot use both tools and output_schema")
+            messages = with_schema_instruction(messages, output_schema)
+            extra_body = {**(extra_body or {}), **RESPONSE_FORMAT}
+        result = self._call(
+            messages, model, temperature, max_tokens, tools, backend, adapter, extra_body
+        )
+        if output_schema is not None and not result.dry_run:
+            result.parsed = parse_structured(self._lg, result.content, output_schema)
+        return result
+
+    def _call(
+        self,
+        messages: list[dict[str, Any]],
+        model: str | None,
+        temperature: float,
+        max_tokens: int | None,
+        tools: list[dict[str, Any]] | None,
+        backend: str | None,
+        adapter: str | None,
+        extra_body: dict[str, Any] | None,
+    ) -> CallResult:
+        """Send the request to the router, or log it in dry-run mode."""
         self._log_request(messages, model, backend, temperature, max_tokens, adapter, tools)
 
         if self._dry_run:

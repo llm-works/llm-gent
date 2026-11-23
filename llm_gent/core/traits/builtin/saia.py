@@ -6,8 +6,8 @@
 Provides optional SAIA integration for agents that want structured
 verb vocabulary (complete, verify, confirm, etc.) rather than raw LLM calls.
 
-This trait is optional - agents can use LLMTrait directly for raw access,
-or add SAIATrait for structured operations, or use both.
+Plain model calls go through the platform's router (``platform.llm``, or
+:class:`~llm_gent.core.llm.Caller` over it); SAIATrait adds the verbs.
 """
 
 from __future__ import annotations
@@ -179,7 +179,7 @@ class SAIATrait(BaseTrait):
     def with_saia(self, saia: SAIA) -> Self:
         """Return a new trait bound to ``saia``, detached from the registry.
 
-        Immutable-view fluent (mirrors ``LLMTrait.with_router``): ``self``
+        Immutable-view fluent (mirrors ``MemoryTrait.with_chat_client``): ``self``
         stays canonical for ``agent.get_trait(SAIATrait)`` and its instance is
         unchanged. ``owns_saia`` on the returned trait is False; the caller
         retains ownership. For a persistent swap, call
@@ -252,6 +252,7 @@ def _create_executor(registry: Registry, lg: Logger) -> Any:
     import inspect
 
     async def executor(name: str, arguments: dict[str, Any]) -> str:
+        """Run tool ``name`` with ``arguments``; errors come back as the result text."""
         tool = registry.get(name)
         if tool is None:
             return f"Error: Unknown tool '{name}'"

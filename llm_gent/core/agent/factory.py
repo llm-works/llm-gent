@@ -7,7 +7,6 @@ Config schema (agent-config dict passed to ``create`` / ``from_config``):
 
     {
         "identity":  {"name": str, "context_key": str | None},   # required
-        "llm":       str | dict,                                  # LLMTrait reads
         "directive": str | dict,                                  # DirectiveTrait reads
         "method":    str,                                         # MethodTrait reads
         "kelt":      dict,                                        # Memory/Training read
@@ -22,7 +21,8 @@ reads its own top-level key from ``agent.config``; nesting under
 
 The factory builds agents on a :class:`~llm_gent.core.Platform`:
 traits use the platform's shared clients, and agent-config keys override the
-platform's defaults (an ``llm`` override gives the agent a router of its own).
+platform's defaults. Every agent reaches models through the platform's
+router; an ``llm`` key is rejected (models are configured on the platform).
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ class Factory:
     requirements, default tools) subclass and override the class variables.
 
     Trait requirements (priority order):
-        1. Config: ``config["traits"]["required"] = ["llm", ...]``
-        2. Class variable: ``required_traits = [TraitName.LLM, ...]``
+        1. Config: ``config["traits"]["required"] = ["directive", ...]``
+        2. Class variable: ``required_traits = [TraitName.MEMORY, ...]``
         3. None — agent starts without traits.
 
     Tool configuration (priority order):
@@ -56,25 +56,24 @@ class Factory:
 
     Usage::
 
-        from llm_gent import AgentFactory, LLMTrait, PlatformFactory
+        from llm_gent import AgentFactory, PlatformFactory
 
         with PlatformFactory(lg).from_config({}) as platform:
             agent = AgentFactory(platform).from_config({
                 "identity": {"name": "hello"},
                 "directive": "You are a helpful assistant.",
-                "traits": {"required": ["llm", "directive"]},
+                "traits": {"required": ["directive"]},
             })
-            agent.start()
-            result = agent.require_trait(LLMTrait).complete(
-                [{"role": "user", "content": "Say hello."}]
-            )
-            agent.stop()
+
+    A prompt agent that answers (``agent.ask(...)``) comes from
+    :class:`llm_gent.agents.default.Factory`, which adds SAIA over the
+    platform's router and wires traits from the config's sections.
 
     Custom agent types::
 
         class CustomFactory(AgentFactory):
             agent_class = MyAgent
-            required_traits = [TraitName.LLM, TraitName.MEMORY]
+            required_traits = [TraitName.MEMORY]
 
         agent = CustomFactory(platform).create(config)
     """
@@ -134,10 +133,16 @@ class Factory:
             Configured agent instance.
 
         Raises:
-            ConfigError: If agent_class not set or required config fields missing.
+            ConfigError: If agent_class not set, required config fields are
+                missing, or the config has an ``llm`` key.
         """
         if self.agent_class is None:
             raise ConfigError(f"{self.__class__.__name__} must set agent_class class variable")
+        if "llm" in config:
+            raise ConfigError(
+                "agent config has an 'llm' key: every agent uses the platform's model router; "
+                "configure backends in the platform config's llm section"
+            )
 
         # Apply variable substitutions to config if provided
         if variables:
@@ -235,7 +240,6 @@ class Factory:
         """Build mapping from trait names to trait classes for validation."""
         from ..traits.builtin.directive import DirectiveTrait, MethodTrait
         from ..traits.builtin.http import HTTPTrait
-        from ..traits.builtin.llm import LLMTrait
         from ..traits.builtin.memory import MemoryTrait
         from ..traits.builtin.rating import RatingTrait
         from ..traits.builtin.saia import SAIATrait
@@ -245,7 +249,6 @@ class Factory:
 
         return {
             TraitName.DIRECTIVE: DirectiveTrait,
-            TraitName.LLM: LLMTrait,
             TraitName.MEMORY: MemoryTrait,
             TraitName.RATING: RatingTrait,
             TraitName.STORAGE: StorageTrait,
