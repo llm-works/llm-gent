@@ -56,8 +56,8 @@ class Factory(BaseFactory):
 
     agent_class = Agent  # Use default prompt-based agent
 
-    # A prompt agent's traits follow the sections its config declares (see
-    # _determine_required_traits); traits.required in the config overrides them.
+    # A prompt agent gets these traits plus the ones its config's sections declare
+    # (see _determine_required_traits); traits.required in the config overrides both.
     required_traits = []
     default_tools = {}  # Tools specified in YAML config
 
@@ -123,11 +123,12 @@ class Factory(BaseFactory):
         return agent  # type: ignore[return-value]
 
     def _determine_required_traits(self, config: DotDict) -> list[TraitName]:
-        """The traits the config's sections declare, unless ``traits.required`` lists them.
+        """The factory's ``required_traits`` plus the traits the config's sections declare.
 
         ``directive`` and ``method`` sections attach their traits. Memory tools
         (``remember`` / ``recall``) attach a MemoryTrait when the platform has
         memory; without it those tools are skipped, as the tool factory reports.
+        A config's ``traits.required`` replaces both.
         """
         if "required" in config.get("traits", {}):
             return super()._determine_required_traits(config)
@@ -135,7 +136,7 @@ class Factory(BaseFactory):
         tools = config.get("tools") or {}
         if self._platform.trait_factory.has_memory and any(t in tools for t in _MEMORY_TOOLS):
             traits.append(TraitName.MEMORY)
-        return traits
+        return list(dict.fromkeys([*self.required_traits, *traits]))
 
     def _add_conversation_trait(self, agent: Agent, config: dict[str, Any]) -> None:
         """Attach a ConversationTrait built from the config's ``conversation`` section, if any."""

@@ -68,7 +68,10 @@ def parse_structured(lg: Logger, content: str, schema: type[BaseModel]) -> BaseM
                 "LLM returned JSON schema definition instead of actual data. "
                 "The model may not understand the structured output instruction."
             )
-        data = cleaner.clean_parsed(data, set(schema.model_fields.keys()))
+        as_received = _validate_as_received(data, schema)
+        if as_received is not None:
+            return as_received
+        data = cleaner.clean_parsed(data, _unwrap_guide(schema))
     try:
         return schema.model_validate(data)
     except ValidationError as e:
@@ -77,6 +80,31 @@ def parse_structured(lg: Logger, content: str, schema: type[BaseModel]) -> BaseM
             extra={"parsed_data": data, "expected_fields": list(schema.model_fields.keys())},
         )
         raise StructuredOutputError(f"Response doesn't match schema: {e}") from e
+
+
+def _validate_as_received(data: dict[str, Any], schema: type[BaseModel]) -> BaseModel | None:
+    """``data`` validated unchanged, when it names a schema field and matches; else ``None``.
+
+    A reply that names none of the fields is a wrapper: on a schema whose
+    fields all have defaults it would validate to the defaults and drop its
+    content, so it is left to unwrapping.
+    """
+    if not data.keys() & schema.model_fields.keys():
+        return None
+    try:
+        return schema.model_validate(data)
+    except ValidationError:
+        return None
+
+
+def _unwrap_guide(schema: type[BaseModel]) -> set[str]:
+    """The fields whose presence ends unwrapping: the required ones, else all.
+
+    A defaulted field may be missing from a valid reply, so waiting for every
+    field would unwrap past it.
+    """
+    required = {name for name, field in schema.model_fields.items() if field.is_required()}
+    return required or set(schema.model_fields)
 
 
 def _instruction(schema: type[BaseModel]) -> str:

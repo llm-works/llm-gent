@@ -115,6 +115,43 @@ class TestStructuredOutput:
         assert result.parsed is None
 
 
+class Counts(BaseModel):
+    """A schema with a dict field and a defaulted sibling."""
+
+    payload: dict[str, int]
+    note: str = ""
+
+
+class Defaults(BaseModel):
+    """A schema whose fields all have defaults."""
+
+    label: str = ""
+    score: float = 0.0
+
+
+class TestUnwrapping:
+    def test_valid_reply_with_a_defaulted_field_is_kept(self):
+        caller = _caller('{"payload": {"n": 1}}')
+
+        result = caller.chat([{"role": "user", "content": "Q?"}], output_schema=Counts)
+
+        assert result.parsed == Counts(payload={"n": 1})
+
+    def test_wrapped_reply_with_a_defaulted_field_is_unwrapped_once(self):
+        caller = _caller('{"result": {"payload": {"n": 1}}}')
+
+        result = caller.chat([{"role": "user", "content": "Q?"}], output_schema=Counts)
+
+        assert result.parsed == Counts(payload={"n": 1})
+
+    def test_wrapped_reply_on_an_all_defaults_schema_is_unwrapped(self):
+        caller = _caller('{"result": {"label": "spam", "score": 0.9}}')
+
+        result = caller.chat([{"role": "user", "content": "Q?"}], output_schema=Defaults)
+
+        assert result.parsed == Defaults(label="spam", score=0.9)
+
+
 class TestStructuredOutputErrors:
     def test_invalid_json_raises(self):
         caller = _caller("not valid json {")

@@ -231,16 +231,14 @@ class Agent:
 
         The caller's live references to the ejected trait become stale after
         this call — its ``on_stop`` has fired, and for ownership-carrying
-        traits like :class:`MemoryTrait` with ``owns_chat_client=True`` its
-        resources are closed. Re-fetch via :meth:`get_trait` or
-        :meth:`require_trait` to obtain a usable reference.
+        traits like :class:`SAIATrait` with ``owns_saia=True`` it releases
+        what it owns. Re-fetch via :meth:`get_trait` or :meth:`require_trait`
+        to obtain a usable reference.
 
-        Typical pairing with ``MemoryTrait.with_chat_client``::
+        Typical pairing with ``SAIATrait.with_saia``::
 
-            agent.replace_trait(
-                agent.require_trait(MemoryTrait).with_chat_client(other_client)
-            )
-            memory = agent.require_trait(MemoryTrait)  # reload
+            agent.replace_trait(agent.require_trait(SAIATrait).with_saia(other_saia))
+            saia_trait = agent.require_trait(SAIATrait)  # reload
 
         Args:
             trait: The trait instance to register or use as a replacement.

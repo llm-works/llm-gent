@@ -63,7 +63,8 @@ class Factory:
 
     Example:
         platform = PlatformFactory(lg).from_config({})
-        memory_trait = platform.trait_factory.create(TraitName.MEMORY, agent)
+        # reads agent.config["directive"]; needs no platform clients
+        directive_trait = platform.trait_factory.create(TraitName.DIRECTIVE, agent)
     """
 
     def __init__(
