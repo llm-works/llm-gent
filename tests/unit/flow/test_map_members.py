@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from llm_gent.core import Role
 from llm_gent.flow import (
     HALTED,
     Context,
@@ -27,7 +28,6 @@ from llm_gent.flow import (
     History,
     Interrupted,
     Loop,
-    Role,
     Skipped,
     Structure,
     majority,

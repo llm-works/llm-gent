@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import UNSET, Context, Flow, Role, Unset, verb
+from llm_gent.core import Role
+from llm_gent.flow import UNSET, Context, Flow, Unset, verb
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, StubSAIA, make_test_logger
 

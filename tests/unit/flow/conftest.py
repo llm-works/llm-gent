@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from appinfra.cas import Commit, Store
 
-from llm_gent.flow import Factory, FlowCommit, Role, SAIAFactory
+from llm_gent.core import Role, SAIAFactory
+from llm_gent.flow import Factory, FlowCommit
 from llm_gent.flow.checkpoint import HEAD_REF
 from tests.helpers import make_test_logger
 

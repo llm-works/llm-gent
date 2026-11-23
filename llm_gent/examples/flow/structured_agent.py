@@ -51,7 +51,8 @@ from appinfra.log import quick_console_logger
 from pydantic import BaseModel, ConfigDict
 
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
-from llm_gent.flow import Context, Factory, Role, StateDataclass, TypeStateFactory, verb
+from llm_gent.core import Role
+from llm_gent.flow import Context, Factory, StateDataclass, TypeStateFactory, verb
 
 
 # ── schemas ──────────────────────────────────────────────────────────

@@ -10,7 +10,8 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Flow, Role, verb
+from llm_gent.core import Role
+from llm_gent.flow import Context, Flow, verb
 
 from .conftest import make_test_logger
 

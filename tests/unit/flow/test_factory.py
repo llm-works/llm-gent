@@ -9,8 +9,9 @@ from typing import Any
 
 import pytest
 
+from llm_gent.core import Role, SAIAFactory
 from llm_gent.core.cost import Tracker as CostTracker
-from llm_gent.flow import Context, Factory, Flow, Role, SAIAFactory, TypeStateFactory, verb
+from llm_gent.flow import Context, Factory, Flow, TypeStateFactory, verb
 from tests.helpers import memory_store
 
 from .conftest import ROLE_A, StubFactory, make_test_logger

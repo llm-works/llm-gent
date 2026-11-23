@@ -3,10 +3,10 @@
 
 """Agent flow framework — role-based verb dispatch on top of saia.
 
-Public surface:
+Public surface (roles and how they become SAIA instances,
+:class:`~llm_gent.core.Role` and :class:`~llm_gent.core.SAIAFactory`, are
+:mod:`llm_gent.core`'s):
 
-- :class:`Role` — pure config for a persona (name, backend, model, sampling)
-- :class:`SAIAFactory` — protocol that turns a Role into a saia instance
 - :func:`verb` — decorator marking an async function as a role-bound verb
 - :data:`VerbCallable` — the type of a verb: an async callable taking
   ``(ctx, *args, **kwargs)``
@@ -27,7 +27,7 @@ Public surface:
   call routes through ``state_type.from_dict``)
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
 - :class:`Factory` — app-scoped :class:`Flow` builder (captures ``lg``
-  and one :class:`SAIAFactory`); preferred entry point at the application
+  and one :class:`~llm_gent.core.SAIAFactory`); preferred entry point at the application
   boundary
 - :class:`Resource` — protocol of a run-scoped object checkpointed with
   the run (``snapshot()`` / ``restore(data)``, optional ``child(...)`` for
@@ -76,8 +76,6 @@ compose those from ``llm_kelt`` (default) or their own implementations, and
 mount them via the existing trait system.
 """
 
-from ..core.env import SAIAFactory
-from ..core.role import Role
 from .aggregate import majority, mean, unanimous, weighted
 from .archetypes import extractor, grader, planner, synthesizer
 from .checkpoint import CheckpointPolicy, ConcurrentWriteError, ResumeMode, Retention
@@ -121,8 +119,6 @@ __all__ = [
     "RestoredError",
     "ResumeMode",
     "Retention",
-    "Role",
-    "SAIAFactory",
     "Skipped",
     "State",
     "StateData",

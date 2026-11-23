@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from llm_gent.flow import Role, extractor, grader, planner, synthesizer
+from llm_gent.core import Role
+from llm_gent.flow import extractor, grader, planner, synthesizer
 
 
 ROLE = Role(name="x", backend="openai", model="gpt-4o-mini")

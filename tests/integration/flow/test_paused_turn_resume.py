@@ -26,7 +26,8 @@ from llm_saia.core.errors import PauseRequested
 from llm_saia.core.logger import NullLogger
 from llm_saia.core.types import ChatResponse, Message, ToolCall, ToolDef
 
-from llm_gent.flow import Context, Factory, History, Loop, Role, verb
+from llm_gent.core import Role
+from llm_gent.flow import Context, Factory, History, Loop, verb
 from llm_gent.flow.state.snapshot import TURN
 from tests.helpers import file_store
 

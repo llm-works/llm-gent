@@ -58,7 +58,8 @@ from llm_saia.core.backend import Backend
 
 from llm_gent.examples._clients import example_client, parse_client_args
 from llm_gent.examples.provenance._shared import print_records, summary_of, writer_saia
-from llm_gent.flow import HALTED, Context, Factory, Flow, Loop, Pause, Role, verb
+from llm_gent.core import Role
+from llm_gent.flow import HALTED, Context, Factory, Flow, Loop, Pause, verb
 from llm_gent.flow.hooks import Hook, StepEvent
 from llm_gent.provenance import Actor, Record, VersionControl
 

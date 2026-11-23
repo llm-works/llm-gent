@@ -21,9 +21,10 @@ from typing import Any
 
 import pytest
 
+from llm_gent.core import Role
 from llm_gent.core.cost import PricingConfig
 from llm_gent.core.cost import Tracker as CostTracker
-from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, Loop, Role, verb
+from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, Loop, verb
 from llm_gent.flow.state.snapshot import RESOURCES
 from tests.helpers import memory_store
 
