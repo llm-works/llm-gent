@@ -24,10 +24,10 @@ class RememberTool(BaseTool):
     Facts are stored with optional category for organization.
 
     Example:
-        from llm_gent.core.traits.builtin.memory import MemoryTrait, MemoryConfig
+        from llm_gent.core.traits.builtin.memory import MemoryTrait
         from llm_gent.core.tools.builtin.memory import RememberTool
 
-        memory_trait = MemoryTrait(agent, MemoryConfig(...))
+        memory_trait = agent.require_trait(MemoryTrait)  # the agent's memory view
         tool = RememberTool(memory_trait)
         result = tool.execute(fact="User prefers Python", category="preferences")
     """
@@ -85,10 +85,10 @@ class RecallTool(BaseTool):
     when embedder is configured, otherwise returns recent facts.
 
     Example:
-        from llm_gent.core.traits.builtin.memory import MemoryTrait, MemoryConfig
+        from llm_gent.core.traits.builtin.memory import MemoryTrait
         from llm_gent.core.tools.builtin.memory import RecallTool
 
-        memory_trait = MemoryTrait(agent, MemoryConfig(...))
+        memory_trait = agent.require_trait(MemoryTrait)  # the agent's memory view
         tool = RecallTool(memory_trait)
         result = tool.execute(query="user preferences", limit=5)
     """

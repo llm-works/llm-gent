@@ -11,6 +11,7 @@ import pytest
 from llm_gent.core import Role
 from llm_gent.core.platform import Config, Factory, Platform
 from llm_gent.core.traits import Registry as TraitRegistry
+from llm_gent.core.traits.builtin.memory import MemoryTrait
 from tests.helpers import make_platform, make_test_logger
 
 
@@ -128,12 +129,13 @@ class TestFactory:
 
 @pytest.fixture
 def database():
-    """The kelt Database the platform builds for memory; no connection is made."""
+    """The kelt Database and client the platform builds for memory; no connection is made."""
     with (
         patch("appinfra.db.pg.PG") as pg,
         patch("llm_gent.core.platform.factory.Database") as database,
+        patch("llm_gent.core.traits.builtin.memory.KeltClient") as kelt,
     ):
-        yield {"pg": pg, "database": database}
+        yield {"pg": pg, "database": database, "kelt": kelt}
 
 
 class TestFactoryMemory:
@@ -163,6 +165,14 @@ class TestFactoryMemory:
         )
         assert memory.embedder is clients.return_value.embeddings.return_value
 
+    def test_the_memory_trait_is_built_once_into_the_registry(self, packaged, clients, database):
+        platform = Factory(MagicMock()).from_config({"memory": {"db": {"url": "x"}}})
+
+        memory = platform.traits.require(MemoryTrait)
+        assert memory is platform.trait_factory._memory
+        assert memory.identity is None
+        database["kelt"].assert_called_once()
+
     def test_close_disposes_database_and_closes_clients(self, packaged, clients, database):
         router, chat_client = MagicMock(), MagicMock()
         clients.return_value.from_config.side_effect = [router, chat_client]
@@ -173,7 +183,7 @@ class TestFactoryMemory:
 
         platform.close()
 
-        assert memory.chat_client is chat_client
+        assert memory.client is chat_client
         memory.database.dispose.assert_called_once()
         chat_client.close.assert_called_once()
         memory.embedder.close.assert_called_once()

@@ -18,14 +18,14 @@ from appinfra import DotDict
 from appinfra.log import Logger
 
 from ..errors import TraitNotFoundError
-from ..traits.base import BaseTrait
+from ..traits.base import Trait
 from ..traits.registry import Registry as TraitRegistry
 
 
 if TYPE_CHECKING:
     from .identity import Identity
 
-TraitT = TypeVar("TraitT", bound=BaseTrait)
+TraitT = TypeVar("TraitT", bound=Trait)
 
 
 class Agent:
@@ -156,7 +156,7 @@ class Agent:
     # Trait Management
     # =========================================================================
 
-    def add_trait(self, trait: BaseTrait) -> None:
+    def add_trait(self, trait: Trait) -> None:
         """Add a trait to this agent.
 
         Traits must be constructed with this agent as a parameter. If the
@@ -198,7 +198,7 @@ class Agent:
         """Get an attached trait by its type (or ``None``)."""
         return self._traits.get(trait_type)
 
-    def has_trait(self, trait_type: type[BaseTrait]) -> bool:
+    def has_trait(self, trait_type: type[Trait]) -> bool:
         """Return whether a trait of this type is attached."""
         return self._traits.has(trait_type)
 
@@ -216,7 +216,7 @@ class Agent:
                 f"add it with agent.add_trait({trait_type.__name__}(...))"
             ) from e
 
-    def replace_trait(self, trait: BaseTrait) -> None:
+    def replace_trait(self, trait: Trait) -> None:
         """Register ``trait``, replacing any existing entry of the same type.
 
         Registry membership implies agent-managed lifecycle: when the agent
@@ -272,9 +272,9 @@ class Agent:
 
     def _rollback_trait_replace(
         self,
-        trait: BaseTrait,
-        old: BaseTrait | None,
-        trait_type: type[BaseTrait],
+        trait: Trait,
+        old: Trait | None,
+        trait_type: type[Trait],
         exception: Exception,
     ) -> None:
         """Roll back a failed replace_trait: stop the new trait, restore the old."""
@@ -292,7 +292,7 @@ class Agent:
         else:
             self._traits.unregister(trait_type)
 
-    def _log_trait_replaced(self, trait_type: type[BaseTrait], *, ejected: bool) -> None:
+    def _log_trait_replaced(self, trait_type: type[Trait], *, ejected: bool) -> None:
         """Debug-log the outcome of a successful replace_trait call."""
         self._lg.debug(
             "trait replaced",
@@ -303,7 +303,7 @@ class Agent:
     # Trait Lifecycle Helpers
     # =========================================================================
 
-    def _safe_stop_trait(self, trait: BaseTrait, context: str) -> None:
+    def _safe_stop_trait(self, trait: Trait, context: str) -> None:
         """Attempt on_stop, logging but swallowing any exception."""
         try:
             trait.on_stop()

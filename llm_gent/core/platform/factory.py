@@ -17,8 +17,8 @@ from llm_kelt.core import Database
 
 from ..role import Role
 from ..tools.factory import Factory as ToolFactory
+from ..traits.builtin.memory import MemoryTrait
 from ..traits.factory import Factory as TraitFactory
-from ..traits.factory import MemoryResources
 from ..traits.registry import Registry as TraitRegistry
 from ._platform import Closeable, Platform, SAIAFactory, close_resources
 from .config import Config
@@ -87,6 +87,9 @@ class Factory:
             close_resources(self._lg, owned)
             raise
         trait_factory = TraitFactory(self._lg, router, memory_config=settings.memory, memory=memory)
+        traits = TraitRegistry(self._lg)
+        if memory is not None:
+            traits.register(memory)
         self._lg.debug(
             "platform built",
             extra={"default": router_config.get("default"), "memory": memory is not None},
@@ -97,7 +100,7 @@ class Factory:
             saia_factory=self._saia_factory,
             trait_factory=trait_factory,
             tool_factory=ToolFactory(self._lg),
-            traits=TraitRegistry(self._lg),
+            traits=traits,
             owned=owned,
         )
 
@@ -111,8 +114,11 @@ class Factory:
 
     def _memory(
         self, memory_config: dict[str, Any] | None, owned: list[Closeable]
-    ) -> MemoryResources | None:
-        """The shared memory clients, built when the memory settings name a database."""
+    ) -> MemoryTrait | None:
+        """The shared memory trait and its clients, when the memory settings name a database.
+
+        The trait prepares the memory schema here, once for the platform.
+        """
         if not memory_config or "db" not in memory_config:
             return None
         from appinfra.db.pg import PG
@@ -125,7 +131,13 @@ class Factory:
         embedder = _embedder(client_factory, memory_config)
         if embedder is not None:
             owned.append(embedder)
-        return MemoryResources(database=database, chat_client=chat_client, embedder=embedder)
+        return MemoryTrait(
+            self._lg,
+            DotDict(memory_config),
+            database=database,
+            chat_client=chat_client,
+            embedder=embedder,
+        )
 
 
 def _embedder(

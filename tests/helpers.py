@@ -16,8 +16,8 @@ from llm_gent.core.platform import Platform, SAIAFactory
 from llm_gent.core.platform.factory import _NoSAIAFactory
 from llm_gent.core.tools.factory import Factory as ToolFactory
 from llm_gent.core.traits import Registry as TraitRegistry
+from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.factory import Factory as TraitFactory
-from llm_gent.core.traits.factory import MemoryResources
 from llm_gent.flow import Factory, Flow, FlowRunner
 
 
@@ -153,23 +153,27 @@ def make_platform(
     saia_factory: SAIAFactory | None = None,
     traits: TraitRegistry | None = None,
     memory_config: Mapping[str, Any] | None = None,
-    memory: MemoryResources | None = None,
+    memory: MemoryTrait | None = None,
 ) -> Platform:
     """A platform on stub clients, built directly: no config file read, no client built.
 
     ``router`` defaults to a ``MagicMock``. Without ``saia_factory`` the platform
     builds no SAIA, as one from ``PlatformFactory`` without one; without
-    ``traits`` its registry is empty.
+    ``traits`` its registry is empty. ``memory``, the shared memory trait, joins
+    the registry as ``PlatformFactory`` registers it.
     """
     router = router if router is not None else MagicMock()
     trait_factory = TraitFactory(lg, router, memory_config=memory_config, memory=memory)
+    registry = traits if traits is not None else TraitRegistry(lg)
+    if memory is not None:
+        registry.register(memory)
     return Platform(
         lg,
         llm=router,
         saia_factory=saia_factory if saia_factory is not None else _NoSAIAFactory(),
         trait_factory=trait_factory,
         tool_factory=ToolFactory(lg),
-        traits=traits if traits is not None else TraitRegistry(lg),
+        traits=registry,
         owned=[],
     )
 

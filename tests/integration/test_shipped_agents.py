@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import yaml
+from appinfra import DotDict
 
 from llm_gent.agents.default import Factory
 from llm_gent.core.traits.builtin.conversation import ConversationTrait
@@ -59,15 +60,42 @@ def test_memory_tools_attach_memory_on_a_platform_with_memory() -> None:
     """Jokester's remember / recall need a MemoryTrait; a platform with memory gives it one."""
     path = AGENTS_DIR / "jokester.yaml"
     config = AgentServerConfig.from_dict({"agents": {"jokester": _raw(path)}}).agents["jokester"]
-    memory = MagicMock()
-    memory.database.schema = "public"  # kelt checks the client's schema against the database's
-    platform = make_platform(MagicMock(), memory_config={"db": {}}, memory=memory)
+    platform = make_platform(MagicMock(), memory_config={"db": {}}, memory=_memory(_database()))
 
     agent = Factory(platform=platform).create(config.factory_config("jokester"))
 
-    assert agent.get_trait(MemoryTrait) is not None
+    assert agent.require_trait(MemoryTrait).identity == agent.identity
     names = {tool.name for tool in agent.require_trait(ToolsTrait).registry.list_tools()}
     assert {"remember", "recall"} <= names
+
+
+def test_agents_on_one_platform_prepare_the_memory_schema_once() -> None:
+    """Each agent's memory is a view of the platform's: the schema is prepared once."""
+    database = _database()
+    platform = make_platform(MagicMock(), memory_config={"db": {}}, memory=_memory(database))
+    factory = Factory(platform=platform)
+    raw = _raw(AGENTS_DIR / "jokester.yaml")
+
+    agents = []
+    for name in ("jokester", "jokester-2"):
+        agent_raw = {**raw, "identity": {"name": name}}
+        config = AgentServerConfig.from_dict({"agents": {name: agent_raw}}).agents[name]
+        agents.append(factory.create(config.factory_config(name)))
+
+    database.ensure_schema.assert_called_once()
+    keys = {agent.require_trait(MemoryTrait).kelt.context_key for agent in agents}
+    assert keys == {"jokester", "jokester-2"}
+
+
+def _database() -> MagicMock:
+    database = MagicMock()
+    database.schema = "public"  # kelt checks the client's schema against the database's
+    return database
+
+
+def _memory(database: MagicMock) -> MemoryTrait:
+    """The platform's memory trait: a real kelt client over a stub database."""
+    return MemoryTrait(MagicMock(), DotDict({}), database=database, chat_client=MagicMock())
 
 
 def test_memory_tools_are_skipped_on_a_platform_without_memory() -> None:

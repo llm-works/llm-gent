@@ -48,8 +48,8 @@ class StorageTrait(BaseTrait):
             rated: Mapped[bool] = mapped_column(Boolean, default=False)
             rating: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-        # Attach traits
-        agent.add_trait(MemoryTrait(agent, memory_config))
+        # Attach traits: the agent's view of the platform's memory, then storage
+        agent.add_trait(platform.traits.require(MemoryTrait).view(agent.identity))
         agent.add_trait(StorageTrait(agent))
         agent.start()
 
@@ -74,7 +74,8 @@ class StorageTrait(BaseTrait):
         results = storage.execute(stmt).all()
 
     Lifecycle:
-        - on_start(): Creates AgentStorage from MemoryTrait's KeltClient
+        - on_start(): Creates AgentStorage on the memory database and the
+          agent's memory isolation context
         - on_stop(): Cleanup (no-op, AgentStorage is stateless)
     """
 
@@ -88,7 +89,7 @@ class StorageTrait(BaseTrait):
         self._storage: AgentStorage | None = None
 
     def on_start(self) -> None:
-        """Create AgentStorage from MemoryTrait's KeltClient.
+        """Create AgentStorage on the agent's memory database and isolation context.
 
         Raises:
             TraitNotFoundError: If MemoryTrait is not attached.
@@ -99,8 +100,10 @@ class StorageTrait(BaseTrait):
         # Require MemoryTrait
         memory_trait = self.agent.require_trait(MemoryTrait)
 
-        # Create storage wrapping KeltClient
-        self._storage = AgentStorage(self.agent.lg, memory_trait.kelt)
+        # Storage shares the memory database, isolated by the memory view's context
+        self._storage = AgentStorage(
+            self.agent.lg, memory_trait.database, memory_trait.kelt.context
+        )
 
         self.agent.lg.trace("storage trait started", extra={"agent": self.agent.name})
 

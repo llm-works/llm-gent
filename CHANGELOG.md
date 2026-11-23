@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: model access is the platform's, not a trait. `LLMTrait`, `LLMConfig` and
   `TraitName.LLM` are removed; a plain call is `Caller(lg, platform.llm).chat(...)`, which takes
   `output_schema=` for structured output. An agent config with an `llm` key raises `ConfigError`.
+- Breaking: a platform builds one `MemoryTrait` (`platform.traits`), preparing the memory schema
+  once; an agent's memory is `MemoryTrait.view(identity)`. Removed: `MemoryTrait(agent, ...)`,
+  its `owns_*` flags and `with_*` swaps, `TraitFactory.create_memory_trait`, `MemoryResources`.
+  `AgentStorage` takes `(lg, database, context)`.
 
 ### Fixed
 

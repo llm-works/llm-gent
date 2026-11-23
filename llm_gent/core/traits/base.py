@@ -26,8 +26,11 @@ For runtime override, expose an immutable-view fluent
 detached from the agent's registry; a caller wanting a persistent swap
 calls ``agent.replace_trait(new)``.
 
-Worked examples: ``MemoryTrait`` (database, chat client, embedder),
-``TrainingTrait`` (train factory).
+Worked examples: ``TrainingTrait`` (train factory), ``SAIATrait`` (SAIA).
+
+A trait over the platform's shared clients is built once by the platform
+instead and handed to each agent as a view bound to its identity; the
+platform closes those clients (``MemoryTrait`` and ``MemoryTrait.view``).
 """
 
 from __future__ import annotations
