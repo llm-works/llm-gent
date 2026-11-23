@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import Factory, Failure, State, StateDataclass, TypeStateFactory, verb
-from tests.helpers import TestFactory, run_flow
+from tests.helpers import TestFactory, platform_of, run_flow
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, make_ff, make_test_logger
 
@@ -198,7 +198,7 @@ class TestStateWrapper:
 
         flow = make_ff().create("top")
         flow.register(check)
-        await flow.dispatch("check", scope_state=user_state)
+        await flow.dispatch("check", scope_state=user_state, platform=platform_of(flow))
 
         assert isinstance(seen[0], State)
         assert seen[0].data is user_state
@@ -214,8 +214,8 @@ class TestStateWrapper:
 
         flow = _factory(TypeStateFactory(_Tally)).create("top")
         flow.register(check)
-        await flow.dispatch("check")
-        await flow.dispatch("check")
+        await flow.dispatch("check", platform=platform_of(flow))
+        await flow.dispatch("check", platform=platform_of(flow))
 
         assert [type(s) for s in seen] == [_Tally, _Tally]
         assert seen[0] is not seen[1]

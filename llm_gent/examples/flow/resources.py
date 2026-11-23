@@ -43,6 +43,7 @@ from typing import Any
 from appinfra.cas import MemoryStore
 from appinfra.log import quick_console_logger
 
+from llm_gent.core import PlatformFactory
 from llm_gent.flow import (
     HALTED,
     Context,
@@ -132,22 +133,24 @@ async def main() -> int:
     lg = quick_console_logger("resources-example", config={"level": "warning"})
     store = MemoryStore(lg)
     ff = Factory(lg, flow_class=MyFlow)
-    runner = FlowRunner(lg, store=store)
+    async with PlatformFactory(lg).from_config({}) as platform:
+        runner = FlowRunner(lg, platform=platform, store=store)
 
-    print("--- Run 1: halts once every document is fetched ---")
-    stats1 = Stats()
-    result1 = await runner.start(build(ff, stats1, arm=True), halt=asyncio.Event(), history="docs")
-    assert result1 is HALTED
-    print(f"halted with tallies {dict(stats1.tallies)}")
+        print("--- Run 1: halts once every document is fetched ---")
+        stats1 = Stats()
+        flow1 = build(ff, stats1, arm=True)
+        result1 = await runner.start(flow1, halt=asyncio.Event(), history="docs")
+        assert result1 is HALTED
+        print(f"halted with tallies {dict(stats1.tallies)}")
 
-    print("\n--- Run 2: fresh flow and Stats, Resume('latest') ---")
-    stats2 = Stats()
-    scores = await runner.start(
-        build(ff, stats2, arm=False),
-        halt=asyncio.Event(),
-        history="docs",
-        start=Resume("latest"),
-    )
+        print("\n--- Run 2: fresh flow and Stats, Resume('latest') ---")
+        stats2 = Stats()
+        scores = await runner.start(
+            build(ff, stats2, arm=False),
+            halt=asyncio.Event(),
+            history="docs",
+            start=Resume("latest"),
+        )
     print(f"scores {scores}, tallies {dict(stats2.tallies)}")
     assert stats2.tallies == Counter(fetched=len(DOCS), scored=len(DOCS))
     return 0

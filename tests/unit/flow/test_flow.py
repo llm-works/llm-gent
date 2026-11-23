@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
-from llm_gent.core import Environment, Role
+from llm_gent.core import Role
 from llm_gent.flow import UNSET, Context, Flow, Unset, verb
-from tests.helpers import TestFlow
+from tests.helpers import TestFlow, make_platform, platform_of
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, StubSAIA, make_test_logger
 
@@ -105,7 +105,7 @@ class TestDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_invokes_verb_with_context(self) -> None:
         """The verb receives a Context whose saia is bound to its role."""
-        env = Environment(saia_factory=StubFactory())
+        platform = make_platform(make_test_logger(), saia_factory=StubFactory())
         flow = Flow(lg=make_test_logger())
 
         @verb(role=ROLE_A)
@@ -114,7 +114,7 @@ class TestDispatch:
             return ctx.saia, value
 
         flow.register(check)
-        saia, value = await flow.dispatch("check", 42, env=env)
+        saia, value = await flow.dispatch("check", 42, platform=platform)
 
         assert isinstance(saia, StubSAIA)
         assert saia.role is ROLE_A
@@ -133,8 +133,9 @@ class TestDispatch:
             return ctx.state.data["counter"]
 
         flow.register(bump)
-        assert await flow.dispatch("bump", scope_state=user_state) == 1
-        assert await flow.dispatch("bump", scope_state=user_state) == 2
+        platform = platform_of(flow)
+        assert await flow.dispatch("bump", scope_state=user_state, platform=platform) == 1
+        assert await flow.dispatch("bump", scope_state=user_state, platform=platform) == 2
         assert user_state["counter"] == 2
 
     @pytest.mark.asyncio
@@ -148,24 +149,24 @@ class TestDispatch:
             return ctx.role
 
         flow.register(report)
-        assert (await flow.dispatch("report")) is ROLE_B
+        assert (await flow.dispatch("report", platform=platform_of(flow))) is ROLE_B
 
     @pytest.mark.asyncio
     async def test_dispatch_unknown_name_raises(self) -> None:
         """Dispatching an unregistered name raises KeyError with the name."""
         flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         with pytest.raises(KeyError, match="no verb"):
-            await flow.dispatch("missing")
+            await flow.dispatch("missing", platform=platform_of(flow))
 
 
 class TestSAIACaching:
-    """An environment invokes its SAIAFactory at most once per Role."""
+    """A platform invokes its SAIAFactory at most once per Role."""
 
     @pytest.mark.asyncio
     async def test_saia_built_once_per_role(self) -> None:
-        """Repeated dispatch of the same role reuses the environment's saia."""
+        """Repeated dispatch of the same role reuses the platform's saia."""
         saia = StubFactory()
-        env = Environment(saia_factory=saia)
+        platform = make_platform(make_test_logger(), saia_factory=saia)
         flow = Flow(lg=make_test_logger())
 
         @verb(role=ROLE_A)
@@ -181,9 +182,9 @@ class TestSAIACaching:
         flow.register(a1)
         flow.register(a2)
 
-        s1 = await flow.dispatch("a1", env=env)
-        s2 = await flow.dispatch("a2", env=env)
-        s3 = await flow.dispatch("a1", env=env)
+        s1 = await flow.dispatch("a1", platform=platform)
+        s2 = await flow.dispatch("a2", platform=platform)
+        s3 = await flow.dispatch("a1", platform=platform)
 
         assert s1 is s2 is s3
         assert saia.built_for == [ROLE_A]
@@ -192,7 +193,7 @@ class TestSAIACaching:
     async def test_saia_built_per_distinct_role(self) -> None:
         """Distinct roles get distinct saia instances."""
         saia = StubFactory()
-        env = Environment(saia_factory=saia)
+        platform = make_platform(make_test_logger(), saia_factory=saia)
         flow = Flow(lg=make_test_logger())
 
         @verb(role=ROLE_A)
@@ -208,8 +209,8 @@ class TestSAIACaching:
         flow.register(alpha)
         flow.register(beta)
 
-        sa = await flow.dispatch("alpha", env=env)
-        sb = await flow.dispatch("beta", env=env)
+        sa = await flow.dispatch("alpha", platform=platform)
+        sb = await flow.dispatch("beta", platform=platform)
 
         assert sa is not sb
         assert saia.built_for == [ROLE_A, ROLE_B]

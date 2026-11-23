@@ -45,7 +45,7 @@ from llm_saia import SAIA
 from llm_saia.core.config import DEFAULT_CALL
 from llm_saia.core.conversation import ConversationFactory
 
-from ..core.env import SAIAFactory
+from ..core.platform import SAIAFactory
 from ..core.role import Role
 from .checkpoint import maybe_await
 from .context import Context
@@ -655,7 +655,7 @@ class LoopFactory:
 
     The ``SAIAFactory`` on this factory is held for future
     standalone-Loop use (not required today — Flow-body Loops read
-    ``ctx.saia`` from the run's environment, ``FlowRunner(lg, env=...)``).
+    ``ctx.saia`` from the run's platform, ``FlowRunner(lg, platform=...)``).
     Consumers are free
     to pass ``saia_factory=None`` when they only wire Loops into Flows.
     """
@@ -676,7 +676,7 @@ class LoopFactory:
                 ``with_*`` derivations.
             saia_factory: Optional :class:`SAIAFactory`. Reserved for
                 standalone-Loop use; Flow-body Loops read ``ctx.saia``
-                from the run's environment (``FlowRunner(lg, env=...)``).
+                from the run's platform (``FlowRunner(lg, platform=...)``).
             halt: Optional :class:`asyncio.Event` used as the default
                 halt for every built Loop. Per-``create`` overrides
                 win (same explicit-wins rule the Loop itself uses).

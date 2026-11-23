@@ -4,7 +4,7 @@
 """Role — first-class config for a persona bound to an LLM backend + model.
 
 A ``Role`` wraps the configuration a
-:class:`~llm_gent.core.env.SAIAFactory` needs to build a
+:class:`~llm_gent.core.SAIAFactory` needs to build a
 role-bound saia client. It exists because neither ``llm_saia`` nor
 ``llm_infer`` carries the "persona with a job" concept as a first-class
 object — saia knows verbs, llm-infer knows routing strings. The flow layer
@@ -12,10 +12,12 @@ on top of both needs a small explicit shape.
 
 ``Role`` carries two kinds of information: statically-typed persona config
 (name, and optionally backend, model, temperature, max_tokens, style) and an open
-``params`` mapping for per-run parameters the enclosing consumer's
-:class:`SAIAFactory` interprets at build time (max_iterations, cost
-trackers, session identifiers, task state — anything gent itself doesn't
-model). Consumers vary a role for a run via :meth:`Role.with_params`.
+``params`` mapping of further configuration the enclosing consumer's
+:class:`SAIAFactory` interprets at build time (max_iterations, a tool set's
+name — anything gent itself doesn't model). A role is the key of a
+platform's SAIA cache, so it holds configuration only: a run's own values
+(its cost tracker, its state, a session) reach a step through ``ctx.cost``
+and ``ctx.state``, never through a role.
 """
 
 from __future__ import annotations
@@ -59,16 +61,20 @@ class Role:
     """Optional prompt preamble injected by the flow into system prompts."""
 
     params: dict[str, Any] = field(default_factory=dict, hash=False, compare=True)
-    """Per-run parameters consumed by the enclosing :class:`SAIAFactory` at
+    """Further configuration consumed by the enclosing :class:`SAIAFactory` at
     build time. Opaque to gent — key naming is a contract between the
-    factory and its callers (e.g. a factory reading ``max_iterations``,
-    ``run_cost``, ``session_id``, ``task_state`` from here).
+    factory and its callers (e.g. a factory reading ``max_iterations``
+    from here).
 
-    Excluded from :meth:`__hash__` so ``Role`` remains hashable even when
-    ``params`` values are unhashable objects (trackers, state instances).
-    Participates in :meth:`__eq__` so roles differing only in ``params``
-    correctly miss an :class:`~llm_gent.core.env.Environment`'s SAIA cache —
-    each unique ``params`` snapshot yields a distinct SAIA build.
+    Configuration only. A :class:`~llm_gent.core.Platform` keeps the SAIA
+    it builds for a role for the life of the process, and roles differing
+    in ``params`` are different keys: a value that differs per run (a cost
+    tracker, a state, a session id) would leave one SAIA per run in the
+    cache. Such values reach a step through ``ctx.cost`` and ``ctx.state``.
+
+    Excluded from :meth:`__hash__` so ``Role`` stays hashable with
+    unhashable values (a dict, a list); participates in :meth:`__eq__` so
+    roles differing only in ``params`` build apart.
 
     Do not mutate ``params`` in place after construction — use
     :meth:`with_params` to create a new Role with changed parameters.
@@ -79,7 +85,7 @@ class Role:
 
         Later calls override earlier keys::
 
-            r = ROLE.with_params(max_iterations=20, run_cost=tracker)
+            r = ROLE.with_params(max_iterations=20, toolset="search")
             r2 = r.with_params(max_iterations=30)   # r2.params["max_iterations"] == 30
         """
         return replace(self, params={**self.params, **kv})

@@ -43,7 +43,7 @@ from typing import Any, Generic, TypeVar, overload
 from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
-from ..core.env import Environment
+from ..core.platform import Platform
 from ..core.role import Role
 from ..core.traits import Registry as TraitRegistry
 from .checkpoint import checkpoint_tag
@@ -103,13 +103,13 @@ class Context(Generic[T]):
     method used.
     """
 
-    env: Environment = field(default_factory=Environment)
-    """What the run may use: the SAIA per role (:attr:`saia`) and the traits (:attr:`traits`).
+    platform: Platform
+    """The platform the run runs on: the SAIA per role (:attr:`saia`) and the traits (:attr:`traits`).
 
-    The run's :class:`~llm_gent.core.env.Environment`, given to the runner
-    that started it; every flow of the run, nested ones included, sees the
-    same one. Pass ``env=ctx.env`` to :meth:`Flow.dispatch` to hand it to a
-    sibling.
+    The :class:`~llm_gent.core.Platform` given to the runner that started
+    the run; every flow of the run, nested ones included, sees the same
+    one. Pass ``platform=ctx.platform`` to :meth:`Flow.dispatch` to hand it
+    to a sibling.
     """
 
     halt: asyncio.Event | None = None
@@ -182,39 +182,40 @@ class Context(Generic[T]):
         return self.state.data
 
     @property
-    def traits(self) -> TraitRegistry | None:
-        """The run's trait registry, or ``None`` when its environment has none.
+    def traits(self) -> TraitRegistry:
+        """The platform's trait registry; it may be empty.
 
         Verbs reach mounted platform capabilities (memory, storage, tools,
         custom traits) via ``ctx.traits.get(SomeTrait)`` or
         ``ctx.traits.require(SomeTrait)``; a verb that needs a trait handles
-        its absence, or the run is started with an environment that has
-        one. The same class is exported as ``Registry`` from
+        its absence, or the run is started on a platform that has it. The
+        same class is exported as ``Registry`` from
         :mod:`llm_gent.core.traits`.
         """
-        return self.env.traits
+        return self.platform.traits
 
     @property
     def saia(self) -> Any:
         """The role-bound saia instance for this dispatch.
 
-        Built on first access by the run's environment
-        (:meth:`Environment.saia <llm_gent.core.env.Environment.saia>`),
-        which keeps one per role: repeated reads, from this run or any
-        other sharing the environment, get the same instance.
+        Built on first access by the run's platform
+        (:meth:`Platform.saia <llm_gent.core.Platform.saia>`), which keeps
+        one per role: repeated reads, from this run or any other on the
+        platform, get the same instance.
 
         Returns ``None`` when :attr:`role` is ``None`` — subflow-node ctx,
         hook ctx, and pure-Python verbs (``@verb`` with no ``role=``)
         have no role to bind against, so there is no saia to build.
 
-        Raises :class:`RuntimeError` if the environment has no SAIAFactory
-        and this ctx has a role. The error surfaces at access, not at
-        construction, so verbs that never touch ``ctx.saia`` (e.g. those
-        routing LLM calls through their own configuration) run without one.
+        Raises what the platform's SAIA factory raises; a platform built
+        without one raises :class:`RuntimeError`. The error surfaces at
+        access, not at construction, so verbs that never touch
+        ``ctx.saia`` (e.g. those routing LLM calls through their own
+        configuration) run without one.
         """
         if self.role is None:
             return None
-        return self.env.saia(self.role)
+        return self.platform.saia(self.role)
 
     def saia_as(self, cls: type[S]) -> S | None:
         """Return :attr:`saia` typed as ``cls`` — cast helper for verb authors.

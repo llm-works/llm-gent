@@ -58,7 +58,7 @@ from llm_saia.core.backend import Backend
 
 from llm_gent.examples._clients import example_client, parse_client_args
 from llm_gent.examples.provenance._shared import print_records, summary_of, writer_saia
-from llm_gent.core import Environment, Role
+from llm_gent.core import PlatformFactory, Role
 from llm_gent.flow import HALTED, Context, Factory, Flow, FlowRunner, Loop, Pause, Resume, verb
 from llm_gent.flow.hooks import Hook, StepEvent
 from llm_gent.provenance import Actor, Record, VersionControl
@@ -152,18 +152,19 @@ async def _run(lg: Logger, backend: Backend) -> tuple[Any, Any, VersionControl, 
     """Run until the gate pauses, then resume with the approval."""
     store = MemoryStore(lg)
     vc = VersionControl(lg, store.repo(REPO))
-    env = Environment(saia_factory=_WriterFactory(lg, backend))
-    runner = FlowRunner(lg, env=env, store=store)
-    flow = _flow(lg, (EditorApproval(vc, None), vc))
-    first = await runner.start(flow, TOPIC, halt=asyncio.Event(), history=REPO)
-    print(f"--- run 1: {'halted, waiting for approval' if first is HALTED else first}")
-    gate = EditorApproval(vc, approved_by="editor-1")
-    second = await runner.start(
-        _flow(lg, (gate, vc)),
-        halt=asyncio.Event(),
-        history=REPO,
-        start=Resume("latest"),
-    )
+    platforms = PlatformFactory(lg).with_saia_factory(_WriterFactory(lg, backend))
+    async with platforms.from_config({}) as platform:
+        runner = FlowRunner(lg, platform=platform, store=store)
+        flow = _flow(lg, (EditorApproval(vc, None), vc))
+        first = await runner.start(flow, TOPIC, halt=asyncio.Event(), history=REPO)
+        print(f"--- run 1: {'halted, waiting for approval' if first is HALTED else first}")
+        gate = EditorApproval(vc, approved_by="editor-1")
+        second = await runner.start(
+            _flow(lg, (gate, vc)),
+            halt=asyncio.Event(),
+            history=REPO,
+            start=Resume("latest"),
+        )
     print(f"--- run 2 (resumed, approved): {second}")
     return first, second, vc, store
 

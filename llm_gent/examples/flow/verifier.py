@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from appinfra.log import quick_console_logger
 
 from llm_gent.examples.flow._infra import ExampleSAIA, StubSAIAFactory
-from llm_gent.core import Environment, Role
+from llm_gent.core import PlatformFactory, Role
 from llm_gent.flow import Context, Factory, FlowRunner, StateDataclass, TypeStateFactory, verb
 
 
@@ -206,7 +206,6 @@ async def main() -> int:
     lg = quick_console_logger("verifier-example", config={"level": "warning"})
     saia_factory = StubSAIAFactory(_demo_scripts())
     ff = Factory(lg, state_factory=TypeStateFactory(VerifierState))
-    runner = FlowRunner(lg, env=Environment(saia_factory=saia_factory))
 
     query = "What is the capital of France?"
     flow = ff.create("verifier")
@@ -217,7 +216,9 @@ async def main() -> int:
     )
 
     print(f"Query: {query}\n")
-    final = await runner.start(flow, state=VerifierState(query=query))
+    async with PlatformFactory(lg).with_saia_factory(saia_factory).from_config({}) as platform:
+        runner = FlowRunner(lg, platform=platform)
+        final = await runner.start(flow, state=VerifierState(query=query))
     print("\n=== converged ===")
     print(f"final answer: {final}")
     print(f"rounds run:   {len(saia_factory.instance('judge').call_log)}")

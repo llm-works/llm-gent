@@ -41,8 +41,8 @@ class Run(CoreRun):
     ``await run`` gives the run's result (:data:`~llm_gent.flow.HALTED` when
     the halt stopped it) or raises what the run raised.
 
-    ``flow`` is the top-level flow being run; ``lg`` and ``env`` are the
-    runner's logger and environment. ``signals`` are the events its shortcut
+    ``flow`` is the top-level flow being run; ``lg`` and ``platform`` are the
+    runner's logger and platform. ``signals`` are the events its shortcut
     regions observe; ``checkpoint_ctx`` writes its history, or is ``None``
     without one. ``scopes`` holds the run's live scopes and cursors.
     ``halt_at`` records where the halt was first observed, for the halt

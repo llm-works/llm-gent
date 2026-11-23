@@ -3,13 +3,12 @@
 How llm-gent runs many agents in one process with nothing duplicated per agent: what is shared,
 what each agent holds, and how flows run for agents.
 
-Status: the target design, built in steps. Implemented: the platform package (`Config`,
-`Factory`, `Context`) with the shared clients injected into traits, and agents built on a
-platform; the scope a flow runs in as a fold of its declarations, the generic run and its
-environment, flow runs started by a runner, and the run's own cost tracker (section 6). Not yet:
-the platform's `SAIAFactory`, shared trait instances with per-agent state,
-`platform.with_trait_registry`, agents supplying a run's environment and identity, and the API in
-section 8.
+Status: the target design, built in steps. Implemented: the `Platform` (one per process, built
+by the platform `Factory` from `Config`) shared by agents and runs, with the shared clients
+injected into traits; the scope a flow runs in as a fold of its declarations, the generic run,
+flow runs started by a runner, and the run's own cost tracker (section 6). Not yet: a default
+`SAIAFactory` the platform builds over its router, traits without per-agent instances, a run's
+identity, agents supplying a run's identity and platform, and the API in section 8.
 
 ## 1. Goals
 
@@ -26,30 +25,47 @@ section 8.
 
 | | Holds | Instances |
 |---|---|---|
-| Platform | The shared clients (model router, database pool, memory clients), the trait registry, the tool registry, the `SAIAFactory` | One per worker |
-| Trait | Shared logic and resources | One per trait type per registry, used by every thread and event loop |
-| Agent | Identity, per-agent trait state, its runs | One per identity |
-| Flow | Structure: what happens to state | One per definition, shared by every agent |
-| Run | One run's state: flow state, halt, signals, run info, checkpoint context | Many per agent, held by it |
+| Platform | The shared clients (model router, database pool, memory clients), the trait and tool factories, the trait registry, the `SAIAFactory` and one SAIA per role | One per process |
+| Trait | Shared logic and resources | One per trait type, used by every thread and event loop |
+| Flow | Structure: what happens to state | One per definition, shared by every run |
+| Run | One execution: its identity, halt, cost, history, signals, live scopes and cursors | Many per process |
+| Context | One step of a run: the run, the scope folded so far, the position | One per step |
+| Agent | An identity, and the platform its runs use | One per identity |
 
-State is kept apart from the logic that acts on it. Traits and flows are logic and structure,
-shared; agents and runs are state, cheap and many.
+State is kept apart from the logic that acts on it. The platform, traits and flows are logic,
+structure and shared wiring, built once; runs and their contexts are state, cheap and many.
+Ownership is a tree of three levels, by lifetime:
+
+```
+Platform   one per process: clients, factories, the trait registry, one SAIA per role
+   ▼
+Run        one execution: identity, halt, cost, history, signals, scopes, cursors
+   ▼
+Context    one step: the run, the scope, the position (what a verb receives)
+```
+
+Only a run and what is under it are checkpointed; the platform holds no run's or agent's data.
+An agent is not a level of the tree: it supplies a run's identity and platform.
 
 ## 3. Construction
 
-Factories build; the context they produce is passed around and builds nothing. A class is named
-without its package's name inside the package (`platform.Factory`, `platform.Context`,
+Factories build; the platform they produce is passed around and builds nothing but one SAIA per
+role. A class is named without its package's name inside the package (`platform.Factory`,
 `agent.Factory`, `traits.Factory`); flat namespaces such as the top-level package export it with
-the prefix (`PlatformFactory`, `AgentFactory`, `TraitFactory`).
+the prefix (`PlatformFactory`, `AgentFactory`, `TraitFactory`). `Platform` is exported by
+`llm_gent.core` and `llm_gent`.
 
 | Object | Role |
 |---|---|
-| platform `Factory(lg).from_config(config)` | Builds the shared clients, the traits (through `TraitFactory`), the tool registry and the `SAIAFactory`, and injects them into a platform `Context` with ownership. Reads the platform `Config`. |
-| platform `Context` | Container passed around. Holds references and closes what it owns on `close()` or at the end of a `with` or `async with` block. |
-| `TraitFactory` | Builds traits from injected clients; holds no reference to the context. |
-| `AgentFactory(platform)` | Builds agents that reference the context. Subclassed per agent type (`agent_class`, `required_traits`, `default_tools`). |
+| platform `Factory(lg).from_config(config)` | Builds the shared clients, the trait factory (through `TraitFactory`) and the tool factory, and injects them into a `Platform` with ownership, with an empty trait registry and the `SAIAFactory` given by `with_saia_factory()`. Reads the platform `Config`. |
+| `Platform` | Passed to agents and runners. Holds references, builds one SAIA per role on first use, and closes what it owns on `close()` or at the end of a `with` or `async with` block. Its constructor takes every part, so code with parts of its own builds one without the factory. |
+| `TraitFactory` | Builds traits from injected clients; holds no reference to the platform. |
+| `AgentFactory(platform)` | Builds agents that reference the platform. Subclassed per agent type (`agent_class`, `required_traits`, `default_tools`). |
 | flow `Factory(lg)` | Builds flows: structure only (state factory, flow class, declared resources). |
-| `FlowRunner(lg, env=, store=)` | Executes flows. Holds what its runs share: the `Environment` (trait registry, `SAIAFactory`) and the checkpoint store. `start()` takes one run's inputs and returns the run. |
+| `FlowRunner(lg, platform=, store=)` | Executes flows. Holds what its runs share: the platform and the checkpoint store. `start()` takes one run's inputs and returns the run. |
+
+A platform requires its factories, not instances: its trait registry may be empty, and a SAIA
+factory builds nothing until a step asks for a role.
 
 `AgentFactory` does not build the platform: several agent types share one worker, and the
 platform's lifecycle belongs to the worker. Factories build clients and inject them; a receiver
@@ -62,8 +78,10 @@ Models are wired in two ways:
 - Injection: `PlatformFactory(lg).with_llm(client)` takes a client the caller built, for example
   with llm-infer's `Factory(lg).openai(...)`. The caller keeps ownership.
 
-The platform's `SAIAFactory` builds SAIA over the platform's llm-infer router and reads the `Role`
-fields: `style` becomes the system prompt, `backend` and `model` select the model.
+The target default `SAIAFactory` builds SAIA over the platform's llm-infer router and reads the
+`Role` fields: `style` becomes the system prompt, `backend` and `model` select the model. Until it
+exists, a platform built without `with_saia_factory()` builds no SAIA: a step reading `ctx.saia`
+raises.
 
 Platform `Config` defaults: `llm` is the packaged `etc/llm.yaml`; `memory` is optional, and without
 it no memory-backed trait or tool is available. An agent's only required field is its name.
@@ -73,7 +91,7 @@ it no memory-backed trait or tool is available. An agent's only required field i
 Every capability is a trait. What a trait holds splits in two:
 
 - **The trait (shared):** clients, pools, caches, config. One instance per trait type per
-  registry, built by `TraitFactory`.
+  process, in the platform's registry, built by `TraitFactory`.
 - **Per-agent state:** what differs per agent: directive text, conversation history, budget,
   Memory's identity-scoped view. The trait defines its state type and creates it per agent; the
   agent holds these state objects keyed by trait. Calls pass the agent:
@@ -134,15 +152,15 @@ A trait instance is shared by every thread and event loop in its process:
 ## 5. Agents and registries
 
 An agent's main job is to hold an identity: who acts, for per-agent state, provenance and
-authorization. Every run has an agent, with and without Flow.
+authorization. A run does not need an agent: an agent is one way to supply a run's identity and
+platform.
 
 An agent holds:
 
 - its identity;
 - per-agent state objects, keyed by trait, created only for the traits it uses;
-- a reference to its platform `Context`;
-- the trait types it uses (`required_traits`), not trait instances;
-- its active flow runs, keyed by run id.
+- a reference to its `Platform`;
+- the trait types it uses (`required_traits`), not trait instances.
 
 No trait instance lives on an agent. `agent.get_trait(T)` and `require_trait(T)` resolve through
 the platform's registry. A custom trait is registered with the platform like a built-in one, even
@@ -150,14 +168,15 @@ when one agent uses it: the platform owns its lifecycle and it follows the threa
 A resource an agent manages itself is plain agent code, an attribute of the agent subclass that
 the agent closes, not a trait.
 
-A registry holds one instance per trait type; differences between agents go in per-agent state or
-call arguments, not in a second instance. Agents or a swarm that need other instances get their
-own registry through `platform.with_trait_registry(registry)`: a shallow copy of the context that
-shares the clients, the tool registry and the `SAIAFactory`, and closes only the registry it was
-given. A registry is built whole by `TraitFactory`, which wires the dependencies between traits
-(Rating and Storage take Memory's client and the LLM router); swapping one trait into a copy of
-another registry would leave its dependents on the old one. Platform components (`SAIAFactory`,
-tools) hold no trait instances; they resolve traits through the agent's context on each call.
+A process keeps as many copies of a trait as it must, which is one: the platform's registry holds
+one instance per trait type, and differences between agents or runs go in per-agent state, call
+arguments or data keyed by the ids a call carries, not in a second instance. There is no API for
+a second registry. Code that needs other instances builds a registry and a `Platform` of its own:
+nothing prevents it, nothing encourages it. A registry is built whole by `TraitFactory`, which
+wires the dependencies between traits (Rating and Storage take Memory's client and the LLM
+router). Platform components (`SAIAFactory`, tools) hold no trait instances; they resolve traits
+through the platform on each call. Copies that exist for a client's own reasons stay inside the
+client: llm-infer keeps one async HTTP client per event loop behind one router.
 
 ## 6. Flow: structure and runs
 
@@ -168,16 +187,15 @@ runner executes it, and each execution is a run.
   hooks, budget and resource declarations, the shortcut declaration, `state_factory` and the
   structure hash. Its first start freezes it and every flow under it; a builder method on a
   frozen flow raises.
-- `FlowRunner(lg, env=, store=).start(flow, input, ...)` checks the run's inputs, starts the run in
-  a task of its own and returns it. `ctx.env`, `ctx.traits` and `ctx.saia` come from the runner's
-  environment. The target design takes the environment and the run's identity from the agent,
-  which holds its runs keyed by run id; an agent may have any number of runs, of different flows
-  or of the same flow.
+- `FlowRunner(lg, platform=, store=).start(flow, input, ...)` checks the run's inputs, starts the
+  run in a task of its own and returns it. `ctx.platform`, `ctx.traits` and `ctx.saia` come from
+  the runner's platform. In the target design an agent supplies a run's identity and platform; an
+  agent may start any number of runs, of different flows or of the same flow.
 - State is supplied per run, never held by the flow. `state_factory` stays with the flow: how a
   run's state is made and restored is structure.
-- A run leaves the agent when it ends. A checkpoint is its durable record: scopes, cursors,
-  resource accounting and the structure hash. Halt, cost tracker, SAIA, traits and logger are
-  never serialized; they reattach from the agent and the run at resume.
+- A checkpoint is a run's durable record: scopes, cursors, resource accounting and the structure
+  hash. Halt, cost tracker, SAIA, traits and logger are never serialized; they reattach from
+  whoever starts the resumed run, and from its platform.
 - The walk keeps its position in per-execution objects (chain step, iterate pass, map items), not
   on the flow's nodes, so the same nodes serve every run.
 
@@ -189,7 +207,7 @@ Settings live where their lifetime is:
 | Setting | Where |
 |---|---|
 | `state_factory`, flow class, resource methods | The flow `Factory` |
-| Trait registry, `SAIAFactory` (the `Environment`), CAS store | The runner; in the target design the environment comes from the agent |
+| The `Platform` (trait registry, `SAIAFactory`, SAIAs), CAS store | The runner |
 | Halt, signals, history name, start, cost tracker | `start()` |
 | Declarations about part of the tree: checkpointer, checkpoint policy, shortcut, budget, resource instances (`with_resource`) | The flow |
 
@@ -201,16 +219,16 @@ Hooks follow the trait model: one shared instance, per-run data keyed by the eve
 identity read from the event. Events carry `ctx`, so a hook reads `ctx.agent.identity`: the "who"
 for provenance and authorization. Hooks are attached to the flow (`Flow.with_hooks`).
 
-### Environment and the generic run
+### Platform and the generic run
 
-An `Environment` is what a run may use: the `SAIAFactory` and the trait registry. It owns nothing;
-it selects what a run uses of the platform's clients. It builds one SAIA per role on first use and
-keeps it, so everything that uses one environment shares its SAIAs. That is safe because a SAIA
-holds configuration only (section 4, Conversations). Work that needs SAIAs of its own (its own
-tools, its own directive) uses an environment of its own. The runner holds one; every run it
-starts, and every step of every flow in it, uses that one.
+The `Platform` is what every run on it uses: the `SAIAFactory`, the trait registry and the shared
+clients. It builds one SAIA per role on first use and keeps it, so every run on one platform
+shares its SAIAs. That is safe because a SAIA holds configuration only (section 4,
+Conversations). Differences between roles go through `Role` and `SAIAFactory.build(role)`, which
+may choose tools and directive by role. The runner holds a platform; every run it starts, and
+every step of every flow in it, uses that one.
 
-The generic `Run` is what any execution has, with or without Flow: its logger, its environment,
+The generic `Run` is what any execution has, with or without Flow: its logger, its platform,
 its cost tracker, its halt event and the task that executes it. It is awaited for its result,
 halted with `halt()`, and reports `done`. A flow run extends it with what exists only because a
 flow nests and checkpoints its scopes: the flow, its signals, its history writer, its live scopes
@@ -222,7 +240,8 @@ fold.
 A runner holds the wiring its runs share and executes them; a run is one execution:
 
 ```python
-runner = FlowRunner(lg, env=Environment(saia_factory=factory, traits=registry), store=store)
+platform = PlatformFactory(lg).with_saia_factory(factory).from_config({})
+runner = FlowRunner(lg, platform=platform, store=store)
 run = runner.start(
     flow,
     "input",  # the first node's arguments
@@ -295,12 +314,13 @@ their accounting. A field that fits none of the rules is either fixed for the wh
 `extra` is) or needs a rule of its own named here.
 
 The walk carries a frame from node to node: the run (fixed for the whole run), the scope (the
-fold so far) and the position (snapshot path, chain context, ancestor chain).
+fold so far) and the position (snapshot path, chain context, ancestor chain). A step sees it as
+its `Context`.
 
 ### Packages
 
 ```
-core/       what any run has and may use: Run, Environment, Role, SAIAFactory
+core/       what any run has and runs on: Run, Platform, Role, SAIAFactory
 flow/       structure: the builder and its read-only tree, nodes, verbs, state, the declaration
             type (Decl), Context and Loop
 flow/run/   execution: the runner (FlowRunner) and Start, Scope and Position, the frame, the
@@ -314,8 +334,8 @@ the run through the frame they are handed.
 ## 7. Runtime
 
 Each agent is an appinfra `AsyncService` on its worker's `LoopHost`: one task per agent, no thread
-held while it waits. All agents in a worker share one platform `Context`; the hub maps an agent
-name to its runner.
+held while it waits. All agents in a worker share one `Platform`; the hub maps an agent name to
+its runner.
 
 Measured with `tests/performance/test_flow_runs.py` at 10,000 and 100,000 concurrent runs of a
 small flow (a scripted model answering in 50-500 ms): one event loop handles about 2,200-2,800
@@ -343,8 +363,8 @@ async def hello(ctx, text: str) -> str:
 
 
 async with PlatformFactory(lg).from_config({}) as platform:
-    agent = AgentFactory(platform).create("hello")
-    print(await FlowFactory(lg).create("hello").call(hello).run("Say hello.", agent=agent))
+    flow = FlowFactory(lg).create("hello").call(hello)
+    print(await FlowRunner(lg, platform=platform).start(flow, "Say hello."))
 ```
 
 A model of the caller's own, in code:

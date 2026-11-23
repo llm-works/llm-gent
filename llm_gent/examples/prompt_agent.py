@@ -50,8 +50,8 @@ from llm_infer.schemas.openai import FunctionCall, ToolCall
 
 import llm_gent
 from llm_gent.agents.default import Factory
-from llm_gent.core.platform import Context
 from llm_gent.core.platform import Factory as PlatformFactory
+from llm_gent.core.platform import Platform
 from llm_gent.runtime.server.config import AgentServerConfig
 
 
@@ -115,7 +115,7 @@ def _llm_config(args: argparse.Namespace) -> dict[str, Any]:
     return {"backends": {"local": local}} if local else {}
 
 
-def _platform(lg: Logger, args: argparse.Namespace) -> Context:
+def _platform(lg: Logger, args: argparse.Namespace) -> Platform:
     """The platform: the shipped backends, or llm-infer's scripted client with ``--smoke``."""
     factory = PlatformFactory(lg)
     if args.smoke:
@@ -124,7 +124,7 @@ def _platform(lg: Logger, args: argparse.Namespace) -> Context:
     return factory.from_config({"llm": _llm_config(args)})
 
 
-def _build(platform: Context, args: argparse.Namespace) -> Any:
+def _build(platform: Platform, args: argparse.Namespace) -> Any:
     """Agent ``args.agent``, built as ``llm-gent serve`` builds it."""
     raw = yaml.safe_load((ETC / "agents" / f"{args.agent}.yaml").read_text())
     agent_config = AgentServerConfig.from_dict({"agents": {args.agent: raw}}).agents[args.agent]

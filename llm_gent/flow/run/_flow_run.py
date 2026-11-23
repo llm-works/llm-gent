@@ -19,7 +19,7 @@ from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ...core.cost import Tracker as CostTracker
-from ...core.env import Environment
+from ...core.platform import Platform
 from ..checkpoint import Retention
 from ..flow import Flow
 from ..hooks import Decision, HookDenied, RunOutcome
@@ -41,10 +41,10 @@ from .start import FRESH, Fresh, Restart, Resume, Start
 
 @dataclass(frozen=True)
 class Wiring:
-    """What every run a runner starts shares: its logger, its environment, its history store."""
+    """What every run a runner starts shares: its logger, its platform, its history store."""
 
     lg: Logger
-    env: Environment
+    platform: Platform
     store: Store | None
 
 
@@ -137,7 +137,7 @@ def _new_run(
     return Run(
         flow=flow,
         lg=wiring.lg,
-        env=wiring.env,
+        platform=wiring.platform,
         halt_event=halt,
         signals=signals,
         checkpoint_ctx=ctx,
@@ -237,7 +237,7 @@ def _check_history(wiring: Wiring, flow: Flow, history: str | None) -> None:
     if history is not None and wiring.store is None:
         raise RuntimeError(
             f"Flow {flow._name or '<anonymous>'!r} was started with history={history!r} but "
-            f"the runner has no store: build it with FlowRunner(lg, store=...)"
+            f"the runner has no store: build it with FlowRunner(lg, platform=..., store=...)"
         )
 
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Platform factory: builds a worker's shared scope from config."""
+"""Platform factory: builds a process's :class:`Platform` from config."""
 
 from __future__ import annotations
 
@@ -15,20 +15,25 @@ from llm_infer.client import ChatClient, EmbeddingClient
 from llm_infer.client import Factory as LLMClientFactory
 from llm_kelt.core import Database
 
+from ..role import Role
 from ..tools.factory import Factory as ToolFactory
 from ..traits.factory import Factory as TraitFactory
 from ..traits.factory import MemoryResources
+from ..traits.registry import Registry as TraitRegistry
+from ._platform import Closeable, Platform, SAIAFactory, close_resources
 from .config import Config
-from .context import Closeable, Context, close_resources
 
 
 class Factory:
-    """Builds a platform :class:`Context`: the clients and factories a worker's agents share.
+    """Builds a :class:`Platform`: the clients and factories a process's agents and runs share.
 
     The model router and, with memory configured, the memory database, chat
-    client and embedder are built once here and injected; the context owns
+    client and embedder are built once here and injected; the platform owns
     and closes them. A client given through :meth:`with_llm` is used instead
-    of building a router, and stays the caller's to close.
+    of building a router, and stays the caller's to close. The platform's
+    SAIA factory is the one given through :meth:`with_saia_factory`; without
+    one, the platform builds no SAIA and a step reading ``ctx.saia`` raises.
+    The platform's trait registry starts empty.
 
     Example:
         async with PlatformFactory(lg).from_config({}) as platform:
@@ -46,6 +51,7 @@ class Factory:
         """
         self._lg = lg
         self._llm: ChatClient | None = None
+        self._saia_factory: SAIAFactory = _NoSAIAFactory()
 
     def with_llm(self, client: ChatClient) -> Factory:
         """A copy of this factory whose platforms use ``client`` as their model router.
@@ -56,14 +62,20 @@ class Factory:
         factory._llm = client
         return factory
 
-    def from_config(self, config: Config | Mapping[str, Any]) -> Context:
+    def with_saia_factory(self, saia_factory: SAIAFactory) -> Factory:
+        """A copy of this factory whose platforms build their SAIAs with ``saia_factory``."""
+        factory = copy.copy(self)
+        factory._saia_factory = saia_factory
+        return factory
+
+    def from_config(self, config: Config | Mapping[str, Any]) -> Platform:
         """Build the platform described by ``config``.
 
         Args:
             config: A platform :class:`Config`, or a mapping validated into one.
 
         Returns:
-            The platform context, owning the clients built here.
+            The platform, owning the clients built here.
         """
         settings = config if isinstance(config, Config) else Config.model_validate(config)
         router_config = settings.router_config()
@@ -85,13 +97,13 @@ class Factory:
             "platform built",
             extra={"default": router_config.get("default"), "memory": memory is not None},
         )
-        return Context(
+        return Platform(
             self._lg,
-            settings,
             llm=router,
-            memory=memory,
+            saia_factory=self._saia_factory,
             trait_factory=trait_factory,
             tool_factory=ToolFactory(self._lg),
+            traits=TraitRegistry(self._lg),
             owned=owned,
         )
 
@@ -135,6 +147,17 @@ def _embedder(
         timeout=memory_config.get("embedder_timeout", 30.0),
     )
     return embedder
+
+
+class _NoSAIAFactory:
+    """The SAIA factory of a platform built without one: building a SAIA raises."""
+
+    def build(self, role: Role) -> Any:
+        """Raise: a platform built without a SAIA factory builds no SAIA."""
+        raise RuntimeError(
+            f"this platform builds no SAIA (role {role.name!r}): build it with "
+            f"PlatformFactory(lg).with_saia_factory(...), or pass saia_factory= to Platform"
+        )
 
 
 class _DisposeOnClose:

@@ -12,7 +12,7 @@ import pytest
 from llm_gent.core import Role, SAIAFactory
 from llm_gent.core.cost import Tracker as CostTracker
 from llm_gent.flow import Context, Factory, Flow, FlowRunner, TypeStateFactory, verb
-from tests.helpers import memory_store, run_flow
+from tests.helpers import make_platform, memory_store, run_flow
 
 from .conftest import ROLE_A, make_test_logger
 
@@ -94,7 +94,9 @@ class TestRunnerStore:
             return None
 
         store = memory_store()
-        runner = FlowRunner(make_test_logger(), store=store)
+        runner = FlowRunner(
+            make_test_logger(), platform=make_platform(make_test_logger()), store=store
+        )
         assert runner.store is store
         await runner.start(Factory(make_test_logger()).create("named").call(noop), history="h")
         assert store.list_repos() == ["h"]
@@ -107,7 +109,9 @@ class TestRunnerStore:
 
         flow = Factory(make_test_logger()).create("plain").call(noop)
         with pytest.raises(RuntimeError, match="history='h' but the runner has no store"):
-            FlowRunner(make_test_logger()).start(flow, history="h")
+            FlowRunner(make_test_logger(), platform=make_platform(make_test_logger())).start(
+                flow, history="h"
+            )
 
 
 class TestPricingProviderSwap:

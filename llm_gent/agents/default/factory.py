@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ...core.agent import Factory as BaseFactory
-from ...core.platform import Context
+from ...core.platform import Platform
 from ...core.traits.builtin.saia import SAIAConfig, SAIATrait
 from .agent import Agent
 
@@ -47,7 +47,7 @@ class Factory(BaseFactory):
     required_traits = []  # Let YAML config specify (directive, method, tools optional)
     default_tools = {}  # Tools specified in YAML config
 
-    def __init__(self, platform: Context) -> None:
+    def __init__(self, platform: Platform) -> None:
         """Initialize factory.
 
         Args:

@@ -13,7 +13,8 @@ from llm_gent.core.agent.factory import Factory as AgentFactory
 from llm_gent.core.agent.helpers import _substitute_in_dict
 from llm_gent.core.dispatcher import Dispatcher
 from llm_gent.core.llm.caller import Caller as LLMCaller
-from llm_gent.core.platform import Config, Context
+from llm_gent.core.platform import Platform
+from llm_gent.core.traits import Registry as TraitRegistry
 from tests.helpers import make_platform
 
 
@@ -21,24 +22,24 @@ pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
-# Platform context
+# Platform
 # ---------------------------------------------------------------------------
 
 
 def _context(lg, owned):
-    """A context owning ``owned``, on stub clients and factories."""
-    return Context(
+    """A platform owning ``owned``, on stub clients and factories."""
+    return Platform(
         lg,
-        Config(),
         llm=MagicMock(),
-        memory=None,
+        saia_factory=MagicMock(),
         trait_factory=MagicMock(),
         tool_factory=MagicMock(),
+        traits=TraitRegistry(lg),
         owned=owned,
     )
 
 
-class TestPlatformContext:
+class TestPlatform:
     def test_holds_what_it_was_given(self):
         lg = MagicMock()
         router = MagicMock()
@@ -47,7 +48,6 @@ class TestPlatformContext:
 
         assert ctx.logger is lg
         assert ctx.llm is router
-        assert ctx.memory is None
         assert ctx.trait_factory is not None
         assert ctx.tool_factory is not None
 

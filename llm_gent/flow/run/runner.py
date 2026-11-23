@@ -18,7 +18,7 @@ from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ...core.cost import Tracker as CostTracker
-from ...core.env import Environment
+from ...core.platform import Platform
 from ..checkpoint import Retention
 from ..flow import Flow
 from ..nodes import UNSET
@@ -31,28 +31,28 @@ class Runner:
     """Executes flows: :meth:`start` begins a run and returns it.
 
     Exported as :class:`llm_gent.flow.FlowRunner`. ``lg`` is the logger
-    every run it starts reports to; ``env`` is what every one of them may
-    use (``ctx.env``, ``ctx.saia``, ``ctx.traits``), and runs sharing it
-    share its SAIA instances, one per role. Without one, the runs have an
-    empty environment of this runner's: no traits, and ``ctx.saia`` raises
-    for a role-bound verb. ``store`` is the :class:`appinfra.cas.Store` the
-    runs keep their histories in, each in the repository its ``history=``
-    names; without one, a run given a history raises.
+    every run it starts reports to; ``platform`` is the
+    :class:`~llm_gent.core.Platform` every one of them runs on
+    (``ctx.platform``, ``ctx.saia``, ``ctx.traits``), and runs sharing it
+    share its SAIA instances, one per role. ``store`` is the
+    :class:`appinfra.cas.Store` the runs keep their histories in, each in
+    the repository its ``history=`` names; without one, a run given a
+    history raises.
     """
 
     def __init__(
         self,
         lg: Logger,
         *,
-        env: Environment | None = None,
+        platform: Platform,
         store: Store | None = None,
     ) -> None:
-        self._wiring = Wiring(lg, env if env is not None else Environment(), store)
+        self._wiring = Wiring(lg, platform, store)
 
     @property
-    def env(self) -> Environment:
-        """What the runs this runner starts may use."""
-        return self._wiring.env
+    def platform(self) -> Platform:
+        """The platform the runs this runner starts run on."""
+        return self._wiring.platform
 
     @property
     def store(self) -> Store | None:

@@ -52,7 +52,7 @@ from llm_infer.schemas.openai import FinishReason, FunctionCall, ToolCall
 from llm_kelt.conversation import ConversationFactory
 from llm_saia import SAIA, ToolDef
 
-from llm_gent.core import Environment, Role
+from llm_gent.core import Role
 from llm_gent.core.llm.testing import DelayedScriptedBackend, uniform_delay
 from llm_gent.flow import (
     Context,
@@ -64,7 +64,7 @@ from llm_gent.flow import (
     TypeStateFactory,
     verb,
 )
-from tests.helpers import make_test_logger
+from tests.helpers import make_platform, make_test_logger
 
 
 pytestmark = pytest.mark.performance
@@ -248,7 +248,7 @@ def build_flow(ff: Factory[Flow], conversations: ConversationFactory, checkpoint
 class Bench:
     """One configuration: what every run shares, and how each run starts.
 
-    ``flow_per_run`` gives each run its own flow and its own environment, so
+    ``flow_per_run`` gives each run its own flow and its own platform, so
     its own SAIAs: what an agent with SAIAs of its own costs per run.
     """
 
@@ -272,8 +272,8 @@ class Bench:
     def run_runner(self) -> FlowRunner:
         if not self.flow_per_run:
             return self.runner
-        env = Environment(saia_factory=self.saias)
-        return FlowRunner(make_test_logger(), env=env, store=self.store)
+        platform = make_platform(make_test_logger(), saia_factory=self.saias)
+        return FlowRunner(make_test_logger(), platform=platform, store=self.store)
 
     async def run(self, state: RunState) -> None:
         if self.store is None:
@@ -293,7 +293,9 @@ def make_bench(lg: Logger, variant: str) -> Bench:
     store = CountingStore(lg) if variant == "checkpoint" else None
     ff: Factory[Flow] = Factory(lg, state_factory=TypeStateFactory(RunState))
     saias = _SAIAFactory(lg, client)
-    runner = FlowRunner(lg, env=Environment(saia_factory=saias), store=store)
+    runner = FlowRunner(
+        lg, platform=make_platform(lg, router=client, saia_factory=saias), store=store
+    )
     conversations = ConversationFactory(lg)
     return Bench(variant, model, runner, saias, ff, conversations, variant == "flow_per_run", store)
 
