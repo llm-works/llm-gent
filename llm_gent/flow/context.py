@@ -43,10 +43,10 @@ from typing import Any, Generic, TypeVar, overload
 from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
+from ..core.role import Role
 from ..core.traits import Registry as TraitRegistry
 from .checkpoint import checkpoint_tag
 from .resource import COST, NO_RESOURCES, R, ResourceKey
-from .role import Role
 from .state import State
 
 
@@ -189,9 +189,10 @@ class Context(Generic[T]):
     def saia(self) -> Any:
         """The role-bound saia instance for this dispatch.
 
-        Resolved lazily on first access via the dispatching flow's
-        SAIAFactory. The flow caches per role, so repeated reads on the
-        same or sibling contexts hit the same instance.
+        Resolved lazily on first access through the dispatching flow's
+        :class:`~llm_gent.core.env.Environment`, which builds one SAIA per
+        role, so repeated reads on the same or sibling contexts hit the
+        same instance.
 
         Returns ``None`` when :attr:`role` is ``None`` — subflow-node ctx,
         hook ctx, and pure-Python verbs (``@verb`` with no ``role=``)
@@ -205,7 +206,7 @@ class Context(Generic[T]):
         """
         if self.role is None:
             return None
-        return self.flow._saia_for(self.role)
+        return self.flow._env.saia(self.role)
 
     def saia_as(self, cls: type[S]) -> S | None:
         """Return :attr:`saia` typed as ``cls`` — cast helper for verb authors.

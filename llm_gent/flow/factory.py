@@ -1,33 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Factory surfaces for the flow substrate.
+"""The app-scoped :class:`Factory` that builds flows.
 
-Two factories live here, at different scopes:
-
-- :class:`SAIAFactory` — protocol that turns a :class:`Role` into a saia
-  instance. Typically one per application; the wiring (backend, tools,
-  system prompt) is deployment-specific so the framework only names the
-  contract.
-- :class:`Factory` — app-scoped bundle of the ambient ``lg`` and (by
-  convention) a single ``SAIAFactory``. Provides :meth:`create` for
-  building Flows without repeating those two arguments at every
-  construction site, and :meth:`with_saia_factory` for deriving a
-  factory that swaps the SAIAFactory (e.g. a plugin subsystem).
+:class:`Factory` bundles the ambient ``lg`` and (by convention) a single
+:class:`~llm_gent.core.env.SAIAFactory`. It provides :meth:`create` for
+building Flows without repeating those two arguments at every construction
+site, and :meth:`with_saia_factory` for deriving a factory that swaps the
+SAIAFactory (e.g. a plugin subsystem).
 """
 
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
+from ..core.env import SAIAFactory
 from ..core.traits import Registry as TraitRegistry
 from .resource import R, ResourceKey, check_resource, resource_method
-from .role import Role
 from .state import StateFactory
 
 
@@ -37,46 +31,6 @@ if TYPE_CHECKING:
 
 F = TypeVar("F", bound="Flow")
 """The class of the flows a :class:`Factory` builds."""
-
-
-class SAIAFactory(Protocol):
-    """Constructs a role-bound saia instance.
-
-    Implementations decide how a :class:`Role` maps to a backend + tools +
-    system prompt + call options. The framework's only expectation is that
-    :meth:`build` returns an object supporting saia's public surface — the
-    verb calling code uses ``.verify(...)`` / ``.complete(...)`` / etc.
-
-    Implementations MAY read :attr:`Role.params` for per-run parameters
-    (max_iterations, cost trackers, session identifiers, task state —
-    anything the consumer needs at build time that isn't captured in the
-    typed Role fields). Key naming inside ``params`` is a contract between
-    a factory and its callers; gent itself imposes none.
-
-    Reference sketch (users typically write one specific to their yaml
-    config)::
-
-        class MySAIAFactory:
-            def __init__(self, lg, llm_yaml, tools=None):
-                self._lg = lg
-                self._llm_yaml = llm_yaml
-                self._tools = tools or []
-
-            def build(self, role):
-                backend = build_backend_from_config(self._llm_yaml, role)
-                builder = SAIA.builder().backend(backend).logger(self._lg)
-                if "max_iterations" in role.params:
-                    builder = builder.max_iterations(role.params["max_iterations"])
-                if self._tools:
-                    builder = builder.tools(self._tools, executor)
-                if role.style:
-                    builder = builder.system(role.style)
-                return builder.build()
-    """
-
-    def build(self, role: Role) -> Any:
-        """Return a saia instance configured for ``role``."""
-        ...
 
 
 class Factory(Generic[F]):

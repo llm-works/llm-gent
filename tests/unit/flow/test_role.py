@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Tests for llm_gent.flow.role."""
+"""Tests for llm_gent.core.role, through the flow that binds verbs to roles."""
 
 from __future__ import annotations
 

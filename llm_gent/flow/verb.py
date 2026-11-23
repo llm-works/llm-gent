@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, overload
 
-from .role import Role
+from ..core.role import Role
 
 
 VerbCallable = Callable[..., Awaitable[Any]]

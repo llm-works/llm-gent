@@ -58,14 +58,14 @@ def is_halt_signaled(frame: _Frame) -> bool:
 
 def is_run_halted(frame: _Frame) -> bool:
     """True when the run's halt is set."""
-    halt = frame.run.halt
+    halt = frame.run.halt_event
     return halt is not None and halt.is_set()
 
 
 def note_halt(frame: _Frame, iteration: int, node_id: str) -> None:
     """Record where the run's halt was observed, unless an earlier observation was recorded."""
     run = frame.run
-    halt = run.halt
+    halt = run.halt_event
     if halt is not None and halt.is_set() and run.halt_at is None:
         run.halt_at = HaltPoint(
             frame.position.ancestor_chain, iteration, node_id, frame.scope.state

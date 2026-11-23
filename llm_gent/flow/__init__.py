@@ -76,18 +76,19 @@ compose those from ``llm_kelt`` (default) or their own implementations, and
 mount them via the existing trait system.
 """
 
+from ..core.env import SAIAFactory
+from ..core.role import Role
 from .aggregate import majority, mean, unanimous, weighted
 from .archetypes import extractor, grader, planner, synthesizer
 from .checkpoint import CheckpointPolicy, ConcurrentWriteError, ResumeMode, Retention
 from .context import Context
-from .factory import Factory, SAIAFactory
+from .factory import Factory
 from .flow import Flow
 from .history import History, HistoryCorrupt
 from .hooks import Hook, HookDenied, Pause
 from .loop import Loop, LoopFactory
 from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, Skipped, Unset
 from .resource import COST, Resource, ResourceKey, resource_method
-from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
 from .state.cas import CommitMeta, FlowCommit
 from .structure import StepPath, Structure, StructureDiff, path_label

@@ -86,8 +86,7 @@ it back and returns the count of steps it produced.
 ```python
 from typing import Any
 from llm_gent import verb, Context
-from llm_gent.flow import Factory
-from llm_gent.role import Role
+from llm_gent.flow import Factory, Role
 
 planner = Role(name="planner", backend="anthropic", model="claude-sonnet-4-20250514")
 worker = Role(name="worker", backend="anthropic", model="claude-sonnet-4-20250514")

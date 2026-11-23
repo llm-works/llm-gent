@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
 
+from ..core.role import Role
 from .nodes import StateMerge, StateProject
-from .role import Role
 
 
 if TYPE_CHECKING:

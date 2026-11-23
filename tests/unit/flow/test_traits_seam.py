@@ -193,7 +193,7 @@ class TestFactoryDerivers:
         )
         derived = ff.with_traits(_fresh_registry())
         built = derived.create()
-        assert built._saia_factory is sf
+        assert built._env.saia_factory is sf
         assert built._state_factory is state_factory
 
     def test_with_traits_none_clears_registry(self) -> None:

@@ -80,7 +80,7 @@ class TestFlowFactory:
         ff = Factory(make_test_logger(), saia_factory=sf)
         flow = ff.create()
         # Reach into the private slot — this test's point is the wiring itself.
-        assert flow._saia_factory is sf
+        assert flow._env.saia_factory is sf
 
     def test_with_saia_returns_new_factory(self) -> None:
         """with_saia_factory() derives a new Factory (immutable-style swap)."""
@@ -88,9 +88,9 @@ class TestFlowFactory:
         ff = Factory(make_test_logger(), saia_factory=a)
         derived = ff.with_saia_factory(b)
         assert derived is not ff
-        assert derived.create()._saia_factory is b
+        assert derived.create()._env.saia_factory is b
         # Original untouched.
-        assert ff.create()._saia_factory is a
+        assert ff.create()._env.saia_factory is a
 
     def test_with_saia_preserves_the_state_factory(self) -> None:
         """with_saia_factory() carries the state factory forward untouched."""
