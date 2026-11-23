@@ -36,6 +36,7 @@ from llm_gent.flow import (
     History,
     Interrupted,
     Loop,
+    ResourceKey,
     Resume,
     verb,
 )
@@ -806,6 +807,23 @@ class TestValidation:
     async def test_a_tracker_on_the_factory_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="a cost tracker is the run's, not the flow's"):
             Factory(make_test_logger()).with_resource(COST, _tracker())
+
+    @staticmethod
+    def _flow_with_own_cost_key() -> Any:
+        @verb
+        async def step(ctx: Context[Any], x: int) -> int:
+            return x
+
+        own: ResourceKey[CostTracker] = ResourceKey("cost")
+        return _ff().create().with_resource(own, _tracker()).call(step)
+
+    async def test_a_flow_key_named_like_the_run_s_tracker_raises_at_start(self) -> None:
+        """Both would be saved under one name in a checkpoint."""
+        with pytest.raises(ValueError, match="two resource keys are named 'cost'"):
+            FlowRunner(make_test_logger()).start(self._flow_with_own_cost_key(), 1, cost=_tracker())
+
+    async def test_the_name_is_free_in_a_run_without_cost(self) -> None:
+        assert await run_flow(self._flow_with_own_cost_key(), 1) == 1
 
     @pytest.mark.parametrize("bad", [0, -1.0, float("inf"), float("nan")])
     async def test_budget_must_be_finite_and_positive(self, bad: float) -> None:

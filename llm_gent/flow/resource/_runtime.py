@@ -202,6 +202,7 @@ def check_resources(root: Flow, provided: frozenset[ResourceKey[Any]] = frozense
             neither it nor any flow enclosing it declares.
     """
     names: dict[str, ResourceKey[Any]] = {}
+    _check_names(names, list(provided))
     seen: set[tuple[int, frozenset[ResourceKey[Any]]]] = set()
     stack: list[tuple[Flow, frozenset[ResourceKey[Any]]]] = [(root, provided)]
     while stack:
