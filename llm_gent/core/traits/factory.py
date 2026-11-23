@@ -109,6 +109,11 @@ class Factory:
             TraitName.TRAINING: self._create_training,
         }
 
+    @property
+    def has_memory(self) -> bool:
+        """The platform's memory clients are built, so a MemoryTrait can be created."""
+        return self._memory is not None
+
     def create(
         self,
         trait_name: TraitName,

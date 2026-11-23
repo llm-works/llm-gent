@@ -10,14 +10,26 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from appinfra import DotDict
+
 from ...core.agent import Factory as BaseFactory
 from ...core.platform import Platform
+from ...core.tools.names import ToolName
+from ...core.traits import TraitName
+from ...core.traits.builtin.conversation import ConversationTrait, ConversationTraitConfig
 from ...core.traits.builtin.saia import SAIAConfig, SAIATrait
 from .agent import Agent
 
 
 if TYPE_CHECKING:
     from llm_saia import Backend
+
+
+_SECTION_TRAITS = (("directive", TraitName.DIRECTIVE), ("method", TraitName.METHOD))
+"""Config sections a prompt agent declares, and the trait each one attaches."""
+
+_MEMORY_TOOLS = (ToolName.REMEMBER, ToolName.RECALL)
+"""Tools that need a MemoryTrait."""
 
 
 class Factory(BaseFactory):
@@ -43,8 +55,9 @@ class Factory(BaseFactory):
 
     agent_class = Agent  # Use default prompt-based agent
 
-    # Prompt agents typically need these traits (can override in YAML)
-    required_traits = []  # Let YAML config specify (directive, method, tools optional)
+    # A prompt agent's traits follow the sections its config declares (see
+    # _determine_required_traits); traits.required in the config overrides them.
+    required_traits = []
     default_tools = {}  # Tools specified in YAML config
 
     def __init__(self, platform: Platform) -> None:
@@ -93,14 +106,38 @@ class Factory(BaseFactory):
         # Use base Factory.create() - handles identity, traits, tools, and variable substitution
         agent = super().create(dotdict_config, variables=variables)
 
-        # Add SAIA trait and event handlers (prompt-agent specific)
+        # Add SAIA trait and event handlers (prompt-agent specific). The conversation
+        # comes after SAIA: it starts from SAIA's system prompt.
         self._add_saia_trait(agent, dotdict_config)  # type: ignore[arg-type]
+        self._add_conversation_trait(agent, dotdict_config)  # type: ignore[arg-type]
         self._configure_event_handlers(agent, dotdict_config)  # type: ignore[arg-type]
 
         # Add HTTP trait if configured (handled separately from base factory)
         self._add_http_trait(agent, dotdict_config)  # type: ignore[arg-type]
 
         return agent  # type: ignore[return-value]
+
+    def _determine_required_traits(self, config: DotDict) -> list[TraitName]:
+        """The traits the config's sections declare, unless ``traits.required`` lists them.
+
+        ``directive`` and ``method`` sections attach their traits. Memory tools
+        (``remember`` / ``recall``) attach a MemoryTrait when the platform has
+        memory; without it those tools are skipped, as the tool factory reports.
+        """
+        if "required" in config.get("traits", {}):
+            return super()._determine_required_traits(config)
+        traits = [name for section, name in _SECTION_TRAITS if config.get(section)]
+        tools = config.get("tools") or {}
+        if self._platform.trait_factory.has_memory and any(t in tools for t in _MEMORY_TOOLS):
+            traits.append(TraitName.MEMORY)
+        return traits
+
+    def _add_conversation_trait(self, agent: Agent, config: dict[str, Any]) -> None:
+        """Attach a ConversationTrait built from the config's ``conversation`` section, if any."""
+        declared = config.get("conversation")
+        if not declared:
+            return
+        agent.add_trait(ConversationTrait(agent, ConversationTraitConfig(**dict(declared))))
 
     def _add_saia_trait(self, agent: Agent, config: dict[str, Any]) -> None:
         """Add SAIATrait for LLM operations."""
