@@ -72,11 +72,12 @@ from appinfra.log import quick_console_logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
-from llm_gent.core import Role
+from llm_gent.core import Environment, Role
 from llm_gent.flow import (
     Context,
     Failure,
     Flow,
+    FlowRunner,
     Factory,
     Skipped,
     StateDataclass,
@@ -432,7 +433,8 @@ async def main() -> int:
     """Grade the demo batch end-to-end."""
     lg = quick_console_logger("batch-grade-example", config={"level": "warning"})
     saia_factory = StructuredStubSAIAFactory(_demo_scripts())
-    ff = Factory(lg, saia_factory=saia_factory, state_factory=TypeStateFactory(BatchGradingState))
+    ff = Factory(lg, state_factory=TypeStateFactory(BatchGradingState))
+    runner = FlowRunner(lg, env=Environment(saia_factory=saia_factory))
 
     submissions = _demo_submissions()
     flow = ff.create("batch-grade")
@@ -446,7 +448,7 @@ async def main() -> int:
     )
 
     print(f"Batch: {len(submissions)} submissions\n")
-    summary = await flow.run(state=BatchGradingState(submissions=submissions))
+    summary = await runner.start(flow, state=BatchGradingState(submissions=submissions))
     _print_summary(summary)
     return 0
 

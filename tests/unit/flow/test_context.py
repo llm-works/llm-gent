@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import Context, Flow, State, verb
-from tests.helpers import memory_store
+from llm_gent.flow import Context, Flow, Resume, State, verb
+from tests.helpers import TestFlow, env_of, memory_store, run_flow
 
 from .conftest import ROLE_A, StubFactory, StubSAIA, make_test_logger
 
@@ -25,7 +25,7 @@ class TestCtxLg:
     async def test_ctx_lg_is_flow_lg(self) -> None:
         """A module-level verb reads the ambient logger via ``ctx.lg``."""
         lg = make_test_logger()
-        flow = Flow(lg=lg, saia_factory=StubFactory())
+        flow = TestFlow(lg=lg, saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def read_lg(ctx: Context) -> object:
@@ -39,7 +39,7 @@ class TestCtxLg:
     async def test_ctx_lg_survives_dispatch(self) -> None:
         """Repeated dispatches surface the same logger reference."""
         lg = make_test_logger()
-        flow = Flow(lg=lg, saia_factory=StubFactory())
+        flow = TestFlow(lg=lg, saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def read_lg(ctx: Context) -> object:
@@ -79,7 +79,7 @@ class TestContextGeneric:
     async def test_context_generic_dispatch(self) -> None:
         """A verb annotated as ``Context[_Payload]`` runs without error."""
         payload = _Payload(turn=0)
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context[_Payload]) -> int:
@@ -99,7 +99,7 @@ class TestCtxData:
     async def test_ctx_data_returns_payload(self) -> None:
         """``ctx.data`` returns the same object as ``ctx.state.data``."""
         payload = _Payload(turn=7)
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def probe(ctx: Context[_Payload]) -> tuple[object, object]:
@@ -114,7 +114,7 @@ class TestCtxData:
     async def test_ctx_data_mutation_is_visible(self) -> None:
         """Mutating through ``ctx.data`` is visible on ``ctx.state.data``."""
         payload = _Payload(turn=0)
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def bump(ctx: Context[_Payload]) -> int:
@@ -144,12 +144,12 @@ class TestCtxData:
 
 
 class TestCtxExtra:
-    """``ctx.extra`` surfaces caller-supplied ``Flow.run(extra=)`` at the verb."""
+    """``ctx.extra`` surfaces caller-supplied ``FlowRunner.start(extra=)`` at the verb."""
 
     @pytest.mark.asyncio
     async def test_ctx_extra_reaches_verb(self) -> None:
-        """A verb reads ``ctx.extra`` values supplied at ``Flow.run(extra=)``."""
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        """A verb reads ``ctx.extra`` values supplied at ``FlowRunner.start(extra=)``."""
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         sentinel = object()
 
         @verb
@@ -158,14 +158,14 @@ class TestCtxExtra:
             return ctx.extra["handle"], n
 
         flow.call(probe)
-        got, n = await flow.run(4, extra={"handle": sentinel})
+        got, n = await run_flow(flow, 4, extra={"handle": sentinel})
         assert got is sentinel
         assert n == 4
 
     @pytest.mark.asyncio
     async def test_ctx_extra_defaults_to_empty(self) -> None:
         """Omitting ``extra=`` yields an empty ``ctx.extra`` dict."""
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb
         async def probe(ctx: Context) -> dict[str, Any]:
@@ -173,13 +173,13 @@ class TestCtxExtra:
             return ctx.extra
 
         flow.call(probe)
-        got = await flow.run()
+        got = await run_flow(flow)
         assert got == {}
 
     @pytest.mark.asyncio
     async def test_ctx_extra_identity_preserved(self) -> None:
-        """The exact dict handed to ``Flow.run(extra=)`` reaches the verb."""
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        """The exact dict handed to ``FlowRunner.start(extra=)`` reaches the verb."""
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         supplied: dict[str, Any] = {"k": 1}
 
         @verb
@@ -188,7 +188,7 @@ class TestCtxExtra:
             return ctx.extra
 
         flow.call(probe)
-        got = await flow.run(extra=supplied)
+        got = await run_flow(flow, extra=supplied)
         assert got is supplied
 
 
@@ -205,12 +205,12 @@ class TestCtxExtraPropagation:
             """Return the extra handle for identity assertion."""
             return ctx.extra["h"]
 
-        subflow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        subflow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         subflow.call(inner)
 
-        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         outer.call(subflow)
-        got = await outer.run(extra={"h": sentinel})
+        got = await run_flow(outer, extra={"h": sentinel})
         assert got is sentinel
 
     @pytest.mark.asyncio
@@ -223,12 +223,12 @@ class TestCtxExtraPropagation:
             """Return the extra handle for identity assertion."""
             return ctx.extra["h"]
 
-        then_flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        then_flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         then_flow.call(arm)
 
-        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         outer.branch(when=lambda _p, _c: True, then=then_flow)
-        got = await outer.run(0, extra={"h": sentinel})
+        got = await run_flow(outer, 0, extra={"h": sentinel})
         assert got is sentinel
 
     @pytest.mark.asyncio
@@ -243,12 +243,12 @@ class TestCtxExtraPropagation:
             seen.append(ctx.extra["h"])
             return prev + 1
 
-        body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        body = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         body.call(body_step)
 
-        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         outer.iterate(body, max_iters=3)
-        await outer.run(0, extra={"h": sentinel})
+        await run_flow(outer, 0, extra={"h": sentinel})
         assert seen == [sentinel, sentinel, sentinel]
 
     @pytest.mark.asyncio
@@ -261,12 +261,12 @@ class TestCtxExtraPropagation:
             """Pair the item with the extra handle for identity assertion."""
             return item, ctx.extra["h"]
 
-        body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        body = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         body.call(per_item)
 
-        outer = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        outer = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         outer.map(body, items=lambda _p, _c: [1, 2, 3])
-        got = await outer.run(extra={"h": sentinel})
+        got = await run_flow(outer, extra={"h": sentinel})
         assert got == [(1, sentinel), (2, sentinel), (3, sentinel)]
 
     @pytest.mark.asyncio
@@ -284,9 +284,9 @@ class TestCtxExtraPropagation:
             """Return the extra handle observed inside member b."""
             return ctx.extra["h"]
 
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
         flow.map([member_a, member_b])
-        got = await flow.run(extra={"h": sentinel})
+        got = await run_flow(flow, extra={"h": sentinel})
         assert got == [sentinel, sentinel]
 
 
@@ -318,15 +318,21 @@ class TestCtxExtraResume:
 
         def build() -> Flow:
             """Build the outer flow bound to the shared store."""
-            body = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+            body = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
             body.call(body_step)
-            outer = Flow(lg=make_test_logger(), saia_factory=StubFactory(), checkpoint_store=store)
+            outer = TestFlow(
+                lg=make_test_logger(), saia_factory=StubFactory(), checkpoint_store=store
+            )
             outer.iterate(body, max_iters=5)
             return outer.with_checkpointer()
 
         pre_lock = threading.Lock()
-        await build().run(
-            state={"counter": 0}, halt=halt, history="extra-resume-1", extra={"lock": pre_lock}
+        await run_flow(
+            build(),
+            state={"counter": 0},
+            halt=halt,
+            history="extra-resume-1",
+            extra={"lock": pre_lock},
         )
         # Pre-halt: 2 iterations, both observed the pre-halt lock.
         assert seen == [pre_lock, pre_lock]
@@ -335,7 +341,9 @@ class TestCtxExtraResume:
         # the post-halt iterations by identity.
         resume_lock = threading.Lock()
         assert resume_lock is not pre_lock
-        await build().run(history="extra-resume-1", resume="latest", extra={"lock": resume_lock})
+        await run_flow(
+            build(), history="extra-resume-1", start=Resume("latest"), extra={"lock": resume_lock}
+        )
         # Every post-resume iteration observed the resume lock, never the
         # pre-halt one (which would prove extra leaked through a blob).
         assert len(seen) == 5, f"expected 5 iterations total, got {len(seen)}"
@@ -349,7 +357,7 @@ class TestPureVerbCtx:
     @pytest.mark.asyncio
     async def test_pure_verb_dispatch_has_no_saia(self) -> None:
         """Dispatch of a role-less verb builds a Context whose ``saia`` is ``None``."""
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb
         async def tick(ctx: Context) -> object:
@@ -362,7 +370,7 @@ class TestPureVerbCtx:
     @pytest.mark.asyncio
     async def test_pure_verb_in_chain(self) -> None:
         """A pure-Python verb runs as a chain step (no role, no ``ctx.saia`` access)."""
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb
         async def head(ctx: Context, n: int) -> int:
@@ -370,7 +378,7 @@ class TestPureVerbCtx:
             return n + 1
 
         flow.call(head)
-        assert await flow.run(4) == 5
+        assert await run_flow(flow, 4) == 5
 
 
 class TestSaiaAs:
@@ -379,7 +387,7 @@ class TestSaiaAs:
     @pytest.mark.asyncio
     async def test_saia_as_returns_saia(self) -> None:
         """The helper returns the same object as ``ctx.saia`` when a role is bound."""
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb(role=ROLE_A)
         async def probe(ctx: Context) -> tuple[object, object]:
@@ -387,14 +395,14 @@ class TestSaiaAs:
             return ctx.saia, ctx.saia_as(StubSAIA)
 
         flow.register(probe)
-        s, s_as = await flow.dispatch("probe")
+        s, s_as = await flow.dispatch("probe", env=env_of(flow))
         assert s is s_as
         assert isinstance(s, StubSAIA)
 
     @pytest.mark.asyncio
     async def test_saia_as_on_roleless_returns_none(self) -> None:
         """Without a role, ``ctx.saia_as(cls)`` returns ``None`` (no saia to bind)."""
-        flow = Flow(lg=make_test_logger(), saia_factory=StubFactory())
+        flow = TestFlow(lg=make_test_logger(), saia_factory=StubFactory())
 
         @verb
         async def probe(ctx: Context) -> object:

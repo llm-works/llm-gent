@@ -15,11 +15,11 @@ from llm_saia import ListConversation, Message
 from pydantic import BaseModel
 
 from llm_gent.core import Role
-from llm_gent.flow import Context, Factory, Flow, Loop, verb
+from llm_gent.flow import Context, Flow, Loop, verb
 from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.hooks import Hook, StepEvent
 from llm_gent.provenance import REF, Actor, Messages, Record, VersionControl
-from tests.helpers import make_test_logger, memory_store
+from tests.helpers import TestFactory, make_test_logger, memory_store, run_flow
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -38,7 +38,7 @@ async def double(ctx: Context[Any], x: int) -> int:
 
 
 def _flow(**kw: Any) -> Flow:
-    return Factory(make_test_logger(), **kw).create()
+    return TestFactory(make_test_logger(), **kw).create()
 
 
 def _vc(store: MemoryStore) -> VersionControl:
@@ -52,7 +52,7 @@ def _oldest_first(vc: VersionControl) -> list[Record]:
 class TestSteps:
     async def test_every_step_and_the_run_are_records_in_order(self) -> None:
         vc = _vc(memory_store())
-        await _flow().call(add_one, name="a").then(double, name="b").with_hooks(vc).run(1)
+        await run_flow(_flow().call(add_one, name="a").then(double, name="b").with_hooks(vc), 1)
         records = _oldest_first(vc)
         assert [(r.kind, r.meta.get("where", {}).get("step_name")) for r in records] == [
             ("step", "a"),
@@ -63,7 +63,7 @@ class TestSteps:
 
     async def test_a_steps_input_is_the_blob_of_the_previous_steps_result(self) -> None:
         vc = _vc(memory_store())
-        await _flow().call(add_one, name="a").then(double, name="b").with_hooks(vc).run(1)
+        await run_flow(_flow().call(add_one, name="a").then(double, name="b").with_hooks(vc), 1)
         a, b, _ = _oldest_first(vc)
         assert b.inputs["0"].id == a.outputs["result"].id
         assert vc.load(a.inputs["0"]) == 1
@@ -80,7 +80,7 @@ class TestSteps:
             return len(items)
 
         vc = _vc(memory_store())
-        await _flow().call(start, name="a").then(extend, name="b").with_hooks(vc).run(1)
+        await run_flow(_flow().call(start, name="a").then(extend, name="b").with_hooks(vc), 1)
         a, b, _ = _oldest_first(vc)
         assert vc.load(b.inputs["0"]) == [1]
         assert b.inputs["0"].id == a.outputs["result"].id
@@ -92,7 +92,7 @@ class TestSteps:
             return x
 
         vc = _vc(memory_store())
-        await _flow().call(take).with_hooks(vc).run(1, **{"0": 2, "y": 3})
+        await run_flow(_flow().call(take).with_hooks(vc), 1, **{"0": 2, "y": 3})
         step = _oldest_first(vc)[0]
         assert vc.load(step.inputs["0"]) == 1
         assert vc.load(step.inputs["y"]) == 3
@@ -105,7 +105,7 @@ class TestSteps:
 
         vc = _vc(memory_store())
         flow = _flow().call(add_one, rescue=lambda _e, _p, _c: 0).with_hooks(vc, Deny())
-        assert await flow.run(5) == 0
+        assert await run_flow(flow, 5) == 0
         step = _oldest_first(vc)[0]
         assert step.meta["outcome"] == "denied"
         assert vc.load(step.inputs["0"]) == 5
@@ -113,14 +113,14 @@ class TestSteps:
 
     async def test_records_name_their_activity_and_its_parent(self) -> None:
         vc = _vc(memory_store())
-        await _flow().call(add_one).with_hooks(vc).run(1)
+        await run_flow(_flow().call(add_one).with_hooks(vc), 1)
         step, run = _oldest_first(vc)
         assert step.meta["parent"] == run.meta["activity"] == run.meta["run"]
         assert step.meta["run"] == run.meta["run"]
 
     async def test_each_record_is_parented_on_the_one_before(self) -> None:
         vc = _vc(memory_store())
-        await _flow().call(add_one).then(double).with_hooks(vc).run(1)
+        await run_flow(_flow().call(add_one).then(double).with_hooks(vc), 1)
         records = _oldest_first(vc)
         assert records[0].parents == ()
         assert [r.parents for r in records[1:]] == [(r.id,) for r in records[:-1]]
@@ -132,7 +132,7 @@ class TestSteps:
 
         vc = _vc(memory_store())
         flow = _flow().call(add_one, rescue=lambda _e, _p, _c: 0).with_hooks(Deny(), vc)
-        assert await flow.run(1) == 0
+        assert await run_flow(flow, 1) == 0
         step = _oldest_first(vc)[0]
         assert step.meta["outcome"] == "denied"
         assert step.meta["decision"] == {"verdict": "deny", "reason": "no", "hook": "Deny"}
@@ -143,7 +143,7 @@ class TestSteps:
             return object()
 
         vc = _vc(memory_store())
-        await _flow().call(opaque).with_hooks(vc).run(1)
+        await run_flow(_flow().call(opaque).with_hooks(vc), 1)
         step = _oldest_first(vc)[0]
         assert step.meta["omitted"] == ["outputs/result"]
         assert "0" in step.inputs
@@ -151,7 +151,7 @@ class TestSteps:
     async def test_parallel_map_items_form_one_line(self) -> None:
         vc = _vc(memory_store())
         body = _flow().call(add_one, name="item")
-        await _flow().map(body, items=lambda _p, _c: list(range(8))).with_hooks(vc).run(0)
+        await run_flow(_flow().map(body, items=lambda _p, _c: list(range(8))).with_hooks(vc), 0)
         records = list(vc.log())
         items = [r for r in records if r.meta.get("where", {}).get("step_name") == "item"]
         assert len(items) == 8
@@ -212,7 +212,7 @@ class TestModelCalls:
     async def test_a_context_that_cannot_be_read_is_named_and_the_call_kept(self) -> None:
         vc = _vc(memory_store())
         loop = Loop(Role(name="worker"), conversation_factory=_UnreadableConversations())  # type: ignore[arg-type]
-        await _flow(saia_factory=_Factory()).call(loop).with_hooks(vc).run("go")
+        await run_flow(_flow(saia_factory=_Factory()).call(loop).with_hooks(vc), "go")
         calls = [r for r in _oldest_first(vc) if r.kind == "llm_call"]
         assert len(calls) == 3
         assert calls[0].meta["omitted"] == ["inputs/context"]
@@ -221,7 +221,7 @@ class TestModelCalls:
     async def test_each_call_records_its_context_as_a_vector_and_its_response(self) -> None:
         vc = _vc(memory_store())
         loop = Loop(Role(name="worker"), conversation_factory=_Conversations())  # type: ignore[arg-type]
-        await _flow(saia_factory=_Factory()).call(loop).with_hooks(vc).run("go")
+        await run_flow(_flow(saia_factory=_Factory()).call(loop).with_hooks(vc), "go")
         calls = [r for r in _oldest_first(vc) if r.kind == "llm_call"]
         assert [len(vc.load(c.inputs["context"])) for c in calls] == [1, 2, 3]
         assert vc.load(calls[2].inputs["context"])[1] == {"role": "assistant", "content": "turn-0"}
@@ -233,7 +233,7 @@ class TestModelCalls:
         store = memory_store()
         vc = _vc(store)
         loop = Loop(Role(name="worker"), conversation_factory=_Conversations())  # type: ignore[arg-type]
-        await _flow(saia_factory=_Factory()).call(loop).with_hooks(vc).run("go")
+        await run_flow(_flow(saia_factory=_Factory()).call(loop).with_hooks(vc), "go")
         calls = [r for r in _oldest_first(vc) if r.kind == "llm_call"]
         contexts = [list(Vector(vc.repo, c.inputs["context"].id)) for c in calls]
         # Each context extends the one before: its messages are the same blobs.
@@ -253,7 +253,7 @@ class TestCheckpointsAndRepo:
             return x
 
         flow = _flow(checkpoint_store=store).with_checkpointer().call(save).with_hooks(vc)
-        await flow.run(1, history=REPO)
+        await run_flow(flow, 1, history=REPO)
         checkpoints = [r for r in _oldest_first(vc) if r.kind == "checkpoint"]
         head = store.repo(REPO).get_ref(HEAD_REF)
         assert checkpoints[-1].meta["checkpoint"] == head  # the final-state commit
@@ -263,7 +263,7 @@ class TestCheckpointsAndRepo:
         store = memory_store()
         vc = _vc(store)
         flow = _flow(checkpoint_store=store).call(add_one).with_hooks(vc)
-        await flow.run(1, history=REPO, retention="gc_on_success")
+        await run_flow(flow, 1, history=REPO, retention="gc_on_success")
         assert set(store.repo(REPO).refs()) == {REF}
         assert [r.kind for r in _oldest_first(vc)] == ["step", "run"]
 
@@ -283,7 +283,7 @@ class TestCheckpointsAndRepo:
             )
             return 2
 
-        await _flow().call(choose).with_hooks(vc).run(1)
+        await run_flow(_flow().call(choose).with_hooks(vc), 1)
         chose, step, run = _oldest_first(vc)
         assert chose.kind == "chose"
         assert chose.meta["parent"] == step.meta["activity"]
@@ -303,7 +303,7 @@ class TestCheckpointsAndRepo:
                 act.commit("note", outputs={"text": "hi"})
             return x
 
-        await _flow().call(work).with_hooks(vc).run(1)
+        await run_flow(_flow().call(work).with_hooks(vc), 1)
         note, plan, step, _ = _oldest_first(vc)
         assert note.meta["parent"] == plan.meta["activity"]
         assert plan.meta["parent"] == step.meta["activity"]
@@ -344,7 +344,7 @@ class TestCheckpointsAndRepo:
             return real(ref, tree, payload)
 
         vc.repo.commit = racing  # type: ignore[method-assign]
-        await _flow().call(add_one).with_hooks(vc).run(1)
+        await run_flow(_flow().call(add_one).with_hooks(vc), 1)
         other, step, run = _oldest_first(vc)
         assert (other.id, other.kind) == (competing[0], "other")
         assert step.parents == (other.id,)

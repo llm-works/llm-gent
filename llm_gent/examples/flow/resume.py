@@ -14,7 +14,7 @@ Exercises the Flow-level checkpointer end-to-end without touching an LLM:
    a cooperative halt. The framework writes a halt checkpoint at that step,
    preserves it on halt exit, and returns.
 2. **Run 2** — the same :class:`~llm_gent.flow.Flow`, on the same
-   ``history=`` and without a halt, is run with ``resume="latest"``. The
+   ``history=`` and without a halt, is started with ``Resume("latest")``. The
    framework checks out the latest checkpoint, reconstructs ``state.data``
    via :meth:`Counter.from_dict`, and continues where run 1 stopped: the
    next pass runs, then any remaining passes.
@@ -52,7 +52,9 @@ from llm_gent.flow import (
     Context,
     Flow,
     Factory,
+    FlowRunner,
     History,
+    Resume,
     StateDataclass,
     TypeStateFactory,
     verb,
@@ -77,7 +79,7 @@ class Counter(StateDataclass):
     Inherits :class:`~llm_gent.flow.StateDataclass` for ``to_dict`` /
     ``from_dict`` — flat dataclass, no override needed. Bound as
     ``state_factory=TypeStateFactory(Counter)`` on the :class:`~llm_gent.flow.Factory` so
-    the framework calls :meth:`from_dict` on ``run(resume="latest")`` to
+    the framework calls :meth:`from_dict` on a ``Resume("latest")`` start to
     reconstruct an instance from the checkpoint payload.
     """
 
@@ -121,7 +123,7 @@ def _build_flow(ff: Factory[Flow]) -> Flow:
 
     The factory carries the checkpoint store and the state factory; each
     run names its history, brings its own halt and starts from a fresh
-    ``Counter()`` (:meth:`~llm_gent.flow.Flow.run`).
+    ``Counter()`` (:meth:`~llm_gent.flow.FlowRunner.start`).
     """
     flow = ff.create("resume-demo")
     flow.iterate(lambda body: body.call(tick).call(stop_at_limit), max_iters=MAX_ITERS)
@@ -145,20 +147,21 @@ async def main() -> int:
     try:
         store = FileStore(lg, tmp_root)
         name = "resume-demo"
-        ff = Factory(lg, state_factory=TypeStateFactory(Counter), checkpoint_store=store)
+        ff = Factory(lg, state_factory=TypeStateFactory(Counter))
         flow = _build_flow(ff)
 
         # Only run 1 gets a halt: run 2 resumes at the step that halted,
         # and without a halt that step passes through.
+        runner = FlowRunner(lg, store=store)
         print(f"--- Run 1: fresh start, halts at count={HALT_AFTER} ---")
-        result1 = await flow.run(halt=asyncio.Event(), history=name)
+        result1 = await runner.start(flow, halt=asyncio.Event(), history=name)
         history = History(store, name)
         assert result1 is HALTED
         print(f"run 1 returned: {result1} (its state is in the halt checkpoint)")
         print(f"history head: {await _describe_head(history)}")
 
-        print(f"\n--- Run 2: resume=latest (cumulative max_iters={MAX_ITERS}) ---")
-        result2 = await flow.run(history=name, resume="latest")
+        print(f"\n--- Run 2: Resume('latest') (cumulative max_iters={MAX_ITERS}) ---")
+        result2 = await runner.start(flow, history=name, start=Resume("latest"))
         print(f"run 2 returned: count={result2}")
         print(f"history head: {await _describe_head(history)}")
 

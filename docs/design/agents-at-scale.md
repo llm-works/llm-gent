@@ -5,10 +5,10 @@ what each agent holds, and how flows run for agents.
 
 Status: the target design, built in steps. Implemented: the platform package (`Config`,
 `Factory`, `Context`) with the shared clients injected into traits, and agents built on a
-platform; the scope a flow runs in as a fold of its declarations, and the generic run and its
-environment (section 6). Not yet: the platform's `SAIAFactory`, shared trait instances with
-per-agent state, `platform.with_trait_registry`, runs started by a runner rather than by the flow,
-and the API in section 8.
+platform; the scope a flow runs in as a fold of its declarations, the generic run and its
+environment, and flow runs started by a runner (section 6). Not yet: the platform's `SAIAFactory`,
+shared trait instances with per-agent state, `platform.with_trait_registry`, agents supplying a
+run's environment and identity, and the API in section 8.
 
 ## 1. Goals
 
@@ -47,7 +47,8 @@ the prefix (`PlatformFactory`, `AgentFactory`, `TraitFactory`).
 | platform `Context` | Container passed around. Holds references and closes what it owns on `close()` or at the end of a `with` or `async with` block. |
 | `TraitFactory` | Builds traits from injected clients; holds no reference to the context. |
 | `AgentFactory(platform)` | Builds agents that reference the context. Subclassed per agent type (`agent_class`, `required_traits`, `default_tools`). |
-| flow `Factory(lg)` | Builds flows. A run takes its agent; the trait registry and `SAIAFactory` come from the agent's context. |
+| flow `Factory(lg)` | Builds flows: structure only (state factory, flow class, declared resources). |
+| `FlowRunner(lg, env=, store=)` | Executes flows. Holds what its runs share: the `Environment` (trait registry, `SAIAFactory`) and the checkpoint store. `start()` takes one run's inputs and returns the run. |
 
 `AgentFactory` does not build the platform: several agent types share one worker, and the
 platform's lifecycle belongs to the worker. Factories build clients and inject them; a receiver
@@ -159,15 +160,18 @@ tools) hold no trait instances; they resolve traits through the agent's context 
 
 ## 6. Flow: structure and runs
 
-A flow is defined once and runs for many agents.
+A flow is defined once and runs many times at once, for many agents. It never runs itself: a
+runner executes it, and each execution is a run.
 
-- `Flow` is immutable after build and shared: nodes, verbs, checkpointer and checkpoint policy,
-  hooks, budget and resource declarations, the shortcut declaration, `state_factory`, the
-  structure hash, and the per-role SAIA cache (keyed by SAIA factory and role, since agents of
-  different platforms may run the same flow).
-- `flow.run(input, agent=agent)` requires the agent and creates a Run held by it, keyed by run id.
-  An agent may have any number of runs, of different flows or of the same flow. `ctx` is built
-  from the agent and the run; `ctx.traits` and `ctx.saia` come from the agent's context.
+- `Flow` is shared and immutable once started: nodes, verbs, checkpointer and checkpoint policy,
+  hooks, budget and resource declarations, the shortcut declaration, `state_factory` and the
+  structure hash. Its first start freezes it and every flow under it; a builder method on a
+  frozen flow raises.
+- `FlowRunner(lg, env=, store=).start(flow, input, ...)` checks the run's inputs, starts the run in
+  a task of its own and returns it. `ctx.env`, `ctx.traits` and `ctx.saia` come from the runner's
+  environment. The target design takes the environment and the run's identity from the agent,
+  which holds its runs keyed by run id; an agent may have any number of runs, of different flows
+  or of the same flow.
 - State is supplied per run, never held by the flow. `state_factory` stays with the flow: how a
   run's state is made and restored is structure.
 - A run leaves the agent when it ends. A checkpoint is its durable record: scopes, cursors,
@@ -177,20 +181,20 @@ A flow is defined once and runs for many agents.
   on the flow's nodes, so the same nodes serve every run.
 
 Cloning a flow per run would keep structure and state coupled: every field added to `Flow` would
-need a copy-or-share decision, each clone would rebuild the SAIA cache, and nothing would stop two
-runs from sharing a clone.
+need a copy-or-share decision, and nothing would stop two runs from sharing a clone.
 
 Settings live where their lifetime is:
 
 | Setting | Where |
 |---|---|
-| CAS store, `state_factory`, flow class, resource methods | The flow `Factory` |
-| Trait registry, `SAIAFactory` | The run's agent |
-| Halt, signals, resource instances (cost tracker), history key | `run()` |
+| `state_factory`, flow class, resource methods | The flow `Factory` |
+| Trait registry, `SAIAFactory` (the `Environment`), CAS store | The runner; in the target design the environment comes from the agent |
+| Halt, signals, resource instances (cost tracker), history name, start | `start()` |
 | Declarations about part of the tree: checkpointer, checkpoint policy, shortcut, budget | The flow |
 
-A run names its checkpoint history from the agent's identity and a key the caller gives, so runs
-of a shared flow keep separate histories and `resume="latest"` continues the caller's own run.
+A run's history is named by the caller (`history=`); in the target design the name joins the
+agent's identity, so runs of a shared flow keep separate histories and `start=Resume("latest")`
+continues the caller's own run.
 
 Hooks follow the trait model: one shared instance, per-run data keyed by the event's ids, the
 identity read from the event. Events carry `ctx`, so a hook reads `ctx.agent.identity`: the "who"
@@ -202,14 +206,38 @@ An `Environment` is what a run may use: the `SAIAFactory` and the trait registry
 it selects what a run uses of the platform's clients. It builds one SAIA per role on first use and
 keeps it, so everything that uses one environment shares its SAIAs. That is safe because a SAIA
 holds configuration only (section 4, Conversations). Work that needs SAIAs of its own (its own
-tools, its own directive) uses an environment of its own. A flow holds one, built from its
-`saia_factory` and `traits`; a run and every step in it use the top-level flow's.
+tools, its own directive) uses an environment of its own. The runner holds one; every run it
+starts, and every step of every flow in it, uses that one.
 
 The generic `Run` is what any execution has, with or without Flow: its logger, its environment,
 its halt event and the task that executes it. It is awaited for its result, halted with `halt()`,
 and reports `done`. A flow run extends it with what exists only because a flow nests and
 checkpoints its scopes: the flow, its signals, its history writer, its live scopes and cursors,
 and its hook bookkeeping. Without Flow there is one scope, the root, and nothing to fold.
+
+### Runner and run
+
+A runner holds the wiring its runs share and executes them; a run is one execution:
+
+```python
+runner = FlowRunner(lg, env=Environment(saia_factory=factory, traits=registry), store=store)
+run = runner.start(
+    flow,
+    "input",  # the first node's arguments
+    state=s,  # the root scope's state
+    halt=h,  # the run's halt
+    history="k",  # the repository of the runner's store the run's commits go to
+    start=Resume("latest"),  # Fresh() (default), Resume(at) or Restart(at)
+)
+result = await run
+```
+
+`start()` runs every check before anything is read or written, so a misconfigured run raises
+there and leaves no history behind. `Start` is used once, to produce the run's initial state and
+snapshot: `Fresh()` from `state`, `Resume(at)` continuing where the run was at a commit,
+`Restart(at)` from the commit's root state with every position cleared; `at` is `"latest"`, a
+commit hash or a checkpoint name. A run is awaited for its result (`HALTED` when its halt stopped
+it), halted with `run.halt()`, and reports `done`; cancelling the task that awaits it cancels it.
 
 ### Scopes: the fold
 
@@ -259,13 +287,13 @@ fold so far) and the position (snapshot path, chain context, ancestor chain).
 core/       what any run has and may use: Run, Environment, Role, SAIAFactory
 flow/       structure: the builder and its read-only tree, nodes, verbs, state, the declaration
             type (Decl), Context and Loop
-flow/run/   execution: Scope and Position, the frame, the walk (chain, branch, iterate, map),
-            the flow run, start and resume, history writing, hook events, shortcut regions
+flow/run/   execution: the runner (FlowRunner) and Start, Scope and Position, the frame, the
+            walk (chain, branch, iterate, map), the flow run, start and resume, history writing,
+            hook events, shortcut regions
 ```
 
-`flow/run` imports the structure; the structure imports `flow/run` only where `Flow.run` starts a
-run. Context and Loop reach the run through the frame they are handed, never by importing the
-engine.
+`flow/run` imports the structure; the structure never imports `flow/run`. Context and Loop reach
+the run through the frame they are handed.
 
 ## 7. Runtime
 

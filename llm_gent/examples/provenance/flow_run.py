@@ -49,7 +49,7 @@ import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from appinfra.cas import MemoryStore, Store
+from appinfra.cas import MemoryStore
 from appinfra.log import Logger, quick_console_logger
 from llm_infer.client.saia import SAIAAdapter
 from llm_kelt.conversation import ConversationFactory as KeltConversationFactory
@@ -58,8 +58,8 @@ from llm_saia.core.backend import Backend
 
 from llm_gent.examples._clients import example_client, parse_client_args
 from llm_gent.examples.provenance._shared import print_records, summary_of, writer_saia
-from llm_gent.core import Role
-from llm_gent.flow import HALTED, Context, Factory, Flow, Loop, Pause, verb
+from llm_gent.core import Environment, Role
+from llm_gent.flow import HALTED, Context, Factory, Flow, FlowRunner, Loop, Pause, Resume, verb
 from llm_gent.flow.hooks import Hook, StepEvent
 from llm_gent.provenance import Actor, Record, VersionControl
 
@@ -135,12 +135,12 @@ async def publish(ctx: Context[Any], text: str) -> str:
     return f"published: {text}"
 
 
-def _flow(lg: Logger, store: Store, backend: Backend, hooks: tuple[Hook, ...]) -> Flow:
-    """The flow, keeping its runs' histories in ``store``; run it with a halt, for a gate's pause."""
+def _flow(lg: Logger, hooks: tuple[Hook, ...]) -> Flow:
+    """The flow; run it with a halt and a history, for a gate's pause."""
     loop = Loop(WRITER, conversation_factory=KeltConversationFactory(lg))
-    ff = Factory(lg, saia_factory=_WriterFactory(lg, backend), checkpoint_store=store)
     return (
-        ff.create("publish-summary")
+        Factory(lg)
+        .create("publish-summary")
         .call(_make_write(loop), name="write")
         .then(review, name="review")
         .then(publish, name="publish")
@@ -152,12 +152,17 @@ async def _run(lg: Logger, backend: Backend) -> tuple[Any, Any, VersionControl, 
     """Run until the gate pauses, then resume with the approval."""
     store = MemoryStore(lg)
     vc = VersionControl(lg, store.repo(REPO))
-    flow = _flow(lg, store, backend, (EditorApproval(vc, None), vc))
-    first = await flow.run(TOPIC, halt=asyncio.Event(), history=REPO)
+    env = Environment(saia_factory=_WriterFactory(lg, backend))
+    runner = FlowRunner(lg, env=env, store=store)
+    flow = _flow(lg, (EditorApproval(vc, None), vc))
+    first = await runner.start(flow, TOPIC, halt=asyncio.Event(), history=REPO)
     print(f"--- run 1: {'halted, waiting for approval' if first is HALTED else first}")
     gate = EditorApproval(vc, approved_by="editor-1")
-    second = await _flow(lg, store, backend, (gate, vc)).run(
-        halt=asyncio.Event(), history=REPO, resume="latest"
+    second = await runner.start(
+        _flow(lg, (gate, vc)),
+        halt=asyncio.Event(),
+        history=REPO,
+        start=Resume("latest"),
     )
     print(f"--- run 2 (resumed, approved): {second}")
     return first, second, vc, store

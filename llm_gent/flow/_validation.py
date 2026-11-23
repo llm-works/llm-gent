@@ -5,7 +5,7 @@
 
 Called from :meth:`Flow.call` / :meth:`Flow.iterate` / :meth:`Flow.map`
 / :meth:`Flow.branch` at build time so bad compositions surface where
-the graph is authored, not at :meth:`Flow.run` time. All helpers are
+the graph is authored, not at :meth:`FlowRunner.start` time. All helpers are
 module-private; the :class:`Flow` isinstance checks resolve through a
 localized late import (``from .flow import Flow``) to break the
 circular dependency between this module and the class it validates
@@ -53,25 +53,25 @@ def _validate_target(target: Any) -> None:
     _reject_reserved_kwarg(target, "signals")
     _reject_reserved_kwarg(target, "history")
     _reject_reserved_kwarg(target, "retention")
-    _reject_reserved_kwarg(target, "resume")
-    _reject_reserved_kwarg(target, "restart")
+    _reject_reserved_kwarg(target, "start")
     _reject_reserved_kwarg(target, "extra")
 
 
 def _reject_reserved_kwarg(verb: Any, name: str) -> None:
-    """Reject a verb whose signature declares a :meth:`Flow.run`-bound kwarg.
+    """Reject a verb whose signature declares a kwarg :meth:`FlowRunner.start` binds.
 
-    ``Flow.run(state=...)`` binds ``state`` to seed the top-level payload
-    and strips it before forwarding kwargs to the first node. A verb whose
-    signature declares ``state`` as a keyword-visible parameter would never
-    see a value passed via ``.run()`` — silent misbehavior. Rejected at
-    build time so the collision surfaces where the graph is authored.
+    ``start(flow, state=...)`` binds ``state`` to seed the top-level
+    payload and strips it before forwarding kwargs to the first node. A
+    verb whose signature declares ``state`` as a keyword-visible parameter
+    would never see a value passed to ``start()`` — silent misbehavior.
+    Rejected at build time so the collision surfaces where the graph is
+    authored.
 
     The first positional is conventionally ``ctx`` and is skipped: the
     framework always binds it, so its name doesn't collide with any run
     kwarg. Ignores verbs whose signature cannot be introspected (C
     callables, some partials) — those cannot statically collide with a
-    bound kwarg either. ``**kwargs``-only verbs are allowed: :meth:`run`
+    bound kwarg either. ``**kwargs``-only verbs are allowed: ``start()``
     already strips the reserved name before forwarding, so the verb's
     ``**kwargs`` never sees it.
     """
@@ -89,7 +89,7 @@ def _reject_reserved_kwarg(verb: Any, name: str) -> None:
             verb_name = getattr(verb, "__name__", type(verb).__name__)
             raise TypeError(
                 f"verb {verb_name!r} declares reserved parameter {name!r} — "
-                f"Flow.run({name}=...) binds this name and it would never "
+                f"FlowRunner.start({name}=...) binds this name and it would never "
                 f"reach the verb; rename the parameter"
             )
         return
@@ -154,7 +154,7 @@ def _materialize(buildable: Any, lg: Logger, name: str, flow_class: type[Flow]) 
     verb. Any other callable is invoked against a fresh Flow it may mutate
     (the return value, if any, is ignored). Anything else is a
     :class:`TypeError` — bad Buildables fail eagerly at build time, not at
-    :meth:`Flow.run` time. The flows built here are ``flow_class`` — the
+    :meth:`FlowRunner.start` time. The flows built here are ``flow_class`` — the
     enclosing flow's class, so a subclass's methods are there in its
     bodies.
     """

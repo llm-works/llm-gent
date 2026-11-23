@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""The app-scoped :class:`Factory` that builds flows.
+"""App-scoped :class:`Factory` for flows.
 
-:class:`Factory` bundles the ambient ``lg`` and (by convention) a single
-:class:`~llm_gent.core.env.SAIAFactory`. It provides :meth:`create` for
-building Flows without repeating those two arguments at every construction
-site, and :meth:`with_saia_factory` for deriving a factory that swaps the
-SAIAFactory (e.g. a plugin subsystem).
+:class:`Factory` bundles what every flow an application builds shares as
+structure (the logger, the state factory, the flow class, declared
+resources), so construction sites read as ``f.create("grade").call(...)``.
+What a run may use (SAIA factory, traits) and where it keeps its history
+are not structure: they are the runner's (its
+:class:`~llm_gent.core.env.Environment` and its store).
 """
 
 from __future__ import annotations
@@ -15,12 +16,9 @@ from __future__ import annotations
 import copy
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
-from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
-from ..core.env import SAIAFactory
-from ..core.traits import Registry as TraitRegistry
 from .resource import R, ResourceKey, check_resource, resource_method
 from .state import StateFactory
 
@@ -34,17 +32,10 @@ F = TypeVar("F", bound="Flow")
 
 
 class Factory(Generic[F]):
-    """App-scoped factory for :class:`Flow` — captures ``lg`` and ``saia`` once.
+    """App-scoped factory for :class:`Flow` — captures ``lg`` and the shared declarations once.
 
-    An application typically has one logger and one :class:`SAIAFactory`
-    covering every :class:`Flow` it constructs. Repeating both at every
-    Flow-construction site is noise; :class:`Factory` bundles them
-    once so subsystem builders read as ``f.create("grade").call(...)``.
-
-    :meth:`create` builds a Flow with the captured defaults;
-    :meth:`with_saia_factory` returns a new :class:`Factory` whose
-    SAIAFactory is swapped (for subsystems that need a different saia
-    builder). Every ``with_*`` method returns a new factory the same way.
+    :meth:`create` builds a Flow with the captured settings; every
+    ``with_*`` method returns a new factory with one setting swapped.
 
     ``flow_class=`` builds a :class:`Flow` subclass instead — typed:
     ``Factory(lg, flow_class=MyFlow).create()`` is a ``MyFlow``, and
@@ -56,11 +47,8 @@ class Factory(Generic[F]):
         self: Factory[Flow],
         lg: Logger,
         *,
-        saia_factory: SAIAFactory | None = None,
-        traits: TraitRegistry | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
-        checkpoint_store: Store | None = None,
         flow_class: None = None,
     ) -> None: ...
 
@@ -69,11 +57,8 @@ class Factory(Generic[F]):
         self,
         lg: Logger,
         *,
-        saia_factory: SAIAFactory | None = None,
-        traits: TraitRegistry | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
-        checkpoint_store: Store | None = None,
         flow_class: type[F],
     ) -> None: ...
 
@@ -81,24 +66,14 @@ class Factory(Generic[F]):
         self,
         lg: Logger,
         *,
-        saia_factory: SAIAFactory | None = None,
-        traits: TraitRegistry | None = None,
         cost_tracker: CostTracker | None = None,
         state_factory: StateFactory[Any] | None = None,
-        checkpoint_store: Store | None = None,
         flow_class: type[Any] | None = None,
     ) -> None:
-        """Capture the ambient environment for subsequent :meth:`create` calls.
+        """Capture the shared settings for subsequent :meth:`create` calls.
 
         Args:
             lg: Logger threaded into every :class:`Flow` this factory builds.
-            saia_factory: A :class:`SAIAFactory` that builds role-bound
-                saia instances. Threaded into every :class:`Flow` this
-                factory builds.
-            traits: Optional trait registry propagated to every :class:`Flow`
-                built by this factory. Verbs reach mounted capabilities via
-                ``ctx.traits``. ``None`` yields flows with ``ctx.traits is
-                None``.
             cost_tracker: Optional :class:`CostTracker` attached via
                 :meth:`Flow.with_cost_tracker` on every built flow. Wire once at
                 the factory to thread the same cost tracker through an
@@ -110,46 +85,31 @@ class Factory(Generic[F]):
                 :class:`TypeStateFactory`; implement :class:`StateFactory`
                 directly for state that binds runtime handles. ``None``
                 (default): a run given no state gets a fresh empty ``dict``.
-            checkpoint_store: Optional :class:`appinfra.cas.Store` every
-                built :class:`Flow` keeps its runs' histories in (its
-                ``checkpoint_store=``). Each run names its history:
-                :meth:`Flow.run` ``history=``. Saves inside the run also
-                need :meth:`Flow.with_checkpointer`.
             flow_class: A :class:`Flow` subclass to build instead of
                 :class:`Flow`; it keeps :class:`Flow`'s constructor
                 signature. ``None`` (default) builds :class:`Flow`.
         """
         self._lg = lg
-        self._saia_factory = saia_factory
-        self._traits = traits
         self._cost_tracker = cost_tracker
         self._state_factory = state_factory
-        self._checkpoint_store = checkpoint_store
         self._flow_class = flow_class
         self._resources: dict[ResourceKey[Any], Any] = {}
         self._resource_methods: dict[str, ResourceKey[Any]] = {}
         self._built_class: type[F] | None = None
 
     def create(self, name: str = "") -> F:
-        """Return a :class:`Flow` (``flow_class``) using this factory's captured environment.
+        """Return a :class:`Flow` (``flow_class``) built with this factory's settings.
 
         The flow is structure: it can run many times, at once too. What
-        belongs to one run — its state, halt, signals and history — goes
-        to :meth:`Flow.run`.
+        belongs to one run — its state, halt, signals, history and
+        environment — goes to the runner that starts it.
 
         Args:
             name: Optional identifier — used in error messages and traces.
                 Also lets the flow serve as a named node inside a parent
                 chain.
         """
-        flow = self._class()(
-            self._lg,
-            name,
-            saia_factory=self._saia_factory,
-            traits=self._traits,
-            state_factory=self._state_factory,
-            checkpoint_store=self._checkpoint_store,
-        )
+        flow = self._class()(self._lg, name, state_factory=self._state_factory)
         if self._cost_tracker is not None:
             flow.with_cost_tracker(self._cost_tracker)
         for key, value in self._resources.items():
@@ -227,25 +187,6 @@ class Factory(Generic[F]):
             raise ValueError(f"{name!r} is already an attribute of the flow class")
         return self._replace(resource_methods={**self._resource_methods, name: key})
 
-    def with_saia_factory(self, saia_factory: SAIAFactory) -> Factory[F]:
-        """Return a new :class:`Factory` whose :class:`SAIAFactory` is swapped.
-
-        Every other captured slot (``lg``, ``traits``,
-        ``cost_tracker``, ``state_factory``, ``checkpoint_store``, the flow
-        class, resources and resource methods) carries over. Useful for
-        subsystems that share the app's logger but need a different saia
-        builder (e.g. a plugin with its own model wiring).
-        """
-        return self._replace(saia_factory=saia_factory)
-
-    def with_traits(self, traits: TraitRegistry | None) -> Factory[F]:
-        """Return a new :class:`Factory` whose trait registry is swapped.
-
-        Every other captured slot carries over. Mirrors
-        :meth:`with_saia_factory` for the trait dimension.
-        """
-        return self._replace(traits=traits)
-
     def with_cost_tracker(self, tracker: CostTracker) -> Factory[F]:
         """Return a new :class:`Factory` whose cost tracker is swapped.
 
@@ -255,15 +196,6 @@ class Factory(Generic[F]):
         observes ``ctx.cost``.
         """
         return self._replace(cost_tracker=tracker)
-
-    def with_checkpoint_store(self, store: Store) -> Factory[F]:
-        """Return a new :class:`Factory` whose checkpoint store is swapped.
-
-        Every other captured slot carries over. Every subsequently created
-        :class:`Flow` keeps its runs' histories in ``store``; each run
-        names its own (:meth:`Flow.run` ``history=``).
-        """
-        return self._replace(checkpoint_store=store)
 
     def with_state_factory(self, state_factory: StateFactory[Any] | None) -> Factory[F]:
         """Return a new :class:`Factory` whose state factory is swapped.

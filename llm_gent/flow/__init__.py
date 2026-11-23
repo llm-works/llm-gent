@@ -3,9 +3,9 @@
 
 """Agent flow framework — role-based verb dispatch on top of saia.
 
-Public surface (roles and how they become SAIA instances,
-:class:`~llm_gent.core.Role` and :class:`~llm_gent.core.SAIAFactory`, are
-:mod:`llm_gent.core`'s):
+Public surface (what a run may use and how roles become SAIA instances,
+:class:`~llm_gent.core.Environment`, :class:`~llm_gent.core.Role` and
+:class:`~llm_gent.core.SAIAFactory`, are :mod:`llm_gent.core`'s):
 
 - :func:`verb` — decorator marking an async function as a role-bound verb
 - :data:`VerbCallable` — the type of a verb: an async callable taking
@@ -26,8 +26,13 @@ Public surface (roles and how they become SAIA instances,
   state types (wraps a :class:`StateData` class so the framework's restore
   call routes through ``state_type.from_dict``)
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
+- :class:`FlowRunner` — executes flows: ``start(flow, ...)`` returns a
+  :class:`FlowRun` to await, hold or halt; :class:`Fresh`, :class:`Resume`
+  and :class:`Restart` (a :data:`Start`) say whether a run starts from its
+  state or from a commit of its history; its ``env=``
+  (:class:`~llm_gent.core.Environment`) is what the runs may use
 - :class:`Factory` — app-scoped :class:`Flow` builder (captures ``lg``
-  and one :class:`~llm_gent.core.SAIAFactory`); preferred entry point at the application
+  and the shared declarations); preferred entry point at the application
   boundary
 - :class:`Resource` — protocol of a run-scoped object checkpointed with
   the run (``snapshot()`` / ``restore(data)``, optional ``child(...)`` for
@@ -41,8 +46,8 @@ Public surface (roles and how they become SAIA instances,
   pause/resume via the framework halt-save site
 - :class:`LoopFactory` — app-scoped :class:`Loop` builder; its
   ``with_halt`` gives its Loops a halt of their own, over the run's
-- Checkpoints — a flow built with ``checkpoint_store=`` (on :class:`Flow`
-  or :class:`Factory`) keeps each run's history, ``run(history=...)``, in
+- Checkpoints — a runner built with ``store=`` (:class:`FlowRunner`)
+  keeps each run's history, ``start(flow, history=...)``, in
   one repository of an :class:`appinfra.cas.Store`
   (``MemoryStore``, ``FileStore``, :class:`~llm_gent.flow.stores.PgStore`):
   snapshots of the run — every scope and running structure's position,
@@ -59,9 +64,9 @@ Public surface (roles and how they become SAIA instances,
   ``Flow.guard`` on a ``Flow.map`` node
 - :class:`Interrupted` — raised by a step that stops because of the halt
   before finishing its work, so it runs again on resume
-- :data:`HALTED` — what ``Flow.run`` returns when the halt stopped the run
+- :data:`HALTED` — what ``FlowRunner.start`` returns when the halt stopped the run
 - :data:`UNSET` — "no value here" sentinel (distinct from ``None``), used by
-  :meth:`Flow.run`'s ``state=`` default and by rescue callbacks'
+  :meth:`FlowRunner.start`'s ``state=`` default and by rescue callbacks'
   ``pending_input`` positional
 - Archetype decorators: :func:`planner`, :func:`extractor`, :func:`grader`,
   :func:`synthesizer` — semantic tags for the standard agent shape
@@ -78,7 +83,7 @@ mount them via the existing trait system.
 
 from .aggregate import majority, mean, unanimous, weighted
 from .archetypes import extractor, grader, planner, synthesizer
-from .checkpoint import CheckpointPolicy, ConcurrentWriteError, ResumeMode, Retention
+from .checkpoint import CheckpointPolicy, ConcurrentWriteError, Retention
 from .context import Context
 from .factory import Factory
 from .flow import Flow
@@ -87,6 +92,9 @@ from .hooks import Hook, HookDenied, Pause
 from .loop import Loop, LoopFactory
 from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, Skipped, Unset
 from .resource import COST, Resource, ResourceKey, resource_method
+from .run._run import Run as FlowRun
+from .run.runner import Runner as FlowRunner
+from .run.start import Fresh, Restart, Resume, Start
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
 from .state.cas import CommitMeta, FlowCommit
 from .structure import StepPath, Structure, StructureDiff, path_label
@@ -105,6 +113,9 @@ __all__ = [
     "Failure",
     "Flow",
     "FlowCommit",
+    "FlowRun",
+    "FlowRunner",
+    "Fresh",
     "Halted",
     "History",
     "HistoryCorrupt",
@@ -117,9 +128,11 @@ __all__ = [
     "Resource",
     "ResourceKey",
     "RestoredError",
-    "ResumeMode",
+    "Restart",
+    "Resume",
     "Retention",
     "Skipped",
+    "Start",
     "State",
     "StateData",
     "StateDataclass",

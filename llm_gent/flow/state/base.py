@@ -3,7 +3,7 @@
 
 """State — scope-aware wrapper around a user-owned payload.
 
-Every :meth:`Flow.run` wraps its incoming state as a :class:`State`; sub-flows
+Every :meth:`FlowRunner.start` wraps its incoming state as a :class:`State`; sub-flows
 opened with ``state=`` on ``.call`` / ``.loop`` / ``.map`` produce a child
 :class:`State` whose ``_parent`` links back to the enclosing scope. Verbs
 access their scope's payload via :attr:`data` and reach run-wide state via
@@ -25,7 +25,7 @@ because it doesn't know the payload's concrete type. Consumers call
 ``PayloadClass.from_dict(checkpoint["data"])`` in their resume hook.
 
 The contract only surfaces when the run keeps a history
-(``run(history=...)``). Consumers who never checkpoint don't need to
+(``start(flow, history=...)``). Consumers who never checkpoint don't need to
 conform.
 """
 
@@ -143,7 +143,7 @@ class StateDataclass:
 class State(Generic[T]):
     """Scope-aware wrapper around a user-owned payload.
 
-    ``data`` is the payload the caller supplied at :meth:`Flow.run` (or the
+    ``data`` is the payload the caller supplied at :meth:`FlowRunner.start` (or the
     child payload produced by a ``state=`` projection); the framework carries
     it verbatim without inspecting or dictating its shape.
 
@@ -208,17 +208,17 @@ class State(Generic[T]):
 class StateFactory(Protocol[T_co]):
     """Framework-facing state construction: a fresh run's state, and restore from a checkpoint.
 
-    The framework calls :meth:`new` for a :meth:`~llm_gent.flow.Flow.run`
+    The framework calls :meth:`new` for a :meth:`~llm_gent.flow.FlowRunner.start`
     given no ``state=``: every run gets its own state, never one shared
     with other runs of the flow. It calls :meth:`restore` at resume time
-    (``run(resume=...)`` on a run with a history) to rebuild state from the
+    (``start=Resume(...)`` on a run with a history) to rebuild state from the
     serialized dict. Runtime handles that cannot be serialized (Logger,
     storage backends, connections) are captured at factory construction
     and threaded through both; the framework passes no runtime context of
     its own.
 
     A factory that cannot build a state without inputs raises from
-    :meth:`new`; its callers pass ``run(state=...)``.
+    :meth:`new`; its callers pass ``start(flow, state=...)``.
 
     ``StateFactory[T]`` narrows the payload type; both methods return
     ``T`` so the run's state is statically typed against the caller's

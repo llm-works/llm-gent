@@ -11,7 +11,8 @@ import pytest
 
 from llm_gent.core.cost import FixedOp, PricingConfig
 from llm_gent.core.cost import Tracker as CostTracker
-from llm_gent.flow import Context, Flow, verb
+from llm_gent.flow import Context, verb
+from tests.helpers import TestFlow, run_flow
 
 from .conftest import ROLE_A, StubFactory, make_test_logger
 
@@ -38,11 +39,11 @@ class TestContextBudgetPropagation:
             return "ok"
 
         flow = (
-            Flow(make_test_logger(), saia_factory=StubFactory())
+            TestFlow(make_test_logger(), saia_factory=StubFactory())
             .call(peek)
             .with_cost_tracker(tracker)
         )
-        await flow.run()
+        await run_flow(flow)
         assert captured["budget"] is tracker
 
     @pytest.mark.asyncio
@@ -54,8 +55,8 @@ class TestContextBudgetPropagation:
             captured["budget"] = ctx.cost
             return "ok"
 
-        flow = Flow(make_test_logger(), saia_factory=StubFactory()).call(peek)
-        await flow.run()
+        flow = TestFlow(make_test_logger(), saia_factory=StubFactory()).call(peek)
+        await run_flow(flow)
         assert captured["budget"] is None
 
     @pytest.mark.asyncio
@@ -68,7 +69,7 @@ class TestContextBudgetPropagation:
             captured["budget"] = ctx.cost
             return "ok"
 
-        flow = Flow(make_test_logger(), saia_factory=StubFactory()).with_cost_tracker(tracker)
+        flow = TestFlow(make_test_logger(), saia_factory=StubFactory()).with_cost_tracker(tracker)
         flow.register(peek)
         await flow.dispatch("peek")
         assert captured["budget"] is tracker
@@ -87,13 +88,13 @@ class TestSubflowInheritance:
             captured["budget"] = ctx.cost
             return "ok"
 
-        inner = Flow(make_test_logger(), saia_factory=StubFactory(), name="inner").call(peek)
+        inner = TestFlow(make_test_logger(), saia_factory=StubFactory(), name="inner").call(peek)
         outer = (
-            Flow(make_test_logger(), saia_factory=StubFactory(), name="outer")
+            TestFlow(make_test_logger(), saia_factory=StubFactory(), name="outer")
             .call(inner)
             .with_cost_tracker(outer_tracker)
         )
-        await outer.run()
+        await run_flow(outer)
         assert captured["budget"] is outer_tracker
 
     @pytest.mark.asyncio
@@ -108,16 +109,16 @@ class TestSubflowInheritance:
             return "ok"
 
         inner = (
-            Flow(make_test_logger(), saia_factory=StubFactory(), name="inner")
+            TestFlow(make_test_logger(), saia_factory=StubFactory(), name="inner")
             .call(peek)
             .with_cost_tracker(inner_tracker)
         )
         outer = (
-            Flow(make_test_logger(), saia_factory=StubFactory(), name="outer")
+            TestFlow(make_test_logger(), saia_factory=StubFactory(), name="outer")
             .call(inner)
             .with_cost_tracker(outer_tracker)
         )
-        await outer.run()
+        await run_flow(outer)
         assert captured["budget"] is inner_tracker
 
 
@@ -135,13 +136,13 @@ class TestEndToEndHalt:
             ctx.cost.track("web_search", count=3)
             iterations.append(len(iterations) + 1)
 
-        body = Flow(make_test_logger(), saia_factory=StubFactory(), name="body").call(burn)
+        body = TestFlow(make_test_logger(), saia_factory=StubFactory(), name="body").call(burn)
         flow = (
-            Flow(make_test_logger(), saia_factory=StubFactory())
+            TestFlow(make_test_logger(), saia_factory=StubFactory())
             .iterate(body, max_iters=10)
             .with_cost_tracker(tracker)
         )
-        await flow.run(halt=halt)
+        await run_flow(flow, halt=halt)
         assert tracker.exceeded is True
         assert halt.is_set()
         assert len(iterations) < 10
@@ -158,11 +159,11 @@ class TestEndToEndHalt:
             scope.track("web_search", count=3)
 
         flow = (
-            Flow(make_test_logger(), saia_factory=StubFactory())
+            TestFlow(make_test_logger(), saia_factory=StubFactory())
             .call(scoped_work)
             .with_cost_tracker(root)
         )
-        await flow.run()
+        await run_flow(flow)
         assert scope_halt.is_set()
         assert not halt.is_set()
         assert root.spent == pytest.approx(0.003)

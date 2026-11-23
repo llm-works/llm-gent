@@ -10,9 +10,9 @@ import asyncio
 import pytest
 from appinfra.cas import MemoryStore
 
-from llm_gent.flow import FlowCommit, History, HistoryCorrupt, TypeStateFactory
+from llm_gent.flow import FlowCommit, History, HistoryCorrupt, Resume, TypeStateFactory
 from llm_gent.flow.testing.checkpoint import CanonicalCounter, build_canonical_flow
-from tests.helpers import memory_store
+from tests.helpers import memory_store, run_flow
 
 from .conftest import commit_ids, make_test_logger
 
@@ -29,9 +29,15 @@ def store() -> MemoryStore:
 async def _run(store: MemoryStore, name: str, *, halt_at: int | None = None) -> None:
     """Run the canonical flow (4 iterations) under ``name``; halt after ``halt_at`` if given."""
     halt = asyncio.Event() if halt_at is not None else None
-    await build_canonical_flow(
-        make_test_logger(), max_iters=4, halt_after_iteration=halt_at, store=store
-    ).run(halt=halt, history=name, resume="latest")
+    await run_flow(
+        build_canonical_flow(
+            make_test_logger(), max_iters=4, halt_after_iteration=halt_at, checkpointed=True
+        ),
+        halt=halt,
+        history=name,
+        start=Resume("latest"),
+        store=store,
+    )
 
 
 async def _all(history: History) -> list[FlowCommit]:
@@ -117,9 +123,15 @@ class TestCorruptHistory:
         assert head is not None
         store.delete_objects("torn-resume", [head.id])
 
-        flow = build_canonical_flow(make_test_logger(), max_iters=4, store=store)
+        flow = build_canonical_flow(make_test_logger(), max_iters=4, checkpointed=True)
         with pytest.raises(HistoryCorrupt):
-            await flow.run(state=CanonicalCounter(n=100), history="torn-resume", resume="latest")
+            await run_flow(
+                flow,
+                state=CanonicalCounter(n=100),
+                history="torn-resume",
+                start=Resume("latest"),
+                store=store,
+            )
         # Nothing was written past the damage: the ref still names the missing commit.
         with pytest.raises(HistoryCorrupt):
             await History(store, "torn-resume").head()

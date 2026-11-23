@@ -20,7 +20,7 @@ as the first argument to every verb. It exposes:
   through state
 - ``extra`` — caller-supplied per-invocation opaque dict, escape hatch
   for handles the framework does not type (tenant IDs, correlation IDs,
-  per-run callbacks); supplied at :meth:`Flow.run` via ``extra=`` and
+  per-run callbacks); supplied at :meth:`FlowRunner.start` via ``extra=`` and
   never checkpointed
 - ``resource(key)`` — a resource the run runs with
   (:meth:`Flow.with_resource`), typed by its :class:`ResourceKey`
@@ -43,6 +43,7 @@ from typing import Any, Generic, TypeVar, overload
 from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
+from ..core.env import Environment
 from ..core.role import Role
 from ..core.traits import Registry as TraitRegistry
 from .checkpoint import checkpoint_tag
@@ -97,34 +98,29 @@ class Context(Generic[T]):
     flow: Any
     """Back-reference to the :class:`Flow` that built this context.
 
-    A verb uses this to dispatch sibling verbs with their own role-bound
-    saia. Typed as ``Any`` to avoid a circular
-    import — ``.dispatch(name, *args, **kwargs)`` is the only method used.
-    Also the resolver for :attr:`saia`.
+    A verb uses this to dispatch sibling verbs. Typed as ``Any`` to avoid a
+    circular import — ``.dispatch(name, *args, **kwargs)`` is the only
+    method used.
     """
 
-    traits: TraitRegistry | None = None
-    """Trait registry the dispatching flow was constructed with, or ``None``.
+    env: Environment = field(default_factory=Environment)
+    """What the run may use: the SAIA per role (:attr:`saia`) and the traits (:attr:`traits`).
 
-    Verbs reach mounted platform capabilities (memory, storage, tools,
-    custom traits) via ``ctx.traits.get(SomeTrait)`` or
-    ``ctx.traits.require(SomeTrait)``. ``None`` when the flow was
-    constructed without a registry — verbs that need a trait must handle
-    absence, or the flow must be constructed with one. Imported as
-    ``TraitRegistry`` to disambiguate from other registry types in
-    consumer codebases; the same class is exported as ``Registry`` from
-    :mod:`llm_gent.core.traits`.
+    The run's :class:`~llm_gent.core.env.Environment`, given to the runner
+    that started it; every flow of the run, nested ones included, sees the
+    same one. Pass ``env=ctx.env`` to :meth:`Flow.dispatch` to hand it to a
+    sibling.
     """
 
     halt: asyncio.Event | None = None
-    """The run's halt — :meth:`Flow.run` ``halt=`` — or ``None``.
+    """The run's halt — :meth:`FlowRunner.start` ``halt=`` — or ``None``.
 
     Verbs that expose their own inner loop (SAIA turn-by-turn, long-running
     external calls) can observe ``ctx.halt`` to short-circuit gracefully:
     a step that stops before finishing raises :class:`Interrupted` and
     runs again on resume. :meth:`Flow.map` and :meth:`Flow.iterate`
     observe it at their natural boundaries automatically. Setting it from
-    a step pauses the whole run (:meth:`Flow.run` returns ``HALTED``).
+    a step pauses the whole run (:meth:`FlowRunner.start` returns ``HALTED``).
 
     A cut (:meth:`Flow.with_shortcut`) does not set it; see
     :attr:`fast_forward`.
@@ -135,14 +131,14 @@ class Context(Generic[T]):
 
     Escape hatch for handles the framework does not type (tenant IDs,
     correlation IDs, request-scoped audit hooks, per-run callbacks).
-    Supplied at :meth:`Flow.run` via the ``extra=`` kwarg; propagates
+    Supplied at :meth:`FlowRunner.start` via the ``extra=`` kwarg; propagates
     unchanged to every dispatch inside the run — subflows, iterate
     bodies and map items all see the same dict.
 
     Framework does not inspect the contents, does not type-check the
     values, and never persists them: ``extra`` never enters a
     checkpoint Blob, Tree, or node content hash. On resume the caller
-    re-supplies at :meth:`Flow.run`; identity across resume is not
+    re-supplies at :meth:`FlowRunner.start`; identity across resume is not
     preserved. Default is a fresh empty dict.
     """
 
@@ -186,27 +182,39 @@ class Context(Generic[T]):
         return self.state.data
 
     @property
+    def traits(self) -> TraitRegistry | None:
+        """The run's trait registry, or ``None`` when its environment has none.
+
+        Verbs reach mounted platform capabilities (memory, storage, tools,
+        custom traits) via ``ctx.traits.get(SomeTrait)`` or
+        ``ctx.traits.require(SomeTrait)``; a verb that needs a trait handles
+        its absence, or the run is started with an environment that has
+        one. The same class is exported as ``Registry`` from
+        :mod:`llm_gent.core.traits`.
+        """
+        return self.env.traits
+
+    @property
     def saia(self) -> Any:
         """The role-bound saia instance for this dispatch.
 
-        Resolved lazily on first access through the dispatching flow's
-        :class:`~llm_gent.core.env.Environment`, which builds one SAIA per
-        role, so repeated reads on the same or sibling contexts hit the
-        same instance.
+        Built on first access by the run's environment
+        (:meth:`Environment.saia <llm_gent.core.env.Environment.saia>`),
+        which keeps one per role: repeated reads, from this run or any
+        other sharing the environment, get the same instance.
 
         Returns ``None`` when :attr:`role` is ``None`` — subflow-node ctx,
         hook ctx, and pure-Python verbs (``@verb`` with no ``role=``)
         have no role to bind against, so there is no saia to build.
 
-        Raises :class:`RuntimeError` if the flow was constructed with no
-        SAIAFactory and this ctx has a role. The error surfaces at access,
-        not at construction, so verbs that never touch ``ctx.saia`` (e.g.
-        those routing LLM calls through their own configuration) can run
-        under a factoryless flow.
+        Raises :class:`RuntimeError` if the environment has no SAIAFactory
+        and this ctx has a role. The error surfaces at access, not at
+        construction, so verbs that never touch ``ctx.saia`` (e.g. those
+        routing LLM calls through their own configuration) run without one.
         """
         if self.role is None:
             return None
-        return self.flow._env.saia(self.role)
+        return self.env.saia(self.role)
 
     def saia_as(self, cls: type[S]) -> S | None:
         """Return :attr:`saia` typed as ``cls`` — cast helper for verb authors.
@@ -285,7 +293,7 @@ class Context(Generic[T]):
 
     @property
     def run_id(self) -> str | None:
-        """The id of the :meth:`Flow.run` call this step runs in; ``None`` without hooks."""
+        """The id of the :meth:`FlowRunner.start` call this step runs in; ``None`` without hooks."""
         if self._frame is None:
             return None
         info = self._frame.run.info
@@ -365,11 +373,11 @@ class Context(Generic[T]):
         commit's metadata records the current node, iteration ``0`` and
         ``outcome="ok"``.
 
-        The commit goes to the run's history (:meth:`~llm_gent.flow.Flow.run`
+        The commit goes to the run's history (:meth:`~llm_gent.flow.FlowRunner.start`
         ``history=``), wherever in the flow tree this step runs. Returns the commit's hash:
-        ``run(resume=<hash>)`` checks it out later, even after a later run
+        ``start=Resume(<hash>)`` checks it out later, even after a later run
         leaves it off the history's line. With ``name``, the checkpoint is also
-        tagged ``tags/<name>``: ``run(resume=name)`` checks it out. Taking
+        tagged ``tags/<name>``: ``start=Resume(name)`` checks it out. Taking
         it again (at this step or elsewhere) moves the tag to the new
         commit. A named :meth:`~llm_gent.flow.Flow.with_checkpointer` this
         save belongs to moves its tag too.

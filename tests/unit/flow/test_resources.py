@@ -28,11 +28,13 @@ from llm_gent.flow import (
     Interrupted,
     Resource,
     ResourceKey,
+    Restart,
+    Resume,
     resource_method,
     verb,
 )
 from llm_gent.flow.state.snapshot import RESOURCES, RUN_RESOURCES
-from tests.helpers import memory_store
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import make_test_logger
 
@@ -94,7 +96,7 @@ COUNTER = ResourceKey[Counter]("counter")
 
 
 def _ff(store: Any = None) -> Factory[Flow]:
-    return Factory(make_test_logger(), checkpoint_store=store)
+    return TestFactory(make_test_logger(), checkpoint_store=store)
 
 
 @verb
@@ -113,7 +115,7 @@ class TestDeclared:
             seen.append(ctx.resource(COUNTER))
             return x
 
-        assert await _ff().create().with_resource(COUNTER, counter).call(step).run(1) == 1
+        assert await run_flow(_ff().create().with_resource(COUNTER, counter).call(step), 1) == 1
         assert seen == [counter]
 
     async def test_flows_below_inherit_it(self) -> None:
@@ -128,14 +130,14 @@ class TestDeclared:
             .map(lambda b: b.call(tick), items=lambda _p, _c: [1, 2])
             .iterate(lambda b: b.call(tick), max_iters=2)
         )
-        await flow.run(0)
+        await run_flow(flow, 0)
         assert counter.count == 1 + 2 + 2
 
     async def test_a_nested_flow_s_own_replaces_it_below(self) -> None:
         outer, inner = Counter(), Counter()
         sub = _ff().create().with_resource(COUNTER, inner).call(tick)
         flow = _ff().create().with_resource(COUNTER, outer).call(tick).then(sub).then(tick)
-        await flow.run(0)
+        await run_flow(flow, 0)
         assert (outer.count, inner.count) == (2, 1)
 
     async def test_none_in_scope_raises_naming_the_key(self) -> None:
@@ -145,7 +147,7 @@ class TestDeclared:
             return x
 
         with pytest.raises(KeyError, match="'counter'"):
-            await _ff().create().call(step).run(1)
+            await run_flow(_ff().create().call(step), 1)
 
     async def test_a_default_when_none_is_in_scope(self) -> None:
         seen: list[Any] = []
@@ -155,7 +157,7 @@ class TestDeclared:
             seen.append(ctx.resource(COUNTER, None))
             return x
 
-        await _ff().create().call(step).run(1)
+        await run_flow(_ff().create().call(step), 1)
         assert seen == [None]
 
     async def test_dispatch_hands_the_flow_s_resources_to_the_verb(self) -> None:
@@ -184,7 +186,7 @@ class TestPerRunChild:
             .with_resource(COUNTER, root)
             .map(lambda b: b.with_resource(COUNTER, per="item").call(step), items=lambda *_: [1, 2])
         )
-        assert await flow.run() == [1, 2]
+        assert await run_flow(flow) == [1, 2]
         assert seen[0] is not seen[1]
         assert all(c.parent is root and c.args == {"per": "item"} for c in seen)
         assert sorted(c.count for c in seen) == [1, 2]
@@ -202,7 +204,7 @@ class TestPerRunChild:
 
         sub = _ff().create().with_resource(COUNTER, own, per="call").call(step)
         flow = _ff().create().with_resource(COUNTER, outer).call(sub).then(sub)
-        await flow.run(1)
+        await run_flow(flow, 1)
         assert seen[0] is not seen[1] and all(c.parent is own for c in seen)
         assert (outer.count, own.count) == (0, 2)
 
@@ -216,7 +218,7 @@ class TestPerRunChild:
             return x
 
         sub = _ff().create().with_resource(COUNTER, own).with_resource(COUNTER, per=1).call(step)
-        await _ff().create().call(sub).run(0)
+        await run_flow(_ff().create().call(sub), 0)
         assert seen[0].parent is own and seen[0].args == {"per": 1}
 
 
@@ -257,17 +259,17 @@ class TestAcrossResume:
     async def test_the_count_comes_back_after_a_halt(self) -> None:
         store = memory_store()
         flow = self._flow(store, Counter(), True)
-        assert await flow.run(1, halt=asyncio.Event(), history=NAME) is HALTED
+        assert await run_flow(flow, 1, halt=asyncio.Event(), history=NAME) is HALTED
 
         fresh = Counter()
         flow = self._flow(store, fresh, False)
-        assert await flow.run(history=NAME, resume="latest", halt=asyncio.Event()) == 1
+        assert await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event()) == 1
         assert fresh.restored == [{"count": 3}]
         assert fresh.count == 3 + 4
 
     async def test_a_finished_run_s_count_carries_into_the_next_run(self) -> None:
         store = memory_store()
-        await self._flow(store, Counter(), False).run(1, halt=asyncio.Event(), history=NAME)
+        await run_flow(self._flow(store, Counter(), False), 1, halt=asyncio.Event(), history=NAME)
         history = History(store, NAME)
         head = await history.head()
         assert head is not None and await history.is_complete()
@@ -276,7 +278,7 @@ class TestAcrossResume:
 
         fresh = Counter()
         flow = self._flow(store, fresh, False)
-        await flow.run(1, history=NAME, resume="latest", halt=asyncio.Event())
+        await run_flow(flow, 1, history=NAME, start=Resume("latest"), halt=asyncio.Event())
         assert fresh.count == 7 + 7
 
     async def test_one_every_flow_inherits_is_kept_once_at_the_top(self) -> None:
@@ -298,13 +300,18 @@ class TestAcrossResume:
             inner = ff.create().call(b)
             return ff.create().call(tick).then(inner)
 
-        assert await build(Counter(), arm=True).run(1, halt=halt, history=NAME) is HALTED
+        assert await run_flow(build(Counter(), arm=True), 1, halt=halt, history=NAME) is HALTED
         history = History(store, NAME)
         snapshot = await history.snapshot(await history.head())
         assert [p for p, c in snapshot.cursors.items() if RESOURCES in c] == [""]
 
         fresh = Counter()
-        assert await build(fresh, arm=False).run(1, history=NAME, resume="latest", halt=halt) == 1
+        assert (
+            await run_flow(
+                build(fresh, arm=False), 1, history=NAME, start=Resume("latest"), halt=halt
+            )
+            == 1
+        )
         assert fresh.count == 3 + 2  # 3 restored, b again: 2
 
     async def test_items_halted_mid_way_resume_with_their_children_s_counts(self) -> None:
@@ -343,13 +350,13 @@ class TestAcrossResume:
             )
 
         root1 = Counter()
-        assert await build(root1, arm=True, before={}).run(halt=halt, history=NAME) is HALTED
+        assert await run_flow(build(root1, arm=True, before={}), halt=halt, history=NAME) is HALTED
         assert root1.count == 3
 
         root2, before = Counter(), {}
         halt.clear()
         flow = build(root2, arm=False, before=before)
-        assert await flow.run(history=NAME, resume="latest", halt=halt) == [1, 2]
+        assert await run_flow(flow, history=NAME, start=Resume("latest"), halt=halt) == [1, 2]
         assert before == {1: 1, 2: 2}  # each item's child came back with its own count
         # 3 restored at the root; the items' restored counts do not roll up again.
         assert root2.count == 3 + 20
@@ -366,9 +373,9 @@ class TestAcrossResume:
         def build(key: ResourceKey[Counter], counter: Counter) -> Any:
             return _ff(store).create().with_checkpointer().with_resource(key, counter).call(step)
 
-        await build(COUNTER, Counter()).run(1, history=NAME)
+        await run_flow(build(COUNTER, Counter()), 1, history=NAME)
         fresh = Counter()
-        assert await build(other, fresh).run(1, history=NAME, resume="latest") == 1
+        assert await run_flow(build(other, fresh), 1, history=NAME, start=Resume("latest")) == 1
         assert fresh.restored == []
 
 
@@ -377,12 +384,16 @@ class TestRestart:
         store = memory_store()
         build = TestAcrossResume._flow
         assert (
-            await build(store, Counter(), True).run(1, halt=asyncio.Event(), history=NAME) is HALTED
+            await run_flow(build(store, Counter(), True), 1, halt=asyncio.Event(), history=NAME)
+            is HALTED
         )
 
         fresh = Counter()
         flow = build(store, fresh, False)
-        assert await flow.run(1, history=NAME, restart="latest", halt=asyncio.Event()) == 1
+        assert (
+            await run_flow(flow, 1, history=NAME, start=Restart("latest"), halt=asyncio.Event())
+            == 1
+        )
         assert fresh.restored == [{"count": 3}]
         assert fresh.count == 3 + 1 + 2 + 4  # a, b and c run again; resume would run c alone
 
@@ -409,7 +420,10 @@ class TestRestart:
                 .call(step)
             )
 
-        assert await build(Counter(), arm=True, seen=[]).run(1, halt=halt, history=NAME) is HALTED
+        assert (
+            await run_flow(build(Counter(), arm=True, seen=[]), 1, halt=halt, history=NAME)
+            is HALTED
+        )
         history = History(store, NAME)
         halted = await history.snapshot(await history.head())
         assert halted.cursors[""][RUN_RESOURCES] == {"counter": {"count": 5}}
@@ -417,7 +431,7 @@ class TestRestart:
         root, seen = Counter(), []
         halt.clear()
         flow = build(root, arm=False, seen=seen)
-        assert await flow.run(1, history=NAME, restart="latest", halt=halt) == 1
+        assert await run_flow(flow, 1, history=NAME, start=Restart("latest"), halt=halt) == 1
         assert seen == [0]  # the per-run child was not restored; resume would hand it 5
         assert root.restored == [{"count": 5}]
 
@@ -444,7 +458,7 @@ class TestAcrossShortcut:
 
         region = _ff().create().with_resource(COUNTER, per="call").with_shortcut("cut")
         flow = _ff().create().with_resource(COUNTER, root)
-        assert await flow.call(region.call(a).then(b)).run(1, signals={"cut": cut}) == 1
+        assert await run_flow(flow.call(region.call(a).then(b)), 1, signals={"cut": cut}) == 1
         assert len(seen) == 1 and seen[0].count == 1
         assert root.count == 1
 
@@ -475,7 +489,7 @@ class TestAcrossShortcut:
         region = _ff().create().with_shortcut("cut")
         region.map(item, items=lambda *_: [0, 1], max_concurrency=2)
         flow = _ff().create().with_resource(COUNTER, root).call(region)
-        assert await flow.run(signals={"cut": cut}) == [0, 1]
+        assert await run_flow(flow, signals={"cut": cut}) == [0, 1]
         assert root.count == 2
 
 
@@ -492,9 +506,9 @@ class TestProtocol:
         def build(resource: Structural) -> Any:
             return _ff(store).create().with_checkpointer().with_resource(key, resource).call(step)
 
-        await build(Structural()).run(0, history=NAME)
+        await run_flow(build(Structural()), 0, history=NAME)
         fresh = Structural()
-        await build(fresh).run(0, history=NAME, resume="latest")
+        await run_flow(build(fresh), 0, history=NAME, start=Resume("latest"))
         assert fresh.restored == [{"n": 1}]
 
     def test_a_subclass_that_leaves_a_method_out_cannot_be_made(self) -> None:
@@ -519,7 +533,7 @@ class TestCostIsAResource:
             return x
 
         sub = _ff().create().with_budget(2.0).call(step)
-        await _ff().create().with_cost_tracker(root).call(step).then(sub).run(1)
+        await run_flow(_ff().create().with_cost_tracker(root).call(step).then(sub), 1)
         (top, top_key), (child, child_key) = seen
         assert top is root and top_key is root
         assert child is child_key and child.parent is root and child.budget == 2.0
@@ -568,7 +582,7 @@ class TestValidation:
         sub = _ff().create().with_resource(twin, Counter()).call(tick)
         flow = _ff().create().with_resource(COUNTER, Counter()).call(sub)
         with pytest.raises(ValueError, match="'counter'"):
-            await flow.run(0)
+            await run_flow(flow, 0)
 
     async def test_a_per_run_child_with_none_above_raises_at_run_start(self) -> None:
         ran: list[int] = []
@@ -585,7 +599,7 @@ class TestValidation:
             .map(lambda b: b.with_resource(COUNTER, per=1).call(step), items=lambda *_: [1])
         )
         with pytest.raises(RuntimeError, match="none is in scope"):
-            await flow.run(0)
+            await run_flow(flow, 0)
         assert ran == []
 
     async def test_a_per_run_child_of_a_resource_without_child_raises(self) -> None:
@@ -593,7 +607,7 @@ class TestValidation:
         sub = _ff().create().with_resource(plain, per=1).call(tick)
         flow = _ff().create().with_resource(plain, Plain()).call(sub)
         with pytest.raises(TypeError, match="no child"):
-            await flow.run(0)
+            await run_flow(flow, 0)
 
 
 class TestFluentNames:
@@ -611,7 +625,7 @@ class TestFluentNames:
         flow.with_counter(root).map(
             lambda b: b.with_counter(per="item").call(step), items=lambda *_: [1, 2]
         ).iterate(lambda b: b.with_counter(per="pass").call(step), max_iters=1)
-        assert await flow.run() == [1, 2]
+        assert await run_flow(flow) == [1, 2]
         assert [c.args for c in seen] == [{"per": "item"}, {"per": "item"}, {"per": "pass"}]
         assert all(c.parent is root for c in seen)
 
@@ -649,7 +663,7 @@ class TestFluentNames:
         ff = Factory(make_test_logger(), flow_class=MyFlow)
         flow = ff.create().with_counter(root).map(body, items=lambda *_: [1, 2])
         assert isinstance(flow, MyFlow)
-        assert await flow.run() == [1, 2]
+        assert await run_flow(flow) == [1, 2]
         assert all(type(b) is MyFlow for b in bodies)
         assert root.count == 2
 
@@ -660,7 +674,7 @@ class TestFluentNames:
         ff = (
             Factory(make_test_logger(), flow_class=MyFlow)
             .with_resource_method("with_counter", COUNTER)
-            .with_traits(None)
+            .with_state_factory(None)
         )
         flow = ff.create()
         assert isinstance(flow, MyFlow) and hasattr(flow, "with_counter")

@@ -20,9 +20,9 @@ from typing import Any
 import pytest
 from appinfra.cas import FileStore
 
-from llm_gent.flow import Context, Factory, History, verb
+from llm_gent.flow import Context, History, Resume, verb
 from llm_gent.flow.checkpoint import HEAD_REF
-from tests.helpers import file_store
+from tests.helpers import TestFactory, file_store, run_flow
 
 from ...unit.flow.conftest import make_test_logger
 
@@ -47,7 +47,7 @@ def _iterate_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
         return x + 1
 
     return (
-        Factory(make_test_logger(), checkpoint_store=store)
+        TestFactory(make_test_logger(), checkpoint_store=store)
         .create()
         .with_checkpointer()
         .iterate(lambda b: b.call(step), max_iters=4)
@@ -71,7 +71,7 @@ def _map_flow(store: Any, ran: list[int], die_at: int | None) -> Any:
         return x * 10
 
     return (
-        Factory(make_test_logger(), checkpoint_store=store)
+        TestFactory(make_test_logger(), checkpoint_store=store)
         .create()
         .with_checkpointer()
         .with_checkpoint_policy(on_map_item=True)
@@ -101,7 +101,7 @@ def child(store_dir: str, scenario: str) -> None:
     build, die_at = _SCENARIOS[scenario]
     store_cls = _DiesBeforeSecondHeadMove if scenario == "torn" else FileStore
     store = store_cls(make_test_logger(), Path(store_dir))
-    asyncio.run(build(store, [], die_at).run(0, history=NAME))
+    asyncio.run(run_flow(build(store, [], die_at), 0, history=NAME))
 
 
 def _run_child(tmp_path: Path, scenario: str) -> Path:
@@ -125,7 +125,10 @@ async def test_death_after_a_checkpoint_resumes_at_its_step(tmp_path: Path) -> N
     store = file_store(store_dir)
     ran: list[int] = []
 
-    assert await _iterate_flow(store, ran, None).run(0, history=NAME, resume="latest") == 4
+    assert (
+        await run_flow(_iterate_flow(store, ran, None), 0, history=NAME, start=Resume("latest"))
+        == 4
+    )
     assert ran == [2, 3]
     assert await History(store, NAME).is_complete()
 
@@ -142,7 +145,9 @@ async def test_death_inside_a_parallel_map_reruns_no_saved_item(tmp_path: Path) 
     assert saved, "no item was saved before the death"
 
     ran: list[int] = []
-    assert await _map_flow(store, ran, None).run(0, history=NAME, resume="latest") == 60
+    assert (
+        await run_flow(_map_flow(store, ran, None), 0, history=NAME, start=Resume("latest")) == 60
+    )
     assert not saved & set(ran), f"saved items ran again: {saved & set(ran)}"
     assert set(ran) | saved == {0, 1, 2, 3}
 
@@ -158,6 +163,9 @@ async def test_death_between_commit_and_head_move_resumes_from_the_previous_head
     assert len(commits) == 1  # pass 0's checkpoint; pass 1's commit never became HEAD
 
     ran: list[int] = []
-    assert await _iterate_flow(store, ran, None).run(0, history=NAME, resume="latest") == 4
+    assert (
+        await run_flow(_iterate_flow(store, ran, None), 0, history=NAME, start=Resume("latest"))
+        == 4
+    )
     assert ran == [0, 1, 2, 3]  # pass 0 reruns: its checkpoint was taken inside it
     assert await history.is_complete()

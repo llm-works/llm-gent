@@ -24,9 +24,9 @@ import pytest
 from llm_gent.core import Role
 from llm_gent.core.cost import PricingConfig
 from llm_gent.core.cost import Tracker as CostTracker
-from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, Loop, verb
+from llm_gent.flow import HALTED, Context, Factory, History, Interrupted, Loop, Resume, verb
 from llm_gent.flow.state.snapshot import RESOURCES
-from tests.helpers import memory_store
+from tests.helpers import TestFactory, memory_store, run_flow
 
 from .conftest import make_test_logger
 
@@ -47,7 +47,7 @@ def _spend(ctx: Context[Any], cost: float, op: str = "llm") -> None:
 
 
 def _ff(store: Any = None) -> Factory:
-    return Factory(make_test_logger(), checkpoint_store=store)
+    return TestFactory(make_test_logger(), checkpoint_store=store)
 
 
 class TestAppTrackerAcrossResume:
@@ -88,14 +88,14 @@ class TestAppTrackerAcrossResume:
     async def test_the_running_cost_comes_back_after_a_halt(self) -> None:
         store = memory_store()
         assert (
-            await self._flow(store, _tracker(), []).run(1, halt=asyncio.Event(), history=NAME)
+            await run_flow(self._flow(store, _tracker(), []), 1, halt=asyncio.Event(), history=NAME)
             is HALTED
         )
 
         fresh = _tracker(10.0)
         seen: list[float] = []
         flow = self._flow(store, fresh, seen)
-        assert await flow.run(history=NAME, resume="latest", halt=asyncio.Event()) == 1
+        assert await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event()) == 1
         assert seen == [5.0]
         assert fresh.spent == 6.0
         assert fresh.costs_by_op == {"llm": 3.0, "op": 3.0}
@@ -103,7 +103,7 @@ class TestAppTrackerAcrossResume:
     async def test_a_per_session_budget_is_set_on_the_restored_spend(self) -> None:
         """Spend is cumulative; the app reads it from the history and sets this session's limit."""
         store = memory_store()
-        await self._flow(store, _tracker(), []).run(1, halt=asyncio.Event(), history=NAME)
+        await run_flow(self._flow(store, _tracker(), []), 1, halt=asyncio.Event(), history=NAME)
         history = History(store, NAME)
         head = await history.head()
         assert head is not None
@@ -111,8 +111,11 @@ class TestAppTrackerAcrossResume:
         assert so_far == 5.0
 
         session = _tracker(so_far + 1.5)
-        await self._flow(store, session, []).run(
-            history=NAME, resume="latest", halt=asyncio.Event()
+        await run_flow(
+            self._flow(store, session, []),
+            history=NAME,
+            start=Resume("latest"),
+            halt=asyncio.Event(),
         )
         assert session.spent == 6.0 and not session.exceeded
 
@@ -133,7 +136,7 @@ class TestAppTrackerAcrossResume:
             return x
 
         flow = _ff(store).create().with_cost_tracker(_tracker(1.5, halt=halt)).call(a).then(b)
-        assert await flow.run(1, halt=halt, history=NAME) is HALTED
+        assert await run_flow(flow, 1, halt=halt, history=NAME) is HALTED
         assert seen == []
         head = await History(store, NAME).head()
         assert head is not None and head.meta.outcome == "halted"
@@ -150,7 +153,7 @@ class TestAppTrackerAcrossResume:
         def flow(tracker: CostTracker) -> Any:
             return _ff(store).create().with_checkpointer().with_cost_tracker(tracker).call(a)
 
-        await flow(_tracker()).run(1, history=NAME)
+        await run_flow(flow(_tracker()), 1, history=NAME)
         history = History(store, NAME)
         assert await history.is_complete()
         head = await history.head()
@@ -158,7 +161,7 @@ class TestAppTrackerAcrossResume:
         assert (await history.snapshot(head)).cursors[""][RESOURCES]["cost"]["spent"] == 2.0
 
         fresh = _tracker()
-        await flow(fresh).run(1, history=NAME, resume="latest")
+        await run_flow(flow(fresh), 1, history=NAME, start=Resume("latest"))
         assert fresh.spent == 4.0
 
     async def test_a_tracker_every_flow_inherits_is_restored_once(self) -> None:
@@ -170,7 +173,7 @@ class TestAppTrackerAcrossResume:
         store = memory_store()
 
         def build(tracker: CostTracker, arm: bool) -> Any:
-            ff = Factory(make_test_logger(), cost_tracker=tracker, checkpoint_store=store)
+            ff = TestFactory(make_test_logger(), cost_tracker=tracker, checkpoint_store=store)
 
             @verb
             async def a(ctx: Context[Any], x: int) -> int:
@@ -189,15 +192,20 @@ class TestAppTrackerAcrossResume:
             return ff.create().call(a).then(inner)
 
         assert (
-            await build(_tracker(), arm=True).run(1, halt=asyncio.Event(), history=NAME) is HALTED
+            await run_flow(build(_tracker(), arm=True), 1, halt=asyncio.Event(), history=NAME)
+            is HALTED
         )
         snapshot = await History(store, NAME).snapshot(await History(store, NAME).head())
         assert [p for p, c in snapshot.cursors.items() if RESOURCES in c] == [""]
 
         fresh = _tracker()
         assert (
-            await build(fresh, arm=False).run(
-                1, history=NAME, resume="latest", halt=asyncio.Event()
+            await run_flow(
+                build(fresh, arm=False),
+                1,
+                history=NAME,
+                start=Resume("latest"),
+                halt=asyncio.Event(),
             )
             == 1
         )
@@ -286,7 +294,7 @@ class TestTrackerSubclassAcrossResume:
         store = memory_store()
         first = _SessionTracker("s1", 10.0)
         assert (
-            await self._flow(store, first, {}, "b").run(1, halt=asyncio.Event(), history=NAME)
+            await run_flow(self._flow(store, first, {}, "b"), 1, halt=asyncio.Event(), history=NAME)
             is HALTED
         )
         assert first.session_spent == 2.0
@@ -294,34 +302,44 @@ class TestTrackerSubclassAcrossResume:
         second = _SessionTracker("s2", 10.0)
         seen: dict[str, float] = {}
         flow = self._flow(store, second, seen)
-        assert await flow.run(history=NAME, resume="latest", halt=asyncio.Event()) == 1
+        assert await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event()) == 1
         assert seen == {"c": 0.0, "d": 1.0}
         assert second.spent == 4.0 and second.session_spent == 2.0
 
     async def test_a_resume_in_the_same_session_keeps_its_baseline(self) -> None:
         store = memory_store()
         first = self._flow(store, _SessionTracker("s1", 10.0), {}, "a")
-        await first.run(1, halt=asyncio.Event(), history=NAME)
+        await run_flow(first, 1, halt=asyncio.Event(), history=NAME)
         s2 = _SessionTracker("s2", 10.0)
         flow = self._flow(store, s2, {}, "c")
-        assert await flow.run(history=NAME, resume="latest", halt=asyncio.Event()) is HALTED
+        assert (
+            await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event())
+            is HALTED
+        )
         assert s2.baseline == 1.0 and s2.session_spent == 2.0
 
         again = _SessionTracker("s2", 10.0)
         flow = self._flow(store, again, {})
-        assert await flow.run(history=NAME, resume="latest", halt=asyncio.Event()) == 1
+        assert await run_flow(flow, history=NAME, start=Resume("latest"), halt=asyncio.Event()) == 1
         assert again.baseline == 1.0
         assert again.spent == 4.0 and again.session_spent == 3.0
 
     async def test_the_session_after_a_finished_run_is_rebased_on_its_total(self) -> None:
         store = memory_store()
-        await self._flow(store, _SessionTracker("s1", 10.0), {}).run(
-            1, halt=asyncio.Event(), history=NAME
+        await run_flow(
+            self._flow(store, _SessionTracker("s1", 10.0), {}),
+            1,
+            halt=asyncio.Event(),
+            history=NAME,
         )
 
         second = _SessionTracker("s2", 10.0)
-        await self._flow(store, second, {}).run(
-            1, history=NAME, resume="latest", halt=asyncio.Event()
+        await run_flow(
+            self._flow(store, second, {}),
+            1,
+            history=NAME,
+            start=Resume("latest"),
+            halt=asyncio.Event(),
         )
         assert second.spent == 8.0 and second.session_spent == 4.0
 
@@ -329,12 +347,15 @@ class TestTrackerSubclassAcrossResume:
         """Restored spend over the session's allowance: the rebased cap keeps the run going."""
         store = memory_store()
         first = self._flow(store, _SessionTracker("s1", 10.0), {}, "c")
-        await first.run(1, halt=asyncio.Event(), history=NAME)
+        await run_flow(first, 1, halt=asyncio.Event(), history=NAME)
 
         halt = asyncio.Event()
         second = _SessionTracker("s2", 2.5, halt=halt)
         assert (
-            await self._flow(store, second, {}).run(history=NAME, resume="latest", halt=halt) == 1
+            await run_flow(
+                self._flow(store, second, {}), history=NAME, start=Resume("latest"), halt=halt
+            )
+            == 1
         )
         assert not halt.is_set() and not second.exceeded
         assert second.budget == 5.5 and second.session_spent == 1.0
@@ -349,13 +370,19 @@ class TestTrackerSubclassAcrossResume:
         store = memory_store()
         flow = TestAppTrackerAcrossResume._flow
         assert (
-            await flow(store, _tracker(), []).run(1, halt=asyncio.Event(), history=NAME) is HALTED
+            await run_flow(flow(store, _tracker(), []), 1, halt=asyncio.Event(), history=NAME)
+            is HALTED
         )
 
         halt = asyncio.Event()
         fresh = Ignoring(make_test_logger(), PricingConfig(), 4.0, halt=halt)
         seen: list[float] = []
-        assert await flow(store, fresh, seen).run(history=NAME, resume="latest", halt=halt) == 1
+        assert (
+            await run_flow(
+                flow(store, fresh, seen), history=NAME, start=Resume("latest"), halt=halt
+            )
+            == 1
+        )
         assert seen == [0.0]
         assert fresh.spent == 1.0 and not halt.is_set()
 
@@ -375,7 +402,7 @@ class TestTrackerSubclassAcrossResume:
         root = Owned(make_test_logger(), PricingConfig())
         seen: dict[int, Any] = {}
         costs = {0: [0.2, 0.3], 1: [0.1, 0.1]}
-        assert await _item_flow(root, costs, seen).run() == [0, 10]
+        assert await run_flow(_item_flow(root, costs, seen)) == [0, 10]
         assert all(type(t) is Owned and t.parent is root for t in seen.values())
 
     async def test_a_budgeted_run_s_child_restores_through_the_subclass(self) -> None:
@@ -407,11 +434,13 @@ class TestTrackerSubclassAcrossResume:
         store = memory_store()
         costs = {0: [0.3, 0.2], 1: [0.4, 0.1]}
         flow1 = _item_flow(root(), costs, {}, arm=True, store=store)
-        assert await flow1.run(halt=asyncio.Event(), history=NAME) is HALTED
+        assert await run_flow(flow1, halt=asyncio.Event(), history=NAME) is HALTED
 
         before: dict[int, float] = {}
         flow2 = _item_flow(root(), costs, {}, before_second=before, store=store)
-        assert await flow2.run(history=NAME, resume="latest", halt=asyncio.Event()) == [0, 10]
+        assert await run_flow(
+            flow2, history=NAME, start=Resume("latest"), halt=asyncio.Event()
+        ) == [0, 10]
         assert sorted(d["tag"] for d in restored) == ["item", "item", "root"]
         assert before == {0: pytest.approx(0.3), 1: pytest.approx(0.4)}
 
@@ -469,7 +498,7 @@ class TestItemBudgets:
         root = _tracker()
         seen: dict[int, Any] = {}
         costs = {0: [0.2, 0.3], 1: [0.1, 0.1]}
-        assert await _item_flow(root, costs, seen).run() == [0, 10]
+        assert await run_flow(_item_flow(root, costs, seen)) == [0, 10]
         assert seen[0] is not seen[1]
         assert all(t.parent is root and t.budget == 1.0 for t in seen.values())
         assert seen[0].spent == pytest.approx(0.5)
@@ -480,7 +509,7 @@ class TestItemBudgets:
         root = _tracker()
         seen: dict[int, Any] = {}
         costs = {0: [0.2, 0.3], 1: [1.5, 9.0], 2: [0.1, 0.1]}
-        assert await _item_flow(root, costs, seen).run() == [0, 10, 20]
+        assert await run_flow(_item_flow(root, costs, seen)) == [0, 10, 20]
         assert seen[1].exceeded and seen[1].urgent_wrapup
         assert not seen[0].exceeded
         assert root.spent == pytest.approx(0.5 + 10.5 + 0.2)
@@ -500,7 +529,7 @@ class TestItemBudgets:
             .with_cost_tracker(root)
             .map(lambda b: b.call(step), items=lambda _p, _c: [0, 1])
         )
-        await flow.run()
+        await run_flow(flow)
         assert seen == [root, root]
 
 
@@ -512,14 +541,16 @@ class TestItemBudgetsAcrossHalt:
 
         root1 = _tracker()
         flow1 = _item_flow(root1, costs, {}, arm=True, store=store)
-        assert await flow1.run(halt=asyncio.Event(), history=NAME) is HALTED
+        assert await run_flow(flow1, halt=asyncio.Event(), history=NAME) is HALTED
         assert root1.spent == pytest.approx(0.7)
 
         root2 = _tracker()
         seen2: dict[int, Any] = {}
         before: dict[int, float] = {}
         flow2 = _item_flow(root2, costs, seen2, before_second=before, store=store)
-        assert await flow2.run(history=NAME, resume="latest", halt=asyncio.Event()) == [0, 10]
+        assert await run_flow(
+            flow2, history=NAME, start=Resume("latest"), halt=asyncio.Event()
+        ) == [0, 10]
         assert seen2 == {}  # no first step ran again
         assert before == {0: pytest.approx(0.3), 1: pytest.approx(0.4)}
         # 0.7 restored; the items' restored spend does not roll up a second time.
@@ -530,12 +561,14 @@ class TestItemBudgetsAcrossHalt:
         store = memory_store()
         costs = {0: [0.9, 0.1], 1: [0.1, 0.1]}
         flow1 = _item_flow(_tracker(), costs, {}, arm=True, store=store)
-        assert await flow1.run(halt=asyncio.Event(), history=NAME) is HALTED
+        assert await run_flow(flow1, halt=asyncio.Event(), history=NAME) is HALTED
 
         root2 = _tracker()
         before: dict[int, float] = {}
         flow2 = _item_flow(root2, costs, {}, before_second=before, cap=0.5, store=store)
-        assert await flow2.run(history=NAME, resume="latest", halt=asyncio.Event()) == [0, 10]
+        assert await run_flow(
+            flow2, history=NAME, start=Resume("latest"), halt=asyncio.Event()
+        ) == [0, 10]
         assert before == {0: pytest.approx(0.9), 1: pytest.approx(0.1)}
         assert root2.spent == pytest.approx(1.0 + 0.2)
 
@@ -614,7 +647,7 @@ class TestLoopInABudgetedItem:
                 max_concurrency=1,
             )
         )
-        assert await flow.run() == ["done:a", "done:b"]
+        assert await run_flow(flow) == ["done:a", "done:b"]
         assert saia.paused == []
         assert saia.trackers["b"].exceeded and not saia.trackers["a"].exceeded
         assert root.spent == pytest.approx(0.3 + 0.3 + 1.5 + 1.5)
@@ -637,7 +670,7 @@ class TestPassAndCallBudgets:
             .with_cost_tracker(root)
             .iterate(lambda b: b.with_budget(1.0).call(step), max_iters=3)
         )
-        assert await flow.run(0) == 3
+        assert await run_flow(flow, 0) == 3
         assert len({id(t) for t in seen}) == 3
         assert all(t.parent is root and t.spent == 0.5 for t in seen)
         assert root.spent == pytest.approx(1.5)
@@ -666,8 +699,8 @@ class TestPassAndCallBudgets:
             return prev
 
         flow = _ff().create().with_cost_tracker(root).call(sub).then(after)
-        assert await flow.run(0.5) == 0.5
-        assert await flow.run(2.0) == 2.0
+        assert await run_flow(flow, 0.5) == 0.5
+        assert await run_flow(flow, 2.0) == 2.0
         assert ran == ["check", "after:0.5", "check", "after:2.0"]
         assert [c.exceeded for c in children] == [False, True]
         assert root.spent == pytest.approx(2.5)
@@ -692,7 +725,7 @@ class TestPassAndCallBudgets:
         inner = ff.create().call(spend).then(check)
         sub = ff.create().with_budget(1.0).call(inner)
         flow = ff.create().with_cost_tracker(_tracker()).call(sub)
-        assert await flow.run(0.5, halt=halt) is HALTED
+        assert await run_flow(flow, 0.5, halt=halt) is HALTED
         assert ran == []
 
     async def test_map_total_through_a_budgeted_enclosing_flow(self) -> None:
@@ -715,7 +748,7 @@ class TestPassAndCallBudgets:
             .map(lambda b: b.call(item), items=lambda _p, _c: [0, 1, 2, 3], max_concurrency=1)
         )
         flow = _ff().create().with_cost_tracker(root).call(budgeted_map)
-        assert await flow.run() == [0, 1, 2, 3]
+        assert await run_flow(flow) == [0, 1, 2, 3]
         assert len({id(t) for t in trackers}) == 1 and trackers[0].exceeded
         assert root.spent == pytest.approx(1.6)
 
@@ -745,7 +778,7 @@ class TestCostAcrossShortcut:
 
         region = _ff().create().with_budget(5.0).with_shortcut("cut").call(a).then(b)
         flow = _ff().create().with_cost_tracker(root).call(region)
-        assert await flow.then(after).run(1, signals={"cut": cut}) == 1
+        assert await run_flow(flow.then(after), 1, signals={"cut": cut}) == 1
         assert root.spent == pytest.approx(1.5)
 
     async def test_started_budgeted_items_end_with_their_spend(self) -> None:
@@ -775,7 +808,7 @@ class TestCostAcrossShortcut:
         region = _ff().create().with_shortcut("cut")
         region.map(item, items=lambda _p, _c: [0, 1], max_concurrency=2)
         flow = _ff().create().with_cost_tracker(root).call(region)
-        assert await flow.run(signals={"cut": cut}) == [0, 1]
+        assert await run_flow(flow, signals={"cut": cut}) == [0, 1]
         assert root.spent == pytest.approx(2 * 0.2)
 
 
@@ -805,10 +838,12 @@ class TestCostAcrossCrash:
             return _ff(store).create().with_checkpointer().with_cost_tracker(root).call(sub)
 
         with pytest.raises(RuntimeError, match="process died"):
-            await build(_tracker(), fail=True).run(1, history=NAME)
+            await run_flow(build(_tracker(), fail=True), 1, history=NAME)
 
         root2 = _tracker()
-        assert await build(root2, fail=False).run(1, history=NAME, resume="latest") == 1
+        assert (
+            await run_flow(build(root2, fail=False), 1, history=NAME, start=Resume("latest")) == 1
+        )
         assert seen == [pytest.approx(1.0), pytest.approx(1.0)]  # b's first spend was lost
         assert root2.spent == pytest.approx(1.0 + 2.0)  # the total at the save, then b again
 
@@ -829,7 +864,7 @@ class TestValidation:
             .map(lambda b: b.with_budget(1.0).call(step), items=lambda _p, _c: [1])
         )
         with pytest.raises(RuntimeError, match="no cost tracker"):
-            await flow.run(1)
+            await run_flow(flow, 1)
         assert ran == []
 
     async def test_a_budget_on_a_flow_with_its_own_tracker_is_a_child_of_it(self) -> None:
@@ -843,7 +878,7 @@ class TestValidation:
             return x
 
         flow = _ff().create().with_cost_tracker(own).with_budget(1.0).call(step)
-        assert await flow.run(1) == 1
+        assert await run_flow(flow, 1) == 1
         assert seen[0].parent is own and seen[0].budget == 1.0
         assert own.spent == pytest.approx(0.25)
 

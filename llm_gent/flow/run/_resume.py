@@ -3,17 +3,17 @@
 
 """Resume protocol: checkout on the read side, framework commits on the write side.
 
-Read side — :class:`Resume` is constructed per resuming ``run()`` with the
-flow being resumed, and reads the history through the public
-:class:`~llm_gent.flow.history.History` API. :meth:`Resume.checkout`
-(``resume="latest"``) checks out the snapshot of the newest commit with
-usable state, :meth:`Resume.checkout_at` (``resume=<hash>`` or
-``resume=<name>``) the snapshot of one commit or named checkpoint: its
+Read side — :class:`Checkout` is constructed per run that starts from its
+history, and reads the history through the public
+:class:`~llm_gent.flow.history.History` API. :meth:`Checkout.checkout`
+(``Resume("latest")``) checks out the snapshot of the newest commit with
+usable state, :meth:`Checkout.checkout_at` (``Resume(<hash>)`` or
+``Resume(<name>)``) the snapshot of one commit or named checkpoint: its
 root scope hydrates the top-level
 :class:`State`; each
 child scope goes back to the block that owns it, and each cursor to the
 chain, iterate, branch or Loop call that registered it, when the run
-reaches their paths. :meth:`Resume.restart` (``restart=...``)
+reaches their paths. :meth:`Checkout.restart` (``Restart(...)``)
 checks out a commit the same way for a run that starts again from its
 first step, taking the commit's root state and the top-level flow's
 resources alone.
@@ -44,11 +44,11 @@ if TYPE_CHECKING:
     from ._run import Run
 
 
-class Resume:
-    """Check out the snapshot a resuming ``run()`` continues from.
+class Checkout:
+    """Check out the snapshot a run that starts from its history continues from.
 
     Constructed with a run that has a history writer. :meth:`checkout` takes
-    a builder of the fallback :class:`State` (the wrapped ``run(state=...)``
+    a builder of the fallback :class:`State` (the wrapped ``state=``
     payload, else a fresh state) and calls it only when there is nothing to
     resume, so the caller falls through to a fresh run — whose commits still
     append to the same history. A history with a commit to check out never
@@ -227,7 +227,7 @@ async def apply_clean_exit_retention(run: Run, final_state: State[Any]) -> None:
     clean even when the halt was set during its last step — the step
     completed, so there is nothing left to resume. On a clean exit:
     ``gc_on_success`` deletes the history; ``retain`` keeps the record and commits
-    ``final_state`` tagged ``complete``, so a later ``run(resume="latest")``
+    ``final_state`` tagged ``complete``, so a later ``Resume("latest")``
     continues from the finished run's final state.
 
     A resumed run that finished without reaching some of its saved scopes

@@ -52,9 +52,18 @@ from llm_infer.schemas.openai import FinishReason, FunctionCall, ToolCall
 from llm_kelt.conversation import ConversationFactory
 from llm_saia import SAIA, ToolDef
 
-from llm_gent.core import Role
+from llm_gent.core import Environment, Role
 from llm_gent.core.llm.testing import DelayedScriptedBackend, uniform_delay
-from llm_gent.flow import Context, Factory, Flow, Loop, StateDataclass, TypeStateFactory, verb
+from llm_gent.flow import (
+    Context,
+    Factory,
+    Flow,
+    FlowRunner,
+    Loop,
+    StateDataclass,
+    TypeStateFactory,
+    verb,
+)
 from tests.helpers import make_test_logger
 
 
@@ -237,10 +246,16 @@ def build_flow(ff: Factory[Flow], conversations: ConversationFactory, checkpoint
 
 @dataclass
 class Bench:
-    """One configuration: what every run shares, and how each run starts."""
+    """One configuration: what every run shares, and how each run starts.
+
+    ``flow_per_run`` gives each run its own flow and its own environment, so
+    its own SAIAs: what an agent with SAIAs of its own costs per run.
+    """
 
     name: str
     model: Model
+    runner: FlowRunner
+    saias: _SAIAFactory
     ff: Factory[Flow]
     conversations: ConversationFactory
     flow_per_run: bool
@@ -254,12 +269,20 @@ class Bench:
             self.shared = build_flow(self.ff, self.conversations, self.store is not None)
         return self.shared
 
+    def run_runner(self) -> FlowRunner:
+        if not self.flow_per_run:
+            return self.runner
+        env = Environment(saia_factory=self.saias)
+        return FlowRunner(make_test_logger(), env=env, store=self.store)
+
     async def run(self, state: RunState) -> None:
         if self.store is None:
-            await self.flow().run(state=state)
+            await self.run_runner().start(self.flow(), state=state)
             return
         history = f"run-{state.run}"
-        await self.flow().run(state=state, history=history, retention="gc_on_success")
+        await self.run_runner().start(
+            self.flow(), state=state, history=history, retention="gc_on_success"
+        )
 
 
 def make_bench(lg: Logger, variant: str) -> Bench:
@@ -268,14 +291,11 @@ def make_bench(lg: Logger, variant: str) -> Bench:
     delay = uniform_delay(*SCALE.latency, seed=SEED)
     client = LLMClient(lg, DelayedScriptedBackend(lg, delay, model, record=False))
     store = CountingStore(lg) if variant == "checkpoint" else None
-    ff: Factory[Flow] = Factory(
-        lg,
-        saia_factory=_SAIAFactory(lg, client),
-        state_factory=TypeStateFactory(RunState),
-        checkpoint_store=store,
-    )
+    ff: Factory[Flow] = Factory(lg, state_factory=TypeStateFactory(RunState))
+    saias = _SAIAFactory(lg, client)
+    runner = FlowRunner(lg, env=Environment(saia_factory=saias), store=store)
     conversations = ConversationFactory(lg)
-    return Bench(variant, model, ff, conversations, variant == "flow_per_run", store)
+    return Bench(variant, model, runner, saias, ff, conversations, variant == "flow_per_run", store)
 
 
 def new_states(runs: int) -> list[RunState]:

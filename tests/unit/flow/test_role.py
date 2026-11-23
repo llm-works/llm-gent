@@ -11,7 +11,8 @@ from typing import Any
 import pytest
 
 from llm_gent.core import Role
-from llm_gent.flow import Context, Flow, verb
+from llm_gent.flow import Context, verb
+from tests.helpers import TestFlow, run_flow
 
 from .conftest import make_test_logger
 
@@ -148,7 +149,7 @@ class TestRoleByName:
             return x
 
         factory = _NamedConfigFactory()
-        await Flow(make_test_logger(), saia_factory=factory).call(first).then(second).run()
+        await run_flow(TestFlow(make_test_logger(), saia_factory=factory).call(first).then(second))
         assert factory.built == [planning]  # equal name-only roles share one saia
         assert seen == [{"model": "m-plan"}, {"model": "m-plan"}]
         assert seen[0] is seen[1]

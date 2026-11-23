@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from llm_gent.flow import UNSET, Context, Flow, Unset, verb
+from tests.helpers import run_flow
 
 from .conftest import ROLE_A, ROLE_B, StubFactory, StubSAIA, make_ff, make_test_logger
 
@@ -69,7 +70,7 @@ class TestBuilderValidation:
             flow.call(bogus)
 
     def test_call_rejects_verb_declaring_state_kwarg(self) -> None:
-        """A verb with a ``state=`` parameter collides with ``Flow.run(state=...)``."""
+        """A verb with a ``state=`` parameter collides with ``FlowRunner.start(state=...)``."""
         flow = make_ff().create()
 
         @verb(role=ROLE_A)
@@ -100,30 +101,29 @@ class TestBuilderValidation:
 
         flow.call(ok)  # no error
 
-    def test_call_rejects_verb_declaring_resume_kwarg(self) -> None:
-        """A verb with a ``resume=`` parameter collides with ``Flow.run(resume=...)``."""
+    def test_call_rejects_verb_declaring_start_kwarg(self) -> None:
+        """A verb with a ``start=`` parameter collides with ``FlowRunner.start(start=...)``."""
         flow = make_ff().create()
 
         @verb(role=ROLE_A)
-        async def bad(ctx: Context, *, resume: bool) -> None:
-            """Verb tries to bind ``resume`` — would never receive it via .run()."""
+        async def bad(ctx: Context, *, start: bool) -> None:
+            """Verb tries to bind ``start`` — would never receive it via start()."""
 
-        with pytest.raises(TypeError, match="reserved parameter 'resume'"):
+        with pytest.raises(TypeError, match="reserved parameter 'start'"):
             flow.call(bad)
 
-    def test_call_rejects_verb_declaring_restart_kwarg(self) -> None:
-        """A verb with a ``restart=`` parameter collides with ``Flow.run(restart=...)``."""
+    def test_call_accepts_resume_and_restart_parameters(self) -> None:
+        """``resume`` and ``restart`` are no run arguments: a verb may take them."""
         flow = make_ff().create()
 
         @verb(role=ROLE_A)
-        async def bad(ctx: Context, restart: str) -> None:
-            """Verb tries to bind ``restart`` — would never receive it via .run()."""
+        async def ok(ctx: Context, resume: bool, restart: str) -> None:
+            """Both reach the verb as its own inputs."""
 
-        with pytest.raises(TypeError, match="reserved parameter 'restart'"):
-            flow.call(bad)
+        flow.call(ok)  # no error
 
     def test_call_rejects_verb_declaring_signals_kwarg(self) -> None:
-        """A verb with a ``signals=`` parameter collides with ``Flow.run(signals=...)``."""
+        """A verb with a ``signals=`` parameter collides with ``FlowRunner.start(signals=...)``."""
         flow = make_ff().create()
 
         @verb(role=ROLE_A)
@@ -134,7 +134,7 @@ class TestBuilderValidation:
             flow.call(bad)
 
     def test_call_rejects_verb_declaring_halt_kwarg(self) -> None:
-        """A verb with a ``halt=`` parameter collides with ``Flow.run(halt=...)``."""
+        """A verb with a ``halt=`` parameter collides with ``FlowRunner.start(halt=...)``."""
         flow = make_ff().create()
 
         @verb(role=ROLE_A)
@@ -145,7 +145,7 @@ class TestBuilderValidation:
             flow.call(bad)
 
     def test_call_rejects_verbs_declaring_history_retention_or_extra(self) -> None:
-        """Each collides with a ``Flow.run`` argument of that name."""
+        """Each collides with a ``FlowRunner.start`` argument of that name."""
 
         @verb(role=ROLE_A)
         async def takes_history(ctx: Context, *, history: str) -> None:
@@ -186,7 +186,7 @@ class TestBuilderValidation:
 
 
 class TestExecutionShape:
-    """Flow.run walks the chain, threading data node-to-node."""
+    """FlowRunner.start walks the chain, threading data node-to-node."""
 
     @pytest.mark.asyncio
     async def test_single_node_receives_run_args(self) -> None:
@@ -199,7 +199,7 @@ class TestExecutionShape:
             return x, tag
 
         flow.call(echo)
-        assert await flow.run(7, tag="hi") == (7, "hi")
+        assert await run_flow(flow, 7, tag="hi") == (7, "hi")
 
     @pytest.mark.asyncio
     async def test_chained_positional_dataflow(self) -> None:
@@ -217,7 +217,7 @@ class TestExecutionShape:
             return x + 1
 
         flow.call(double).then(inc)
-        assert await flow.run(3) == 7  # (3*2)+1
+        assert await run_flow(flow, 3) == 7  # (3*2)+1
 
     @pytest.mark.asyncio
     async def test_project_transforms_between_nodes(self) -> None:
@@ -235,7 +235,7 @@ class TestExecutionShape:
             return n * 10
 
         flow.call(make_dict).then(times_ten, project=lambda d: d["n"])
-        assert await flow.run(4) == 40
+        assert await run_flow(flow, 4) == 40
 
     @pytest.mark.asyncio
     async def test_later_nodes_do_not_inherit_run_kwargs(self) -> None:
@@ -253,7 +253,7 @@ class TestExecutionShape:
             return len(s)
 
         flow.call(head).then(tail)
-        assert await flow.run(42, tag="v") == len("v=42")
+        assert await run_flow(flow, 42, tag="v") == len("v=42")
 
     @pytest.mark.asyncio
     async def test_run_kwargs_named_like_framework_internals_reach_the_first_node(self) -> None:
@@ -267,10 +267,10 @@ class TestExecutionShape:
             return run + runtime + parent_extra + parent_activity
 
         flow = make_ff().create().call(head)
-        assert await flow.run(run=1, runtime=2, parent_extra=3, parent_activity=4) == 10
+        assert await run_flow(flow, run=1, runtime=2, parent_extra=3, parent_activity=4) == 10
         # A subflow as the first node passes them on to its own first node.
         outer = make_ff().create().call(make_ff().create().call(head))
-        assert await outer.run(run=1, runtime=2, parent_extra=3, parent_activity=4) == 10
+        assert await run_flow(outer, run=1, runtime=2, parent_extra=3, parent_activity=4) == 10
 
     @pytest.mark.asyncio
     async def test_chain_verb_can_omit_prev_positional(self) -> None:
@@ -294,7 +294,7 @@ class TestExecutionShape:
             return "done"
 
         flow.call(head).then(tail)
-        assert await flow.run(7) == "done"
+        assert await run_flow(flow, 7) == "done"
 
     @pytest.mark.asyncio
     async def test_head_verb_ignores_run_kwargs_it_does_not_declare(self) -> None:
@@ -307,7 +307,7 @@ class TestExecutionShape:
             return x
 
         flow.call(head)
-        assert await flow.run(3, extra="ignored") == 3
+        assert await run_flow(flow, 3, extra="ignored") == 3
 
     @pytest.mark.asyncio
     async def test_var_positional_receives_all_args(self) -> None:
@@ -320,7 +320,7 @@ class TestExecutionShape:
             return args
 
         flow.call(head)
-        assert await flow.run(1, 2, 3) == (1, 2, 3)
+        assert await run_flow(flow, 1, 2, 3) == (1, 2, 3)
 
     @pytest.mark.asyncio
     async def test_var_keyword_receives_all_kwargs(self) -> None:
@@ -333,7 +333,7 @@ class TestExecutionShape:
             return kwargs
 
         flow.call(head)
-        assert await flow.run(a=1, b=2) == {"a": 1, "b": 2}
+        assert await run_flow(flow, a=1, b=2) == {"a": 1, "b": 2}
 
     @pytest.mark.asyncio
     async def test_state_kwarg_and_positional_are_distinct(self) -> None:
@@ -352,7 +352,7 @@ class TestExecutionShape:
             return label, kick
 
         flow.call(head)
-        result = await flow.run(7, state={"label": "run-A"})
+        result = await run_flow(flow, 7, state={"label": "run-A"})
         assert result == ("run-A", 7)
 
     @pytest.mark.asyncio
@@ -371,7 +371,7 @@ class TestExecutionShape:
             return ctx.role, ctx.saia
 
         flow.call(check_a).then(check_b)
-        role_b, saia_b = await flow.run(None)
+        role_b, saia_b = await run_flow(flow, None)
         assert role_b is ROLE_B
         assert isinstance(saia_b, StubSAIA)
         assert saia_b.role is ROLE_B
@@ -394,7 +394,7 @@ class TestExecutionShape:
         doubled.role = ROLE_A  # type: ignore[attr-defined]
 
         flow.call(doubled)
-        assert await flow.run(5) == 10
+        assert await run_flow(flow, 5) == 10
 
     @pytest.mark.asyncio
     async def test_class_based_verb_dispatch(self) -> None:
@@ -414,7 +414,7 @@ class TestExecutionShape:
 
         add_ten = Adder(10)
         flow.call(add_ten)
-        assert await flow.run(7) == 17
+        assert await run_flow(flow, 7) == 17
 
     @pytest.mark.asyncio
     async def test_introspection_fallback_forwards_all_args(self) -> None:
@@ -446,7 +446,7 @@ class TestExecutionShape:
 
         verb_instance = VarArgsVerb()
         flow.call(verb_instance)
-        args, kwargs = await flow.run(1, 2, 3, a="x", b="y")
+        args, kwargs = await run_flow(flow, 1, 2, 3, a="x", b="y")
         assert args == (1, 2, 3)
         assert kwargs == {"a": "x", "b": "y"}
 
@@ -475,7 +475,7 @@ class TestRescue:
             return x + 1
 
         flow.call(fail).rescue(lambda _exc, _prev, _ctx: 100).then(add_one)
-        assert await flow.run(None) == 101
+        assert await run_flow(flow, None) == 101
 
     @pytest.mark.asyncio
     async def test_rescue_receives_exception_and_ctx(self) -> None:
@@ -496,7 +496,7 @@ class TestRescue:
             return "fell-back"
 
         flow.call(fail, rescue=policy)
-        assert await flow.run() == "fell-back"
+        assert await run_flow(flow) == "fell-back"
         assert isinstance(seen["exc"], RuntimeError)
         assert seen["role"] is ROLE_A
 
@@ -516,7 +516,7 @@ class TestRescue:
             return "async-fallback"
 
         flow.call(fail).rescue(policy)
-        assert await flow.run() == "async-fallback"
+        assert await run_flow(flow) == "async-fallback"
 
     @pytest.mark.asyncio
     async def test_rescue_does_not_catch_cancelled(self) -> None:
@@ -538,7 +538,7 @@ class TestRescue:
 
         flow.call(cancel_me).rescue(policy)
         with pytest.raises(asyncio.CancelledError):
-            await flow.run()
+            await run_flow(flow)
         assert rescue_calls == 0
 
     @pytest.mark.asyncio
@@ -553,7 +553,7 @@ class TestRescue:
 
         flow.call(fail)
         with pytest.raises(RuntimeError, match="propagates"):
-            await flow.run()
+            await run_flow(flow)
 
     @pytest.mark.asyncio
     async def test_rescue_pending_input_unset_for_first_node_no_positional(self) -> None:
@@ -573,7 +573,7 @@ class TestRescue:
             return "fb"
 
         flow.call(fail, rescue=policy)
-        assert await flow.run() == "fb"
+        assert await run_flow(flow) == "fb"
         assert seen["prev"] is UNSET
         assert isinstance(seen["prev"], Unset)
 
@@ -595,7 +595,7 @@ class TestRescue:
             return "fb"
 
         flow.call(fail, rescue=policy)
-        assert await flow.run("hello") == "fb"
+        assert await run_flow(flow, "hello") == "fb"
         assert seen["prev"] == "hello"
 
     @pytest.mark.asyncio
@@ -621,7 +621,7 @@ class TestRescue:
             return prev
 
         flow.call(produce).then(fail, rescue=policy)
-        assert await flow.run() == 42
+        assert await run_flow(flow) == 42
         assert seen["prev"] == 42
 
     @pytest.mark.asyncio
@@ -647,7 +647,7 @@ class TestRescue:
             return prev
 
         flow.call(produce).then(fail, project=lambda x: x * 3, rescue=policy)
-        assert await flow.run() == 30
+        assert await run_flow(flow) == 30
         assert seen["prev"] == 30
 
 
@@ -667,7 +667,7 @@ class TestAfter:
             return 5
 
         flow.call(make).after(lambda result, ctx: seen.update(result=result, role=ctx.role))  # noqa: ARG005
-        assert await flow.run() == 5
+        assert await run_flow(flow) == 5
         assert seen == {"result": 5, "role": ROLE_A}
 
     @pytest.mark.asyncio
@@ -681,7 +681,7 @@ class TestAfter:
             return 3
 
         flow.call(make).after(lambda _result, _ctx: 9999)
-        assert await flow.run() == 3
+        assert await run_flow(flow) == 3
 
     @pytest.mark.asyncio
     async def test_after_fires_after_rescue(self) -> None:
@@ -695,7 +695,7 @@ class TestAfter:
 
         seen: list[Any] = []
         flow.call(fail).rescue(lambda _e, _prev, _c: "rescued").after(lambda r, _c: seen.append(r))
-        assert await flow.run() == "rescued"
+        assert await run_flow(flow) == "rescued"
         assert seen == ["rescued"]
 
     @pytest.mark.asyncio
@@ -721,7 +721,7 @@ class TestAfter:
             order.append(f"after:{result}")
 
         flow.call(one).after(hook).then(two)
-        assert await flow.run() == 2
+        assert await run_flow(flow) == 2
         assert order == ["after:1"]
 
 
@@ -741,7 +741,7 @@ class TestChainedVsKwargsHooks:
         chained = make_ff(saia_factory=saia).create().call(fail).rescue(lambda _e, _prev, _c: "R")
         kwargs = make_ff(saia_factory=saia).create().call(fail, rescue=lambda _e, _prev, _c: "R")
 
-        assert await chained.run() == await kwargs.run() == "R"
+        assert await run_flow(chained) == await run_flow(kwargs) == "R"
 
     @pytest.mark.asyncio
     async def test_kwargs_after_equals_chained(self) -> None:
@@ -766,8 +766,8 @@ class TestChainedVsKwargsHooks:
             .call(make, after=lambda r, _c: seen.append(("k", r)))
         )
 
-        await chained.run()
-        await kwargs.run()
+        await run_flow(chained)
+        await run_flow(kwargs)
         assert seen == [("c", 42), ("k", 42)]
 
 
@@ -802,7 +802,7 @@ class TestSubflow:
         sub = make_ff().create("inner").call(add_one).then(times_two)  # no saia
         main = make_ff(saia_factory=saia).create("outer").call(sub).then(stringify)
 
-        assert await main.run(5) == "n=12"  # ((5+1)*2)
+        assert await run_flow(main, 5) == "n=12"  # ((5+1)*2)
 
     @pytest.mark.asyncio
     async def test_subflow_shares_runtime_saia_cache(self) -> None:
@@ -822,7 +822,7 @@ class TestSubflow:
         sub = make_ff().create("inner").call(inner_verb)
         main = make_ff(saia_factory=saia).create().call(outer_verb).then(sub)
 
-        assert await main.run() is True
+        assert await run_flow(main) is True
         assert saia.built_for == [ROLE_A]
 
     @pytest.mark.asyncio
@@ -846,7 +846,7 @@ class TestSubflow:
             return "handled"
 
         main = make_ff(saia_factory=saia).create("outer").call(sub, rescue=policy)
-        assert await main.run(None) == "handled"
+        assert await run_flow(main, None) == "handled"
         assert seen["role"] is None
         assert seen["saia"] is None
         assert seen["flow"] is main
@@ -864,8 +864,8 @@ class TestSubflow:
         sub = make_ff().create("inner").call(read_state)
         main = make_ff(saia_factory=saia).create().call(sub)
 
-        assert await main.run(None) == {}
-        assert await main.run(None, state={"given": True}) == {"given": True}
+        assert await run_flow(main, None) == {}
+        assert await run_flow(main, None, state={"given": True}) == {"given": True}
 
 
 # -----------------------------------------------------------------------------
@@ -881,7 +881,7 @@ class TestRuntimeErrors:
         """.run() on a flow with no nodes is a programming error."""
         flow = make_ff().create("empty")
         with pytest.raises(RuntimeError, match="no nodes"):
-            await flow.run()
+            await run_flow(flow)
 
     @pytest.mark.asyncio
     async def test_verb_reading_saia_without_factory_raises_at_access(self) -> None:
@@ -902,7 +902,7 @@ class TestRuntimeErrors:
 
         flow = Flow(make_test_logger(), "naked").call(reads_saia)
         with pytest.raises(RuntimeError, match="SAIAFactory"):
-            await flow.run()
+            await run_flow(flow)
 
     @pytest.mark.asyncio
     async def test_verb_not_reading_saia_runs_without_factory(self) -> None:
@@ -922,7 +922,7 @@ class TestRuntimeErrors:
             return 42
 
         flow = Flow(make_test_logger(), "naked").call(no_saia)
-        assert await flow.run() == 42
+        assert await run_flow(flow) == 42
 
 
 # -----------------------------------------------------------------------------
@@ -955,7 +955,7 @@ class TestCancellation:
         main = make_ff(saia_factory=saia).create("outer").call(sub, rescue=parent_rescue)
 
         with pytest.raises(asyncio.CancelledError):
-            await main.run(None)
+            await run_flow(main, None)
         assert parent_rescued is False
 
     @pytest.mark.asyncio
@@ -971,7 +971,7 @@ class TestCancellation:
             await asyncio.sleep(3600)
 
         flow = make_ff(saia_factory=saia).create().call(slow)
-        task = asyncio.create_task(flow.run())
+        task = asyncio.create_task(run_flow(flow))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

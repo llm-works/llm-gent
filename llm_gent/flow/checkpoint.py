@@ -7,7 +7,7 @@ A *history* is the line of commits the runs given one name write. It
 lives in one repository of an :class:`appinfra.cas.Store` (``MemoryStore``,
 ``FileStore``, or gent's :class:`~llm_gent.flow.stores.PgStore`) — the
 flow's ``checkpoint_store`` — named by the agent's ``client_flow_id``
-(``run(history=client_flow_id)``). The repository holds the history's objects — snapshot
+(``start(flow, history=client_flow_id)``). The repository holds the history's objects — snapshot
 blobs and trees, and commits whose payload is
 :class:`~llm_gent.flow.state.cas.CommitMeta` — and its refs:
 
@@ -23,14 +23,14 @@ blobs and trees, and commits whose payload is
 
 Cleanup is the repository's: ``store.repo(client_flow_id).prune(expire)``
 deletes the objects no ref reaches — commits off the history's line after
-a run resumed with ``resume=<name>`` or ``resume=<hash>`` committed, or
+a run resumed with ``Resume(<name>)`` or ``Resume(<hash>)`` committed, or
 written by a process that died before moving ``HEAD`` — once they are
 older than ``expire`` seconds. ``store.delete_repo(client_flow_id)``
 removes the whole history; the next save starts a new one.
 
 Retention policy
 ----------------
-:meth:`Flow.run` ``retention=`` decides what a fully successful run
+:meth:`FlowRunner.start` ``retention=`` decides what a fully successful run
 leaves behind:
 
 - ``"retain"`` (default): the history stays, ending in the final-state
@@ -89,8 +89,9 @@ including after a later run appended commits past it.
 
 
 RESERVED_CHECKPOINT_NAMES = frozenset({"off", "latest", "complete"})
-"""Names a checkpoint cannot take: the :data:`ResumeMode` values and the
-framework's own ``complete`` tag."""
+"""Names a checkpoint cannot take: ``latest``, which :class:`~llm_gent.flow.Resume`
+and :class:`~llm_gent.flow.Restart` read as the newest commit with state, ``off``,
+and the framework's own ``complete`` tag."""
 
 
 def is_commit_hash(value: object) -> bool:
@@ -104,7 +105,7 @@ def checkpoint_tag(name: str) -> str:
     Raises:
         ValueError: ``name`` is not a non-empty ``str``, is one of
             :data:`RESERVED_CHECKPOINT_NAMES`, or has the form of a commit
-            hash (``run(resume=<hash>)`` takes those as commits).
+            hash (``Resume(<hash>)`` takes those as commits).
     """
     if not isinstance(name, str) or not name:
         raise ValueError(f"a checkpoint name must be a non-empty str; got {name!r}")
@@ -134,34 +135,8 @@ The framework writes it — no node produced it — following the
 """
 
 
-ResumeMode = Literal["off", "latest"]
-"""How :meth:`Flow.run` starts from a checkpointed history.
-
-- ``"off"`` — run from ``state=`` as given; new commits still append to
-  the history.
-- ``"latest"`` — check out the newest commit that has state (commits
-  without state are skipped) and continue from it — a run that raised
-  wrote no commit, so this is the last save before it: every scope comes back, and every chain, iterate and
-  branch that was running continues where its cursor was — at the same
-  step with the same input, in the same pass with the same carried value,
-  on the same arm. Only the step that was running when the checkpoint was
-  taken runs again, and a Loop that paused mid-turn resumes that turn.
-  Starts from ``state=`` when the history is empty; raises
-  :class:`~llm_gent.flow.history.HistoryCorrupt` on a corrupt history.
-
-A commit hash (:func:`is_commit_hash`; ``ctx.checkpoint()`` returns the
-one it wrote) checks out that commit of the history, and any other string
-names a checkpoint taken with ``ctx.checkpoint(name)`` (see
-:func:`checkpoint_tag`). Either way the run checks the commit out the same
-way and its commits continue from there. Once the run commits, the commits
-written after it leave the history's line but stay resumable by hash until
-a prune of the repository deletes them; a run that fails before its first
-commit leaves ``HEAD`` where it was.
-"""
-
-
 Retention = Literal["retain", "gc_on_success"]
-"""Retention policy for successful :meth:`Flow.run` completion.
+"""Retention policy for successful :meth:`FlowRunner.start` completion.
 
 See the module docstring's retention section for semantics.
 """
@@ -173,10 +148,10 @@ class CheckpointPolicy:
 
     Two save triggers are always on and NOT gated by this policy:
 
-    - The halt checkpoint — when the run's halt stops it, :meth:`Flow.run`
-      commits the run's position once everything has stopped, provided a
-      checkpointer is wired. This is the durability guarantee that makes
-      ``run(resume="latest")`` reach a halted history.
+    - The halt checkpoint — when the run's halt stops it, the run commits
+      its position once everything has stopped, provided a checkpointer is
+      wired. This is the durability guarantee that makes
+      ``Resume("latest")`` reach a halted history.
     - Explicit ``ctx.checkpoint()`` — the verb-level trigger fires
       regardless of policy; when the verb asks to save, we save.
 

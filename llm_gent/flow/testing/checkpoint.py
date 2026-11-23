@@ -35,10 +35,11 @@ from typing import Any
 from appinfra.cas import Store
 from appinfra.log import Logger
 
-from ..checkpoint import ResumeMode
 from ..context import Context
 from ..flow import Flow
 from ..history import History
+from ..run.runner import Runner as FlowRunner
+from ..run.start import Resume
 from ..state import StateDataclass, TypeStateFactory
 from ..verb import verb
 
@@ -100,7 +101,7 @@ async def _minus_three(ctx: Context[CanonicalCounter], _prev: Any = None) -> int
 async def _snapshot(ctx: Context[CanonicalCounter], _prev: Any = None) -> dict[str, Any]:
     """Tail verb — returns state.data as a JSON-serializable dict.
 
-    Enables :meth:`Flow.run` to yield the final state directly (needed
+    Enables :meth:`FlowRunner.start` to yield the final state directly (needed
     by :func:`resume_in_subprocess` — the subprocess prints the run's
     return to stdout as JSON).
     """
@@ -114,7 +115,7 @@ def _make_halt_check(halt_after_iteration: int | None) -> Any:
     ``halt_after_iteration=None``) yields a no-op halt-check — the
     composition graph stays identical between interrupt and resume, but
     only the interrupt run's copy of the verb can trip the halt. A run
-    without a halt (``run(halt=...)`` not given) is never stopped.
+    started without a halt is never stopped.
     """
 
     @verb
@@ -141,7 +142,7 @@ def build_canonical_flow(
     *,
     max_iters: int = 5,
     halt_after_iteration: int | None = None,
-    store: Store | None = None,
+    checkpointed: bool = False,
 ) -> Flow:
     """Build the canonical multi-stage Flow.
 
@@ -151,10 +152,10 @@ def build_canonical_flow(
         .call(snapshot)
 
     Deterministic — no clock, no randomness, no I/O. The tail
-    ``snapshot`` returns ``state.data.to_dict()`` so :meth:`Flow.run`
+    ``snapshot`` returns ``state.data.to_dict()`` so :meth:`FlowRunner.start`
     yields the final state directly (uniform observable across
     baseline, interrupt, and resume paths). Run it with
-    ``run(history=..., halt=...)`` as the case needs; a run given no
+    ``start(flow, history=..., halt=...)`` as the case needs; a run given no
     ``state=`` starts from a fresh ``CanonicalCounter()``.
 
     Args:
@@ -163,17 +164,16 @@ def build_canonical_flow(
             of an interrupt saved in pass N runs passes N to
             ``max_iters - 1``).
         halt_after_iteration: Iteration count at which the body's last
-            step sets the run's halt (``run(halt=...)``); the run writes a
+            step sets the run's halt (``start(flow, halt=...)``); the run writes a
             halt checkpoint at that step and stops, and the checkpoint is
             preserved (halt-set exit skips the delete-on-success path).
             The step passes its input through, so it can run again on
             resume. ``None``: never.
-        store: Optional :class:`appinfra.cas.Store`: the flow's
-            ``checkpoint_store``, with a checkpointer and a save at every
-            iterate pass. Its runs keep a history when given ``history=``.
+        checkpointed: Declare a checkpointer with a save at every iterate
+            pass. Its runs then need ``history=`` on a runner with a store.
     """
-    flow = Flow(lg, state_factory=TypeStateFactory(CanonicalCounter), checkpoint_store=store)
-    if store is not None:
+    flow = Flow(lg, state_factory=TypeStateFactory(CanonicalCounter))
+    if checkpointed:
         # Canonical fixture opts into per-iteration saves: the determinism
         # assertions and resume tests need each boundary as a resumable anchor.
         flow.with_checkpointer().with_checkpoint_policy(on_iterate=True)
@@ -231,14 +231,18 @@ async def assert_resume_determinism(
             f"halt_after_iteration must be in [1, {max_iters}]; got {halt_after_iteration}"
         )
 
-    baseline = await build_canonical_flow(lg, max_iters=max_iters).run()
+    baseline = await FlowRunner(lg).start(build_canonical_flow(lg, max_iters=max_iters))
 
-    await build_canonical_flow(
-        lg, max_iters=max_iters, halt_after_iteration=halt_after_iteration, store=store
-    ).run(halt=asyncio.Event(), history=history)
+    runner = FlowRunner(lg, store=store)
+    interrupted = build_canonical_flow(
+        lg, max_iters=max_iters, halt_after_iteration=halt_after_iteration, checkpointed=True
+    )
+    await runner.start(interrupted, halt=asyncio.Event(), history=history)
 
-    resumed = await build_canonical_flow(lg, max_iters=max_iters, store=store).run(
-        history=history, resume="latest"
+    resumed = await runner.start(
+        build_canonical_flow(lg, max_iters=max_iters, checkpointed=True),
+        history=history,
+        start=Resume("latest"),
     )
 
     assert resumed == baseline, (
@@ -280,7 +284,7 @@ def resume_in_subprocess(
     flow_builder: str = "build_canonical_flow",
     flow_builder_kwargs: dict[str, Any] | None = None,
     history: str = "canonical-multi-stage",
-    resume: ResumeMode = "latest",
+    resume: str = "latest",
     subprocess_timeout: float = 30.0,
 ) -> dict[str, Any]:
     """Spawn a fresh Python process, resume the Flow from checkpoint, return final state.
@@ -289,8 +293,8 @@ def resume_in_subprocess(
     It reconstructs the store by resolving ``store_module.store_factory``
     (a class or a function) and calling it as
     ``store_factory(lg, **store_kwargs)``, resolves and calls the flow
-    builder with ``store=<instance>, **flow_builder_kwargs``, invokes
-    ``await flow.run(history=history, resume=resume)``, and prints
+    builder with ``**flow_builder_kwargs``, runs the flow on a runner with
+    that store, ``history=history, start=Resume(resume)``, and prints
     the return value as JSON to stdout. The parent parses and returns it.
 
     Every value in ``store_kwargs`` must be JSON-serializable (paths as
@@ -309,26 +313,28 @@ def resume_in_subprocess(
         store_kwargs: JSON-serializable kwargs for the store factory.
         flow_module: Dotted module path exposing the flow builder.
         flow_builder: Builder function name inside that module. Must
-            accept ``(lg, *, store, **kwargs) -> Flow``.
-        flow_builder_kwargs: Additional kwargs passed to the flow builder.
+            accept ``(lg, **kwargs) -> Flow``.
+        flow_builder_kwargs: Kwargs passed to the flow builder; the default
+            builder gets ``checkpointed=True`` unless they say otherwise.
         history: The history the resume runs on — must match the
             ``history=`` of the interrupt run that wrote the checkpoint.
-        resume: The :data:`~llm_gent.flow.checkpoint.ResumeMode` the
-            subprocess runs with (``"off"`` is rejected: nothing to resume).
+        resume: The commit the subprocess resumes from, as
+            :class:`~llm_gent.flow.Resume` takes it: ``"latest"``, a commit
+            hash or a checkpoint name.
         subprocess_timeout: Wall-clock cap on the subprocess in seconds.
 
     Returns:
         The final state dict — whatever the flow's tail node returned.
 
     Raises:
-        ValueError: ``resume`` is ``"off"``.
+        ValueError: ``resume`` is not ``"latest"``, a commit hash or a
+            checkpoint name.
         subprocess.CalledProcessError: The subprocess exited non-zero.
             The stderr is included in the exception.
         subprocess.TimeoutExpired: The subprocess ran past ``subprocess_timeout``.
         json.JSONDecodeError: The subprocess's stdout was not valid JSON.
     """
-    if resume == "off":
-        raise ValueError('resume_in_subprocess needs a resume mode; got "off"')
+    Resume(resume)  # raises before a process starts
     payload = {
         "resume": resume,
         "store_module": store_module,
@@ -336,7 +342,7 @@ def resume_in_subprocess(
         "store_kwargs": store_kwargs,
         "flow_module": flow_module,
         "flow_builder": flow_builder,
-        "flow_builder_kwargs": flow_builder_kwargs or {},
+        "flow_builder_kwargs": _builder_kwargs(flow_module, flow_builder, flow_builder_kwargs),
         "history": history,
     }
     result = subprocess.run(
@@ -353,3 +359,11 @@ def resume_in_subprocess(
             f"resume_in_subprocess requires the flow to return a dict; got {type(parsed).__name__}"
         )
     return dict(parsed)
+
+
+def _builder_kwargs(module: str, builder: str, kwargs: dict[str, Any] | None) -> dict[str, Any]:
+    """The flow builder's kwargs: the canonical flow resumes checkpointed unless told otherwise."""
+    given = dict(kwargs or {})
+    if (module, builder) == (__name__, "build_canonical_flow"):
+        given.setdefault("checkpointed", True)
+    return given

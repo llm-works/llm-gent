@@ -104,7 +104,7 @@ class MapRunner:
     results — is state on the runner, in every snapshot taken while it
     runs. Each item has a key: its index in a map over items, the member's
     key in a map over members. Items that are running keep their own
-    positions under ``<map>/i/<key>``. On ``resume="latest"`` a map over
+    positions under ``<map>/i/<key>``. On ``Resume("latest")`` a map over
     items runs over the saved items; a map over members over its current
     members, matched to their records by key. Either way a completed item
     does not run again — nor does one that failed (``strict=False``) or was
@@ -200,7 +200,7 @@ class MapRunner:
             role=None,
             state=frame.scope.state,
             flow=frame.runtime,
-            traits=frame.run.env.traits,
+            env=frame.run.env,
             halt=frame.halt,
             extra=frame.extra,
             resources=frame.scope.resources,
@@ -543,7 +543,7 @@ class MapItemRunner:
             role=None,
             state=child_state,
             flow=frame.runtime,
-            traits=frame.run.env.traits,
+            env=frame.run.env,
             halt=frame.halt,
             extra=frame.extra,
             resources=frame.scope.resources,

@@ -161,14 +161,14 @@ class FlowCommit:
     :attr:`parents` holds the history's previous head — the commit written
     immediately before this one, in time order — or is empty for a
     history's first commit. It records sequence, not derivation: a run
-    started with ``resume="off"`` still parents on the previous head. A run
+    started ``Fresh()`` still parents on the previous head. A run
     that finishes or halts ends in an ``$end`` or ``halted`` commit; one
     that raises ends at its last save. A multi-parent tuple is reserved for
     a future fork/merge surface and unused today.
     """
 
     id: str
-    """The commit's content hash: what ``ctx.checkpoint()`` returns and ``resume=`` takes."""
+    """The commit's content hash: what ``ctx.checkpoint()`` returns and ``Resume`` takes."""
     tree: str
     """Id of the commit's snapshot tree."""
     parents: tuple[str, ...]

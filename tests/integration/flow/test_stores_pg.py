@@ -23,10 +23,11 @@ from appinfra.db.pg import PG
 from appinfra.log import Logger
 from sqlalchemy import delete, update
 
-from llm_gent.flow import History
+from llm_gent.flow import History, Resume
 from llm_gent.flow.stores import PgStore
 from llm_gent.flow.stores.postgres import _WRITE_BATCH, CasObject, CasRef
 from llm_gent.flow.testing.checkpoint import build_canonical_flow
+from tests.helpers import run_flow
 
 
 def _wipe(pg: PG) -> None:
@@ -104,17 +105,23 @@ class TestCheckpointedRun:
         self, store: PgStore, pg_test_logger: Logger
     ) -> None:
         """A run halts into Postgres and a new flow resumes it to the uninterrupted result."""
-        baseline = await build_canonical_flow(pg_test_logger, max_iters=4).run()
+        baseline = await run_flow(build_canonical_flow(pg_test_logger, max_iters=4))
 
-        common: dict[str, Any] = {"max_iters": 4, "store": store}
-        await build_canonical_flow(pg_test_logger, halt_after_iteration=2, **common).run(
-            halt=asyncio.Event(), history="pg-run"
+        common: dict[str, Any] = {"max_iters": 4, "checkpointed": True}
+        await run_flow(
+            build_canonical_flow(pg_test_logger, halt_after_iteration=2, **common),
+            halt=asyncio.Event(),
+            history="pg-run",
+            store=store,
         )
         head = await History(store, "pg-run").head()
         assert head is not None and head.meta.outcome == "halted"
 
-        resumed = await build_canonical_flow(pg_test_logger, **common).run(
-            history="pg-run", resume="latest"
+        resumed = await run_flow(
+            build_canonical_flow(pg_test_logger, **common),
+            history="pg-run",
+            start=Resume("latest"),
+            store=store,
         )
         assert resumed == baseline
         assert await History(store, "pg-run").is_complete()

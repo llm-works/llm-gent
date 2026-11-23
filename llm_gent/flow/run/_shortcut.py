@@ -63,7 +63,7 @@ def check_signals(signals: Mapping[str, asyncio.Event] | None) -> dict[str, asyn
     if signals is None:
         return {}
     if not isinstance(signals, Mapping):
-        raise TypeError(f"run(signals=) takes a mapping; got {type(signals).__name__}")
+        raise TypeError(f"start(signals=) takes a mapping; got {type(signals).__name__}")
     for name, event in signals.items():
         _check_name(name, "a signal's name")
         if not isinstance(event, asyncio.Event):
@@ -90,7 +90,7 @@ def _check_one(flow: Flow, signals: Mapping[str, asyncio.Event]) -> None:
     if signal not in signals:
         raise RuntimeError(
             f"Flow {_label(flow)} has with_shortcut({signal!r}) but the run has no such "
-            f"signal: pass run(signals={{{signal!r}: event}})"
+            f"signal: pass start(flow, signals={{{signal!r}: event}})"
         )
     inner = _inner_region(flow, signal)
     if inner is not None:

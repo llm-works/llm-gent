@@ -11,7 +11,7 @@ merging the child state back into the parent when the loop exits.
 
 Its cursor — the pass it is in and the value carried into that pass —
 is state on the runner, in every snapshot taken while it runs. On
-``resume="latest"`` the iterate continues at the saved cursor. The
+``Resume("latest")`` the iterate continues at the saved cursor. The
 runner is single-use: a fresh instance per iterate node execution.
 """
 
@@ -74,7 +74,7 @@ class IterateRunner:
         framework commits a snapshot of the run after each successful
         pass, holding every live scope and cursor.
 
-        ``resume="latest"``: the iterate continues in the saved pass with
+        ``Resume("latest")``: the iterate continues in the saved pass with
         the saved carried value (:meth:`_take_saved_position`); completed
         passes do not run again, and ``max_iters`` is a bound across runs.
         ``deadline`` is not restored — the wall clock resets each run.

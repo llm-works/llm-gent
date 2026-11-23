@@ -11,7 +11,7 @@ Verifies Flow's checkpoint + mid-SAIA-turn pause + resume story
 end-to-end. Structurally exercises every save site: iterate
 boundary, halt-observation mid-turn, the paused turn in the CAS
 commit's snapshot, :class:`appinfra.cas.FileStore` persistence, and
-:meth:`Flow.run(resume="latest")` checkout on a subsequent process.
+``Resume("latest")`` checkout on a subsequent process.
 
 Backend modes:
 
@@ -32,7 +32,7 @@ first tool call sets a shared :class:`asyncio.Event` and the
 subsequent SAIA iteration's LLM call catches it via
 ``abort_signal``, returns ``TaskResult(paused=True)``, and Flow
 captures the conversation onto the CAS halt commit for a later
-``resume="latest"`` to re-arm.
+``Resume("latest")`` to re-arm.
 
 Layout
 ------
@@ -50,7 +50,7 @@ Layout
   verb run inside ``.iterate(until=<queue empty>)``; each
   completed iteration pops one topic and appends its summary, a
   paused one leaves state untouched for resume.
-- :func:`_invoke` — one invocation: ``run(resume="latest")`` when the
+- :func:`_invoke` — one invocation: ``Resume("latest")`` when the
   last run halted (:func:`_resume_pending`), otherwise a fresh run with
   the halt armed.
 - :func:`main` — real mode runs one :func:`_invoke` per process
@@ -109,14 +109,17 @@ from llm_saia import SAIA, ToolDef
 from llm_saia.core.backend import Backend
 
 from llm_gent.examples._clients import ANTHROPIC_MODEL, real_client
-from llm_gent.core import Role
+from llm_gent.core import Environment, Role
 from llm_gent.flow import (
     HALTED,
     Context,
     Flow,
     Factory,
+    FlowRunner,
+    Fresh,
     History,
     Loop,
+    Resume,
     StateDataclass,
     TypeStateFactory,
     verb,
@@ -291,7 +294,7 @@ def _make_summarize(loop: Loop) -> Callable[[Context[Digest]], Awaitable[Digest]
         (tool result already in place) and SAIA completes the
         follow-up call.
 
-        Returns ``ctx.data`` so :meth:`Flow.run` hands the caller
+        Returns ``ctx.data`` so the awaited run hands the caller
         the live (possibly resume-hydrated) state.
         """
         if ctx.data.pending:
@@ -385,28 +388,26 @@ async def _paused_turn_saved(history: History) -> bool:
 async def _invoke(lg: Logger, store_dir: Path, backend: Backend, mode: str) -> tuple[Digest, bool]:
     """One process-level invocation; return ``(final state, halted)``.
 
-    Resumes with ``resume="latest"`` when the last run halted, and starts
-    fresh (``resume="off"``) on an empty or finished history. The halt is
-    armed only on a fresh run so the resumed turn completes.
+    Starts with ``Resume("latest")`` when the last run halted, and
+    ``Fresh()`` on an empty or finished history. The halt is armed only on
+    a fresh run so the resumed turn completes.
     """
     store = FileStore(lg, store_dir)
     history = History(store, CLIENT_FLOW_ID)
     resuming = await _resume_pending(history)
     halt = asyncio.Event()
-    ff = Factory(
-        lg,
-        saia_factory=_SAIAFactory(lg, backend, halt, arm_halt=not resuming),
-        state_factory=TypeStateFactory(Digest),
-        checkpoint_store=store,
-    )
+    ff = Factory(lg, state_factory=TypeStateFactory(Digest))
+    saia_factory = _SAIAFactory(lg, backend, halt, arm_halt=not resuming)
+    runner = FlowRunner(lg, env=Environment(saia_factory=saia_factory), store=store)
     print(f"--- Run ({'resume' if resuming else 'fresh'}, {mode}) ---")
     print(f"  store: {store_dir}")
     # A resumed run's state comes from the checkpoint; the given one starts a fresh run.
-    result = await _build_flow(lg, ff).run(
+    result = await runner.start(
+        _build_flow(lg, ff),
         state=Digest(pending=list(TOPICS)),
         halt=halt,
         history=CLIENT_FLOW_ID,
-        resume="latest" if resuming else "off",
+        start=Resume("latest") if resuming else Fresh(),
     )
     # A halted run returns HALTED; its state is in the halt checkpoint.
     halted = result is HALTED

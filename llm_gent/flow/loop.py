@@ -651,7 +651,7 @@ class LoopFactory:
     Bundles the ambient logger, :class:`SAIAFactory`, conversation factory
     and an optional halt event so consumers wire once at the application
     boundary and ``.create(role, **hooks)`` many Loops. Without a halt of
-    its own a Loop aborts on the run's (:meth:`Flow.run` ``halt=``).
+    its own a Loop aborts on the run's (:meth:`FlowRunner.start` ``halt=``).
 
     The ``SAIAFactory`` on this factory is held for future
     standalone-Loop use (not required today — Flow-body Loops read
