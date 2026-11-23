@@ -15,6 +15,7 @@ guards): every call keeps its messages in the conversation it is passed.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Sequence
 from types import TracebackType
 from typing import Any, Protocol
@@ -36,11 +37,13 @@ class SAIAFactory(Protocol):
     :meth:`build` returns an object supporting saia's public surface — the
     verb calling code uses ``.verify(...)`` / ``.complete(...)`` / etc.
 
-    Implementations MAY read :attr:`Role.params` for per-run parameters
-    (max_iterations, cost trackers, session identifiers, task state —
-    anything the consumer needs at build time that isn't captured in the
-    typed Role fields). Key naming inside ``params`` is a contract between
-    a factory and its callers; gent itself imposes none.
+    Implementations MAY read :attr:`Role.params` for further configuration
+    (max_iterations, a tool set's name — anything the consumer needs at
+    build time that isn't captured in the typed Role fields). Key naming
+    inside ``params`` is a contract between a factory and its callers; gent
+    itself imposes none. The built SAIA is shared by every run on the
+    platform, so it holds no run's data: per-run values reach a step through
+    ``ctx.cost`` and ``ctx.state``.
 
     Reference sketch (users typically write one specific to their yaml
     config)::
@@ -85,9 +88,9 @@ class Platform:
     ``owned`` on :meth:`close` or at the end of a ``with`` / ``async with``
     block; everything else stays with whoever built it.
 
-    The SAIA cache is one ``dict`` per platform. Two runs on one event loop
-    that ask for an unbuilt role at once may each build it; one of the two
-    is kept, and both are configured alike.
+    Each role's SAIA is built once: a first request builds it under a lock,
+    and requests from other threads arriving meanwhile wait and get the same
+    instance. Later requests read the cache without the lock.
 
     Example:
         async with PlatformFactory(lg).from_config({}) as platform:
@@ -125,6 +128,7 @@ class Platform:
         self._traits = traits
         self._owned = list(owned)
         self._saia_by_role: dict[Role, Any] = {}
+        self._saia_lock = threading.Lock()
         self._closed = False
 
     @property
@@ -158,13 +162,21 @@ class Platform:
         return self._traits
 
     def saia(self, role: Role) -> Any:
-        """The SAIA for ``role``, built by the SAIA factory on the first request and kept."""
+        """The SAIA for ``role``, built by the SAIA factory on the first request and kept.
+
+        Kept for the life of the platform, keyed by the whole role: a role
+        holds configuration only (:attr:`Role.params`), so the cache has one
+        entry per configured role.
+        """
         cached = self._saia_by_role.get(role)
         if cached is not None:
             return cached
-        built = self._saia_factory.build(role)
-        self._saia_by_role[role] = built
-        return built
+        with self._saia_lock:
+            cached = self._saia_by_role.get(role)
+            if cached is None:
+                cached = self._saia_factory.build(role)
+                self._saia_by_role[role] = cached
+            return cached
 
     def close(self) -> None:
         """Close the resources this platform owns. Later calls do nothing."""

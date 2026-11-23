@@ -128,8 +128,10 @@ A run runs on its runner's platform, not on anything of the flow's:
 `PlatformFactory(lg).with_saia_factory(saia_factory).from_config({})` (both from
 `llm_gent.core`); steps read it as `ctx.platform`. A verb's `ctx.saia` is the SAIA
 its role's `SAIAFactory.build(role)` returned, built once per role and shared by
-every run on the platform; a SAIA holds configuration only, so runs share it
-safely. `ctx.traits` is the platform's trait registry. Every flow of a run,
+every run on the platform. Sharing is safe because the factory keeps run data
+out of it: a SAIA holds configuration only (backend, tools, system prompt), and a
+role carries configuration only, so a run's own values reach a step through
+`ctx.cost` and `ctx.state`. `ctx.traits` is the platform's trait registry. Every flow of a run,
 nested ones included, sees the same platform. On a platform built without a
 SAIA factory, a verb that reads `ctx.saia` raises; the others run.
 
