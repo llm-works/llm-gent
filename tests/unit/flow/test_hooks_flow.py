@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 
-from llm_gent.flow import HALTED, Context, Factory, Flow, Interrupted, Loop, Role, verb
+from llm_gent.core import Role
+from llm_gent.flow import HALTED, Context, Factory, Flow, Interrupted, Loop, verb
 from llm_gent.flow.hooks import (
     CheckpointEvent,
     Hook,

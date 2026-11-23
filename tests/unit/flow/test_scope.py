@@ -165,7 +165,7 @@ class TestPosition:
 
 def _frame() -> _Frame:
     flow = make_ff().create("top")
-    run = Run(flow=flow, halt=None, signals={}, checkpoint_ctx=None)
+    run = Run(lg=LG, env=flow._env, flow=flow, signals={}, checkpoint_ctx=None)
     return _Frame(run=run, lg=LG, scope=Scope(state=State(data={"root": True})))
 
 

@@ -16,8 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `llm_call`) without Flow.
 - `llm_gent.core.llm.testing.DelayedScriptedBackend`: llm-infer's scripted backend with an awaited
   per-call delay and optional request recording, so concurrent runs overlap in experiments.
+- `llm_gent.core.Run`, a handle on one execution (await it, `halt()` it, check `done`), and
+  `llm_gent.core.Environment`, the `SAIAFactory` and traits a run uses with one SAIA per role.
 
 ### Changed
+
+- **Breaking:** `Role` and `SAIAFactory` move to `llm_gent.core`; `llm_gent.flow` no longer
+  exports them.
 
 - Building from source requires setuptools `>= 77.0.3`; the package declares its license as the
   SPDX expression `Apache-2.0`.

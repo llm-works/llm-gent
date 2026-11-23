@@ -67,6 +67,7 @@ from typing import Any, Literal
 import pytest
 from appinfra.cas import ObjectType, Store
 
+from llm_gent.core import Role
 from llm_gent.flow import (
     HALTED,
     Context,
@@ -75,7 +76,6 @@ from llm_gent.flow import (
     History,
     Interrupted,
     Loop,
-    Role,
     verb,
 )
 from tests.helpers import memory_store

@@ -26,7 +26,8 @@ from typing import Any
 import pytest
 from appinfra.cas import MemoryStore, Tree
 
-from llm_gent.flow import FlowCommit, Role
+from llm_gent.core import Role
+from llm_gent.flow import FlowCommit
 from llm_gent.flow.checkpoint import HEAD_REF, ConcurrentWriteError
 from llm_gent.flow.run._checkpoint_ctx import CheckpointContext
 from llm_gent.flow.structure import Structure

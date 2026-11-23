@@ -89,7 +89,14 @@ def _new_run(
         ctx = CheckpointContext(
             flow._checkpoint_store, history, lambda: Structure.of(flow), retention
         )
-    return Run(flow=flow, halt=halt, signals=signals, checkpoint_ctx=ctx)
+    return Run(
+        lg=flow._lg,
+        env=flow._env,
+        halt_event=halt,
+        flow=flow,
+        signals=signals,
+        checkpoint_ctx=ctx,
+    )
 
 
 async def _walk_and_finalize(

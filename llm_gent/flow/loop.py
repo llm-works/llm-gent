@@ -45,10 +45,10 @@ from llm_saia import SAIA
 from llm_saia.core.config import DEFAULT_CALL
 from llm_saia.core.conversation import ConversationFactory
 
+from ..core.env import SAIAFactory
+from ..core.role import Role
 from .checkpoint import maybe_await
 from .context import Context
-from .factory import SAIAFactory
-from .role import Role
 from .state.paused_turn import PausedTurn, PausedTurnEnvelope, TurnUsage
 from .state.snapshot import TURN, ScopePath, ScopeRegistry
 

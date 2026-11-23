@@ -24,12 +24,12 @@ from typing import Any
 
 import pytest
 
+from llm_gent.core import Role
 from llm_gent.flow import (
     Context,
     Flow,
     Loop,
     LoopFactory,
-    Role,
     verb,
 )
 from llm_gent.flow.state.snapshot import TURN

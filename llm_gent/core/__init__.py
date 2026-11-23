@@ -11,6 +11,8 @@ This package contains the core abstractions for building agents:
 - errors: Core exceptions
 - factory: Factory classes for creating traits and tools
 - task: Task definitions and results
+- role, env, run: what a run is (Run), what it may use (Environment), and how
+  roles become SAIA instances (Role, SAIAFactory)
 - traits: Composable agent behaviors (SAIA, LLM, HTTP, Learn, etc.)
 - tools: Tool definitions and registry
 - llm: LLM backend abstractions
@@ -27,6 +29,7 @@ from llm_kelt.conversation import (
 )
 
 from .agent import Agent, ExecutionResult
+from .env import Environment, SAIAFactory
 from .errors import (
     AgentError,
     ConfigError,
@@ -37,6 +40,8 @@ from .errors import (
 from .platform import Config as PlatformConfig
 from .platform import Context as PlatformContext
 from .platform import Factory as PlatformFactory
+from .role import Role
+from .run import Run
 from .runnable import Runnable
 from .task import Task, TaskResult
 from .tools.factory import Factory as ToolFactory
@@ -71,4 +76,9 @@ __all__ = [
     # Tasks
     "Task",
     "TaskResult",
+    # Runs
+    "Environment",
+    "Role",
+    "Run",
+    "SAIAFactory",
 ]

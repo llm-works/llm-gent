@@ -3,10 +3,10 @@
 
 """Agent flow framework — role-based verb dispatch on top of saia.
 
-Public surface:
+Public surface (roles and how they become SAIA instances,
+:class:`~llm_gent.core.Role` and :class:`~llm_gent.core.SAIAFactory`, are
+:mod:`llm_gent.core`'s):
 
-- :class:`Role` — pure config for a persona (name, backend, model, sampling)
-- :class:`SAIAFactory` — protocol that turns a Role into a saia instance
 - :func:`verb` — decorator marking an async function as a role-bound verb
 - :data:`VerbCallable` — the type of a verb: an async callable taking
   ``(ctx, *args, **kwargs)``
@@ -27,7 +27,7 @@ Public surface:
   call routes through ``state_type.from_dict``)
 - :class:`Flow` — verb registry + role-routed dispatch + fluent composition
 - :class:`Factory` — app-scoped :class:`Flow` builder (captures ``lg``
-  and one :class:`SAIAFactory`); preferred entry point at the application
+  and one :class:`~llm_gent.core.SAIAFactory`); preferred entry point at the application
   boundary
 - :class:`Resource` — protocol of a run-scoped object checkpointed with
   the run (``snapshot()`` / ``restore(data)``, optional ``child(...)`` for
@@ -80,14 +80,13 @@ from .aggregate import majority, mean, unanimous, weighted
 from .archetypes import extractor, grader, planner, synthesizer
 from .checkpoint import CheckpointPolicy, ConcurrentWriteError, ResumeMode, Retention
 from .context import Context
-from .factory import Factory, SAIAFactory
+from .factory import Factory
 from .flow import Flow
 from .history import History, HistoryCorrupt
 from .hooks import Hook, HookDenied, Pause
 from .loop import Loop, LoopFactory
 from .nodes import HALTED, UNSET, Failure, Halted, Interrupted, RestoredError, Skipped, Unset
 from .resource import COST, Resource, ResourceKey, resource_method
-from .role import Role
 from .state import State, StateData, StateDataclass, StateFactory, TypeStateFactory
 from .state.cas import CommitMeta, FlowCommit
 from .structure import StepPath, Structure, StructureDiff, path_label
@@ -120,8 +119,6 @@ __all__ = [
     "RestoredError",
     "ResumeMode",
     "Retention",
-    "Role",
-    "SAIAFactory",
     "Skipped",
     "State",
     "StateData",

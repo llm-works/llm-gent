@@ -66,7 +66,7 @@ def _build_ctx(target: Any, frame: _Frame, node_id: str | None = None) -> Contex
     (until predicates, on_error, on_item_complete) where no verb is
     running under a single node id.
     """
-    traits = frame.runtime._traits
+    traits = frame.run.env.traits
     if isinstance(target, Flow | _Branch | _Iterate | _Map):
         return Context(
             role=None,
@@ -487,7 +487,7 @@ async def _check_until(
         role=None,
         state=iterate_state,
         flow=frame.runtime,
-        traits=frame.runtime._traits,
+        traits=frame.run.env.traits,
         halt=frame.halt,
         extra=frame.extra,
         resources=frame.scope.resources,

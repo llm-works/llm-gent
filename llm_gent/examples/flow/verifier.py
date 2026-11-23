@@ -24,7 +24,7 @@ Roles map to three distinct saia instances (:data:`PRIMARY`,
 :data:`VERIFIER`, :data:`JUDGE`), each built by
 :class:`~._infra.StubSAIAFactory` with a scripted response queue so
 the example is deterministic and runs without a backend. Swap the stub
-factory for a real :class:`~llm_gent.flow.SAIAFactory` to run against
+factory for a real :class:`~llm_gent.core.SAIAFactory` to run against
 production models.
 
 Run standalone::
@@ -46,7 +46,8 @@ from dataclasses import dataclass
 from appinfra.log import quick_console_logger
 
 from llm_gent.examples.flow._infra import ExampleSAIA, StubSAIAFactory
-from llm_gent.flow import Context, Factory, Role, StateDataclass, TypeStateFactory, verb
+from llm_gent.core import Role
+from llm_gent.flow import Context, Factory, StateDataclass, TypeStateFactory, verb
 
 
 MAX_ROUNDS = 5

@@ -19,7 +19,8 @@ import pytest
 from llm_saia.core.config import CallOptions
 from llm_saia.core.types import LoopScore, TaskResult
 
-from llm_gent.flow import Context, Factory, History, Loop, Role, verb
+from llm_gent.core import Role
+from llm_gent.flow import Context, Factory, History, Loop, verb
 from tests.helpers import memory_store
 
 from .conftest import make_test_logger

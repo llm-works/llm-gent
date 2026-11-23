@@ -14,7 +14,8 @@ from appinfra.cas import MemoryStore, RefConflictError, Tree, Vector, canonical_
 from llm_saia import ListConversation, Message
 from pydantic import BaseModel
 
-from llm_gent.flow import Context, Factory, Flow, Loop, Role, verb
+from llm_gent.core import Role
+from llm_gent.flow import Context, Factory, Flow, Loop, verb
 from llm_gent.flow.checkpoint import HEAD_REF
 from llm_gent.flow.hooks import Hook, StepEvent
 from llm_gent.provenance import REF, Actor, Messages, Record, VersionControl

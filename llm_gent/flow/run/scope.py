@@ -182,7 +182,7 @@ class _Frame:
     @property
     def halt(self) -> asyncio.Event | None:
         """The run's halt event; ``None`` when the run has none."""
-        return self.run.halt
+        return self.run.halt_event
 
     @property
     def checkpoint_ctx(self) -> CheckpointContext | None:

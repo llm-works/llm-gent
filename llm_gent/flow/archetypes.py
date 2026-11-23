@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from .role import Role
+from ..core.role import Role
 from .verb import VerbCallable, verb
 
 

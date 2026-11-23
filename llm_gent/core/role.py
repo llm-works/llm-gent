@@ -3,7 +3,8 @@
 
 """Role — first-class config for a persona bound to an LLM backend + model.
 
-A ``Role`` wraps the configuration a :class:`SAIAFactory` needs to build a
+A ``Role`` wraps the configuration a
+:class:`~llm_gent.core.env.SAIAFactory` needs to build a
 role-bound saia client. It exists because neither ``llm_saia`` nor
 ``llm_infer`` carries the "persona with a job" concept as a first-class
 object — saia knows verbs, llm-infer knows routing strings. The flow layer
@@ -66,8 +67,8 @@ class Role:
     Excluded from :meth:`__hash__` so ``Role`` remains hashable even when
     ``params`` values are unhashable objects (trackers, state instances).
     Participates in :meth:`__eq__` so roles differing only in ``params``
-    correctly miss the ``Flow._saia_by_role`` cache — each unique
-    ``params`` snapshot yields a distinct SAIA build.
+    correctly miss an :class:`~llm_gent.core.env.Environment`'s SAIA cache —
+    each unique ``params`` snapshot yields a distinct SAIA build.
 
     Do not mutate ``params`` in place after construction — use
     :meth:`with_params` to create a new Role with changed parameters.

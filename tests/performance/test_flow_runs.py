@@ -52,8 +52,9 @@ from llm_infer.schemas.openai import FinishReason, FunctionCall, ToolCall
 from llm_kelt.conversation import ConversationFactory
 from llm_saia import SAIA, ToolDef
 
+from llm_gent.core import Role
 from llm_gent.core.llm.testing import DelayedScriptedBackend, uniform_delay
-from llm_gent.flow import Context, Factory, Flow, Loop, Role, StateDataclass, TypeStateFactory, verb
+from llm_gent.flow import Context, Factory, Flow, Loop, StateDataclass, TypeStateFactory, verb
 from tests.helpers import make_test_logger
 
 

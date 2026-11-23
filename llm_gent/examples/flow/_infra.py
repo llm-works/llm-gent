@@ -3,7 +3,7 @@
 
 """Shared scaffolding for the Flow-substrate examples.
 
-Two scripted stub :class:`SAIAFactory` implementations so the examples
+Two scripted stub :class:`~llm_gent.core.SAIAFactory` implementations so the examples
 run deterministically without contacting a real LLM backend:
 
 * :class:`StubSAIAFactory` — the minimal ``.answer(prompt) -> str``
@@ -12,7 +12,7 @@ run deterministically without contacting a real LLM backend:
   :meth:`llm_saia.SAIA.complete_structured(prompt, schema) -> VerbResult[T]`
   surface, for examples that demonstrate schema-typed output.
 
-Both stub factories map :class:`~llm_gent.flow.Role` to per-role
+Both stub factories map :class:`~llm_gent.core.Role` to per-role
 scripted response queues.
 """
 
@@ -24,7 +24,7 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from llm_saia import VerbResult
 
-from llm_gent.flow import Role
+from llm_gent.core import Role
 
 
 T = TypeVar("T")

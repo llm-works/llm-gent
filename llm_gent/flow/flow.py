@@ -63,6 +63,8 @@ from appinfra.cas import Store
 from appinfra.log import Logger
 
 from ..core.cost import Tracker as CostTracker
+from ..core.env import Environment, SAIAFactory
+from ..core.role import Role
 from ..core.traits import Registry as TraitRegistry
 from ._shortcut import Shortcut, check_shortcut
 from ._validation import (
@@ -81,7 +83,6 @@ from .checkpoint import (
 )
 from .context import Context
 from .decl import Decl
-from .factory import SAIAFactory
 from .nodes import (
     UNSET,
     AfterHook,
@@ -106,7 +107,6 @@ from .nodes import (
 from .resource import COST, R, ResourceKey, check_resource
 from .resource._runtime import Resources
 from .resource.cost import check_budget, check_cost_tracker
-from .role import Role
 from .state import State, StateFactory
 from .structure import Structure
 
@@ -116,8 +116,8 @@ class Flow:
 
     A ``Flow`` used as the top-level runtime is constructed with a factory.
     Subflows used only for composition can be constructed without one — at
-    :meth:`run` time they borrow the factory (and saia cache) of the flow
-    that invoked them.
+    :meth:`run` time they borrow the environment (SAIA factory, SAIA cache
+    and traits) of the flow that invoked them.
 
     Subclassing is supported: every fluent method returns ``Self``, and
     the subflows a ``lambda b: ...`` body builds are of the enclosing
@@ -158,7 +158,7 @@ class Flow:
             traits: Optional trait registry surfaced on every dispatched
                 :class:`Context` as ``ctx.traits``. When ``None``, verbs see
                 ``ctx.traits is None``. A subflow inherits the outer
-                runtime's registry (like the saia cache) via the same
+                runtime's registry (like the SAIA cache) via the same
                 internal handoff, so mounting on the top-level flow is
                 enough to reach every nested dispatch.
             state_factory: A :class:`StateFactory` for this flow's state:
@@ -180,8 +180,7 @@ class Flow:
         """
         self._lg = lg
         self._name = name
-        self._saia_factory = saia_factory
-        self._traits = traits
+        self._env = Environment(saia_factory, traits)
         self._state_factory = state_factory
         self._checkpoint_store = checkpoint_store
         self._shortcut: Shortcut | None = None
@@ -189,7 +188,6 @@ class Flow:
         self._resource_children: dict[ResourceKey[Any], dict[str, Any]] = {}
         self._checkpointer: Checkpointer | None = None
         self._verbs: dict[str, Any] = {}
-        self._saia_by_role: dict[Role, Any] = {}
         self._nodes: list[_Node] = []
         self._checkpoint_policy: CheckpointPolicy | None = None
         self._hooks: tuple[object, ...] = ()
@@ -207,7 +205,7 @@ class Flow:
     @property
     def traits(self) -> TraitRegistry | None:
         """The trait registry this flow was constructed with, or ``None``."""
-        return self._traits
+        return self._env.traits
 
     @property
     def decl(self) -> Decl:
@@ -318,7 +316,7 @@ class Flow:
             role=verb.role,
             state=wrapped_state,
             flow=self,
-            traits=self._traits,
+            traits=self._env.traits,
             halt=effective_halt,
             extra=effective_extra,
             resources=self._dispatch_resources(resources, cost),
@@ -1282,18 +1280,3 @@ class Flow:
         if self._state_factory is None:
             return {}
         return self._state_factory.new()
-
-    def _saia_for(self, role: Role) -> Any:
-        """Return a cached saia for ``role``, building it on first request."""
-        cached = self._saia_by_role.get(role)
-        if cached is not None:
-            return cached
-        if self._saia_factory is None:
-            label = self._name or "<anonymous>"
-            raise RuntimeError(
-                f"Flow {label!r} has no SAIAFactory — saia_factory= was not supplied at "
-                f"construction (needed to build saia for role {role.name!r})"
-            )
-        built = self._saia_factory.build(role)
-        self._saia_by_role[role] = built
-        return built

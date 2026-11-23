@@ -72,12 +72,12 @@ from appinfra.log import quick_console_logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from llm_gent.examples.flow._infra import StructuredSAIA, StructuredStubSAIAFactory
+from llm_gent.core import Role
 from llm_gent.flow import (
     Context,
     Failure,
     Flow,
     Factory,
-    Role,
     Skipped,
     StateDataclass,
     TypeStateFactory,

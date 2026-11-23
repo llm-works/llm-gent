@@ -43,7 +43,7 @@ Layout
   first successful ``lookup_reference`` call flips it.
 - :func:`~llm_gent.examples._clients.real_client` — OpenAI-compatible
   vs Anthropic client, per ``--base-url``.
-- :class:`_SAIAFactory` — gent :class:`~llm_gent.flow.SAIAFactory`
+- :class:`_SAIAFactory` — gent :class:`~llm_gent.core.SAIAFactory`
   binding a role to a SAIA built from the shared backend +
   per-run tool executor.
 - :func:`_make_summarize` — builds the role-bound SAIA-backed
@@ -109,6 +109,7 @@ from llm_saia import SAIA, ToolDef
 from llm_saia.core.backend import Backend
 
 from llm_gent.examples._clients import ANTHROPIC_MODEL, real_client
+from llm_gent.core import Role
 from llm_gent.flow import (
     HALTED,
     Context,
@@ -116,7 +117,6 @@ from llm_gent.flow import (
     Factory,
     History,
     Loop,
-    Role,
     StateDataclass,
     TypeStateFactory,
     verb,
@@ -240,7 +240,7 @@ the backend and model are chosen at runtime by ``--base-url`` / ``--model``."""
 
 
 class _SAIAFactory:
-    """Gent :class:`~llm_gent.flow.SAIAFactory` — one backend, per-Loop executor.
+    """Gent :class:`~llm_gent.core.SAIAFactory` — one backend, per-Loop executor.
 
     A single :class:`_SAIAFactory` is captured on the
     flow :class:`~llm_gent.flow.Factory`; :meth:`build` fires once per role during

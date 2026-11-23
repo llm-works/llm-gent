@@ -5,9 +5,10 @@ what each agent holds, and how flows run for agents.
 
 Status: the target design, built in steps. Implemented: the platform package (`Config`,
 `Factory`, `Context`) with the shared clients injected into traits, and agents built on a
-platform; the scope a flow runs in as a fold of its declarations (section 6). Not yet: the
-platform's `SAIAFactory`, shared trait instances with per-agent state,
-`platform.with_trait_registry`, the flow/run split, and the API in section 8.
+platform; the scope a flow runs in as a fold of its declarations, and the generic run and its
+environment (section 6). Not yet: the platform's `SAIAFactory`, shared trait instances with
+per-agent state, `platform.with_trait_registry`, runs started by a runner rather than by the flow,
+and the API in section 8.
 
 ## 1. Goals
 
@@ -195,6 +196,21 @@ Hooks follow the trait model: one shared instance, per-run data keyed by the eve
 identity read from the event. Events carry `ctx`, so a hook reads `ctx.agent.identity`: the "who"
 for provenance and authorization. Hooks are attached to the flow (`Flow.with_hooks`).
 
+### Environment and the generic run
+
+An `Environment` is what a run may use: the `SAIAFactory` and the trait registry. It owns nothing;
+it selects what a run uses of the platform's clients. It builds one SAIA per role on first use and
+keeps it, so everything that uses one environment shares its SAIAs. That is safe because a SAIA
+holds configuration only (section 4, Conversations). Work that needs SAIAs of its own (its own
+tools, its own directive) uses an environment of its own. A flow holds one, built from its
+`saia_factory` and `traits`; a run and every step in it use the top-level flow's.
+
+The generic `Run` is what any execution has, with or without Flow: its logger, its environment,
+its halt event and the task that executes it. It is awaited for its result, halted with `halt()`,
+and reports `done`. A flow run extends it with what exists only because a flow nests and
+checkpoints its scopes: the flow, its signals, its history writer, its live scopes and cursors,
+and its hook bookkeeping. Without Flow there is one scope, the root, and nothing to fold.
+
 ### Scopes: the fold
 
 The scope in effect at a node (state, resources, checkpointer, checkpoint policy, hooks, shortcut
@@ -240,10 +256,11 @@ fold so far) and the position (snapshot path, chain context, ancestor chain).
 ### Packages
 
 ```
+core/       what any run has and may use: Run, Environment, Role, SAIAFactory
 flow/       structure: the builder and its read-only tree, nodes, verbs, state, the declaration
             type (Decl), Context and Loop
 flow/run/   execution: Scope and Position, the frame, the walk (chain, branch, iterate, map),
-            the top-level run, start and resume, history writing, hook events, shortcut regions
+            the flow run, start and resume, history writing, hook events, shortcut regions
 ```
 
 `flow/run` imports the structure; the structure imports `flow/run` only where `Flow.run` starts a
