@@ -57,8 +57,8 @@ more than a question adds keyword-only parameters to its `ask`; over the wire (`
 serve API) they travel as a `kwargs` dict.
 
 `ask(question, session, on_step=...)` reports the ask's steps while it runs (an `AskStep` per
-model call). `Hub.ask_stream` yields them, then the answer; the serve API streams them as
-server-sent events from `POST /agents/{name}/ask/stream`.
+model call answering the question). `Hub.ask_stream` yields them, then the answer; the serve API
+streams them as server-sent events from `POST /agents/{name}/ask/stream`.
 
 Every ask runs in a session: one conversation, under an id the agent issues.
 Asking without `session` opens a new one; the answer's `session` continues it.

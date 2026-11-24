@@ -42,10 +42,22 @@ class TestServeAsk:
         assert _serve(hub, req) == reply
         hub.forward.assert_called_once_with("a", req.ask)
 
-    def test_a_failure_to_get_the_reply_is_its_last_chunk(self):
+    def test_an_unknown_agent_is_not_found(self):
         hub = MagicMock()
         hub.forward.side_effect = KeyError("No channel for agent: a")
 
         [reply] = _serve(hub, _ask())
 
-        assert (reply.id, reply.success) == ("r-1", False)
+        assert (reply.id, reply.success, reply.error) == ("r-1", False, "Agent not found: a")
+
+    def test_a_failure_while_the_agent_replies_is_its_last_chunk(self):
+        def failing():
+            yield AskProgress(id="r-1", name="model_call")
+            raise TimeoutError("no reply")
+
+        hub = MagicMock()
+        hub.forward.return_value = failing()
+
+        replies = _serve(hub, _ask())
+
+        assert replies[-1] == AskResponse(id="r-1", success=False, error="no reply")

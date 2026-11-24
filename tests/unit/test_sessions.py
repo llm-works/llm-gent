@@ -13,6 +13,7 @@ from llm_kelt.conversation import Conversation, SessionStorage, StoredSession
 from llm_kelt.core.errors import NotFoundError
 from llm_saia import TaskResult
 
+from llm_gent.agents.default import Agent as DefaultAgent
 from llm_gent.agents.default import ChatAgent, Factory
 from llm_gent.agents.default.factory import _session_storage
 from llm_gent.core.agent import AskStep, Chat, Identity, Session, SessionConfig, Sessions
@@ -300,6 +301,29 @@ class TestChatOptIn:
 
         assert isinstance(agent, ChatAgent)
         assert agent._sessions._config.max_tokens == 8000
+
+    def test_a_factorys_own_chat_agent_class_is_kept(self):
+        class Reviewer(ChatAgent):
+            pass
+
+        class ReviewerFactory(Factory):
+            agent_class = Reviewer
+
+        agent = ReviewerFactory(make_platform(MagicMock())).create(
+            {"identity": {"name": "a"}, "chat": {}}
+        )
+
+        assert type(agent) is Reviewer
+
+    def test_a_chat_section_on_a_factorys_agent_class_without_chat_is_a_config_error(self):
+        class Plain(DefaultAgent):
+            pass
+
+        class PlainFactory(Factory):
+            agent_class = Plain
+
+        with pytest.raises(ConfigError, match="Plain has no chat"):
+            PlainFactory(make_platform(MagicMock())).create({"identity": {"name": "a"}, "chat": {}})
 
 
 class TestSessionStorage:

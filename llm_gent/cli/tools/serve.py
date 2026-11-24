@@ -450,6 +450,11 @@ def _forward(hub: Hub, req: AskAgentRequest) -> Iterator[BusResponse]:
     from ...bus.protocol import AskResponse
 
     try:
-        yield from hub.forward(req.agent_name, req.ask)
+        reply = hub.forward(req.agent_name, req.ask)
+    except KeyError:
+        yield AskResponse(id=req.id, success=False, error=f"Agent not found: {req.agent_name}")
+        return
+    try:
+        yield from reply
     except Exception as e:
         yield AskResponse(id=req.id, success=False, error=str(e))

@@ -309,7 +309,7 @@ class ChatAgent(Agent, Chat):
     Every ask runs in a session: one conversation, under an id the agent
     issues. Asking without a session opens one; the result's ``session``
     continues it. Asks in one session run one at a time; asks in different
-    sessions run side by side. Each model call of an ask is a
+    sessions run side by side. Each model call answering the question is a
     ``model_call`` step: its iteration, the tools it called, the tokens it spent.
 
     Example:

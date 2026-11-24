@@ -17,9 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `llm_gent.core.llm.testing.DelayedScriptedBackend`: llm-infer's scripted backend with an awaited
   per-call delay and optional request recording, so concurrent runs overlap in experiments.
 - `llm_gent.core.Run`, a handle on one execution (await it, `halt()` it, check `done`).
-- Streamed asks: `ask(..., on_step=)` reports each model call as an `AskStep`; `Hub.ask_stream`
-  yields the steps, then the answer, and `POST /agents/{name}/ask/stream` sends them as
-  server-sent events.
+- Streamed asks: `ask(..., on_step=)` reports each model call answering the question as an
+  `AskStep`; `Hub.ask_stream` yields the steps, then the answer, and
+  `POST /agents/{name}/ask/stream` sends them as server-sent events.
 
 ### Changed
 

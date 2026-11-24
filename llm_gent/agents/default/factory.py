@@ -15,6 +15,7 @@ from llm_kelt.conversation import DbSessionStorage, SessionStorage
 
 from ...core.agent import Agent as CoreAgent
 from ...core.agent import Factory as BaseFactory
+from ...core.errors import ConfigError
 from ...core.llm.caller import Caller
 from ...core.platform import Platform
 from ...core.tools.names import ToolName
@@ -75,10 +76,20 @@ class Factory(BaseFactory):
 
     def _new_agent(self, agent_class: type[CoreAgent], config: DotDict) -> CoreAgent:
         """A prompt agent; with a ``chat`` section, a :class:`ChatAgent` whose sessions
-        persist where the platform's memory lives."""
-        if "chat" in config:
-            return ChatAgent(self._lg, config, session_storage=self._session_storage)
-        return super()._new_agent(agent_class, config)
+        persist where the platform's memory lives.
+
+        The default ``Agent`` class becomes ``ChatAgent``; a factory's own class
+        must be one.
+
+        Raises:
+            ConfigError: A ``chat`` section for a factory's own class without chat.
+        """
+        if "chat" not in config:
+            return super()._new_agent(agent_class, config)
+        chat_class = ChatAgent if agent_class is Agent else agent_class
+        if not issubclass(chat_class, ChatAgent):
+            raise ConfigError(f"{agent_class.__name__} has no chat; the chat section needs one")
+        return chat_class(self._lg, config, session_storage=self._session_storage)
 
     def _get_backend(self) -> Backend:
         """The SAIA backend over the platform's shared router, made on first use."""
