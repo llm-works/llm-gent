@@ -8,18 +8,19 @@ Requests go through httpx's ASGI transport on the test's own event loop: every h
 """
 
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import DEFAULT, AsyncMock, MagicMock
 
 import httpx
 import pytest
+from appinfra.app.fastapi.runtime.ipc import IPCChannel
 from fastapi import FastAPI
 
+from llm_gent.bus.protocol import AskProgress, AskResponse
 from llm_gent.core.agent import Identity, SessionConfig, Sessions
 from llm_gent.core.errors import SessionNotFoundError
 from llm_gent.runtime.server import create_app
 from llm_gent.runtime.server.management import create_management_routes
 from llm_gent.runtime.server.protocol.management import (
-    AskAgentResponse,
     FeedbackAgentResponse,
     GetAgentResponse,
     GetInsightsResponse,
@@ -92,10 +93,19 @@ class TestCreateApp:
         assert app.title == "Custom Gateway"
 
 
+def _submit_contract(request, timeout=None):
+    """``IPCChannel.submit``'s contract: the request first, carrying the id its reply gets."""
+    if not hasattr(request, "id"):
+        raise ValueError("Request must have an 'id' attribute")
+    return DEFAULT
+
+
 @pytest.fixture
 def mock_ipc_channel():
-    """Create mock IPC channel."""
-    return AsyncMock()
+    """An IPC channel that takes requests as appinfra's does and replies its return_value."""
+    channel = AsyncMock(spec=IPCChannel)
+    channel.submit.side_effect = _submit_contract
+    return channel
 
 
 @pytest.fixture
@@ -293,7 +303,7 @@ class TestAskAgentRoute:
 
     async def test_ask_agent(self, client, mock_ipc_channel):
         """Ask returns agent response."""
-        mock_ipc_channel.submit.return_value = AskAgentResponse(id="1", response="Agent response")
+        mock_ipc_channel.submit.return_value = AskResponse(id="1", response="Agent response")
 
         response = await client.post("/agents/test/ask", json={"question": "What time is it?"})
 
@@ -302,19 +312,36 @@ class TestAskAgentRoute:
 
     async def test_ask_carries_the_session(self, client, mock_ipc_channel):
         """The session goes to the agent, and the one the answer ran in comes back."""
-        mock_ipc_channel.submit.return_value = AskAgentResponse(
+        mock_ipc_channel.submit.return_value = AskResponse(
             id="1", response="Agent response", session="s-1"
         )
 
-        response = await client.post("/agents/test/ask", json={"question": "q", "session": "s-1"})
+        response = await client.post(
+            "/agents/test/ask", json={"question": "q", "session": "s-1", "kwargs": {"job": "j-1"}}
+        )
 
         assert response.json()["session"] == "s-1"
-        assert mock_ipc_channel.submit.call_args[0][1].session == "s-1"
+        sent = mock_ipc_channel.submit.call_args[0][0]
+        assert (sent.agent_name, sent.id) == ("test", sent.ask.id)
+        assert (sent.ask.session, sent.ask.kwargs, sent.ask.stream) == (
+            "s-1",
+            {"job": "j-1"},
+            False,
+        )
+
+    async def test_ask_of_an_agent_without_chat_is_a_client_error(self, client, mock_ipc_channel):
+        mock_ipc_channel.submit.return_value = AskResponse(
+            id="1", success=False, error="agent test has no chat"
+        )
+
+        response = await client.post("/agents/test/ask", json={"question": "q"})
+
+        assert response.status_code == 400
 
     async def test_ask_in_an_unknown_session_is_a_client_error(self, client, mock_ipc_channel):
         """An unknown session is a 400, not a missing agent."""
-        mock_ipc_channel.submit.return_value = AskAgentResponse(
-            id="1", success=False, error="Agent test ask failed: no session 's-x'"
+        mock_ipc_channel.submit.return_value = AskResponse(
+            id="1", success=False, error="no session s-x"
         )
 
         response = await client.post("/agents/test/ask", json={"question": "q", "session": "s-x"})
@@ -327,9 +354,7 @@ class TestAskAgentRoute:
     ):
         """The session's own text does not pick the status: no 404, no 500."""
         rejection = _session_rejection(session)
-        mock_ipc_channel.submit.return_value = AskAgentResponse(
-            id="1", success=False, error=f"Agent test ask failed: {rejection}"
-        )
+        mock_ipc_channel.submit.return_value = AskResponse(id="1", success=False, error=rejection)
 
         response = await client.post("/agents/test/ask", json={"question": "q", "session": session})
 
@@ -337,7 +362,7 @@ class TestAskAgentRoute:
 
     async def test_ask_nonexistent(self, client, mock_ipc_channel):
         """Ask returns 404 for nonexistent agent."""
-        mock_ipc_channel.submit.return_value = AskAgentResponse(
+        mock_ipc_channel.submit.return_value = AskResponse(
             id="1", success=False, error="Agent not found: nonexistent"
         )
 
@@ -347,13 +372,63 @@ class TestAskAgentRoute:
 
     async def test_ask_not_running(self, client, mock_ipc_channel):
         """Ask returns 400 for non-running agent."""
-        mock_ipc_channel.submit.return_value = AskAgentResponse(
+        mock_ipc_channel.submit.return_value = AskResponse(
             id="1", success=False, error="Agent not running"
         )
 
         response = await client.post("/agents/test/ask", json={"question": "test"})
 
         assert response.status_code == 400
+
+
+def _stream(*chunks):
+    """An IPC channel's ``stream`` replaying ``chunks`` under the request's id; its requests."""
+    sent: list = []
+
+    async def stream(request, timeout=None):
+        sent.append(request)
+        for chunk in chunks:
+            yield chunk.model_copy(update={"id": request.id})
+
+    return stream, sent
+
+
+class TestAskStreamRoute:
+    """Tests for POST /agents/{name}/ask/stream: the ask's steps as server-sent events."""
+
+    async def test_the_steps_then_the_answer_stream_as_sse(self, client, mock_ipc_channel):
+        mock_ipc_channel.stream, sent = _stream(
+            AskProgress(id="", name="model_call", data={"iteration": 1}),
+            AskResponse(id="", response="hello", session="s-1"),
+        )
+
+        response = await client.post("/agents/test/ask/stream", json={"question": "q"})
+
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.text == (
+            'event: step\ndata: {"name": "model_call", "data": {"iteration": 1}}\n\n'
+            'event: answer\ndata: {"response": "hello", "session": "s-1"}\n\n'
+        )
+        assert sent[0].ask.stream is True
+
+    async def test_a_failure_before_any_step_is_an_http_error(self, client, mock_ipc_channel):
+        mock_ipc_channel.stream, _ = _stream(
+            AskResponse(id="", success=False, error="Agent not found: ghost")
+        )
+
+        response = await client.post("/agents/ghost/ask/stream", json={"question": "q"})
+
+        assert response.status_code == 404
+
+    async def test_a_failure_after_a_step_is_an_error_event(self, client, mock_ipc_channel):
+        mock_ipc_channel.stream, _ = _stream(
+            AskProgress(id="", name="model_call"),
+            AskResponse(id="", success=False, error="oops"),
+        )
+
+        response = await client.post("/agents/test/ask/stream", json={"question": "q"})
+
+        assert response.text.endswith('event: error\ndata: {"detail": "oops"}\n\n')
 
 
 class TestFeedbackRoute:
@@ -413,7 +488,7 @@ class TestGetInsightsRoute:
         # Verify the request was made (limit is passed via IPC request)
         mock_ipc_channel.submit.assert_called_once()
         call_args = mock_ipc_channel.submit.call_args
-        request = call_args[0][1]  # Second positional arg is the request
+        request = call_args[0][0]
         assert request.limit == 5
 
     async def test_get_insights_nonexistent(self, client, mock_ipc_channel):

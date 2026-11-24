@@ -13,8 +13,8 @@
 - The prompt-agent factory (:class:`llm_gent.agents.default.Factory`) builds
   an agent on that platform from a config: its ``directive`` becomes the
   system prompt of the agent's SAIA, which runs over the platform's router.
-- ``agent.ask()`` runs one task; the agent answers by calling its
-  ``complete_task`` tool.
+- The ``chat`` section makes the agent answer questions: ``agent.ask()`` runs
+  one task; the agent answers by calling its ``complete_task`` tool.
 
 Pass ``--smoke`` to run on llm-infer's scripted client instead of a backend.
 """
@@ -32,6 +32,7 @@ from llm_infer.schemas.openai import FunctionCall, ToolCall
 
 from llm_gent import PlatformFactory
 from llm_gent.agents.default import Factory as PromptAgentFactory
+from llm_gent.core.agent import Chat
 
 
 app = (
@@ -76,8 +77,11 @@ def run(self: Any) -> int:
                 "identity": {"name": "hello-agent"},
                 "directive": "You are a concise assistant.",
                 "tools": {"complete_task": {}},
+                "chat": {},
             }
         )
+        if not isinstance(agent, Chat):  # the ``chat`` section gives the agent chat
+            raise TypeError("agent has no chat")
         agent.start()
         try:
             answer = agent.ask("Say hello.")

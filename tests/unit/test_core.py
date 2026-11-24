@@ -230,9 +230,10 @@ class TestCoreAsk:
         mock_channel.submit.return_value = AskResponse(id="x", response="hi", session="s-1")
         core._channels["test-agent"] = mock_channel
 
-        core.ask("test-agent", "question", session="s-1")
+        core.ask("test-agent", "question", session="s-1", kwargs={"job": "j-1"})
 
-        assert mock_channel.submit.call_args[0][0].session == "s-1"
+        sent = mock_channel.submit.call_args[0][0]
+        assert (sent.session, sent.kwargs) == ("s-1", {"job": "j-1"})
 
     def test_ask_answered_with_another_response_raises(self, core, registry):
         """A runner that does not know the ask answers with a plain Response: its error is raised."""

@@ -3,13 +3,16 @@
 
 """Tests for agent runners (ManagedAgentRunner and AgentRunner)."""
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from llm_gent.agents.default import ChatAgent
 from llm_gent.bus.protocol import (
     AgentJoined,
     AgentLeft,
+    AskProgress,
     AskRequest,
     AskResponse,
     FeedbackRequest,
@@ -21,7 +24,7 @@ from llm_gent.bus.protocol import (
     ShutdownResponse,
 )
 from llm_gent.bus.transport import WorkerBusConfig
-from llm_gent.core.agent import ExecutionResult
+from llm_gent.core.agent import AskStep, ExecutionResult, OnAskStep
 from llm_gent.runtime.handler import Answer, Handler
 from llm_gent.runtime.runner import AgentRunner, ManagedAgentRunner, _AgentHandler
 
@@ -44,6 +47,14 @@ def mock_agent():
 
 
 @pytest.fixture
+def chat_agent():
+    """A mock agent with chat."""
+    agent = MagicMock(spec=ChatAgent)
+    agent.name = "test-agent"
+    return agent
+
+
+@pytest.fixture
 def bus_config():
     return WorkerBusConfig()
 
@@ -60,12 +71,22 @@ class MockHandler:
 
     def __init__(self) -> None:
         self.ask_response = "test answer"
+        self.ask_steps: list[AskStep] = []
         self.ask_calls: list[str] = []
         self.feedback_calls: list[str] = []
         self.shutdown_called = False
 
-    def on_ask(self, question: str, session: str | None) -> Answer:
+    def on_ask(
+        self,
+        question: str,
+        session: str | None,
+        kwargs: dict[str, Any],
+        on_step: OnAskStep | None,
+    ) -> Answer:
         self.ask_calls.append(question)
+        for step in self.ask_steps:
+            assert on_step is not None
+            on_step(step)
         return Answer(response=self.ask_response, session=session or "s-new")
 
     def on_feedback(self, message: str) -> None:
@@ -128,15 +149,20 @@ class TestHandlerProtocol:
 class TestAgentHandler:
     """Tests for the _AgentHandler adapter that wraps Agent as Handler."""
 
-    def test_on_ask_delegates_to_agent(self, mock_agent):
-        """on_ask calls agent.ask() in the session and answers with the result's session."""
-        mock_agent.ask.return_value = ExecutionResult(success=True, content="hello", session="s-1")
-        adapter = _AgentHandler(mock_agent)
+    def test_on_ask_delegates_to_agent(self, chat_agent):
+        """on_ask calls agent.ask() in the session, with its kwargs, and answers."""
+        chat_agent.ask.return_value = ExecutionResult(success=True, content="hello", session="s-1")
+        on_step = MagicMock()
 
-        result = adapter.on_ask("question?", "s-1")
+        result = _AgentHandler(chat_agent).on_ask("question?", "s-1", {"job": "j-1"}, on_step)
 
         assert result == Answer(response="hello", session="s-1")
-        mock_agent.ask.assert_called_once_with("question?", "s-1")
+        chat_agent.ask.assert_called_once_with("question?", "s-1", on_step=on_step, job="j-1")
+
+    def test_an_agent_without_chat_is_refused(self, mock_agent):
+        with pytest.raises(TypeError, match="agent test-agent has no chat"):
+            _AgentHandler(mock_agent).on_ask("question?", None, {}, None)
+        mock_agent.ask.assert_not_called()
 
     def test_on_feedback_delegates_to_agent(self, mock_agent):
         """on_feedback calls agent.record_feedback()."""
@@ -426,6 +452,26 @@ class TestHandleAsk:
         assert "bad input" in resp.error
         assert resp.id == req.id
 
+    def test_a_streamed_ask_sends_each_step_before_the_response(self, ext_runner, handler):
+        handler.ask_steps = [AskStep("model_call", {"iteration": 1})]
+        ext_runner._channel = MagicMock()
+        req = AskRequest(question="what?", stream=True)
+
+        resp = ext_runner._handle_ask(req)
+
+        ext_runner._channel.send.assert_called_once_with(
+            AskProgress(id=req.id, name="model_call", data={"iteration": 1})
+        )
+        assert resp.response == "test answer"
+
+    def test_an_ask_not_streamed_takes_no_steps(self, ext_runner, handler):
+        handler.on_ask = MagicMock(return_value=Answer("a", "s-1"))
+        req = AskRequest(question="what?", kwargs={"job": "j-1"})
+
+        ext_runner._handle_ask(req)
+
+        handler.on_ask.assert_called_once_with("what?", None, {"job": "j-1"}, None)
+
 
 class TestHandleFeedback:
     """Tests for _handle_feedback."""
@@ -640,27 +686,35 @@ class TestManagedRunLoop:
 class TestManagedRequestHandling:
     """Tests for ManagedAgentRunner request dispatch (via _AgentHandler adapter)."""
 
-    def test_handle_ask(self, managed_runner, mock_agent):
+    def test_handle_ask(self, chat_agent, bus_config):
         """Ask request calls agent.ask() and returns response and session."""
-        mock_agent.ask.return_value = ExecutionResult(
+        chat_agent.ask.return_value = ExecutionResult(
             success=True, content="Test answer", session="s-new"
         )
+        runner = ManagedAgentRunner(lg=MagicMock(), agent=chat_agent, bus_config=bus_config)
         req = AskRequest(question="What?")
 
-        resp = managed_runner._handle_request(req)
+        resp = runner._handle_request(req)
 
         assert isinstance(resp, AskResponse)
         assert resp.success is True
         assert resp.response == "Test answer"
         assert resp.session == "s-new"
-        mock_agent.ask.assert_called_once_with("What?", None)
+        chat_agent.ask.assert_called_once_with("What?", None, on_step=None)
 
-    def test_handle_ask_error(self, managed_runner, mock_agent):
+    def test_an_ask_of_an_agent_without_chat_fails(self, managed_runner):
+        resp = managed_runner._handle_request(AskRequest(question="What?"))
+
+        assert resp.success is False
+        assert resp.error == "agent test-agent has no chat"
+
+    def test_handle_ask_error(self, chat_agent, bus_config):
         """Ask request returns error response on exception."""
-        mock_agent.ask.side_effect = RuntimeError("LLM failed")
+        chat_agent.ask.side_effect = RuntimeError("LLM failed")
+        runner = ManagedAgentRunner(lg=MagicMock(), agent=chat_agent, bus_config=bus_config)
         req = AskRequest(question="What?")
 
-        resp = managed_runner._handle_request(req)
+        resp = runner._handle_request(req)
 
         assert isinstance(resp, AskResponse)
         assert resp.success is False

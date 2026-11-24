@@ -50,6 +50,7 @@ with PlatformFactory(lg).from_config({"llm": llm}) as platform:
             "identity": {"name": "my-agent"},
             "directive": "You are a helpful assistant.",
             "tools": {"complete_task": {}},
+            "chat": {},
         }
     )
     agent.start()
@@ -59,7 +60,8 @@ with PlatformFactory(lg).from_config({"llm": llm}) as platform:
 
 The platform builds the model router once from the packaged `etc/llm.yaml`, with the `llm`
 settings merged on top, and every agent built on it shares that router. The agent's directive is
-the system prompt of its SAIA, which answers by calling `complete_task`. A runnable version of
+the system prompt of its SAIA, which answers by calling `complete_task`. The `chat` section
+makes the agent answer questions; without it the agent has no `ask`. A runnable version of
 this example lives at `llm_gent/examples/quickstart.py`. Pass `--smoke` to run it on llm-infer's
 scripted model (no real backend contacted).
 

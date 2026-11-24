@@ -179,6 +179,7 @@ class TestMessages:
             "error_request",
             "error_response",
             "ask_request",
+            "ask_progress",
             "ask_response",
             "feedback_request",
             "feedback_response",

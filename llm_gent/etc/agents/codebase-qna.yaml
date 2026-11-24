@@ -87,7 +87,7 @@ tools:
 schedule:
   interval: 600  # Run every 10 minutes
 
-conversation:
+chat:
   max_tokens: 32000      # Qwen 2.5 7B default context window
   compact_threshold: 0.8 # Compact at 80% usage
   min_recent_messages: 6 # Keep last 6 messages during compaction

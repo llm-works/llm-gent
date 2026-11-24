@@ -102,7 +102,6 @@ class TestAgentLifecycle:
         return DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test-agent"}, default_prompt="You are a test agent."),
-            session_storage=None,
         )
 
     def test_init(self, agent):
@@ -142,7 +141,6 @@ class TestAgentTraits:
         return DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
 
     def test_add_trait(self, agent):
@@ -203,7 +201,6 @@ class TestAgentReplaceTrait:
         return DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
 
     def _make_trait(self, agent, **kw):
@@ -365,11 +362,11 @@ class TestAgentExecution:
     @pytest.fixture
     def agent_with_saia(self, mock_logger, mock_saia_trait):
         """Create agent with SAIATrait attached."""
-        from llm_gent.agents.default import Agent as DefaultAgent
+        from llm_gent.agents.default import ChatAgent
         from llm_gent.agents.default.factory import Factory
         from tests.helpers import make_platform
 
-        agent = DefaultAgent(
+        agent = ChatAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt="Test task"),
             session_storage=None,
@@ -388,7 +385,6 @@ class TestAgentExecution:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt="Test task"),
-            session_storage=None,
         )
 
         result = agent.run_once()
@@ -402,7 +398,6 @@ class TestAgentExecution:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
         agent._traits.register(mock_saia_trait)
 
@@ -450,9 +445,9 @@ class TestAgentExecution:
         assert result.session
 
     def test_ask_without_saia_trait_returns_error(self, mock_logger):
-        from llm_gent.agents.default import Agent as DefaultAgent
+        from llm_gent.agents.default import ChatAgent
 
-        agent = DefaultAgent(
+        agent = ChatAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
             session_storage=None,
@@ -502,7 +497,6 @@ class TestAgentRecentResults:
         return DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
 
     def test_get_recent_results_empty(self, agent):
@@ -536,7 +530,6 @@ class TestAgentRecordFeedback:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
 
         # Should not raise
@@ -637,7 +630,6 @@ class TestFactorySystemPrompt:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
         agent.add_trait(DirectiveTrait(agent, "You are a helpful assistant."))
 
@@ -654,7 +646,6 @@ class TestFactorySystemPrompt:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
         agent.add_trait(MethodTrait(agent, "- Step 1\n- Step 2"))
 
@@ -671,7 +662,6 @@ class TestFactorySystemPrompt:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
         agent.add_trait(DirectiveTrait(agent, "You are a helpful assistant."))
         agent.add_trait(MethodTrait(agent, "- Step 1\n- Step 2"))
@@ -688,7 +678,6 @@ class TestFactorySystemPrompt:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
 
         system_prompt = factory._build_system_prompt(agent)

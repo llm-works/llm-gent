@@ -34,7 +34,7 @@ _ID_LEN = 36
 
 @dataclass(frozen=True)
 class SessionConfig:
-    """How an agent's sessions keep their conversations: the config's ``conversation`` section.
+    """How an agent's sessions keep their conversations: the config's ``chat`` section.
 
     ``max_tokens``, ``compact_threshold``, ``preserve_system`` and
     ``min_recent_messages`` tune a conversation's compaction; ``compactor``

@@ -85,6 +85,7 @@ class TestAgentExecutionE2E:
             "directive": "You are a helpful assistant.",
             "traits": {"required": ["directive"]},
             "task": {"description": "Respond briefly."},
+            "chat": {},
         }
         agent = Factory(platform).create(config)
         agent.start()
@@ -100,6 +101,7 @@ class TestAgentExecutionE2E:
             "traits": {"required": ["directive"]},
             "tools": {"shell": {}, "read_file": {}},
             "task": {"description": "Help with tasks using available tools."},
+            "chat": {},
         }
         agent = Factory(platform).create(config)
         agent.start()

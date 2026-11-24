@@ -103,8 +103,8 @@ def test_memory_tools_are_skipped_on_a_platform_without_memory() -> None:
 
 
 @pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.stem)
-def test_the_conversation_section_configures_the_sessions(path: Path) -> None:
-    declared = _raw(path)["conversation"]
+def test_the_chat_section_configures_the_sessions(path: Path) -> None:
+    declared = _raw(path)["chat"]
 
     config = _build(path)._sessions._config
 

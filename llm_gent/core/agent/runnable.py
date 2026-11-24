@@ -4,9 +4,10 @@
 """Runnable agent — the executable specialization of :class:`Agent`.
 
 Bridges the container (:class:`Agent`) with the runtime-runner contract
-(:class:`Runnable`). Consumers that need ``run_once`` / ``ask`` / feedback
-subclass :class:`RunnableAgent`; consumers that only need traits +
-lifecycle keep using :class:`Agent` directly.
+(:class:`Runnable`). Consumers that need ``run_once`` / feedback subclass
+:class:`RunnableAgent`; consumers that only need traits + lifecycle keep
+using :class:`Agent` directly. Answering questions is
+:class:`~llm_gent.core.agent.chat.Chat`'s.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ __all__ = ["RunnableAgent"]
 class RunnableAgent(Agent, Runnable):
     """Agent that also implements the :class:`Runnable` contract.
 
-    Concrete subclasses must implement :meth:`run_once`, :meth:`ask`,
+    Concrete subclasses must implement :meth:`run_once`,
     :meth:`record_feedback`, and :meth:`get_recent_results`. The
     container / lifecycle / trait surface is inherited from :class:`Agent`
     unchanged.
@@ -33,11 +34,6 @@ class RunnableAgent(Agent, Runnable):
     @abstractmethod
     def run_once(self) -> ExecutionResult:
         """Execute one cycle of the default task."""
-        ...
-
-    @abstractmethod
-    def ask(self, question: str, session: str | None = None) -> ExecutionResult:
-        """Answer one question in a session (``None``: a new one); the answer carries its id."""
         ...
 
     @abstractmethod

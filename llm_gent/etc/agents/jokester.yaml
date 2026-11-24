@@ -81,7 +81,7 @@ events:
     recall_strategy: semantic
     recall_limit: 5
 
-conversation:
+chat:
   max_tokens: 8000
   compact_threshold: 0.8
   min_recent_messages: 4

@@ -321,7 +321,6 @@ class TestHTTPTraitHandleRequest:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
         # Use registry's register method to add mock traits
         agent._traits.register(mock_memory_trait)
@@ -510,7 +509,6 @@ class TestHTTPTraitHandleRequest:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
         agent._traits.register(mock_memory_trait)
 
@@ -550,7 +548,6 @@ class TestHTTPTraitHandleRequest:
         agent = DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test"}, default_prompt=""),
-            session_storage=None,
         )
         http_trait = HTTPTrait(agent, handler=HTTPHandler(agent, caller))
 

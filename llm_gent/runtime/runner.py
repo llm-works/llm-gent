@@ -26,6 +26,7 @@ from appinfra.time import Ticker, TickerMode
 from ..bus.protocol import (
     AgentJoined,
     AgentLeft,
+    AskProgress,
     AskRequest,
     AskResponse,
     FeedbackRequest,
@@ -42,6 +43,7 @@ from ..bus.protocol import (
     ShutdownResponse,
     UnregisterRequest,
 )
+from ..core.agent.chat import AskStep, Chat, OnAskStep
 from .handler import Answer, Handler
 
 
@@ -275,12 +277,26 @@ class BaseAgentRunner(ABC):
         return Response(id=request.id, success=False, error="unknown request type")
 
     def _handle_ask(self, request: AskRequest) -> AskResponse:
-        """Handle ask request via handler."""
+        """Handle ask request via handler; a streamed ask sends its steps before the response."""
+        on_step = self._progress(request.id) if request.stream else None
         try:
-            answer = self._handler.on_ask(request.question, request.session)
+            answer = self._handler.on_ask(
+                request.question, request.session, request.kwargs, on_step
+            )
             return AskResponse(id=request.id, response=answer.response, session=answer.session)
         except Exception as e:
             return AskResponse(id=request.id, success=False, error=str(e))
+
+    def _progress(self, request_id: str) -> OnAskStep:
+        """Sends each step of the ask ``request_id`` as a chunk of its reply."""
+        channel = self._channel
+        if channel is None:
+            raise RuntimeError("not connected to bus")
+
+        def on_step(step: AskStep) -> None:
+            channel.send(AskProgress(id=request_id, name=step.name, data=step.data))
+
+        return on_step
 
     def _handle_feedback(self, request: FeedbackRequest) -> FeedbackResponse:
         """Handle feedback request via handler."""
@@ -349,8 +365,16 @@ class _AgentHandler:
     def __init__(self, agent: RunnableAgent) -> None:
         self._agent = agent
 
-    def on_ask(self, question: str, session: str | None) -> Answer:
-        result = self._agent.ask(question, session)
+    def on_ask(
+        self,
+        question: str,
+        session: str | None,
+        kwargs: dict[str, Any],
+        on_step: OnAskStep | None,
+    ) -> Answer:
+        if not isinstance(self._agent, Chat):
+            raise TypeError(f"agent {self._agent.name} has no chat")
+        result = self._agent.ask(question, session, on_step=on_step, **kwargs)
         return Answer(response=result.content, session=result.session)
 
     def on_feedback(self, message: str) -> None:

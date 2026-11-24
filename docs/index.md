@@ -42,6 +42,7 @@ with PlatformFactory(lg).from_config({"llm": llm_config}) as platform:  # Shared
             "identity": {"name": "my-agent"},
             "directive": "You are a helpful assistant.",
             "tools": {"complete_task": {}},
+            "chat": {},  # the agent answers questions
         }
     )
     agent.start()  # Initialize all traits
@@ -49,6 +50,15 @@ with PlatformFactory(lg).from_config({"llm": llm_config}) as platform:  # Shared
     again = agent.ask("And once more?", session=first.session)  # continues it
     agent.stop()  # Cleanup all traits
 ```
+
+Chat is opt-in: the `chat` section (the sessions' settings, possibly empty) makes the agent a
+`Chat`; without it the agent has no `ask`, and the runtime refuses asks to it. An agent that takes
+more than a question adds keyword-only parameters to its `ask`; over the wire (`Hub.ask`, the
+serve API) they travel as a `kwargs` dict.
+
+`ask(question, session, on_step=...)` reports the ask's steps while it runs (an `AskStep` per
+model call answering the question). `Hub.ask_stream` yields them, then the answer; the serve API
+streams them as server-sent events from `POST /agents/{name}/ask/stream`.
 
 Every ask runs in a session: one conversation, under an id the agent issues.
 Asking without `session` opens a new one; the answer's `session` continues it.

@@ -3,20 +3,24 @@
 
 """Default agent implementation.
 
-A concrete Agent that uses SAIA for execution. Provides run_once(), ask(),
-and other methods expected by the runtime runner.
+A concrete Agent that uses SAIA for execution. Provides run_once() and the
+other methods expected by the runtime runner; :class:`ChatAgent` also answers
+questions.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from appinfra import DotDict
 from appinfra.log import Logger
 from appinfra.time import time
 from llm_kelt.conversation import Role, SessionStorage
+from llm_saia.core.backend import ChatResponse
 
+from ...core.agent import AskStep, Chat, OnAskStep
 from ...core.agent import RunnableAgent as BaseAgent
 from ...core.agent.session import Session, SessionConfig, Sessions
 from ...core.dispatcher import Dispatcher
@@ -38,14 +42,9 @@ class Agent(BaseAgent):
 
     Provides the interface expected by the runtime runner:
     - run_once(): Execute default task
-    - ask(): Interactive Q&A, in a session
     - record_feedback(): Feedback handling (no-op for non-learning)
     - cycle_count: Execution counter
     - get_recent_results(): Recent execution history
-
-    Every ask runs in a session: one conversation, under an id the agent
-    issues. Asking without a session opens one; the result's ``session``
-    continues it.
 
     Example:
         # Plain dicts are accepted and converted to DotDict internally
@@ -55,20 +54,15 @@ class Agent(BaseAgent):
                 "identity": {"name": "explorer"},
                 "default_prompt": "Analyze the codebase",
             },
-            session_storage=None,
         )
         agent.add_trait(SAIATrait(agent, backend=backend))
         agent.add_trait(ToolsTrait(agent))
         agent.start()
 
         result = agent.run_once()
-        first = agent.ask("What files are in src/?")
-        agent.ask("Which of them are tests?", session=first.session)
     """
 
-    def __init__(
-        self, lg: Logger, config: DotDict, *, session_storage: SessionStorage | None
-    ) -> None:
+    def __init__(self, lg: Logger, config: DotDict) -> None:
         """Initialize agent.
 
         Args:
@@ -76,12 +70,8 @@ class Agent(BaseAgent):
             config: Agent configuration with keys:
                 - identity.name: Agent name (required)
                 - default_prompt: Default prompt for run_once() execution (default: "")
-                - conversation: How sessions keep their conversations
-                  (:class:`~llm_gent.core.agent.SessionConfig`; default limits without it)
-            session_storage: Where sessions persist; ``None`` keeps them in memory only.
         """
         super().__init__(lg, config)
-        self._sessions = Sessions(lg, self.identity, _session_config(config), session_storage)
         self._default_prompt = config.get("default_prompt", "")
         self._recent_results: list[ExecutionResult] = []
         self._max_recent = 100
@@ -118,6 +108,7 @@ class Agent(BaseAgent):
         recall_strategy: str = "chronological",
         recall_limit: int = 5,
         session: Session | None = None,
+        on_iteration: OnIteration | None = None,
     ) -> ExecutionResult:
         """Handle task execution with configurable memory recall.
 
@@ -127,12 +118,12 @@ class Agent(BaseAgent):
             task: The task or question to execute.
             recall_strategy: "chronological" or "semantic" recall.
             recall_limit: Maximum number of past solutions to recall.
-            session: The session the task runs in: its conversation is the
-                context, and the task and answer join it. ``None``: no
-                conversation; the context is recalled from memory.
+            session: The session whose conversation is the context. ``None``:
+                no conversation; the context is recalled from memory.
+            on_iteration: Called by SAIA after each model call.
 
         Returns:
-            ExecutionResult with outcome; its ``session`` is the session's id.
+            ExecutionResult with outcome.
         """
         saia_trait = self.get_trait(SAIATrait)
         memory_trait = self.get_trait(MemoryTrait)
@@ -145,11 +136,8 @@ class Agent(BaseAgent):
 
         # Execute task
         prompt = saia_trait.saia.compose(context, task)
-        saia_result = await saia_trait.saia.complete(prompt)
+        saia_result = await saia_trait.saia.complete(prompt, on_iteration=on_iteration)
         result = saia_trait.to_execution_result(saia_result)
-
-        if session is not None:
-            self._record_turn(session, task, result)
 
         # Persist successful outcomes
         if result.success and memory_trait is not None:
@@ -201,12 +189,6 @@ class Agent(BaseAgent):
             if conversation:
                 return conversation
         return self._recall_context(memory_trait, task, recall_strategy, recall_limit)
-
-    def _record_turn(self, session: Session, task: str, result: ExecutionResult) -> None:
-        """Add the task and its answer to the session's conversation, and save the session."""
-        session.conversation.add(task)
-        session.conversation.add(result.content, Role.ASSISTANT)
-        self._sessions.save(session)
 
     async def _persist_outcome(
         self,
@@ -299,38 +281,6 @@ class Agent(BaseAgent):
             recall_limit=5,
         )
 
-    def ask(self, question: str, session: str | None = None) -> ExecutionResult:
-        """Ask the agent a question, in a session.
-
-        Asks in one session run one at a time; asks in different sessions run
-        side by side.
-
-        Args:
-            question: The question to ask.
-            session: The id of the session to continue, as an earlier result
-                returned it. ``None`` opens a new session.
-
-        Returns:
-            The answer; its ``session`` continues the conversation.
-
-        Raises:
-            SessionNotFoundError: ``session`` is not a session of this agent.
-        """
-        with self._sessions.use(session) as current:
-            result = asyncio.run(self._ask_async(question, current))
-        result.session = current.id
-        self._store_result(result)
-        return result
-
-    async def _ask_async(self, question: str, session: Session) -> ExecutionResult:
-        """Async implementation of ask() with semantic recall (for varied questions)."""
-        return await self.handle_task(
-            task=question,
-            recall_strategy="semantic",
-            recall_limit=5,
-            session=session,
-        )
-
     def record_feedback(self, message: str) -> None:
         """Record feedback (no-op for non-learning agent)."""
         self._lg.debug("feedback received (not stored)", extra={"agent": self.name})
@@ -353,13 +303,74 @@ class Agent(BaseAgent):
             self._recent_results = self._recent_results[-self._max_recent :]
 
 
+class ChatAgent(Agent, Chat):
+    """Default agent that also answers questions, each in a session.
+
+    Every ask runs in a session: one conversation, under an id the agent
+    issues. Asking without a session opens one; the result's ``session``
+    continues it. Asks in one session run one at a time; asks in different
+    sessions run side by side. Each model call answering the question is a
+    ``model_call`` step: its iteration, the tools it called, the tokens it spent.
+
+    Example:
+        agent = ChatAgent(lg, config={"identity": {"name": "explorer"}}, session_storage=None)
+        first = agent.ask("What files are in src/?")
+        agent.ask("Which of them are tests?", session=first.session)
+    """
+
+    def __init__(
+        self, lg: Logger, config: DotDict, *, session_storage: SessionStorage | None
+    ) -> None:
+        """Initialize agent.
+
+        Args:
+            lg: Logger instance.
+            config: :class:`Agent`'s keys, plus ``chat``: how sessions keep
+                their conversations (:class:`~llm_gent.core.agent.SessionConfig`).
+            session_storage: Where sessions persist; ``None`` keeps them in memory only.
+        """
+        super().__init__(lg, config)
+        self._sessions = Sessions(lg, self.identity, _session_config(config), session_storage)
+
+    def ask(
+        self, question: str, session: str | None = None, *, on_step: OnAskStep | None = None
+    ) -> ExecutionResult:
+        """Answer ``question`` in a session; see :meth:`Chat.ask`."""
+        on_iteration = None if on_step is None else _model_calls(on_step)
+        with self._sessions.use(session) as current:
+            result = asyncio.run(
+                self.handle_task(question, "semantic", 5, current, on_iteration=on_iteration)
+            )
+            current.conversation.add(question)
+            current.conversation.add(result.content, Role.ASSISTANT)
+            self._sessions.save(current)
+        result.session = current.id
+        self._store_result(result)
+        return result
+
+
+OnIteration = Callable[[int, ChatResponse], Awaitable[None]]
+"""SAIA's callback after each model call: the iteration and the model's response."""
+
+
+def _model_calls(on_step: OnAskStep) -> OnIteration:
+    """A SAIA callback reporting each model call to ``on_step`` as a ``model_call`` step."""
+
+    async def on_iteration(iteration: int, response: ChatResponse) -> None:
+        tokens = response.input_tokens + response.output_tokens
+        tools = [call.name for call in response.tool_calls]
+        on_step(AskStep("model_call", {"iteration": iteration, "tools": tools, "tokens": tokens}))
+
+    return on_iteration
+
+
 def _session_config(config: DotDict) -> SessionConfig:
-    """The sessions' settings from the config's ``conversation`` section."""
-    declared = dict(config.get("conversation") or {})
+    """The sessions' settings from the config's ``chat`` section."""
+    declared = dict(config.get("chat") or {})
     try:
         return SessionConfig(**declared)
     except TypeError as e:
-        raise ConfigError(f"invalid conversation section: {e}") from e
+        raise ConfigError(f"invalid chat section: {e}") from e
 
 
 def _format_conversation(session: Session) -> str:
