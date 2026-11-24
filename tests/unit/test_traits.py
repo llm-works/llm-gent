@@ -162,7 +162,7 @@ class TestAgentTraits:
         from llm_gent.agents.default import Agent as DefaultAgent
 
         config = DotDict(identity={"name": "test"}, default_prompt="")
-        return DefaultAgent(lg=mock_logger, config=config)
+        return DefaultAgent(lg=mock_logger, config=config, session_storage=None)
 
     def test_add_trait(self, agent):
         identity = Directive(prompt="Test identity")

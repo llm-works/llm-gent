@@ -16,7 +16,7 @@ import yaml
 from appinfra import DotDict
 
 from llm_gent.agents.default import Factory
-from llm_gent.core.traits.builtin.conversation import ConversationTrait
+from llm_gent.core.agent import SessionConfig
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.saia import SAIATrait
 from llm_gent.core.traits.builtin.tools import ToolsTrait
@@ -103,13 +103,12 @@ def test_memory_tools_are_skipped_on_a_platform_without_memory() -> None:
 
 
 @pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.stem)
-def test_the_conversation_section_attaches_a_conversation(path: Path) -> None:
+def test_the_conversation_section_configures_the_sessions(path: Path) -> None:
     declared = _raw(path)["conversation"]
 
-    trait = _build(path).require_trait(ConversationTrait)
+    config = _build(path)._sessions._config
 
-    assert trait.config.max_tokens == declared["max_tokens"]
-    assert trait.config.min_recent_messages == declared["min_recent_messages"]
+    assert config == SessionConfig(**declared)
 
 
 class TestCodebaseQnaShell:

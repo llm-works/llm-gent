@@ -132,7 +132,7 @@ class AgentConfigYAML(BaseModel):
     """Optional automatic execution schedule."""
 
     conversation: dict[str, Any] = {}
-    """Conversation settings (max_tokens, compact_threshold, etc.)."""
+    """How the agent's sessions keep their conversations (max_tokens, compact_threshold, etc.)."""
 
     events: dict[str, EventHandlerConfig] = {}
     """Event handlers keyed by event name (schedule, question)."""

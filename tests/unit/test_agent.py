@@ -102,6 +102,7 @@ class TestAgentLifecycle:
         return DefaultAgent(
             lg=mock_logger,
             config=DotDict(identity={"name": "test-agent"}, default_prompt="You are a test agent."),
+            session_storage=None,
         )
 
     def test_init(self, agent):
@@ -139,7 +140,9 @@ class TestAgentTraits:
         from llm_gent.agents.default import Agent as DefaultAgent
 
         return DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
 
     def test_add_trait(self, agent):
@@ -198,7 +201,9 @@ class TestAgentReplaceTrait:
         from llm_gent.agents.default import Agent as DefaultAgent
 
         return DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
 
     def _make_trait(self, agent, **kw):
@@ -365,7 +370,9 @@ class TestAgentExecution:
         from tests.helpers import make_platform
 
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="Test task")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt="Test task"),
+            session_storage=None,
         )
         agent._traits.register(mock_saia_trait)
 
@@ -379,7 +386,9 @@ class TestAgentExecution:
         from llm_gent.agents.default import Agent as DefaultAgent
 
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="Test task")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt="Test task"),
+            session_storage=None,
         )
 
         result = agent.run_once()
@@ -391,7 +400,9 @@ class TestAgentExecution:
         from llm_gent.agents.default import Agent as DefaultAgent
 
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
         agent._traits.register(mock_saia_trait)
 
@@ -435,18 +446,21 @@ class TestAgentExecution:
 
         result = agent_with_saia.ask("What is the answer?")
 
-        assert result == "The answer is 42"
+        assert result.content == "The answer is 42"
+        assert result.session
 
     def test_ask_without_saia_trait_returns_error(self, mock_logger):
         from llm_gent.agents.default import Agent as DefaultAgent
 
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
 
         result = agent.ask("Question?")
 
-        assert "SAIATrait not attached" in result
+        assert "SAIATrait not attached" in result.content
 
     def test_run_once_incomplete_when_saia_not_completed(self, agent_with_saia, mock_saia_trait):
         """Agent reports failure when SAIA returns completed=False (TEXT_ONLY scenario).
@@ -486,7 +500,9 @@ class TestAgentRecentResults:
         from llm_gent.agents.default import Agent as DefaultAgent
 
         return DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
 
     def test_get_recent_results_empty(self, agent):
@@ -518,7 +534,9 @@ class TestAgentRecordFeedback:
         from llm_gent.agents.default import Agent as DefaultAgent
 
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
 
         # Should not raise
@@ -617,7 +635,9 @@ class TestFactorySystemPrompt:
 
         factory = self._create_factory(mock_logger)
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
         agent.add_trait(DirectiveTrait(agent, "You are a helpful assistant."))
 
@@ -632,7 +652,9 @@ class TestFactorySystemPrompt:
 
         factory = self._create_factory(mock_logger)
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
         agent.add_trait(MethodTrait(agent, "- Step 1\n- Step 2"))
 
@@ -647,7 +669,9 @@ class TestFactorySystemPrompt:
 
         factory = self._create_factory(mock_logger)
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
         agent.add_trait(DirectiveTrait(agent, "You are a helpful assistant."))
         agent.add_trait(MethodTrait(agent, "- Step 1\n- Step 2"))
@@ -662,7 +686,9 @@ class TestFactorySystemPrompt:
 
         factory = self._create_factory(mock_logger)
         agent = DefaultAgent(
-            lg=mock_logger, config=DotDict(identity={"name": "test"}, default_prompt="")
+            lg=mock_logger,
+            config=DotDict(identity={"name": "test"}, default_prompt=""),
+            session_storage=None,
         )
 
         system_prompt = factory._build_system_prompt(agent)

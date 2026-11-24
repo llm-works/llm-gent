@@ -381,8 +381,8 @@ class ServeTool(Tool):
             else AskAgentRequest(**request.model_dump())
         )
         try:
-            response = hub.ask(req.agent_name, req.question)
-            return AskAgentResponse(id=req.id, response=response)
+            answer = hub.ask(req.agent_name, req.question, req.session)
+            return AskAgentResponse(id=req.id, response=answer.response, session=answer.session)
         except Exception as e:
             return AskAgentResponse(id=req.id, success=False, error=str(e))
 

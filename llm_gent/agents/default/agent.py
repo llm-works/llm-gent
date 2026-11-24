@@ -11,21 +11,19 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from appinfra import DotDict
 from appinfra.log import Logger
 from appinfra.time import time
+from llm_kelt.conversation import Role, SessionStorage
 
 from ...core.agent import RunnableAgent as BaseAgent
+from ...core.agent.session import Session, SessionConfig, Sessions
 from ...core.dispatcher import Dispatcher
+from ...core.errors import ConfigError
 from ...core.runnable import ExecutionResult
 from ...core.traits.builtin.memory import MemoryTrait
 from ...core.traits.builtin.saia import SAIATrait
-
-
-if TYPE_CHECKING:
-    from ...core.traits.builtin.conversation import ConversationTrait
 
 
 @dataclass
@@ -40,10 +38,14 @@ class Agent(BaseAgent):
 
     Provides the interface expected by the runtime runner:
     - run_once(): Execute default task
-    - ask(): Interactive Q&A
+    - ask(): Interactive Q&A, in a session
     - record_feedback(): Feedback handling (no-op for non-learning)
     - cycle_count: Execution counter
     - get_recent_results(): Recent execution history
+
+    Every ask runs in a session: one conversation, under an id the agent
+    issues. Asking without a session opens one; the result's ``session``
+    continues it.
 
     Example:
         # Plain dicts are accepted and converted to DotDict internally
@@ -53,16 +55,20 @@ class Agent(BaseAgent):
                 "identity": {"name": "explorer"},
                 "default_prompt": "Analyze the codebase",
             },
+            session_storage=None,
         )
         agent.add_trait(SAIATrait(agent, backend=backend))
         agent.add_trait(ToolsTrait(agent))
         agent.start()
 
         result = agent.run_once()
-        response = agent.ask("What files are in src/?")
+        first = agent.ask("What files are in src/?")
+        agent.ask("Which of them are tests?", session=first.session)
     """
 
-    def __init__(self, lg: Logger, config: DotDict) -> None:
+    def __init__(
+        self, lg: Logger, config: DotDict, *, session_storage: SessionStorage | None
+    ) -> None:
         """Initialize agent.
 
         Args:
@@ -70,8 +76,12 @@ class Agent(BaseAgent):
             config: Agent configuration with keys:
                 - identity.name: Agent name (required)
                 - default_prompt: Default prompt for run_once() execution (default: "")
+                - conversation: How sessions keep their conversations
+                  (:class:`~llm_gent.core.agent.SessionConfig`; default limits without it)
+            session_storage: Where sessions persist; ``None`` keeps them in memory only.
         """
         super().__init__(lg, config)
+        self._sessions = Sessions(lg, self.identity, _session_config(config), session_storage)
         self._default_prompt = config.get("default_prompt", "")
         self._recent_results: list[ExecutionResult] = []
         self._max_recent = 100
@@ -107,6 +117,7 @@ class Agent(BaseAgent):
         task: str,
         recall_strategy: str = "chronological",
         recall_limit: int = 5,
+        session: Session | None = None,
     ) -> ExecutionResult:
         """Handle task execution with configurable memory recall.
 
@@ -116,9 +127,12 @@ class Agent(BaseAgent):
             task: The task or question to execute.
             recall_strategy: "chronological" or "semantic" recall.
             recall_limit: Maximum number of past solutions to recall.
+            session: The session the task runs in: its conversation is the
+                context, and the task and answer join it. ``None``: no
+                conversation; the context is recalled from memory.
 
         Returns:
-            ExecutionResult with outcome.
+            ExecutionResult with outcome; its ``session`` is the session's id.
         """
         saia_trait = self.get_trait(SAIATrait)
         memory_trait = self.get_trait(MemoryTrait)
@@ -126,16 +140,16 @@ class Agent(BaseAgent):
         if saia_trait is None:
             return ExecutionResult(success=False, content="SAIATrait not attached")
 
-        # Get context (conversation if available, otherwise recall from learning)
-        context = self._get_context(memory_trait, task, recall_strategy, recall_limit)
+        # Get context (the session's conversation if it has one, otherwise recall)
+        context = self._get_context(memory_trait, task, recall_strategy, recall_limit, session)
 
         # Execute task
         prompt = saia_trait.saia.compose(context, task)
         saia_result = await saia_trait.saia.complete(prompt)
         result = saia_trait.to_execution_result(saia_result)
 
-        # Add turn to conversation if trait present
-        self._record_conversation_turn(task, result)
+        if session is not None:
+            self._record_turn(session, task, result)
 
         # Persist successful outcomes
         if result.success and memory_trait is not None:
@@ -175,49 +189,24 @@ class Agent(BaseAgent):
         task: str,
         recall_strategy: str,
         recall_limit: int,
+        session: Session | None,
     ) -> str:
         """Get context for task execution.
 
-        Uses conversation history if ConversationTrait is present,
-        otherwise falls back to solution recall from MemoryTrait.
+        The session's conversation when it has one; otherwise solutions
+        recalled from MemoryTrait.
         """
-        from ...core.traits.builtin.conversation import ConversationTrait
-
-        conv_trait = self.get_trait(ConversationTrait)
-
-        # Prefer conversation context if available and non-empty
-        if conv_trait is not None:
-            conv_context = self._format_conversation_context(conv_trait)
-            if conv_context:
-                return conv_context
-
-        # Fall back to recall if no conversation context
+        if session is not None:
+            conversation = _format_conversation(session)
+            if conversation:
+                return conversation
         return self._recall_context(memory_trait, task, recall_strategy, recall_limit)
 
-    def _format_conversation_context(self, conv_trait: ConversationTrait) -> str:
-        """Format conversation history as context string."""
-        messages = conv_trait.get_context()
-        if not messages:
-            return ""
-
-        # Format messages as text (skip system message, it's in SAIA config)
-        parts = []
-        for msg in messages:
-            if msg.role == "system":
-                continue
-            role = msg.role.capitalize()
-            content = msg.content
-            parts.append(f"{role}: {content}")
-
-        return "\n\n".join(parts)
-
-    def _record_conversation_turn(self, task: str, result: ExecutionResult) -> None:
-        """Record conversation turn if ConversationTrait is present."""
-        from ...core.traits.builtin.conversation import ConversationTrait
-
-        conv_trait = self.get_trait(ConversationTrait)
-        if conv_trait is not None:
-            conv_trait.add_turn(task, result.content)
+    def _record_turn(self, session: Session, task: str, result: ExecutionResult) -> None:
+        """Add the task and its answer to the session's conversation, and save the session."""
+        session.conversation.add(task)
+        session.conversation.add(result.content, Role.ASSISTANT)
+        self._sessions.save(session)
 
     async def _persist_outcome(
         self,
@@ -310,25 +299,36 @@ class Agent(BaseAgent):
             recall_limit=5,
         )
 
-    def ask(self, question: str) -> str:
-        """Ask the agent a question.
+    def ask(self, question: str, session: str | None = None) -> ExecutionResult:
+        """Ask the agent a question, in a session.
+
+        Asks in one session run one at a time; asks in different sessions run
+        side by side.
 
         Args:
             question: The question to ask.
+            session: The id of the session to continue, as an earlier result
+                returned it. ``None`` opens a new session.
 
         Returns:
-            Response string from the agent.
-        """
-        result = asyncio.run(self._ask_async(question))
-        self._store_result(result)
-        return result.content
+            The answer; its ``session`` continues the conversation.
 
-    async def _ask_async(self, question: str) -> ExecutionResult:
+        Raises:
+            SessionNotFoundError: ``session`` is not a session of this agent.
+        """
+        with self._sessions.use(session) as current:
+            result = asyncio.run(self._ask_async(question, current))
+        result.session = current.id
+        self._store_result(result)
+        return result
+
+    async def _ask_async(self, question: str, session: Session) -> ExecutionResult:
         """Async implementation of ask() with semantic recall (for varied questions)."""
         return await self.handle_task(
             task=question,
             recall_strategy="semantic",
             recall_limit=5,
+            session=session,
         )
 
     def record_feedback(self, message: str) -> None:
@@ -351,3 +351,25 @@ class Agent(BaseAgent):
         self._recent_results.append(result)
         if len(self._recent_results) > self._max_recent:
             self._recent_results = self._recent_results[-self._max_recent :]
+
+
+def _session_config(config: DotDict) -> SessionConfig:
+    """The sessions' settings from the config's ``conversation`` section."""
+    declared = dict(config.get("conversation") or {})
+    try:
+        return SessionConfig(**declared)
+    except TypeError as e:
+        raise ConfigError(f"invalid conversation section: {e}") from e
+
+
+def _format_conversation(session: Session) -> str:
+    """The session's conversation as context text; empty when it has none.
+
+    System messages are left out: the system prompt is SAIA's.
+    """
+    parts = [
+        f"{message.role.capitalize()}: {message.content}"
+        for message in session.conversation.messages
+        if message.role != "system"
+    ]
+    return "\n\n".join(parts)

@@ -53,7 +53,7 @@ with PlatformFactory(lg).from_config({"llm": llm}) as platform:
         }
     )
     agent.start()
-    print(agent.ask("Hello!"))
+    print(agent.ask("Hello!").content)
     agent.stop()
 ```
 

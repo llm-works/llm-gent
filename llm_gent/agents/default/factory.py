@@ -11,13 +11,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from appinfra import DotDict
+from llm_kelt.conversation import DbSessionStorage, SessionStorage
 
+from ...core.agent import Agent as CoreAgent
 from ...core.agent import Factory as BaseFactory
 from ...core.llm.caller import Caller
 from ...core.platform import Platform
 from ...core.tools.names import ToolName
 from ...core.traits import TraitName
-from ...core.traits.builtin.conversation import ConversationTrait, ConversationTraitConfig
+from ...core.traits.builtin.memory import MemoryTrait
 from ...core.traits.builtin.saia import SAIAConfig, SAIATrait
 from .agent import Agent
 
@@ -69,6 +71,13 @@ class Factory(BaseFactory):
         """
         super().__init__(platform)
         self._backend: Backend | None = None
+        self._session_storage = _session_storage(platform)
+
+    def _new_agent(self, agent_class: type[CoreAgent], config: DotDict) -> CoreAgent:
+        """A prompt agent whose sessions persist where the platform's memory lives."""
+        return agent_class(  # type: ignore[call-arg]
+            lg=self._lg, config=config, session_storage=self._session_storage
+        )
 
     def _get_backend(self) -> Backend:
         """The SAIA backend over the platform's shared router, made on first use."""
@@ -111,10 +120,8 @@ class Factory(BaseFactory):
         # Use base Factory.create() - handles identity, traits, tools, and variable substitution
         agent = super().create(dotdict_config, variables=variables)
 
-        # Add SAIA trait and event handlers (prompt-agent specific). The conversation
-        # comes after SAIA: it starts from SAIA's system prompt.
+        # Add SAIA trait and event handlers (prompt-agent specific)
         self._add_saia_trait(agent, dotdict_config)  # type: ignore[arg-type]
-        self._add_conversation_trait(agent, dotdict_config)  # type: ignore[arg-type]
         self._configure_event_handlers(agent, dotdict_config)  # type: ignore[arg-type]
 
         # Add HTTP trait if configured (handled separately from base factory)
@@ -137,13 +144,6 @@ class Factory(BaseFactory):
         if self._platform.trait_factory.has_memory and any(t in tools for t in _MEMORY_TOOLS):
             traits.append(TraitName.MEMORY)
         return list(dict.fromkeys([*self.required_traits, *traits]))
-
-    def _add_conversation_trait(self, agent: Agent, config: dict[str, Any]) -> None:
-        """Attach a ConversationTrait built from the config's ``conversation`` section, if any."""
-        declared = config.get("conversation")
-        if not declared:
-            return
-        agent.add_trait(ConversationTrait(agent, ConversationTraitConfig(**dict(declared))))
 
     def _add_saia_trait(self, agent: Agent, config: dict[str, Any]) -> None:
         """Add SAIATrait for LLM operations."""
@@ -253,6 +253,15 @@ class Factory(BaseFactory):
             )
 
         return handler
+
+
+def _session_storage(platform: Platform) -> SessionStorage | None:
+    """Session storage in the memory database and schema; ``None`` on a platform without memory."""
+    memory = platform.traits.get(MemoryTrait)
+    if memory is None:
+        return None
+    database = memory.database.scoped(memory.default_schema)
+    return DbSessionStorage(platform.logger, database.session)
 
 
 def _task_setting(config: dict[str, Any], key: str) -> Any:

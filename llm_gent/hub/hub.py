@@ -46,6 +46,7 @@ from ..bus.protocol import (
     UnregisterResponse,
 )
 from ..bus.transport import CoordinatorBusConfig, ZMQCoordinatorBus
+from ..runtime.handler import Answer
 from ..runtime.service import AgentService
 from .registry import AgentEntry, AgentType, Registry
 
@@ -78,7 +79,8 @@ class Hub:
         hub = Hub(lg, config, bus_config)
         hub.start()
         hub.start_agent("my-agent", agent_config, llm_config)
-        response = hub.ask("my-agent", "hello")
+        answer = hub.ask("my-agent", "hello")
+        hub.ask("my-agent", "and again", session=answer.session)
         hub.stop()
     """
 
@@ -285,28 +287,34 @@ class Hub:
     # Agent communication
     # =========================================================================
 
-    def ask(self, name: str, question: str, timeout: float = 60.0) -> str:
-        """Ask an agent a question.
+    def ask(
+        self, name: str, question: str, session: str | None = None, timeout: float = 60.0
+    ) -> Answer:
+        """Ask an agent a question, in a session.
 
         Args:
             name: Agent name.
             question: Question text.
+            session: The session to continue, as an earlier answer returned
+                it; ``None`` opens a new one.
             timeout: Response timeout.
 
         Returns:
-            Agent's response string.
+            The agent's answer and the session it ran in.
 
         Raises:
-            RuntimeError: If the agent returned a failure response.
+            RuntimeError: If the agent returned a failure response, an
+                unknown session among them, or a reply that is no answer
+                to an ask.
         """
         channel = self._require_channel(name)
-        req = AskRequest(question=question)
+        req = AskRequest(question=question, session=session)
         resp = channel.submit(req, timeout=timeout)
         if isinstance(resp, AskResponse):
             if not resp.success:
                 raise RuntimeError(f"Agent {name} ask failed: {resp.error}")
-            return resp.response
-        return ""
+            return Answer(response=resp.response, session=resp.session)
+        raise RuntimeError(f"Agent {name} did not answer the ask: {getattr(resp, 'error', resp)}")
 
     def feedback(self, name: str, message: str, timeout: float = 30.0) -> None:
         """Send feedback to an agent.

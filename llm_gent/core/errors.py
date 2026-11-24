@@ -12,6 +12,10 @@ class ConfigError(AgentError):
     """Configuration is missing or invalid."""
 
 
+class SessionNotFoundError(AgentError):
+    """The agent has no session with the given id: it never issued it, or has forgotten it."""
+
+
 class TraitError(AgentError):
     """Base for trait-related errors."""
 

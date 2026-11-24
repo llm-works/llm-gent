@@ -10,7 +10,16 @@ handles bus connectivity and protocol plumbing.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+
+
+@dataclass(frozen=True)
+class Answer:
+    """What an ask returns: the response text and the id of the session it ran in."""
+
+    response: str
+    session: str
 
 
 @runtime_checkable
@@ -22,14 +31,16 @@ class Handler(Protocol):
     corresponding request type on the bus.
     """
 
-    def on_ask(self, question: str) -> str:
+    def on_ask(self, question: str, session: str | None) -> Answer:
         """Handle an ask request.
 
         Args:
             question: The question text from the hub or another agent.
+            session: The session to continue, as an earlier answer returned
+                it; ``None`` opens a new one.
 
         Returns:
-            Response text.
+            The answer and its session.
         """
         ...
 
