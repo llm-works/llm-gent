@@ -79,12 +79,12 @@ class Factory(BaseFactory):
         persist where the platform's memory lives.
 
         The default ``Agent`` class becomes ``ChatAgent``; a factory's own class
-        must be one.
+        must be one. A factory's own ``ChatAgent`` class has chat without the section.
 
         Raises:
             ConfigError: A ``chat`` section for a factory's own class without chat.
         """
-        if "chat" not in config:
+        if "chat" not in config and not issubclass(agent_class, ChatAgent):
             return super()._new_agent(agent_class, config)
         chat_class = ChatAgent if agent_class is Agent else agent_class
         if not issubclass(chat_class, ChatAgent):

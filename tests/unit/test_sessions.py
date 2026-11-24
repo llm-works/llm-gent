@@ -315,6 +315,17 @@ class TestChatOptIn:
 
         assert type(agent) is Reviewer
 
+    def test_a_factorys_own_chat_agent_class_has_chat_without_a_chat_section(self):
+        class Reviewer(ChatAgent):
+            pass
+
+        class ReviewerFactory(Factory):
+            agent_class = Reviewer
+
+        agent = ReviewerFactory(make_platform(MagicMock())).create({"identity": {"name": "a"}})
+
+        assert type(agent) is Reviewer
+
     def test_a_chat_section_on_a_factorys_agent_class_without_chat_is_a_config_error(self):
         class Plain(DefaultAgent):
             pass
