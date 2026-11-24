@@ -14,7 +14,7 @@ from llm_saia import TaskResult
 
 from llm_gent.agents.default import Agent as DefaultAgent
 from llm_gent.agents.default.factory import _session_storage
-from llm_gent.core.agent import Identity, SessionConfig, Sessions
+from llm_gent.core.agent import Identity, Session, SessionConfig, Sessions
 from llm_gent.core.errors import ConfigError, SessionNotFoundError
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.saia import SAIATrait
@@ -51,38 +51,51 @@ def _sessions(storage=None, identity=Identity("jokester"), **config) -> Sessions
     return Sessions(MagicMock(), identity, SessionConfig(**config), storage)
 
 
+def _use(sessions: Sessions, session_id: str | None = None) -> Session:
+    """The session one ask would use, released again."""
+    with sessions.use(session_id) as session:
+        return session
+
+
 class TestSessions:
-    def test_open_issues_a_fresh_uuid(self):
+    def test_no_id_opens_a_session_under_a_fresh_uuid(self):
         sessions = _sessions()
 
-        first, second = sessions.open(), sessions.open()
+        first, second = _use(sessions), _use(sessions)
 
         assert str(uuid.UUID(first.id)) == first.id
         assert first.id != second.id
 
     def test_an_open_session_is_found_again(self):
         sessions = _sessions()
-        session = sessions.open()
+        session = _use(sessions)
 
-        assert sessions.get(session.id) is session
+        assert _use(sessions, session.id) is session
+
+    def test_a_session_in_use_holds_its_lock(self):
+        sessions = _sessions()
+
+        with sessions.use(None) as session:
+            assert session.lock.locked()
+        assert not session.lock.locked()
 
     def test_an_id_never_issued_is_refused(self):
         with pytest.raises(SessionNotFoundError):
-            _sessions().get(str(uuid.uuid4()))
+            _use(_sessions(), str(uuid.uuid4()))
 
     @pytest.mark.parametrize("session_id", ["made-up", "", "3F2B6C1E-9D4A-4B7E-8C21-5A0F7E9D2B13"])
     def test_anything_but_a_canonical_uuid_is_refused(self, session_id):
         with pytest.raises(SessionNotFoundError):
-            _sessions(_DictStorage()).get(session_id)
+            _use(_sessions(_DictStorage()), session_id)
 
     def test_a_saved_session_reloads_in_a_new_process(self):
         storage = _DictStorage()
         first = _sessions(storage)
-        session = first.open()
-        session.conversation.add("hello")
-        first.save(session)
+        with first.use(None) as session:
+            session.conversation.add("hello")
+            first.save(session)
 
-        reloaded = _sessions(storage).get(session.id)
+        reloaded = _use(_sessions(storage), session.id)
 
         assert [m.content for m in reloaded.conversation.messages] == ["hello"]
         assert list(storage.saved) == [f"jokester/jokester/{session.id}"]
@@ -90,46 +103,56 @@ class TestSessions:
     def test_an_id_is_valid_only_at_the_agent_that_issued_it(self):
         storage = _DictStorage()
         mine = _sessions(storage)
-        session = mine.open()
-        mine.save(session)
+        with mine.use(None) as session:
+            mine.save(session)
 
         with pytest.raises(SessionNotFoundError):
-            _sessions(storage, identity=Identity("other", context_key="jokester")).get(session.id)
+            _use(_sessions(storage, identity=Identity("other", context_key="jokester")), session.id)
 
     def test_without_storage_a_session_is_gone_after_a_restart(self):
-        session = _sessions().open()
+        session = _use(_sessions())
 
         with pytest.raises(SessionNotFoundError):
-            _sessions().get(session.id)
+            _use(_sessions(), session.id)
 
     def test_beyond_max_live_an_idle_session_leaves_memory_and_reloads(self):
         storage = _DictStorage()
         sessions = _sessions(storage, max_live=1)
-        first = sessions.open()
-        sessions.save(first)
-        sessions.open()
+        with sessions.use(None) as first:
+            sessions.save(first)
+        _use(sessions)
 
-        reloaded = sessions.get(first.id)
+        reloaded = _use(sessions, first.id)
 
         assert reloaded is not first
         assert storage.loads == [f"jokester/jokester/{first.id}"]
 
-    def test_a_session_in_an_ask_stays_in_memory(self):
+    def test_a_session_in_use_stays_in_memory(self):
+        """Another ask opening a session cannot push out one in use: no second copy of it."""
         storage = _DictStorage()
         sessions = _sessions(storage, max_live=1)
-        busy = sessions.open()
 
-        with busy.lock:
-            sessions.open()
-            assert sessions.get(busy.id) is busy
+        with sessions.use(None) as busy:
+            _use(sessions)
+            assert sessions._live.get(busy.id) is busy
         assert storage.loads == []
+
+    def test_a_session_is_in_use_before_its_lock_is_taken(self):
+        """Counted at lookup, so an ask waiting for the lock keeps its session in memory."""
+        sessions = _sessions(_DictStorage(), max_live=1)
+        waiting = sessions._acquire(None)
+
+        _use(sessions)
+
+        assert not waiting.lock.locked()
+        assert sessions._live.get(waiting.id) is waiting
 
     def test_without_storage_no_session_leaves_memory(self):
         sessions = _sessions(max_live=1)
-        first = sessions.open()
-        sessions.open()
+        first = _use(sessions)
+        _use(sessions)
 
-        assert sessions.get(first.id) is first
+        assert _use(sessions, first.id) is first
 
     def test_an_unknown_compactor_is_a_config_error(self):
         with pytest.raises(ConfigError, match="compactor"):
@@ -204,7 +227,7 @@ class TestAgentAsk:
     def test_an_ask_holds_its_session_for_its_whole_run(self, saia):
         """Asks in one session run one at a time: each holds the session's lock while it runs."""
         agent = _agent(saia)
-        session = agent._sessions.get(agent.ask("first").session)
+        session = agent._sessions._live[agent.ask("first").session]
         held_during_the_call: list[bool] = []
 
         async def complete(prompt):

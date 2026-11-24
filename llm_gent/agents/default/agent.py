@@ -316,8 +316,7 @@ class Agent(BaseAgent):
         Raises:
             SessionNotFoundError: ``session`` is not a session of this agent.
         """
-        current = self._sessions.open() if session is None else self._sessions.get(session)
-        with current.lock:
+        with self._sessions.use(session) as current:
             result = asyncio.run(self._ask_async(question, current))
         result.session = current.id
         self._store_result(result)

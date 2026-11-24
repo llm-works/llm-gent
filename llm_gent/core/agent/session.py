@@ -12,6 +12,8 @@ from __future__ import annotations
 import threading
 import uuid
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from appinfra.log import Logger
@@ -53,16 +55,19 @@ class Session:
     """One conversation with an agent. Callers know it only by ``id``.
 
     ``lock`` serializes the asks in the session: a conversation is a sequence.
+    ``users`` counts the asks holding the session, waiting for its lock
+    included; it changes only under the table's lock.
     """
 
     def __init__(self, session_id: str, conversation: Conversation) -> None:
         self.id = session_id
         self.conversation = conversation
         self.lock = threading.Lock()
+        self.users = 0
 
 
 class Sessions:
-    """The sessions of one agent: opened, found again, saved.
+    """The sessions of one agent: opened or found again for an ask (:meth:`use`), saved.
 
     With ``storage`` every session is saved under a key of the agent's
     ``context_key``, name and the session id, so an id is valid only at the
@@ -98,36 +103,50 @@ class Sessions:
         self._live: OrderedDict[str, Session] = OrderedDict()
         self._lock = threading.Lock()
 
-    def open(self) -> Session:
-        """A new session with an empty conversation, under a fresh id."""
-        session = Session(str(uuid.uuid4()), self._conversation())
-        with self._lock:
-            self._live[session.id] = session
-            self._evict()
-        return session
+    @contextmanager
+    def use(self, session_id: str | None) -> Iterator[Session]:
+        """The session to ask in, held for the ask: its lock, and kept in memory.
 
-    def get(self, session_id: str) -> Session:
-        """The session ``session_id``, from memory or storage.
+        ``None`` opens a new session under a fresh id; an id continues that
+        session, from memory or storage. The session counts as in use from
+        the lookup on, before its lock is taken, so it cannot leave memory
+        while an ask waits for it or runs in it.
 
         Raises:
             SessionNotFoundError: The id is not one this agent issued, or the
                 session is gone (memory only, and the process restarted).
         """
-        _check_id(session_id)
-        with self._lock:
-            session = self._live.get(session_id)
-            if session is None:
-                session = self._load(session_id)
-                self._live[session_id] = session
+        session = self._acquire(session_id)
+        try:
+            with session.lock:
+                yield session
+        finally:
+            with self._lock:
+                session.users -= 1
                 self._evict()
-            else:
-                self._live.move_to_end(session_id)
-        return session
 
     def save(self, session: Session) -> None:
         """Write the session's conversation to storage; nothing without storage."""
         if self._storage is not None:
             self._storage.save(self._prefix + session.id, session.conversation)
+
+    def _acquire(self, session_id: str | None) -> Session:
+        """The session ``session_id`` (``None``: a new one), counted as in use, most recent."""
+        if session_id is not None:
+            _check_id(session_id)
+        with self._lock:
+            session = self._find(session_id)
+            self._live[session.id] = session
+            self._live.move_to_end(session.id)
+            session.users += 1
+            self._evict()
+        return session
+
+    def _find(self, session_id: str | None) -> Session:
+        """A new session for ``None``; else the session in memory, else the stored one."""
+        if session_id is None:
+            return Session(str(uuid.uuid4()), self._conversation())
+        return self._live.get(session_id) or self._load(session_id)
 
     def _load(self, session_id: str) -> Session:
         """The stored session ``session_id``."""
@@ -152,13 +171,13 @@ class Sessions:
     def _evict(self) -> None:
         """Drop the least recently used idle sessions beyond ``max_live``; only when they persist.
 
-        A session in the middle of an ask stays: dropping it would let its
-        next ask reload a conversation the running one has not saved yet.
+        A session in use stays: dropping it would let another ask reload a
+        second copy of it, beside the one in use. Called under the table's lock.
         """
         excess = len(self._live) - self._config.max_live
         if self._storage is None or excess <= 0:
             return
-        for session_id in [sid for sid, s in self._live.items() if not s.lock.locked()][:excess]:
+        for session_id in [sid for sid, s in self._live.items() if s.users == 0][:excess]:
             del self._live[session_id]
 
 
