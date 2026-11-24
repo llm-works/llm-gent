@@ -18,6 +18,7 @@ from llm_gent.bus.protocol import (
     RegisterRequest,
     RelayRequest,
     RelayResponse,
+    Response,
     ShutdownNotice,
     UnregisterRequest,
 )
@@ -318,14 +319,16 @@ class TestHubAskFeedback:
         with pytest.raises(RuntimeError, match="ask failed: oops"):
             hub.ask("agent-1", "question")
 
-    def test_ask_non_ask_response_returns_empty(self, hub):
-        """Ask returns an empty answer when response is not AskResponse."""
+    def test_ask_answered_with_another_response_raises(self, hub):
+        """A runner that does not know the ask answers with a plain Response: its error is raised."""
         mock_channel = MagicMock()
-        mock_channel.submit.return_value = MagicMock(spec=[])  # not AskResponse
+        mock_channel.submit.return_value = Response(
+            id="x", success=False, error="unknown request type"
+        )
         hub._channels["agent-1"] = mock_channel
 
-        result = hub.ask("agent-1", "question")
-        assert result == Answer(response="", session="")
+        with pytest.raises(RuntimeError, match="unknown request type"):
+            hub.ask("agent-1", "question")
 
     def test_feedback_failure_raises_runtime_error(self, hub):
         """Feedback raises RuntimeError when agent returns failure."""

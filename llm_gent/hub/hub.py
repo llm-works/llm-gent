@@ -304,7 +304,8 @@ class Hub:
 
         Raises:
             RuntimeError: If the agent returned a failure response, an
-                unknown session among them.
+                unknown session among them, or a reply that is no answer
+                to an ask.
         """
         channel = self._require_channel(name)
         req = AskRequest(question=question, session=session)
@@ -313,7 +314,7 @@ class Hub:
             if not resp.success:
                 raise RuntimeError(f"Agent {name} ask failed: {resp.error}")
             return Answer(response=resp.response, session=resp.session)
-        return Answer(response="", session="")
+        raise RuntimeError(f"Agent {name} did not answer the ask: {getattr(resp, 'error', resp)}")
 
     def feedback(self, name: str, message: str, timeout: float = 30.0) -> None:
         """Send feedback to an agent.

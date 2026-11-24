@@ -145,7 +145,7 @@ class Core:
             if not resp.success:
                 raise RuntimeError(f"Agent {name} ask failed: {resp.error}")
             return Answer(response=resp.response, session=resp.session)
-        return Answer(response="", session="")
+        raise RuntimeError(f"Agent {name} did not answer the ask: {getattr(resp, 'error', resp)}")
 
     def feedback(self, name: str, message: str, timeout: float = 30.0) -> None:
         """Send feedback to an agent via the channel."""

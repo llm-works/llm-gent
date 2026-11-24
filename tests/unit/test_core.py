@@ -9,7 +9,7 @@ import pytest
 from appinfra import DotDict
 from appinfra.service import State
 
-from llm_gent.bus.protocol import AskResponse, FeedbackResponse
+from llm_gent.bus.protocol import AskResponse, FeedbackResponse, Response
 from llm_gent.runtime.core import Core
 from llm_gent.runtime.handle import AgentHandle
 from llm_gent.runtime.handler import Answer
@@ -233,6 +233,19 @@ class TestCoreAsk:
         core.ask("test-agent", "question", session="s-1")
 
         assert mock_channel.submit.call_args[0][0].session == "s-1"
+
+    def test_ask_answered_with_another_response_raises(self, core, registry):
+        """A runner that does not know the ask answers with a plain Response: its error is raised."""
+        handle = _register_agent(registry)
+        handle.state = State.RUNNING
+        mock_channel = MagicMock()
+        mock_channel.submit.return_value = Response(
+            id="x", success=False, error="unknown request type"
+        )
+        core._channels["test-agent"] = mock_channel
+
+        with pytest.raises(RuntimeError, match="unknown request type"):
+            core.ask("test-agent", "question")
 
 
 class TestCoreFeedback:
