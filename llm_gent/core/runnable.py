@@ -48,20 +48,6 @@ class Runnable(ABC):
         """
         ...
 
-    @abstractmethod
-    def ask(self, question: str, session: str | None = None) -> ExecutionResult:
-        """Ask a question, in a session, and get the answer.
-
-        Args:
-            question: The question to ask.
-            session: The id of the session to continue, as an earlier answer
-                returned it; ``None`` opens a new session.
-
-        Returns:
-            The answer; its ``session`` continues the conversation.
-        """
-        ...
-
     @property
     @abstractmethod
     def cycle_count(self) -> int:

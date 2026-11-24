@@ -4,6 +4,7 @@
 """An agent's sessions: ids the agent issues, one conversation each, saved and reloaded."""
 
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,9 +13,9 @@ from llm_kelt.conversation import Conversation, SessionStorage, StoredSession
 from llm_kelt.core.errors import NotFoundError
 from llm_saia import TaskResult
 
-from llm_gent.agents.default import Agent as DefaultAgent
+from llm_gent.agents.default import ChatAgent, Factory
 from llm_gent.agents.default.factory import _session_storage
-from llm_gent.core.agent import Identity, Session, SessionConfig, Sessions
+from llm_gent.core.agent import AskStep, Chat, Identity, Session, SessionConfig, Sessions
 from llm_gent.core.errors import ConfigError, SessionNotFoundError
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.saia import SAIATrait
@@ -182,15 +183,15 @@ def saia():
     saia = MagicMock()
     saia.compose.side_effect = lambda context, task: f"{context}|{task}"
     saia.complete = AsyncMock(
-        side_effect=lambda prompt: TaskResult(
+        side_effect=lambda prompt, **_: TaskResult(
             completed=True, output=f"answer to {prompt}", iterations=1, history=[]
         )
     )
     return saia
 
 
-def _agent(saia, config=None, storage=None) -> DefaultAgent:
-    agent = DefaultAgent(
+def _agent(saia, config=None, storage=None) -> ChatAgent:
+    agent = ChatAgent(
         lg=MagicMock(),
         config=DotDict({"identity": {"name": "jokester"}, **(config or {})}),
         session_storage=storage,
@@ -243,7 +244,7 @@ class TestAgentAsk:
         session = agent._sessions._live[agent.ask("first").session]
         held_during_the_call: list[bool] = []
 
-        async def complete(prompt):
+        async def complete(prompt, **_):
             held_during_the_call.append(session.lock.locked())
             return TaskResult(completed=True, output="done", iterations=1, history=[])
 
@@ -258,14 +259,47 @@ class TestAgentAsk:
 
         assert agent.run_once().session == ""
 
-    def test_the_conversation_section_sets_the_limits(self, saia):
-        agent = _agent(saia, config={"conversation": {"max_tokens": 8000, "max_live": 5}})
+    def test_the_chat_section_sets_the_limits(self, saia):
+        agent = _agent(saia, config={"chat": {"max_tokens": 8000, "max_live": 5}})
 
         assert agent._sessions._config == SessionConfig(max_tokens=8000, max_live=5)
 
-    def test_an_unknown_conversation_setting_is_a_config_error(self, saia):
-        with pytest.raises(ConfigError, match="conversation"):
-            _agent(saia, config={"conversation": {"window": 3}})
+    def test_an_unknown_chat_setting_is_a_config_error(self, saia):
+        with pytest.raises(ConfigError, match="chat"):
+            _agent(saia, config={"chat": {"window": 3}})
+
+    def test_each_model_call_is_a_step(self, saia):
+        response = SimpleNamespace(
+            input_tokens=3, output_tokens=4, tool_calls=[SimpleNamespace(name="complete_task")]
+        )
+
+        async def complete(prompt, on_iteration):
+            await on_iteration(1, response)
+            return TaskResult(completed=True, output="done", iterations=1, history=[])
+
+        saia.complete = AsyncMock(side_effect=complete)
+        steps: list[AskStep] = []
+
+        _agent(saia).ask("hello", on_step=steps.append)
+
+        assert steps == [
+            AskStep("model_call", {"iteration": 1, "tools": ["complete_task"], "tokens": 7})
+        ]
+
+
+class TestChatOptIn:
+    def test_an_agent_without_a_chat_section_has_no_chat(self):
+        agent = Factory(make_platform(MagicMock())).create({"identity": {"name": "a"}})
+
+        assert not isinstance(agent, Chat)
+
+    def test_a_chat_section_makes_a_chat_agent(self):
+        agent = Factory(make_platform(MagicMock())).create(
+            {"identity": {"name": "a"}, "chat": {"max_tokens": 8000}}
+        )
+
+        assert isinstance(agent, ChatAgent)
+        assert agent._sessions._config.max_tokens == 8000
 
 
 class TestSessionStorage:

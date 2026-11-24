@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from appinfra.service import BufferedChannel, ProcessRunner, State, ThreadRunner
 
 from .handle import AgentHandle, AgentInfo
-from .handler import Answer
+from .handler import Answer, answer
 from .service import AgentService
 
 
@@ -128,24 +128,28 @@ class Core:
         return AgentInfo.from_handle(handle)
 
     def ask(
-        self, name: str, question: str, session: str | None = None, timeout: float = 60.0
+        self,
+        name: str,
+        question: str,
+        session: str | None = None,
+        *,
+        kwargs: dict[str, Any] | None = None,
+        timeout: float = 60.0,
     ) -> Answer:
-        """Ask an agent a question via the channel, in ``session`` (``None``: a new one)."""
+        """Ask an agent a question via the channel, in ``session`` (``None``: a new one).
+
+        ``kwargs`` are keyword arguments of the agent's own ``ask``, passed through unread.
+        """
         self._require_running(name)
 
-        from ..bus.protocol import AskRequest, AskResponse
+        from ..bus.protocol import AskRequest
 
         channel = self._channels.get(name)
         if channel is None:
             raise RuntimeError(f"No channel for agent: {name}")
 
-        req = AskRequest(question=question, session=session)
-        resp = channel.submit(req, timeout=timeout)
-        if isinstance(resp, AskResponse):
-            if not resp.success:
-                raise RuntimeError(f"Agent {name} ask failed: {resp.error}")
-            return Answer(response=resp.response, session=resp.session)
-        raise RuntimeError(f"Agent {name} did not answer the ask: {getattr(resp, 'error', resp)}")
+        req = AskRequest(question=question, session=session, kwargs=kwargs or {})
+        return answer(name, channel.submit(req, timeout=timeout))
 
     def feedback(self, name: str, message: str, timeout: float = 30.0) -> None:
         """Send feedback to an agent via the channel."""

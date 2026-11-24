@@ -23,6 +23,7 @@ from llm_gent.bus.protocol import (
     UnregisterRequest,
 )
 from llm_gent.bus.transport import WorkerBusConfig
+from llm_gent.core.agent import AskStep
 from llm_gent.hub import Hub, HubConfig
 from llm_gent.hub.registry import AgentType
 from llm_gent.runtime.handler import Answer
@@ -293,9 +294,45 @@ class TestHubAskFeedback:
         mock_channel.submit.return_value = AskResponse(id="x", response="hello", session="s-1")
         hub._channels["agent-1"] = mock_channel
 
-        result = hub.ask("agent-1", "question", session="s-1")
+        result = hub.ask("agent-1", "question", session="s-1", kwargs={"job": "j-1"})
         assert result == Answer(response="hello", session="s-1")
-        assert mock_channel.submit.call_args[0][0].session == "s-1"
+        sent = mock_channel.submit.call_args[0][0]
+        assert (sent.session, sent.kwargs, sent.stream) == ("s-1", {"job": "j-1"}, False)
+
+    def test_ask_stream_yields_the_steps_then_the_answer(self, hub):
+        from llm_gent.bus.protocol import AskProgress, AskResponse
+
+        mock_channel = MagicMock()
+        mock_channel.stream.return_value = iter(
+            [
+                AskProgress(id="x", name="model_call", data={"iteration": 1}),
+                AskResponse(id="x", response="hello", session="s-1"),
+            ]
+        )
+        hub._channels["agent-1"] = mock_channel
+
+        items = list(hub.ask_stream("agent-1", "question", timeout=5.0))
+
+        assert items == [AskStep("model_call", {"iteration": 1}), Answer("hello", "s-1")]
+        assert mock_channel.stream.call_args[0][0].stream is True
+        assert mock_channel.stream.call_args[1] == {"timeout": 5.0}
+
+    def test_ask_stream_failure_raises_after_the_steps(self, hub):
+        from llm_gent.bus.protocol import AskProgress, AskResponse
+
+        mock_channel = MagicMock()
+        mock_channel.stream.return_value = iter(
+            [
+                AskProgress(id="x", name="model_call"),
+                AskResponse(id="x", success=False, error="oops"),
+            ]
+        )
+        hub._channels["agent-1"] = mock_channel
+        stream = hub.ask_stream("agent-1", "question")
+
+        assert next(stream) == AskStep("model_call")
+        with pytest.raises(RuntimeError, match="ask failed: oops"):
+            next(stream)
 
     def test_ask_unknown_agent_raises(self, hub):
         """Ask raises KeyError for unknown agent."""

@@ -13,7 +13,8 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
-from .base import Request, Response
+from ....bus.protocol import AskRequest
+from .base import Message, Request, Response
 
 
 # =============================================================================
@@ -151,25 +152,22 @@ class StopAgentResponse(Response):
 # =============================================================================
 
 
-class AskAgentRequest(Request):
-    """Ask agent a question request."""
+class AskAgentRequest(Message):
+    """An ask of agent ``agent_name``: the bus request, forwarded to it unchanged.
+
+    The reply is the agent's own: its ``AskProgress`` chunks when the ask
+    streams, then its ``AskResponse``.
+    """
 
     message_type: ClassVar[str] = "ask_agent_request"
 
     agent_name: str = Field(description="Name of the agent")
-    question: str = Field(description="Question to ask")
-    session: str | None = Field(
-        default=None, description="Session to continue, as a response returned it; none opens one"
-    )
+    ask: AskRequest = Field(description="The ask, as the bus carries it")
 
-
-class AskAgentResponse(Response):
-    """Ask agent response."""
-
-    message_type: ClassVar[str] = "ask_agent_response"
-
-    response: str = ""
-    session: str = ""
+    @property
+    def id(self) -> str:
+        """The ask's id, which every chunk of its reply carries."""
+        return self.ask.id
 
 
 # =============================================================================

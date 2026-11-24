@@ -268,6 +268,21 @@ class AskRequest(Request):
     question: str
     session: str | None = None
     """The session to continue, as an earlier response returned it; ``None`` opens one."""
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    """Keyword arguments of the agent's own ``ask``, passed through unread."""
+    stream: bool = False
+    """Reply with an :class:`AskProgress` per step of the ask before the :class:`AskResponse`."""
+
+
+class AskProgress(Response):
+    """One step of a streamed ask; a chunk of the reply, before its :class:`AskResponse`."""
+
+    message_type: ClassVar[str] = "ask_progress"
+    tier: ClassVar[MessageTier] = MessageTier.APPLICATION
+
+    is_final: bool = False
+    name: str
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class AskResponse(Response):
@@ -398,6 +413,7 @@ MESSAGE_REGISTRY: dict[str, type[Message]] = {
     "error_request": ErrorRequest,
     "error_response": ErrorResponse,
     "ask_request": AskRequest,
+    "ask_progress": AskProgress,
     "ask_response": AskResponse,
     "feedback_request": FeedbackRequest,
     "feedback_response": FeedbackResponse,

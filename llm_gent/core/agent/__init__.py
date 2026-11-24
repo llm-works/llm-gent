@@ -4,6 +4,7 @@
 """Agent package - core agent abstractions and implementations."""
 
 from .agent import Agent
+from .chat import AskStep, Chat, OnAskStep
 from .factory import Factory
 from .identity import Identity
 from .runnable import RunnableAgent
@@ -13,7 +14,10 @@ from .types import ExecutionResult
 
 __all__ = [
     "Agent",
+    "AskStep",
+    "Chat",
     "Factory",
+    "OnAskStep",
     "ExecutionResult",
     "Identity",
     "RunnableAgent",

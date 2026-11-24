@@ -9,15 +9,18 @@ Routes use IPC to communicate with main process where Core runs.
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ...bus import protocol as bus
 from .protocol.management import (
     AskAgentRequest,
-    AskAgentResponse,
     FeedbackAgentRequest,
     FeedbackAgentResponse,
     GetAgentRequest,
@@ -58,10 +61,14 @@ class AgentListResponse(BaseModel):
 
 
 class AskRequest(BaseModel):
-    """Ask question request; ``session`` continues a session an earlier response returned."""
+    """Ask question request; ``session`` continues a session an earlier response returned.
+
+    ``kwargs`` are keyword arguments of the agent's own ``ask``, passed through unread.
+    """
 
     question: str
     session: str | None = None
+    kwargs: dict[str, Any] = {}
 
 
 class AskResponse(BaseModel):
@@ -131,7 +138,7 @@ def _check_response(resp: Any, agent_name: str | None = None) -> None:
 async def _health(request: Request) -> HealthResponse:
     """Health check endpoint."""
     req = MgmtHealthRequest(id=str(uuid4()))
-    resp = await request.app.state.ipc_channel.submit(req.id, req)
+    resp = await request.app.state.ipc_channel.submit(req)
     resp = cast(MgmtHealthResponse, resp)
     _check_response(resp)
     return HealthResponse(status=resp.status, agent_count=resp.agent_count)
@@ -140,7 +147,7 @@ async def _health(request: Request) -> HealthResponse:
 async def _list_agents(request: Request) -> AgentListResponse:
     """List all registered agents."""
     req = ListAgentsRequest(id=str(uuid4()))
-    resp = await request.app.state.ipc_channel.submit(req.id, req)
+    resp = await request.app.state.ipc_channel.submit(req)
     resp = cast(ListAgentsResponse, resp)
     _check_response(resp)
     return AgentListResponse(agents=[AgentInfoResponse(**a) for a in resp.agents])
@@ -149,7 +156,7 @@ async def _list_agents(request: Request) -> AgentListResponse:
 async def _get_agent(name: str, request: Request) -> AgentInfoResponse:
     """Get agent information by name."""
     req = GetAgentRequest(id=str(uuid4()), agent_name=name)
-    resp = await request.app.state.ipc_channel.submit(req.id, req)
+    resp = await request.app.state.ipc_channel.submit(req)
     resp = cast(GetAgentResponse, resp)
     _check_response(resp, name)
     return AgentInfoResponse(
@@ -165,7 +172,7 @@ async def _get_agent(name: str, request: Request) -> AgentInfoResponse:
 async def _start_agent(name: str, request: Request) -> AgentInfoResponse:
     """Start an agent process."""
     req = StartAgentRequest(id=str(uuid4()), agent_name=name)
-    resp = await request.app.state.ipc_channel.submit(req.id, req)
+    resp = await request.app.state.ipc_channel.submit(req)
     resp = cast(StartAgentResponse, resp)
     _check_response(resp, name)
     return AgentInfoResponse(
@@ -181,7 +188,7 @@ async def _start_agent(name: str, request: Request) -> AgentInfoResponse:
 async def _stop_agent(name: str, request: Request) -> AgentInfoResponse:
     """Stop an agent process."""
     req = StopAgentRequest(id=str(uuid4()), agent_name=name)
-    resp = await request.app.state.ipc_channel.submit(req.id, req)
+    resp = await request.app.state.ipc_channel.submit(req)
     resp = cast(StopAgentResponse, resp)
     _check_response(resp, name)
     return AgentInfoResponse(
@@ -194,21 +201,61 @@ async def _stop_agent(name: str, request: Request) -> AgentInfoResponse:
     )
 
 
+def _ask_request(name: str, body: AskRequest, *, stream: bool) -> AskAgentRequest:
+    """The IPC request for an ask of agent ``name``."""
+    return AskAgentRequest(agent_name=name, ask=bus.AskRequest(stream=stream, **body.model_dump()))
+
+
 async def _ask_agent(name: str, body: AskRequest, request: Request) -> AskResponse:
     """Ask an agent a question."""
-    req = AskAgentRequest(
-        id=str(uuid4()), agent_name=name, question=body.question, session=body.session
-    )
-    resp = await request.app.state.ipc_channel.submit(req.id, req)
-    resp = cast(AskAgentResponse, resp)
+    resp = await request.app.state.ipc_channel.submit(_ask_request(name, body, stream=False))
+    resp = cast(bus.AskResponse, resp)
     _check_response(resp, name)
     return AskResponse(response=resp.response, session=resp.session)
+
+
+async def _ask_agent_stream(name: str, body: AskRequest, request: Request) -> StreamingResponse:
+    """Ask as ``/ask`` does, streaming the ask's steps as server-sent events.
+
+    Events: ``step`` (``name``, ``data``) while the agent works, then
+    ``answer`` (``response``, ``session``), or ``error`` (``detail``) when the
+    ask fails after a step. A failure before any step is an HTTP error, as
+    from ``/ask``.
+    """
+    chunks = request.app.state.ipc_channel.stream(_ask_request(name, body, stream=True))
+    first = await anext(chunks)
+    if not isinstance(first, bus.AskProgress) and not first.success:
+        await chunks.aclose()
+        _check_response(first, name)
+    return StreamingResponse(_sse(first, chunks), media_type="text/event-stream")
+
+
+async def _sse(first: Any, rest: AsyncGenerator[Any]) -> AsyncIterator[str]:
+    """The chunks of a streamed ask's reply, as server-sent events; ``rest`` closed at the end."""
+    try:
+        yield _sse_event(first)
+        async for chunk in rest:
+            yield _sse_event(chunk)
+    finally:
+        await rest.aclose()
+
+
+def _sse_event(chunk: Any) -> str:
+    """One chunk of a streamed ask's reply as a server-sent event."""
+    data: dict[str, Any]
+    if isinstance(chunk, bus.AskProgress):
+        kind, data = "step", {"name": chunk.name, "data": chunk.data}
+    elif chunk.success:
+        kind, data = "answer", {"response": chunk.response, "session": chunk.session}
+    else:
+        kind, data = "error", {"detail": chunk.error or "Unknown error"}
+    return f"event: {kind}\ndata: {json.dumps(data)}\n\n"
 
 
 async def _feedback_agent(name: str, body: FeedbackRequest, request: Request) -> FeedbackResponse:
     """Send feedback to an agent."""
     req = FeedbackAgentRequest(id=str(uuid4()), agent_name=name, message=body.message)
-    resp = await request.app.state.ipc_channel.submit(req.id, req)
+    resp = await request.app.state.ipc_channel.submit(req)
     resp = cast(FeedbackAgentResponse, resp)
     _check_response(resp, name)
     return FeedbackResponse(success=True)
@@ -217,7 +264,7 @@ async def _feedback_agent(name: str, body: FeedbackRequest, request: Request) ->
 async def _get_insights(name: str, request: Request, limit: int = 10) -> InsightsResponse:
     """Get recent insights from an agent."""
     req = GetInsightsRequest(id=str(uuid4()), agent_name=name, limit=limit)
-    resp = await request.app.state.ipc_channel.submit(req.id, req)
+    resp = await request.app.state.ipc_channel.submit(req)
     resp = cast(GetInsightsResponse, resp)
     _check_response(resp, name)
     return InsightsResponse(insights=[InsightResponse(**i) for i in resp.insights])
@@ -252,6 +299,7 @@ def create_management_routes() -> APIRouter:
     router.add_api_route(
         "/agents/{name}/ask", _ask_agent, methods=["POST"], response_model=AskResponse
     )
+    router.add_api_route("/agents/{name}/ask/stream", _ask_agent_stream, methods=["POST"])
     router.add_api_route(
         "/agents/{name}/feedback",
         _feedback_agent,

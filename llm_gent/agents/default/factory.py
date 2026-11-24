@@ -21,7 +21,7 @@ from ...core.tools.names import ToolName
 from ...core.traits import TraitName
 from ...core.traits.builtin.memory import MemoryTrait
 from ...core.traits.builtin.saia import SAIAConfig, SAIATrait
-from .agent import Agent
+from .agent import Agent, ChatAgent
 
 
 if TYPE_CHECKING:
@@ -74,10 +74,11 @@ class Factory(BaseFactory):
         self._session_storage = _session_storage(platform)
 
     def _new_agent(self, agent_class: type[CoreAgent], config: DotDict) -> CoreAgent:
-        """A prompt agent whose sessions persist where the platform's memory lives."""
-        return agent_class(  # type: ignore[call-arg]
-            lg=self._lg, config=config, session_storage=self._session_storage
-        )
+        """A prompt agent; with a ``chat`` section, a :class:`ChatAgent` whose sessions
+        persist where the platform's memory lives."""
+        if "chat" in config:
+            return ChatAgent(self._lg, config, session_storage=self._session_storage)
+        return super()._new_agent(agent_class, config)
 
     def _get_backend(self) -> Backend:
         """The SAIA backend over the platform's shared router, made on first use."""

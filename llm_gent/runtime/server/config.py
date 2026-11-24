@@ -131,8 +131,10 @@ class AgentConfigYAML(BaseModel):
     schedule: ScheduleConfigYAML | None = None
     """Optional automatic execution schedule."""
 
-    conversation: dict[str, Any] = {}
-    """How the agent's sessions keep their conversations (max_tokens, compact_threshold, etc.)."""
+    chat: dict[str, Any] | None = None
+    """The agent answers questions; its sessions' settings (max_tokens, compact_threshold, etc.).
+
+    Without it the agent has no chat."""
 
     events: dict[str, EventHandlerConfig] = {}
     """Event handlers keyed by event name (schedule, question)."""
@@ -144,7 +146,7 @@ class AgentConfigYAML(BaseModel):
         """The config an agent factory builds agent ``name`` from, as ``llm-gent serve`` passes it.
 
         Programmatic agents get module, factory and config; prompt agents
-        get conversation and events. Fields this schema does not declare
+        get chat and events. Fields this schema does not declare
         (rating, max_retries, …) pass through unchanged.
         """
         config = DotDict()
@@ -166,7 +168,8 @@ class AgentConfigYAML(BaseModel):
             config["factory"] = self.factory
             config["config"] = self.config
             return
-        config["conversation"] = self.conversation
+        if self.chat is not None:
+            config["chat"] = self.chat
         if self.events:
             config["events"] = {name: handler.model_dump() for name, handler in self.events.items()}
 

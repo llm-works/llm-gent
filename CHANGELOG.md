@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `llm_gent.core.llm.testing.DelayedScriptedBackend`: llm-infer's scripted backend with an awaited
   per-call delay and optional request recording, so concurrent runs overlap in experiments.
 - `llm_gent.core.Run`, a handle on one execution (await it, `halt()` it, check `done`).
+- Streamed asks: `ask(..., on_step=)` reports each model call as an `AskStep`; `Hub.ask_stream`
+  yields the steps, then the answer, and `POST /agents/{name}/ask/stream` sends them as
+  server-sent events.
 
 ### Changed
 
@@ -69,12 +72,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: an agent's asks run in sessions. `ask(question, session=None)` returns the
   `ExecutionResult`, whose `session` id continues the conversation; ids are issued by the agent,
   and an unknown one raises `SessionNotFoundError`. The serve API and `Hub.ask` carry the session.
-  `ConversationTrait` is removed; the `conversation` section configures the sessions.
+  `ConversationTrait` is removed.
+- Breaking: chat is opt-in. `ask` moves from `Runnable` to the `Chat` mixin; a prompt agent with a
+  `chat` section (the sessions' settings, replacing `conversation`) is a `ChatAgent`, and the
+  runtime refuses an ask to an agent without chat. `kwargs` on the bus, REST and `Hub`/`Core` ask
+  pass the agent's own `ask` keywords; `Handler.on_ask` takes them and `on_step`.
 
 ### Fixed
 
 - Structured output keeps a reply that already matches the schema; a schema with defaulted fields
   no longer has a valid reply unwrapped into an invalid one.
+- The serve API's routes failed every request with "Request must have an 'id' attribute": they
+  passed the IPC channel the request id where it takes the request.
 
 ## [0.4.1] - 2026-11-01
 

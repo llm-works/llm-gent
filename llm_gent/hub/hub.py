@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -27,8 +28,8 @@ from appinfra.time import Ticker, TickerMode
 from ..bus.protocol import (
     AgentJoined,
     AgentLeft,
+    AskProgress,
     AskRequest,
-    AskResponse,
     ErrorRequest,
     ErrorResponse,
     FeedbackRequest,
@@ -46,7 +47,8 @@ from ..bus.protocol import (
     UnregisterResponse,
 )
 from ..bus.transport import CoordinatorBusConfig, ZMQCoordinatorBus
-from ..runtime.handler import Answer
+from ..core.agent.chat import AskStep
+from ..runtime.handler import Answer, answer
 from ..runtime.service import AgentService
 from .registry import AgentEntry, AgentType, Registry
 
@@ -288,7 +290,13 @@ class Hub:
     # =========================================================================
 
     def ask(
-        self, name: str, question: str, session: str | None = None, timeout: float = 60.0
+        self,
+        name: str,
+        question: str,
+        session: str | None = None,
+        *,
+        kwargs: dict[str, Any] | None = None,
+        timeout: float = 60.0,
     ) -> Answer:
         """Ask an agent a question, in a session.
 
@@ -297,24 +305,47 @@ class Hub:
             question: Question text.
             session: The session to continue, as an earlier answer returned
                 it; ``None`` opens a new one.
+            kwargs: Keyword arguments of the agent's own ``ask``, passed through unread.
             timeout: Response timeout.
 
         Returns:
             The agent's answer and the session it ran in.
 
         Raises:
-            RuntimeError: If the agent returned a failure response, an
-                unknown session among them, or a reply that is no answer
-                to an ask.
+            RuntimeError: If the agent returned a failure response (an
+                unknown session, or an agent without chat, among them), or a
+                reply that is no answer to an ask.
         """
-        channel = self._require_channel(name)
-        req = AskRequest(question=question, session=session)
-        resp = channel.submit(req, timeout=timeout)
-        if isinstance(resp, AskResponse):
-            if not resp.success:
-                raise RuntimeError(f"Agent {name} ask failed: {resp.error}")
-            return Answer(response=resp.response, session=resp.session)
-        raise RuntimeError(f"Agent {name} did not answer the ask: {getattr(resp, 'error', resp)}")
+        req = AskRequest(question=question, session=session, kwargs=kwargs or {})
+        return answer(name, self._require_channel(name).submit(req, timeout=timeout))
+
+    def ask_stream(
+        self,
+        name: str,
+        question: str,
+        session: str | None = None,
+        *,
+        kwargs: dict[str, Any] | None = None,
+        timeout: float = 60.0,
+    ) -> Iterator[AskStep | Answer]:
+        """Ask as :meth:`ask` does, yielding the agent's steps as it reports them, then the answer.
+
+        ``timeout`` bounds the wait for each step, not the whole ask.
+        """
+        req = AskRequest(question=question, session=session, kwargs=kwargs or {}, stream=True)
+        for chunk in self.forward(name, req, timeout):
+            if isinstance(chunk, AskProgress):
+                yield AskStep(chunk.name, chunk.data)
+            else:
+                yield answer(name, chunk)
+
+    def forward(self, name: str, request: Request, timeout: float = 60.0) -> Iterator[Response]:
+        """Send ``request`` to agent ``name``; its reply chunk by chunk, as the bus delivers it.
+
+        A streamed ask's reply is its :class:`AskProgress` chunks, then the
+        response; any other reply is the response alone.
+        """
+        return self._require_channel(name).stream(request, timeout=timeout)
 
     def feedback(self, name: str, message: str, timeout: float = 30.0) -> None:
         """Send feedback to an agent.

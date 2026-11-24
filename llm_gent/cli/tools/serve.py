@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import multiprocessing as mp
 import signal
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from queue import Empty
 from typing import TYPE_CHECKING, Any
 
@@ -20,10 +20,12 @@ from appinfra.app.tools import Tool, ToolConfig
 if TYPE_CHECKING:
     from multiprocessing.queues import Queue
 
+    from ...bus.protocol import Response as BusResponse
     from ...core.traits.builtin.memory import MemoryConfig
     from ...hub import Hub
     from ...runtime.server import AgentServerConfig
     from ...runtime.server.protocol.base import Request, Response
+    from ...runtime.server.protocol.management import AskAgentRequest
 
 
 class ServeTool(Tool):
@@ -231,12 +233,17 @@ class ServeTool(Tool):
         poll_timeout: float = 0.1,
     ) -> None:
         """Process IPC requests from FastAPI subprocess."""
+        from ...runtime.server.protocol.management import AskAgentRequest
+
         while not is_shutdown():
             request = None
             try:
                 request = request_q.get(timeout=poll_timeout)
-                response = self._handle_request(hub, request)
-                response_q.put(response)
+                if isinstance(request, AskAgentRequest):
+                    for chunk in _forward(hub, request):
+                        response_q.put(chunk)
+                else:
+                    response_q.put(self._handle_request(hub, request))
             except Empty:
                 pass
             except Exception:
@@ -254,7 +261,6 @@ class ServeTool(Tool):
     def _get_ipc_handlers(self) -> dict[str, Callable[..., Response]]:
         """Get mapping of message types to handlers."""
         from ...runtime.server.protocol.management import (
-            AskAgentRequest,
             FeedbackAgentRequest,
             GetAgentRequest,
             GetInsightsRequest,
@@ -270,7 +276,6 @@ class ServeTool(Tool):
             GetAgentRequest.message_type: self._handle_get_agent,
             StartAgentRequest.message_type: self._handle_start_agent,
             StopAgentRequest.message_type: self._handle_stop_agent,
-            AskAgentRequest.message_type: self._handle_ask_agent,
             FeedbackAgentRequest.message_type: self._handle_feedback_agent,
             GetInsightsRequest.message_type: self._handle_get_insights,
         }
@@ -368,24 +373,6 @@ class ServeTool(Tool):
                 id=req.id, success=False, error=f"Agent not found: {req.agent_name}"
             )
 
-    def _handle_ask_agent(self, hub: Hub, request: Request) -> Response:
-        """Handle ask agent request."""
-        from ...runtime.server.protocol.management import (
-            AskAgentRequest,
-            AskAgentResponse,
-        )
-
-        req = (
-            request
-            if isinstance(request, AskAgentRequest)
-            else AskAgentRequest(**request.model_dump())
-        )
-        try:
-            answer = hub.ask(req.agent_name, req.question, req.session)
-            return AskAgentResponse(id=req.id, response=answer.response, session=answer.session)
-        except Exception as e:
-            return AskAgentResponse(id=req.id, success=False, error=str(e))
-
     def _handle_feedback_agent(self, hub: Hub, request: Request) -> Response:
         """Handle feedback request."""
         from ...runtime.server.protocol.management import (
@@ -453,3 +440,16 @@ class ServeTool(Tool):
             config.server.host = self.args.host
         if self.args.port:
             config.server.port = self.args.port
+
+
+def _forward(hub: Hub, req: AskAgentRequest) -> Iterator[BusResponse]:
+    """The agent's reply to the ask ``req`` carries, chunk by chunk, as the bus delivers it.
+
+    A failure to get the reply (no such agent, a timeout) is its last chunk.
+    """
+    from ...bus.protocol import AskResponse
+
+    try:
+        yield from hub.forward(req.agent_name, req.ask)
+    except Exception as e:
+        yield AskResponse(id=req.id, success=False, error=str(e))
