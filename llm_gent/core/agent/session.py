@@ -70,8 +70,8 @@ class Sessions:
     """The sessions of one agent: opened or found again for an ask (:meth:`use`), saved.
 
     With ``storage`` every session is saved under a key of the agent's
-    ``context_key``, name and the session id, so an id is valid only at the
-    agent that issued it; a session dropped from memory, or held by an
+    ``context_key``, name (no ``/`` in it) and the session id, so an id is
+    valid only at the agent that issued it; a session dropped from memory, or held by an
     earlier process, reloads from storage. Without storage sessions live
     in memory only and are never dropped.
     """
@@ -86,6 +86,10 @@ class Sessions:
         if config.compactor != "sliding_window":
             raise ConfigError(f"unsupported conversation compactor: {config.compactor!r}")
         self._lg = lg
+        # context_key is hierarchical and may hold '/'; a name without one keeps
+        # the key unambiguous: the segment before the id is always the name.
+        if "/" in identity.name:
+            raise ConfigError(f"agent {identity.name!r}: a name with '/' cannot key sessions")
         self._prefix = f"{identity.context_key}/{identity.name}/"
         if len(self._prefix) + _ID_LEN > _KEY_MAX:
             raise ConfigError(
@@ -182,10 +186,14 @@ class Sessions:
 
 
 def _check_id(session_id: str) -> None:
-    """Reject anything but a uuid in canonical form, the only ids sessions are issued under."""
+    """Reject anything but a uuid in canonical form, the only ids sessions are issued under.
+
+    The error does not repeat the rejected value: it is the caller's text, and
+    it would travel into error messages read downstream.
+    """
     try:
         canonical = str(uuid.UUID(session_id))
     except (ValueError, TypeError, AttributeError):
         canonical = None
     if canonical != session_id:
-        raise SessionNotFoundError(f"no session {session_id!r}")
+        raise SessionNotFoundError("no session: malformed session id")

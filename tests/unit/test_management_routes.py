@@ -14,6 +14,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from llm_gent.core.agent import Identity, SessionConfig, Sessions
+from llm_gent.core.errors import SessionNotFoundError
 from llm_gent.runtime.server import create_app
 from llm_gent.runtime.server.management import create_management_routes
 from llm_gent.runtime.server.protocol.management import (
@@ -34,6 +36,14 @@ pytestmark = pytest.mark.unit
 def _client(app: FastAPI) -> httpx.AsyncClient:
     """An HTTP client calling ``app`` in-process."""
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+def _session_rejection(session: str) -> str:
+    """The error an agent raises for ``session``, as it travels back to the gateway."""
+    sessions = Sessions(MagicMock(), Identity("test"), SessionConfig(), None)
+    with pytest.raises(SessionNotFoundError) as rejected, sessions.use(session):
+        pass
+    return str(rejected.value)
 
 
 class TestCreateApp:
@@ -308,6 +318,20 @@ class TestAskAgentRoute:
         )
 
         response = await client.post("/agents/test/ask", json={"question": "q", "session": "s-x"})
+
+        assert response.status_code == 400
+
+    @pytest.mark.parametrize("session", ["not found", "internal server error"])
+    async def test_a_rejected_session_is_a_client_error_whatever_it_says(
+        self, client, mock_ipc_channel, session
+    ):
+        """The session's own text does not pick the status: no 404, no 500."""
+        rejection = _session_rejection(session)
+        mock_ipc_channel.submit.return_value = AskAgentResponse(
+            id="1", success=False, error=f"Agent test ask failed: {rejection}"
+        )
+
+        response = await client.post("/agents/test/ask", json={"question": "q", "session": session})
 
         assert response.status_code == 400
 

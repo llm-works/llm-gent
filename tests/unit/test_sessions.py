@@ -158,6 +158,19 @@ class TestSessions:
         with pytest.raises(ConfigError, match="compactor"):
             _sessions(compactor="summarizing")
 
+    def test_a_slash_in_the_name_is_a_config_error(self):
+        """Else ``a/b`` + ``c`` and ``a`` + ``b/c`` would share one key prefix."""
+        with pytest.raises(ConfigError, match="'/'"):
+            _sessions(identity=Identity("b/c", context_key="a"))
+
+    def test_a_hierarchical_context_key_is_accepted(self):
+        storage = _DictStorage()
+        sessions = _sessions(storage, identity=Identity("c", context_key="a/b"))
+        with sessions.use(None) as session:
+            sessions.save(session)
+
+        assert list(storage.saved) == [f"a/b/c/{session.id}"]
+
     def test_a_key_longer_than_kelt_takes_is_a_config_error(self):
         with pytest.raises(ConfigError, match="too long"):
             _sessions(identity=Identity("a" * 120, context_key="b" * 120))
