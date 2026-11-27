@@ -39,7 +39,7 @@ def lg():
 
 @pytest.fixture
 def hub(lg):
-    """Create a hub with mocked bus (zero grace for fast tests).
+    """Create a hub with mocked bus and service runtime (zero grace for fast tests).
 
     Note: start() is intentionally not called so the heartbeat broadcaster
     thread stays dormant.  Tests that assert broadcast call counts depend
@@ -48,6 +48,7 @@ def hub(lg):
     config = HubConfig(max_restarts=3, shutdown_grace_secs=0.0)
     h = Hub(lg, config, bus_config=WorkerBusConfig())
     h._bus = MagicMock()
+    h._runtime = MagicMock()
     return h
 
 
@@ -282,6 +283,12 @@ class TestHubShutdown:
         hub._bus.broadcast.assert_called_once()
         hub._bus.stop.assert_called_once()
 
+    def test_stop_stops_the_service_runtime(self, hub):
+        """stop() stops the hub's service runtime once the bus is down."""
+        hub.stop()
+
+        hub._runtime.stop.assert_called_once_with()
+
 
 class TestHubAskFeedback:
     """Tests for ask/feedback via channels."""
@@ -413,10 +420,11 @@ class TestHubStart:
     """Tests for Hub.start()."""
 
     def test_start_configures_bus(self, hub):
-        """start() calls bus.start, wires up handlers and starts the heartbeat broadcaster."""
+        """start() starts the service runtime and bus, wires up handlers, starts the heartbeats."""
         with patch.object(hub, "_start_heartbeat_broadcaster") as start_broadcaster:
             hub.start()
 
+        hub._runtime.start.assert_called_once_with()
         hub._bus.start.assert_called_once()
         hub._bus.on_request.assert_called_once()
         hub._bus.set_route_validator.assert_called_once()
@@ -438,7 +446,7 @@ class TestHubStopExtended:
     def test_stop_catches_agent_stop_errors(self, hub, lg):
         """stop() logs warning but continues when stop_agent raises."""
         hub._runners["bad-agent"] = MagicMock()
-        hub._runners["bad-agent"].stop.side_effect = RuntimeError("boom")
+        hub._runtime.stop_service.side_effect = RuntimeError("boom")
         hub.registry.register("bad-agent")
 
         hub.stop()
@@ -574,32 +582,28 @@ class TestHubStartAgent:
     """Tests for start_agent lifecycle."""
 
     def test_start_agent_registers_and_starts(self, hub):
-        """start_agent registers agent, creates channel, starts runner."""
+        """start_agent registers agent, creates channel, spawns its service."""
         from appinfra import DotDict
 
         with (
             patch.object(hub, "_create_channel") as mock_ch,
-            patch.object(hub, "_create_runner") as mock_runner_fn,
+            patch.object(hub, "_spawn_service") as mock_spawn,
         ):
-            mock_runner = MagicMock()
-            mock_runner_fn.return_value = mock_runner
-
             entry = hub.start_agent("test-agent", DotDict({}))
 
             assert entry is not None
             assert entry.agent_type == AgentType.INJECTED
             mock_ch.assert_called_once_with("test-agent")
-            mock_runner_fn.assert_called_once()
-            mock_runner.start.assert_called_once()
-            assert hub._runners["test-agent"] is mock_runner
+            mock_spawn.assert_called_once()
+            assert hub._runners["test-agent"] is mock_spawn.return_value
 
     def test_start_agent_cleanup_on_runner_failure(self, hub):
-        """start_agent cleans up on runner creation failure."""
+        """start_agent cleans up when its service does not start."""
         from appinfra import DotDict
 
         with (
             patch.object(hub, "_create_channel"),
-            patch.object(hub, "_create_runner", side_effect=RuntimeError("no runner")),
+            patch.object(hub, "_spawn_service", side_effect=RuntimeError("no runner")),
             patch.object(hub, "_cleanup_agent_resources") as mock_cleanup,
         ):
             with pytest.raises(RuntimeError, match="no runner"):
@@ -624,50 +628,37 @@ class TestHubStartAgent:
             assert hub.registry.get("bad-agent") is None
 
 
-class TestHubCreateRunner:
-    """Tests for _create_runner execution modes."""
+class TestHubSpawnService:
+    """Tests for _spawn_service execution modes."""
 
-    def test_create_runner_thread_mode(self, hub):
-        """Thread execution mode creates ThreadRunner."""
+    @pytest.mark.parametrize(
+        ("config", "isolate"),
+        [({"execution": "thread"}, False), ({}, True), ({"execution": "process"}, True)],
+    )
+    def test_execution_mode_picks_thread_or_own_process(self, hub, config, isolate):
+        """``execution: thread`` spawns on a thread; the default and ``process`` isolate it."""
         from appinfra import DotDict
 
-        with (
-            patch("llm_gent.hub.hub.AgentService"),
-            patch("llm_gent.hub.hub.ThreadRunner") as mock_tr,
-            patch("llm_gent.hub.hub.ProcessRunner"),
-        ):
-            config = DotDict({"execution": "thread"})
-            runner = hub._create_runner("agent-1", config, None, None)
-            mock_tr.assert_called_once()
-            assert runner is mock_tr.return_value
+        with patch("llm_gent.hub.hub.AgentService") as mock_svc:
+            runner = hub._spawn_service("agent-1", DotDict(config), None, None)
 
-    def test_create_runner_process_mode_default(self, hub):
-        """Default execution mode creates ProcessRunner."""
+        hub._runtime.spawn.assert_called_once()
+        args, kwargs = hub._runtime.spawn.call_args
+        assert args[0] is mock_svc.return_value
+        assert args[1].max_retries == 3
+        assert kwargs == {"isolate": isolate}
+        hub._runtime.ready.assert_called_once()
+        assert runner is hub._runtime.spawn.return_value
+
+    def test_a_service_that_does_not_start_leaves_the_runtime(self, hub):
+        """A failed start stops the spawned service, then raises how it failed."""
         from appinfra import DotDict
 
-        with (
-            patch("llm_gent.hub.hub.AgentService"),
-            patch("llm_gent.hub.hub.ThreadRunner"),
-            patch("llm_gent.hub.hub.ProcessRunner") as mock_pr,
-        ):
-            config = DotDict({})
-            runner = hub._create_runner("agent-1", config, None, None)
-            mock_pr.assert_called_once()
-            assert runner is mock_pr.return_value
+        hub._runtime.ready.side_effect = RuntimeError("setup failed")
+        with patch("llm_gent.hub.hub.AgentService"), pytest.raises(RuntimeError, match="setup"):
+            hub._spawn_service("agent-1", DotDict({}), None, None)
 
-    def test_create_runner_explicit_process_mode(self, hub):
-        """Explicit 'process' execution mode creates ProcessRunner."""
-        from appinfra import DotDict
-
-        with (
-            patch("llm_gent.hub.hub.AgentService"),
-            patch("llm_gent.hub.hub.ThreadRunner"),
-            patch("llm_gent.hub.hub.ProcessRunner") as mock_pr,
-        ):
-            config = DotDict({"execution": "process"})
-            runner = hub._create_runner("agent-1", config, None, None)
-            mock_pr.assert_called_once()
-            assert runner is mock_pr.return_value
+        hub._runtime.stop_service.assert_called_once_with(hub._runtime.spawn.return_value)
 
 
 class TestHubCreateChannel:
@@ -690,7 +681,7 @@ class TestHubStopAgent:
     """Tests for stop_agent."""
 
     def test_stop_agent_with_runner(self, hub):
-        """stop_agent stops runner, cleans up, unregisters, broadcasts."""
+        """stop_agent stops its service, cleans up, unregisters, broadcasts."""
         hub.registry.register("agent-1")
         mock_runner = MagicMock()
         hub._runners["agent-1"] = mock_runner
@@ -699,7 +690,7 @@ class TestHubStopAgent:
 
         hub.stop_agent("agent-1")
 
-        mock_runner.stop.assert_called_once()
+        hub._runtime.stop_service.assert_called_once_with(mock_runner)
         assert "agent-1" not in hub._runners
         assert "agent-1" not in hub._channels
         assert hub.registry.get("agent-1") is None
@@ -720,11 +711,10 @@ class TestHubStopAgent:
         assert hub.registry.get("agent-1") is None
 
     def test_stop_agent_cleanup_on_runner_error(self, hub):
-        """stop_agent cleans up even if runner.stop() raises."""
+        """stop_agent cleans up even if stopping its service raises."""
         hub.registry.register("agent-1")
-        mock_runner = MagicMock()
-        mock_runner.stop.side_effect = RuntimeError("stop failed")
-        hub._runners["agent-1"] = mock_runner
+        hub._runtime.stop_service.side_effect = RuntimeError("stop failed")
+        hub._runners["agent-1"] = MagicMock()
         hub._bus.broadcast.reset_mock()
 
         with pytest.raises(RuntimeError, match="stop failed"):

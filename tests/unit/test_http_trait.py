@@ -3,7 +3,6 @@
 
 """Tests for HTTP trait and server components."""
 
-from queue import Empty
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -94,9 +93,21 @@ class TestHTTPServer:
         server = HTTPServer(MagicMock(), config, router_factory)
 
         assert server.config == config
-        assert server.request_queue is not None
-        assert server.response_queue is not None
         assert not server.is_running
+
+    def test_queues_are_the_started_servers(self):
+        """The IPC queues are the ones the appinfra server makes; none before start()."""
+        server = HTTPServer(MagicMock(), HTTPServerConfig(), MagicMock())
+        with pytest.raises(RuntimeError, match="not started"):
+            _ = server.request_queue
+
+        built = MagicMock()
+        with patch.object(server, "_build_server", return_value=built):
+            server.start()
+
+        built.start_subprocess.assert_called_once_with()
+        assert server.request_queue is built.request_queue
+        assert server.response_queue is built.response_queue
 
 
 class TestHTTPTrait:
@@ -572,16 +583,10 @@ class TestHTTPTraitLifecycle:
         agent.lg = MagicMock()
         return agent
 
-    @patch("llm_gent.runtime.server.http.mp.Queue")
     @patch("appinfra.app.fastapi.ServerBuilder")
-    def test_on_start_creates_server(self, mock_builder_cls, mock_queue, mock_logger, mock_agent):
+    def test_on_start_creates_server(self, mock_builder_cls, mock_logger, mock_agent):
         """Verify on_start creates server with correct configuration."""
-        # Configure mock queue to raise Empty on get() so IPC loop doesn't process mock requests
-        queue_instance = MagicMock()
-        queue_instance.get.side_effect = Empty
-        mock_queue.return_value = queue_instance
         mock_server = MagicMock()
-        mock_server.start_subprocess.return_value = MagicMock()
 
         mock_builder = MagicMock()
         mock_builder_cls.return_value = mock_builder
@@ -610,17 +615,10 @@ class TestHTTPTraitLifecycle:
         start_ipc.assert_called_once_with()
         trait.on_stop()
 
-    @patch("llm_gent.runtime.server.http.mp.Queue")
     @patch("appinfra.app.fastapi.ServerBuilder")
-    def test_on_stop_stops_server(self, mock_builder_cls, mock_queue, mock_logger, mock_agent):
+    def test_on_stop_stops_server(self, mock_builder_cls, mock_logger, mock_agent):
         """Verify on_stop stops server and cleans up."""
-        # Configure mock queue to raise Empty on get() so IPC loop doesn't process mock requests
-        queue_instance = MagicMock()
-        queue_instance.get.side_effect = Empty
-        mock_queue.return_value = queue_instance
-        mock_process = MagicMock()
         mock_server = MagicMock()
-        mock_server.start_subprocess.return_value = mock_process
 
         mock_builder = MagicMock()
         mock_builder_cls.return_value = mock_builder

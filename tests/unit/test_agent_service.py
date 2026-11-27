@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from appinfra import DotDict
+from appinfra.runtime import StopToken
 
 from llm_gent.runtime.service import AgentService
 
@@ -44,13 +45,15 @@ def bus_config():
 
 @pytest.fixture
 def service(lg, config, llm_config, bus_config):
-    return AgentService(
+    svc = AgentService(
         lg=lg,
         agent_name="test-agent",
         config=config,
         llm_config=llm_config,
         bus_config=bus_config,
     )
+    svc.stopping = StopToken()  # as the runtime sets it before setup()
+    return svc
 
 
 # =============================================================================
@@ -82,7 +85,6 @@ class TestInit:
     def test_defaults(self, service):
         assert service._runner is None
         assert service._healthy is False
-        assert service._shutdown_event is None
         assert service._variables == {}
         assert service._learn_config is None
         assert service._factory_module == "llm_gent.agents.default"
@@ -132,6 +134,17 @@ class TestSetup:
     @patch("llm_gent.runtime.service.ManagedAgentRunner")
     @patch("llm_gent.runtime.service.AgentService._load_factory")
     @patch("llm_gent.runtime.service.PlatformFactory")
+    def test_the_runner_stops_on_the_services_token(
+        self, mock_platform_factory, mock_load_factory, mock_runner_cls, service
+    ):
+        """The runner gets the token the runtime stops the service with."""
+        service.setup()
+
+        assert mock_runner_cls.call_args.kwargs["stopping"] is service.stopping
+
+    @patch("llm_gent.runtime.service.ManagedAgentRunner")
+    @patch("llm_gent.runtime.service.AgentService._load_factory")
+    @patch("llm_gent.runtime.service.PlatformFactory")
     def test_failed_agent_build_closes_platform(
         self, mock_platform_factory, mock_load_factory, mock_runner_cls, service
     ):
@@ -175,6 +188,7 @@ class TestSetup:
             llm_config=llm_config,
             bus_config=bus_config,
         )
+        svc.stopping = StopToken()
         mock_factory = MagicMock()
         mock_load_factory.return_value = mock_factory
 
@@ -200,7 +214,6 @@ class TestRun:
 
         service.run()
 
-        assert service._healthy is True
         runner.run.assert_called_once()
 
     def test_closes_platform_after_runner_stops(self, service):
@@ -243,28 +256,6 @@ class TestRun:
 
 
 # =============================================================================
-# teardown()
-# =============================================================================
-
-
-class TestTeardown:
-    def test_requests_shutdown_and_sets_unhealthy(self, service):
-        runner = MagicMock()
-        service._runner = runner
-        service._healthy = True
-
-        service.teardown()
-
-        runner.request_shutdown.assert_called_once()
-        assert service._healthy is False
-
-    def test_safe_when_no_runner(self, service):
-        """teardown() should not raise when runner is None."""
-        service.teardown()
-        assert service._healthy is False
-
-
-# =============================================================================
 # is_healthy()
 # =============================================================================
 
@@ -273,39 +264,40 @@ class TestIsHealthy:
     def test_initially_false(self, service):
         assert service.is_healthy() is False
 
-    def test_true_after_run(self, service):
+    def test_false_once_run_returns(self, service):
         service._runner = MagicMock()
         service.run()
-        assert service.is_healthy() is True
-
-    def test_false_after_teardown(self, service):
-        service._runner = MagicMock()
-        service.run()
-        service.teardown()
         assert service.is_healthy() is False
 
 
 # =============================================================================
-# _start_shutdown_watcher()
+# spawn_agent()
 # =============================================================================
 
 
-class TestStartShutdownWatcher:
-    def test_noop_when_no_event(self, service):
-        """No thread should be spawned when _shutdown_event is None."""
-        with patch("llm_gent.runtime.service.threading.Thread") as mock_thread:
-            service._start_shutdown_watcher()
-            mock_thread.assert_not_called()
+class TestSpawnAgent:
+    def test_spawns_and_waits_until_it_runs(self, service):
+        from llm_gent.runtime.service import READY_TIMEOUT, spawn_agent
 
-    def test_spawns_thread_when_event_set(self, service):
-        service._shutdown_event = MagicMock()
-        with patch("llm_gent.runtime.service.threading.Thread") as mock_thread:
-            service._start_shutdown_watcher()
-            mock_thread.assert_called_once()
-            mock_thread.return_value.start.assert_called_once()
-            call_kwargs = mock_thread.call_args[1]
-            assert call_kwargs["daemon"] is True
-            assert "test-agent" in call_kwargs["name"]
+        runtime = MagicMock()
+        policy = MagicMock()
+
+        runner = spawn_agent(runtime, service, policy, isolate=True)
+
+        runtime.spawn.assert_called_once_with(service, policy, isolate=True)
+        runtime.ready.assert_called_once_with(runner, timeout=READY_TIMEOUT)
+        assert runner is runtime.spawn.return_value
+
+    def test_a_service_that_does_not_start_leaves_the_runtime(self, service):
+        from llm_gent.runtime.service import spawn_agent
+
+        runtime = MagicMock()
+        runtime.ready.side_effect = RuntimeError("setup failed")
+
+        with pytest.raises(RuntimeError, match="setup failed"):
+            spawn_agent(runtime, service, None, isolate=False)
+
+        runtime.stop_service.assert_called_once_with(runtime.spawn.return_value)
 
 
 # =============================================================================

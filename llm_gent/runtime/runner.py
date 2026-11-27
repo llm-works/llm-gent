@@ -20,6 +20,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from appinfra.runtime import StopToken
 from appinfra.service import BufferedChannel, ChannelTimeoutError
 from appinfra.time import Ticker, TickerMode
 
@@ -389,7 +390,9 @@ class ManagedAgentRunner(BaseAgentRunner):
 
     Wraps an Agent instance, adapting it to the Handler protocol.
     Adds scheduled execution via appinfra's Ticker and supports
-    agent-controlled loops via agent.run().
+    agent-controlled loops via agent.run(). ``stopping`` is the token of the
+    service the runner runs in: once it is set the runner's loops end, as
+    on :meth:`request_shutdown`.
     """
 
     def __init__(
@@ -397,6 +400,7 @@ class ManagedAgentRunner(BaseAgentRunner):
         lg: Logger,
         agent: RunnableAgent,
         bus_config: WorkerBusConfig,
+        stopping: StopToken,
         schedule_interval: float | None = None,
     ) -> None:
         super().__init__(
@@ -406,6 +410,7 @@ class ManagedAgentRunner(BaseAgentRunner):
             bus_config=bus_config,
         )
         self._agent = agent
+        self._stopping = stopping
         self._schedule_interval = schedule_interval
 
         if schedule_interval is not None and schedule_interval > 0:
@@ -417,6 +422,19 @@ class ManagedAgentRunner(BaseAgentRunner):
             )
         else:
             self._ticker = None
+
+    @property
+    def _running(self) -> bool:
+        """False once shutdown is requested or the service's token is set."""
+        return not (self._stop_event.is_set() or self._stopping.is_set())
+
+    @_running.setter
+    def _running(self, value: bool) -> None:
+        """Set or clear the shutdown request; the service's token stays as it is."""
+        if value:
+            self._stop_event.clear()
+        else:
+            self._stop_event.set()
 
     def _get_stats(self) -> dict[str, Any]:
         """Report agent's cycle count in heartbeat stats."""
@@ -461,9 +479,10 @@ class ManagedAgentRunner(BaseAgentRunner):
     def _run_agent_loop(self) -> None:
         """Delegate to agent's run() method, poll requests in background.
 
-        Note: ShutdownNotice sets _stop_event but cannot interrupt a blocking
-        agent.run() call.  Agents using run() should check runner._stop_event
-        periodically for cooperative cancellation.
+        Note: a ShutdownNotice or the service's ``stopping`` token cannot
+        interrupt a blocking agent.run() call.  Agents using run() should check
+        runner._running periodically for cooperative cancellation; it turns
+        False on either.
         """
         # Start request poller in background thread
         poller = threading.Thread(

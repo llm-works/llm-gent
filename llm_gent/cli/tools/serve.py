@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import multiprocessing as mp
 import signal
 from collections.abc import Callable, Iterator
 from queue import Empty
@@ -163,8 +162,6 @@ class ServeTool(Tool):
     ) -> None:
         """Run the server with signal handling."""
 
-        request_q: Queue[Any] = mp.Queue()
-        response_q: Queue[Any] = mp.Queue()
         shutdown_state = {"requested": False}
 
         def do_shutdown() -> None:
@@ -173,17 +170,17 @@ class ServeTool(Tool):
                 hub.stop()
 
         self._install_signal_handlers(do_shutdown)
-        server = self._build_server(config, request_q, response_q)
+        server = self._build_server(config)
 
         try:
-            process = server.start_subprocess()
+            server.start_subprocess()
 
             def is_shutdown() -> bool:
-                return shutdown_state["requested"] or not process.is_alive()
+                return shutdown_state["requested"] or not server.is_running
 
-            self._ipc_loop(hub, request_q, response_q, is_shutdown)
-            process.join()
+            self._ipc_loop(hub, server.request_queue, server.response_queue, is_shutdown)
         finally:
+            server.stop()
             do_shutdown()
 
     def _install_signal_handlers(self, do_shutdown: Callable[[], None]) -> None:
@@ -200,23 +197,20 @@ class ServeTool(Tool):
         signal.signal(signal.SIGTERM, shutdown_handler)
         signal.signal(signal.SIGINT, shutdown_handler)
 
-    def _build_server(
-        self,
-        config: AgentServerConfig,
-        request_q: Queue[Any],
-        response_q: Queue[Any],
-    ) -> Any:
-        """Build the FastAPI server with subprocess mode and IPC."""
-        from appinfra.app.fastapi.runtime.server import Server
+    def _build_server(self, config: AgentServerConfig) -> Any:
+        """Build the FastAPI server with subprocess mode and IPC; its queues are the server's.
 
-        from ...runtime.server.management import create_management_routes
+        The routes are built in the server's process (``Lazy``): a FastAPI router does not pickle.
+        """
+        from appinfra.app.fastapi import Lazy
+        from appinfra.app.fastapi.runtime.server import Server
 
         server: Server = (
             ServerBuilder(self.lg, "agent-gateway")
             .with_config(config.server)
-            .subprocess.with_ipc(request_q, response_q)
+            .subprocess.with_ipc()
             .done()
-            .routes.with_router(create_management_routes())
+            .routes.with_router(Lazy("llm_gent.runtime.server.management:create_management_routes"))
             .done()
             .uvicorn.with_config(config.server.uvicorn)
             .done()

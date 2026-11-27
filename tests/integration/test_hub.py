@@ -6,7 +6,8 @@
 from typing import Any
 
 import pytest
-from appinfra.service import BufferedChannel
+from appinfra import DotDict
+from appinfra.service import BufferedChannel, State
 
 from llm_gent.bus.protocol import RegisterRequest, UnregisterRequest
 from llm_gent.bus.transport import ZMQWorkerBus
@@ -132,3 +133,40 @@ class TestHubMultipleWorkers:
         assert hub.registry.count == 3
         ids = {a.id for a in hub.registry.list_agents()}
         assert ids == {"worker-0", "worker-1", "worker-2"}
+
+
+def _agent_config(execution: str) -> DotDict:
+    """A default prompt agent's config, run on a thread or in a process of its own."""
+    return DotDict({"identity": {"name": "svc-agent"}, "execution": execution})
+
+
+class TestInjectedAgentService:
+    """An injected agent runs as a service on the hub's runtime until it is stopped."""
+
+    @pytest.fixture
+    def hub(self, test_logger):
+        hub, _ = start_on_free_ports(lambda p: _start_hub(test_logger, p))
+        yield hub
+        hub.stop()
+
+    def test_thread_agent_runs_until_stopped(self, hub):
+        hub.start_agent("svc-agent", _agent_config("thread"))
+        runner = hub._runners["svc-agent"]
+        assert runner.state is State.RUNNING
+
+        hub.stop_agent("svc-agent")
+
+        assert runner.state is State.STOPPED
+        assert "svc-agent" not in hub._runtime.services
+
+    def test_process_agent_ends_on_its_token(self, hub):
+        """The isolated agent's run returns once stopped: its process exits 0, not by a signal."""
+        hub.start_agent("svc-agent", _agent_config("process"))
+        runner = hub._runners["svc-agent"]
+        assert runner.state is State.RUNNING
+        task = runner.task  # the runner lets go of it once the service has left
+
+        hub.stop_agent("svc-agent")
+
+        assert task.process.detail().exitcode == 0
+        assert "svc-agent" not in hub._runtime.services

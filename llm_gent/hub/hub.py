@@ -6,7 +6,7 @@
 The Hub is the single coordinator for a swarm. It owns:
 - ZMQ bus (coordinator sockets)
 - Unified agent registry (membership, health, config, state)
-- appinfra Manager (injected agent lifecycle with restart policies)
+- appinfra service Runtime (injected agents as services, with restart policies)
 - BufferedChannel per agent (controller-to-agent request/response)
 
 All agent operations go through the Hub: start, stop, ask, feedback.
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from appinfra import DotDict
-from appinfra.service import BufferedChannel, ProcessRunner, RestartPolicy, ThreadRunner
+from appinfra.service import BufferedChannel, RestartPolicy, Runner, Runtime
 from appinfra.time import Ticker, TickerMode
 
 from ..bus.protocol import (
@@ -49,7 +49,7 @@ from ..bus.protocol import (
 from ..bus.transport import CoordinatorBusConfig, ZMQCoordinatorBus
 from ..core.agent.chat import AskStep
 from ..runtime.handler import Answer, answer
-from ..runtime.service import AgentService
+from ..runtime.service import AgentService, spawn_agent
 from .registry import AgentEntry, AgentType, Registry
 
 
@@ -106,7 +106,8 @@ class Hub:
 
         self._bus = ZMQCoordinatorBus(lg, config.bus)
         self._registry = Registry(dead_timeout=config.dead_timeout)
-        self._runners: dict[str, ThreadRunner | ProcessRunner] = {}
+        self._runtime = Runtime(lg, name="hub")
+        self._runners: dict[str, Runner] = {}
         self._channels: dict[str, BufferedChannel[Any, Any]] = {}
 
         # Heartbeat broadcaster state
@@ -127,7 +128,8 @@ class Hub:
     # =========================================================================
 
     def start(self) -> None:
-        """Start the hub: bind bus, begin accepting connections."""
+        """Start the hub: start its service runtime, bind bus, begin accepting connections."""
+        self._runtime.start()
         self._bus.start()
         self._bus.on_request(self._handle_bus_request)
         self._bus.set_route_validator(lambda agent_id: self._registry.get(agent_id) is not None)
@@ -143,8 +145,8 @@ class Hub:
         1. Stop heartbeat broadcaster (no more challenges).
         2. Broadcast ShutdownNotice so agents can clean up.
         3. Wait grace period for agents to react.
-        4. Force-stop injected agent runners.
-        5. Tear down bus.
+        4. Force-stop injected agent services.
+        5. Tear down bus, then stop the service runtime.
         """
         self._stop_heartbeat_broadcaster()
         self._broadcast_shutdown(reason)
@@ -161,6 +163,7 @@ class Hub:
                 self._lg.warning("error stopping agent", extra={"agent": name, "exception": e})
 
         self._bus.stop()
+        self._runtime.stop()
         self._lg.info("hub stopped")
 
     def _broadcast_shutdown(self, reason: str) -> None:
@@ -199,18 +202,17 @@ class Hub:
         llm_config: Any | None = None,
         learn_config: Any | None = None,
     ) -> AgentEntry:
-        """Start an injected agent as a threaded service.
+        """Start an injected agent as a service on the hub's runtime.
 
         Registers the agent, creates a BufferedChannel over ZMQ transport,
-        and starts an AgentService in a ThreadRunner with restart policy.
+        and spawns an AgentService with restart policy, returning once it runs.
         """
         config["name"] = name
         entry = self._registry.register(agent_id=name, agent_type=AgentType.INJECTED, config=config)
 
         try:
             self._create_channel(name)
-            runner = self._create_runner(name, config, llm_config, learn_config)
-            runner.start()
+            runner = self._spawn_service(name, config, llm_config, learn_config)
         except Exception:
             self._cleanup_agent_resources(name)
             self._registry.unregister(name)
@@ -226,13 +228,13 @@ class Hub:
         channel: BufferedChannel[Any, Any] = BufferedChannel(transport)
         self._channels[name] = channel
 
-    def _create_runner(
+    def _spawn_service(
         self, name: str, config: DotDict, llm_config: Any | None, learn_config: Any | None
-    ) -> ThreadRunner | ProcessRunner:
-        """Create AgentService wrapped in a runner with restart policy.
+    ) -> Runner:
+        """Spawn the agent's AgentService with restart policy; return once it runs.
 
-        Respects the ``execution`` config field: ``"thread"`` uses ThreadRunner,
-        ``"process"`` (default) uses ProcessRunner for subprocess isolation.
+        Respects the ``execution`` config field: ``"thread"`` runs it on a thread,
+        ``"process"`` (default) in a process of its own.
         """
         service = AgentService(
             lg=self._lg,
@@ -248,10 +250,8 @@ class Hub:
             max_retries=self._config.max_restarts,
             restart_on_failure=True,
         )
-        execution = config.get("execution", "process")
-        if execution == "thread":
-            return ThreadRunner(service, policy=policy)
-        return ProcessRunner(service, policy=policy)
+        isolate = config.get("execution", "process") != "thread"
+        return spawn_agent(self._runtime, service, policy, isolate=isolate)
 
     def stop_agent(self, name: str) -> None:
         """Stop an injected agent.
@@ -262,7 +262,7 @@ class Hub:
         runner = self._runners.pop(name, None)
         try:
             if runner is not None:
-                runner.stop()
+                self._runtime.stop_service(runner)
         finally:
             self._cleanup_agent_resources(name)
             was_registered = self._registry.unregister(name)
