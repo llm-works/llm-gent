@@ -9,7 +9,6 @@ handlers forward requests to main process via queues.
 
 from __future__ import annotations
 
-import multiprocessing as mp
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -66,9 +65,9 @@ class HTTPServer:
             return router
 
         server = HTTPServer(lg, HTTPServerConfig(port=8080), create_routes)
-        server.start()  # Non-blocking, starts subprocess
+        server.start()  # Non-blocking: returns once the subprocess serves
 
-        # Main process reads requests and sends responses
+        # Main process reads requests and sends responses; the queues exist once started
         while running:
             request = server.request_queue.get(timeout=0.1)
             response = handle(request)
@@ -93,10 +92,7 @@ class HTTPServer:
         self._lg = lg
         self._config = config
         self._router_factory = router_factory
-        self._request_q: Queue[Any] = mp.Queue()
-        self._response_q: Queue[Any] = mp.Queue()
         self._server: Any = None  # appinfra.app.fastapi.Server (external type)
-        self._process: mp.Process | None = None
 
     @property
     def config(self) -> HTTPServerConfig:
@@ -105,30 +101,45 @@ class HTTPServer:
 
     @property
     def request_queue(self) -> Queue[Any]:
-        """Queue for receiving requests from FastAPI subprocess."""
-        return self._request_q
+        """Queue for receiving requests from FastAPI subprocess.
+
+        Raises:
+            RuntimeError: The server is not started.
+        """
+        queue: Queue[Any] = self._started().request_queue
+        return queue
 
     @property
     def response_queue(self) -> Queue[Any]:
-        """Queue for sending responses to FastAPI subprocess."""
-        return self._response_q
+        """Queue for sending responses to FastAPI subprocess.
+
+        Raises:
+            RuntimeError: The server is not started.
+        """
+        queue: Queue[Any] = self._started().response_queue
+        return queue
 
     @property
     def is_running(self) -> bool:
         """Check if server subprocess is running."""
-        return self._process is not None and self._process.is_alive()
+        return self._server is not None and bool(self._server.is_running)
 
     def start(self) -> None:
-        """Start the server in subprocess (non-blocking)."""
+        """Start the server in its subprocess; returns once it serves."""
         self._server = self._build_server()
-        self._process = self._server.start_subprocess()
+        self._server.start_subprocess()
 
     def stop(self) -> None:
         """Stop the server subprocess."""
         if self._server:
             self._server.stop()
             self._server = None
-            self._process = None
+
+    def _started(self) -> Any:
+        """The appinfra server, once :meth:`start` has built it."""
+        if self._server is None:
+            raise RuntimeError("HTTP server not started")
+        return self._server
 
     def _build_server(self) -> Any:
         """Build the FastAPI server with subprocess mode."""
@@ -143,7 +154,7 @@ class HTTPServer:
             .with_title(self._config.title)
             .with_description(self._config.description)
             .with_version(self._config.version)
-            .subprocess.with_ipc(self._request_q, self._response_q)
+            .subprocess.with_ipc()
             .with_response_timeout(self._config.response_timeout)
             .with_auto_restart(enabled=self._config.auto_restart)
             .with_max_restarts(self._config.max_restarts)

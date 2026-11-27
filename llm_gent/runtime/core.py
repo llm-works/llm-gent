@@ -3,7 +3,7 @@
 
 """Runtime core - orchestrates agent lifecycle via appinfra.service.
 
-Core manages agent services using appinfra's ThreadRunner/ProcessRunner.
+Core runs agents as services on an appinfra service Runtime.
 Controller-to-agent communication uses appinfra's BufferedChannel backed
 by ZMQ transports. Pub/sub (heartbeats, broadcasts) goes through the bus.
 """
@@ -12,11 +12,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from appinfra.service import BufferedChannel, ProcessRunner, State, ThreadRunner
+from appinfra.service import BufferedChannel, Runner, Runtime, State
 
 from .handle import AgentHandle, AgentInfo
 from .handler import Answer, answer
-from .service import AgentService
+from .service import AgentService, spawn_agent
 
 
 if TYPE_CHECKING:
@@ -29,14 +29,15 @@ if TYPE_CHECKING:
 class Core:
     """Runtime core - orchestrates agent lifecycle.
 
-    Uses appinfra's runners for process/thread management and
-    BufferedChannel over ZMQ transport for controller-to-agent
-    request/response communication.
+    Spawns each agent as a service on ``runtime``, a started appinfra service
+    Runtime the caller owns and stops, and uses BufferedChannel over ZMQ
+    transport for controller-to-agent request/response communication.
     """
 
     def __init__(
         self,
         lg: Logger,
+        runtime: Runtime,
         registry: AgentRegistry,
         llm_config: Any,
         bus: ZMQCoordinatorBus,
@@ -46,6 +47,7 @@ class Core:
         factory_module: str = "llm_gent.agents.default",
     ) -> None:
         self._lg = lg
+        self._runtime = runtime
         self._registry = registry
         self._llm_config = llm_config
         self._bus = bus
@@ -53,7 +55,7 @@ class Core:
         self._learn_config = learn_config
         self._variables = variables or {}
         self._factory_module = factory_module
-        self._runners: dict[str, ThreadRunner | ProcessRunner] = {}
+        self._runners: dict[str, Runner] = {}
         self._channels: dict[str, BufferedChannel[Any, Any]] = {}
 
     @property
@@ -191,7 +193,7 @@ class Core:
         return handle
 
     def _start_service(self, handle: AgentHandle) -> None:
-        """Create AgentService, ZMQ transport + channel, and start runner."""
+        """Create ZMQ transport + channel, and spawn the AgentService; return once it runs."""
         config = handle.config
         config["name"] = handle.name
 
@@ -200,8 +202,7 @@ class Core:
         self._channels[handle.name] = channel
 
         try:
-            runner = self._create_runner(handle)
-            runner.start()
+            runner = self._spawn_service(handle)
         except Exception:
             self._channels.pop(handle.name, None)
             channel.close()
@@ -211,10 +212,10 @@ class Core:
         self._runners[handle.name] = runner
         self._lg.debug("agent service started", extra={"agent": handle.name})
 
-    def _create_runner(self, handle: AgentHandle) -> ThreadRunner | ProcessRunner:
-        """Create an AgentService wrapped in a runner."""
+    def _spawn_service(self, handle: AgentHandle) -> Runner:
+        """Spawn the agent's AgentService: on a thread for ``execution: thread``,
+        else in a process of its own."""
         config = handle.config
-        execution = config.get("execution", "process")
 
         service = AgentService(
             lg=self._lg,
@@ -226,21 +227,20 @@ class Core:
             variables=self._variables,
             factory_module=config.get("module", self._factory_module),
         )
-        if execution == "thread":
-            return ThreadRunner(service)
-        return ProcessRunner(service)
+        isolate = config.get("execution", "process") != "thread"
+        return spawn_agent(self._runtime, service, None, isolate=isolate)
 
     def _stop_service(self, name: str) -> None:
-        """Stop the agent's runner and clean up channel/transport.
+        """Stop the agent's service and clean up channel/transport.
 
-        Always cleans up channel and transport even if runner.stop() fails.
-        Re-raises runner errors after cleanup.
+        Always cleans up channel and transport even if the stop fails.
+        Re-raises the stop's error after cleanup.
         """
         runner = self._runners.pop(name, None)
         runner_error: Exception | None = None
         try:
             if runner is not None:
-                runner.stop()
+                self._runtime.stop_service(runner)
         except Exception as e:
             runner_error = e
         finally:

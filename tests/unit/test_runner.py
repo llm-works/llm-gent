@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from appinfra.runtime import StopToken
 
 from llm_gent.agents.default import ChatAgent
 from llm_gent.bus.protocol import (
@@ -63,7 +64,7 @@ def bus_config():
 def managed_runner(mock_agent, bus_config):
     """Create ManagedAgentRunner (not connected to bus)."""
     lg = MagicMock()
-    return ManagedAgentRunner(lg=lg, agent=mock_agent, bus_config=bus_config)
+    return ManagedAgentRunner(lg=lg, agent=mock_agent, bus_config=bus_config, stopping=StopToken())
 
 
 class MockHandler:
@@ -601,7 +602,9 @@ class TestManagedAgentRunner:
     def test_runner_init(self, mock_agent, bus_config):
         """Runner initializes with bus config."""
         lg = MagicMock()
-        runner = ManagedAgentRunner(lg=lg, agent=mock_agent, bus_config=bus_config)
+        runner = ManagedAgentRunner(
+            lg=lg, agent=mock_agent, bus_config=bus_config, stopping=StopToken()
+        )
 
         assert runner._agent is mock_agent
         assert runner._bus_config is bus_config
@@ -611,7 +614,11 @@ class TestManagedAgentRunner:
         """Runner creates Ticker when schedule_interval provided."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=60.0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=60.0,
         )
 
         assert runner._ticker is not None
@@ -620,10 +627,61 @@ class TestManagedAgentRunner:
         """Schedule interval of 0 (continuous) does not create a Ticker."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=0,
         )
 
         assert runner._ticker is None
+
+
+class TestManagedAgentRunnerStopping:
+    """The service's token stops the runner's loops."""
+
+    def _runner(self, mock_agent, bus_config, stopping):
+        return ManagedAgentRunner(
+            lg=MagicMock(), agent=mock_agent, bus_config=bus_config, stopping=stopping
+        )
+
+    def test_stops_running_once_the_token_is_set(self, mock_agent, bus_config):
+        stopping = StopToken()
+        runner = self._runner(mock_agent, bus_config, stopping)
+        assert runner._running is True
+
+        stopping.stop()
+
+        assert runner._running is False
+
+    def test_clearing_a_shutdown_request_leaves_the_token_set(self, mock_agent, bus_config):
+        stopping = StopToken()
+        runner = self._runner(mock_agent, bus_config, stopping)
+        stopping.stop()
+
+        runner._running = True
+
+        assert runner._running is False
+
+    def test_a_shutdown_request_still_stops_it(self, mock_agent, bus_config):
+        runner = self._runner(mock_agent, bus_config, StopToken())
+
+        runner.request_shutdown()
+
+        assert runner._running is False
+
+    def test_framework_loop_ends_on_the_token(self, mock_agent, bus_config):
+        """A token set during a poll ends the loop before it polls again."""
+        stopping = StopToken()
+        runner = self._runner(mock_agent, bus_config, stopping)
+
+        with (
+            patch.object(runner, "_poll_requests", side_effect=stopping.stop) as poll,
+            patch("llm_gent.runtime.runner.time.sleep"),
+        ):
+            runner._run_framework_loop()
+
+        poll.assert_called_once()
 
 
 class TestManagedGetStats:
@@ -633,7 +691,9 @@ class TestManagedGetStats:
         """Stats include the agent's cycle count."""
         mock_agent.cycle_count = 42
         lg = MagicMock()
-        runner = ManagedAgentRunner(lg=lg, agent=mock_agent, bus_config=bus_config)
+        runner = ManagedAgentRunner(
+            lg=lg, agent=mock_agent, bus_config=bus_config, stopping=StopToken()
+        )
 
         stats = runner._get_stats()
 
@@ -666,7 +726,9 @@ class TestManagedRunLoop:
         """When agent has run(), delegates to _run_agent_loop."""
         mock_agent.run = MagicMock()  # Agent has a run() method
         lg = MagicMock()
-        runner = ManagedAgentRunner(lg=lg, agent=mock_agent, bus_config=bus_config)
+        runner = ManagedAgentRunner(
+            lg=lg, agent=mock_agent, bus_config=bus_config, stopping=StopToken()
+        )
 
         with patch.object(runner, "_run_agent_loop") as mock_agent_loop:
             runner._run_loop()
@@ -676,7 +738,9 @@ class TestManagedRunLoop:
         """When agent has no run(), uses _run_framework_loop."""
         del mock_agent.run  # Remove run attribute
         lg = MagicMock()
-        runner = ManagedAgentRunner(lg=lg, agent=mock_agent, bus_config=bus_config)
+        runner = ManagedAgentRunner(
+            lg=lg, agent=mock_agent, bus_config=bus_config, stopping=StopToken()
+        )
 
         with patch.object(runner, "_run_framework_loop") as mock_fw_loop:
             runner._run_loop()
@@ -691,7 +755,9 @@ class TestManagedRequestHandling:
         chat_agent.ask.return_value = ExecutionResult(
             success=True, content="Test answer", session="s-new"
         )
-        runner = ManagedAgentRunner(lg=MagicMock(), agent=chat_agent, bus_config=bus_config)
+        runner = ManagedAgentRunner(
+            lg=MagicMock(), agent=chat_agent, bus_config=bus_config, stopping=StopToken()
+        )
         req = AskRequest(question="What?")
 
         resp = runner._handle_request(req)
@@ -711,7 +777,9 @@ class TestManagedRequestHandling:
     def test_handle_ask_error(self, chat_agent, bus_config):
         """Ask request returns error response on exception."""
         chat_agent.ask.side_effect = RuntimeError("LLM failed")
-        runner = ManagedAgentRunner(lg=MagicMock(), agent=chat_agent, bus_config=bus_config)
+        runner = ManagedAgentRunner(
+            lg=MagicMock(), agent=chat_agent, bus_config=bus_config, stopping=StopToken()
+        )
         req = AskRequest(question="What?")
 
         resp = runner._handle_request(req)
@@ -806,7 +874,11 @@ class TestManagedScheduling:
         """Continuous mode (interval=0) always runs cycle."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=0,
         )
 
         assert runner._should_run_cycle() is True
@@ -819,7 +891,11 @@ class TestManagedScheduling:
         """Scheduled mode delegates to ticker.try_tick()."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=60.0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=60.0,
         )
         runner._ticker.try_tick = MagicMock(return_value=True)
 
@@ -830,7 +906,11 @@ class TestManagedScheduling:
         """Ticker not ready returns False."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=60.0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=60.0,
         )
         runner._ticker.try_tick = MagicMock(return_value=False)
 
@@ -855,7 +935,11 @@ class TestManagedExecutionMode:
         """Schedule interval 0 => continuous mode."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=0,
         )
         assert runner._get_execution_mode() == "continuous"
 
@@ -863,7 +947,11 @@ class TestManagedExecutionMode:
         """Positive schedule interval with ticker => scheduled mode."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=30.0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=30.0,
         )
         assert runner._get_execution_mode() == "scheduled"
 
@@ -879,7 +967,11 @@ class TestManagedCalculateSleep:
         """With ticker, sleep delegates to ticker.time_until_next_tick()."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=60.0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=60.0,
         )
         runner._ticker.time_until_next_tick = MagicMock(return_value=5.0)
 
@@ -889,7 +981,11 @@ class TestManagedCalculateSleep:
         """Negative time_until_next_tick is clamped to 0."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=60.0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=60.0,
         )
         runner._ticker.time_until_next_tick = MagicMock(return_value=-1.0)
 
@@ -899,7 +995,11 @@ class TestManagedCalculateSleep:
         """Continuous mode (interval=0) returns 0."""
         lg = MagicMock()
         runner = ManagedAgentRunner(
-            lg=lg, agent=mock_agent, bus_config=bus_config, schedule_interval=0
+            lg=lg,
+            agent=mock_agent,
+            bus_config=bus_config,
+            stopping=StopToken(),
+            schedule_interval=0,
         )
         assert runner._calculate_sleep() == 0.0
 

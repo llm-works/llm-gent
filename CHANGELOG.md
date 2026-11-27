@@ -77,6 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `chat` section (the sessions' settings, replacing `conversation`) is a `ChatAgent`, and the
   runtime refuses an ask to an agent without chat. `kwargs` on the bus, REST and `Hub`/`Core` ask
   pass the agent's own `ask` keywords; `Handler.on_ask` takes them and `on_step`.
+- Breaking: injected agents run as services on appinfra's service `Runtime`; `execution: process`
+  spawns them with `isolate=True`. `Core` takes the started `runtime` it spawns them on, and
+  `ManagedAgentRunner` takes the service's `stopping` token.
 
 ### Fixed
 

@@ -41,12 +41,21 @@ def bus():
 
 
 @pytest.fixture
-def core(lg, registry, bus):
-    """Create a Core instance with mocked bus."""
+def runtime():
+    """Mock service runtime; spawn() gives a new runner per call."""
+    mock_runtime = MagicMock()
+    mock_runtime.spawn.side_effect = lambda *_args, **_kwargs: MagicMock()
+    return mock_runtime
+
+
+@pytest.fixture
+def core(lg, runtime, registry, bus):
+    """Create a Core instance with mocked runtime and bus."""
     from llm_gent.bus.transport import WorkerBusConfig
 
     return Core(
         lg=lg,
+        runtime=runtime,
         registry=registry,
         llm_config=DotDict({"model": "test"}),
         bus=bus,
@@ -54,9 +63,9 @@ def core(lg, registry, bus):
     )
 
 
-def _register_agent(registry, name: str = "test-agent") -> AgentHandle:
+def _register_agent(registry, name: str = "test-agent", execution: str = "thread") -> AgentHandle:
     """Register a test agent in the registry."""
-    config = DotDict({"name": name, "execution": "thread"})
+    config = DotDict({"name": name, "execution": execution})
     return registry.register(name, config)
 
 
@@ -82,29 +91,31 @@ class TestCoreStart:
             core.start("test-agent")
 
     @patch("llm_gent.runtime.core.AgentService")
-    @patch("llm_gent.runtime.core.ThreadRunner")
-    def test_start_success(self, mock_runner_cls, mock_svc_cls, core, registry, bus):
-        """Successful start sets state to RUNNING."""
+    def test_start_success(self, mock_svc_cls, core, registry, bus, runtime):
+        """Successful start spawns the service on a thread, waits until it runs, sets RUNNING."""
         _register_agent(registry)
-
-        mock_runner = MagicMock()
-        mock_runner_cls.return_value = mock_runner
 
         info = core.start("test-agent")
 
         assert info.status == State.RUNNING.value
         bus.create_agent_transport.assert_called_once_with("test-agent")
-        mock_runner.start.assert_called_once()
+        runtime.spawn.assert_called_once_with(mock_svc_cls.return_value, None, isolate=False)
+        runtime.ready.assert_called_once()
 
     @patch("llm_gent.runtime.core.AgentService")
-    @patch("llm_gent.runtime.core.ThreadRunner")
-    def test_start_failure_sets_failed_state(self, mock_runner_cls, mock_svc_cls, core, registry):
+    def test_start_process_execution_isolates(self, mock_svc_cls, core, registry, runtime):
+        """``execution: process`` spawns the service in a process of its own."""
+        _register_agent(registry, execution="process")
+
+        core.start("test-agent")
+
+        assert runtime.spawn.call_args.kwargs == {"isolate": True}
+
+    @patch("llm_gent.runtime.core.AgentService")
+    def test_start_failure_sets_failed_state(self, mock_svc_cls, core, registry, runtime):
         """Failed start sets state to FAILED with error message."""
         _register_agent(registry)
-
-        mock_runner = MagicMock()
-        mock_runner.start.side_effect = RuntimeError("boom")
-        mock_runner_cls.return_value = mock_runner
+        runtime.ready.side_effect = RuntimeError("boom")
 
         info = core.start("test-agent")
 
@@ -112,22 +123,15 @@ class TestCoreStart:
         assert info.error == "boom"
 
     @patch("llm_gent.runtime.core.AgentService")
-    @patch("llm_gent.runtime.core.ThreadRunner")
-    def test_start_failure_cleans_up_resources(
-        self, mock_runner_cls, mock_svc_cls, core, registry, bus
-    ):
-        """Failed start cleans up channel and transport."""
+    def test_start_failure_cleans_up_resources(self, mock_svc_cls, core, registry, bus, runtime):
+        """Failed start takes the service out of the runtime and cleans up channel and transport."""
         _register_agent(registry)
-
-        mock_runner = MagicMock()
-        mock_runner.start.side_effect = RuntimeError("boom")
-        mock_runner_cls.return_value = mock_runner
+        runtime.ready.side_effect = RuntimeError("boom")
 
         core.start("test-agent")
 
-        # Channel should be removed
+        runtime.stop_service.assert_called_once()
         assert "test-agent" not in core._channels
-        # Transport should be cleaned up
         bus.remove_agent_transport.assert_called_once_with("test-agent")
 
 
@@ -152,32 +156,27 @@ class TestCoreStop:
         assert info.status == State.CREATED.value
 
     @patch("llm_gent.runtime.core.AgentService")
-    @patch("llm_gent.runtime.core.ThreadRunner")
-    def test_stop_running_agent(self, mock_runner_cls, mock_svc_cls, core, registry, bus):
-        """Stop sets state to STOPPED and cleans up runner."""
+    def test_stop_running_agent(self, mock_svc_cls, core, registry, bus, runtime):
+        """Stop stops the agent's service on the runtime, sets STOPPED and cleans up."""
         _register_agent(registry)
-        mock_runner = MagicMock()
-        mock_runner_cls.return_value = mock_runner
-
         core.start("test-agent")
+        runner = core._runners["test-agent"]
 
         info = core.stop("test-agent")
+
         assert info.status == State.STOPPED.value
-        mock_runner.stop.assert_called_once()
+        runtime.stop_service.assert_called_once_with(runner)
         bus.remove_agent_transport.assert_called_with("test-agent")
 
     @patch("llm_gent.runtime.core.AgentService")
-    @patch("llm_gent.runtime.core.ThreadRunner")
-    def test_stop_failure_sets_failed(self, mock_runner_cls, mock_svc_cls, core, registry, bus):
+    def test_stop_failure_sets_failed(self, mock_svc_cls, core, registry, bus, runtime):
         """Stop failure sets FAILED state with error."""
         _register_agent(registry)
-        mock_runner = MagicMock()
-        mock_runner.stop.side_effect = RuntimeError("stop failed")
-        mock_runner_cls.return_value = mock_runner
-
         core.start("test-agent")
+        runtime.stop_service.side_effect = RuntimeError("stop failed")
 
         info = core.stop("test-agent")
+
         assert info.status == State.FAILED.value
         assert info.error == "stop failed"
 
@@ -286,47 +285,35 @@ class TestCoreShutdown:
     """Tests for Core.shutdown()."""
 
     @patch("llm_gent.runtime.core.AgentService")
-    @patch("llm_gent.runtime.core.ThreadRunner")
-    def test_shutdown_stops_running_agents(self, mock_runner_cls, mock_svc_cls, core, registry):
+    def test_shutdown_stops_running_agents(self, mock_svc_cls, core, registry, runtime):
         """Shutdown stops all running agents."""
         _register_agent(registry, "agent-1")
         _register_agent(registry, "agent-2")
-
-        mock_runner = MagicMock()
-        mock_runner_cls.return_value = mock_runner
-
         core.start("agent-1")
         core.start("agent-2")
 
         core.shutdown()
 
-        # Both runners should be stopped
-        assert mock_runner.stop.call_count == 2
+        assert runtime.stop_service.call_count == 2
 
     @patch("llm_gent.runtime.core.AgentService")
-    @patch("llm_gent.runtime.core.ThreadRunner")
-    def test_shutdown_handles_stop_errors(self, mock_runner_cls, mock_svc_cls, core, registry, lg):
+    def test_shutdown_handles_stop_errors(self, mock_svc_cls, core, registry, lg, runtime):
         """Shutdown continues stopping agents even when one fails."""
         _register_agent(registry, "agent-1")
         _register_agent(registry, "agent-2")
-
-        mock_runner_1 = MagicMock()
-        mock_runner_1.stop.side_effect = RuntimeError("error-1")
-        mock_runner_2 = MagicMock()
-        mock_runner_cls.side_effect = [mock_runner_1, mock_runner_2]
-
         core.start("agent-1")
         core.start("agent-2")
+        error = RuntimeError("error-1")
+        runtime.stop_service.side_effect = [error, None]
 
         core.shutdown()
 
-        # Both should be attempted despite agent-1 failing
-        mock_runner_1.stop.assert_called_once()
-        mock_runner_2.stop.assert_called_once()
+        # Both should be attempted despite the first failing
+        assert runtime.stop_service.call_count == 2
         # Error is logged by stop() internally
         lg.warning.assert_any_call(
             "error stopping agent",
-            extra={"agent": "agent-1", "exception": mock_runner_1.stop.side_effect},
+            extra={"agent": "agent-1", "exception": error},
         )
 
     def test_shutdown_skips_non_running(self, core, registry):
