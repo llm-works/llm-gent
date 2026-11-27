@@ -479,9 +479,10 @@ class ManagedAgentRunner(BaseAgentRunner):
     def _run_agent_loop(self) -> None:
         """Delegate to agent's run() method, poll requests in background.
 
-        Note: ShutdownNotice sets _stop_event but cannot interrupt a blocking
-        agent.run() call.  Agents using run() should check runner._stop_event
-        periodically for cooperative cancellation.
+        Note: a ShutdownNotice or the service's ``stopping`` token cannot
+        interrupt a blocking agent.run() call.  Agents using run() should check
+        runner._running periodically for cooperative cancellation; it turns
+        False on either.
         """
         # Start request poller in background thread
         poller = threading.Thread(
