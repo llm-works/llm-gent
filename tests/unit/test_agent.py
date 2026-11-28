@@ -255,7 +255,7 @@ class _Binding:
 
 
 class _PlatformTrait:
-    """A platform trait: shared resources only; each agent binds it."""
+    """A scoped platform trait: shared resources only; each agent binds it."""
 
     trait_name = "thing"
 
@@ -267,8 +267,18 @@ class _PlatformTrait:
         return _Binding(self, agent.name)
 
 
+class _SharedTrait:
+    """A platform trait that is not scoped: every agent uses the platform's instance."""
+
+    trait_name = "shared"
+
+    def __init__(self) -> None:
+        self.on_start = MagicMock()
+        self.on_stop = MagicMock()
+
+
 class TestAgentLookup:
-    """agent.get / has / require: the agent's own traits and bindings of the platform's."""
+    """agent.get / has / require: the agent's own traits, its bindings and the platform's traits."""
 
     @pytest.fixture
     def platform(self):
@@ -278,6 +288,7 @@ class TestAgentLookup:
         lg = MagicMock()
         traits = Registry(lg)
         traits.register(_PlatformTrait())
+        traits.register(_SharedTrait())
         return make_platform(lg, traits=traits)
 
     def _agent(self, platform, name: str = "a") -> Agent:
@@ -400,15 +411,50 @@ class TestAgentLookup:
         trait.on_start.assert_not_called()
         trait.on_stop.assert_not_called()
 
-    def test_a_platform_trait_the_agent_does_not_use_is_not_found(self, platform):
+    def test_a_scoped_trait_the_agent_does_not_use_is_not_found(self, platform):
         from llm_gent.core.errors import TraitNotFoundError
 
         agent = self._agent(platform)
 
         assert agent.get(_PlatformTrait) is None
         assert not agent.has(_PlatformTrait)
-        with pytest.raises(TraitNotFoundError, match="_PlatformTrait"):
+        with pytest.raises(
+            TraitNotFoundError, match=r"_PlatformTrait is scoped per agent: agent\.use"
+        ):
             agent.require(_PlatformTrait)
+
+    def test_a_trait_that_is_not_scoped_is_the_platforms_instance(self, platform):
+        agent = self._agent(platform)
+        shared = platform.traits.require(_SharedTrait)
+
+        assert agent.require(_SharedTrait) is shared
+        assert agent.get(_SharedTrait) is shared
+        assert agent.has(_SharedTrait)
+        assert agent.require(_SharedTrait) is self._agent(platform, name="b").require(_SharedTrait)
+
+    def test_a_trait_that_is_not_scoped_is_not_used(self, platform):
+        agent = self._agent(platform)
+
+        with pytest.raises(TypeError, match="_SharedTrait is not scoped"):
+            agent.use(_SharedTrait)
+
+    def test_the_agent_never_starts_or_stops_a_trait_that_is_not_scoped(self, platform):
+        agent = self._agent(platform)
+        agent.require(_SharedTrait)
+
+        agent.start()
+        agent.stop()
+
+        shared = platform.traits.require(_SharedTrait)
+        shared.on_start.assert_not_called()
+        shared.on_stop.assert_not_called()
+
+    def test_the_agents_own_trait_wins_over_the_platforms(self, platform):
+        agent = self._agent(platform)
+        own = _SharedTrait()
+        agent.add_trait(own)
+
+        assert agent.require(_SharedTrait) is own
 
     def test_using_a_trait_the_platform_lacks_raises(self, platform):
         from llm_gent.core.errors import TraitNotFoundError

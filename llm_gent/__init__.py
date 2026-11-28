@@ -61,10 +61,12 @@ from .core.traits import (
     MethodTrait,
     SAIAConfig,
     SAIATrait,
+    ScopedTrait,
     ToolsTrait,
     TrainingConfig,
     TrainingTrait,
     Trait,
+    TraitBinding,
 )
 from .core.traits.factory import Factory as TraitFactory
 from .schema import (
@@ -129,7 +131,9 @@ __all__ = [
     "MethodTrait",
     "SAIAConfig",
     "SAIATrait",
+    "ScopedTrait",
     "Trait",
+    "TraitBinding",
     "TrainingConfig",
     "TrainingTrait",
     # HTTP

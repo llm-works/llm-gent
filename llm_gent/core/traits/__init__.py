@@ -5,7 +5,7 @@
 
 from enum import StrEnum
 
-from .base import BaseTrait, Trait, TraitBinding
+from .base import BaseTrait, ScopedTrait, Trait, TraitBinding
 from .builtin import (
     CostTrait,
     Directive,
@@ -66,6 +66,7 @@ ALL_TRAITS: list[TraitName] = [
 __all__ = [
     # Base
     "BaseTrait",
+    "ScopedTrait",
     "Trait",
     "TraitBinding",
     # Names & Catalogs

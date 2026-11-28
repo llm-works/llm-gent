@@ -185,11 +185,14 @@ class Context(Generic[T]):
     def traits(self) -> TraitRegistry:
         """The platform's trait registry; it may be empty.
 
-        Verbs reach mounted platform capabilities (memory, storage, tools,
-        custom traits) via ``ctx.traits.get(SomeTrait)`` or
-        ``ctx.traits.require(SomeTrait)``; a verb that needs a trait handles
-        its absence, or the run is started on a platform that has it. The
-        same class is exported as ``Registry`` from
+        Verbs reach the platform's traits via ``ctx.traits.get(SomeTrait)`` or
+        ``ctx.traits.require(SomeTrait)``: the shared instance, the same one
+        every agent of the platform uses. A scoped trait's per-agent
+        operations are on an agent's binding, not on the shared instance:
+        ``MemoryTrait`` has no ``remember`` or ``recall``, which an agent
+        reaches through its ``MemoryBinding``. A verb that needs a trait
+        handles its absence, or the run is started on a platform that has it.
+        The same class is exported as ``Registry`` from
         :mod:`llm_gent.core.traits`.
         """
         return self.platform.traits

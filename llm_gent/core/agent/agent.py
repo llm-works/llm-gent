@@ -18,7 +18,7 @@ from appinfra import DotDict
 from appinfra.log import Logger
 
 from ..errors import ConfigError, DuplicateTraitError, TraitNotFoundError
-from ..traits.base import Trait, TraitBinding
+from ..traits.base import ScopedTrait, TraitBinding
 from ..traits.registry import Registry as TraitRegistry
 
 
@@ -41,16 +41,19 @@ class Agent:
     instead.
 
     The platform's traits (``platform.traits``) hold only shared resources
-    and are always running; the platform starts and stops them. An agent
-    holds a binding of each one it uses (:meth:`use`, :meth:`Trait.bind`):
-    the binding holds all of the agent's data for that trait. It also holds
-    the traits it builds itself (:meth:`add_trait`). The agent starts and
-    stops what it holds with itself (:meth:`start` / :meth:`stop`, or
-    ``async with agent``), never a platform trait.
+    and are always running; the platform starts and stops them. For a
+    trait whose data is scoped to each agent (a :class:`ScopedTrait`), the
+    agent holds a binding of each one it uses (:meth:`use`,
+    :meth:`ScopedTrait.bind`), which holds all of the agent's data for that
+    trait. A trait that is not scoped is used as the platform's instance.
+    The agent also holds the traits it builds itself (:meth:`add_trait`). It
+    starts and stops what it holds with itself (:meth:`start` /
+    :meth:`stop`, or ``async with agent``), never a platform trait.
 
-    One lookup, :meth:`require` (or :meth:`get` / :meth:`has`), finds what
-    the agent holds: ``agent.require(MemoryTrait)`` is the agent's
-    ``MemoryBinding``; ``agent.require(SAIATrait)`` is its own SAIA trait.
+    One lookup, :meth:`require` (or :meth:`get` / :meth:`has`), works out what
+    is meant: ``agent.require(MemoryTrait)`` is the agent's ``MemoryBinding``;
+    ``agent.require(SAIATrait)`` is its own SAIA trait; a platform trait that
+    is not scoped is the platform's instance.
 
     Example:
         agent = Agent(lg, platform, config=DotDict(identity={"name": "explorer"}))
@@ -92,7 +95,7 @@ class Agent:
         self._reject_platform_settings()
         self._identity: Identity = self._resolve_identity()
         self._traits = TraitRegistry(lg)
-        self._bindings: dict[type[Trait[Any]], TraitBinding] = {}
+        self._bindings: dict[type[ScopedTrait[Any]], TraitBinding] = {}
         self._started = False
         self._cycle_count = 0
 
@@ -223,7 +226,7 @@ class Agent:
                 self._traits.unregister(type(trait))
                 raise
 
-    def use(self, trait_type: type[Trait[Any]]) -> None:
+    def use(self, trait_type: type[ScopedTrait[Any]]) -> None:
         """Bind the platform's ``trait_type`` to this agent and hold the binding.
 
         The binding starts now if the agent is started; otherwise with it. A
@@ -234,13 +237,19 @@ class Agent:
             DuplicateTraitError: The agent already holds a binding of ``trait_type``;
                 it is kept as it is.
             TraitNotFoundError: The platform has no ``trait_type`` to bind.
+            TypeError: The platform's ``trait_type`` is not scoped: :meth:`require`
+                returns the platform's instance.
         """
         if trait_type in self._bindings:
             raise DuplicateTraitError(f"{self.name} already uses {trait_type.__name__}")
         trait = self._platform.traits.get(trait_type)
-        if not isinstance(trait, Trait):
+        if trait is None:
             raise TraitNotFoundError(
                 f"{self.name} uses {trait_type.__name__}, which the platform does not have"
+            )
+        if not isinstance(trait, ScopedTrait):
+            raise TypeError(
+                f"{trait_type.__name__} is not scoped: agent.require() returns the platform's"
             )
         binding = trait.bind(self)
         self._bindings[trait_type] = binding
@@ -254,49 +263,61 @@ class Agent:
                 raise
 
     @overload
-    def get(self, trait_type: type[Trait[BindingT]]) -> BindingT | None:
-        """A platform trait: the agent's binding of it."""
+    def get(self, trait_type: type[ScopedTrait[BindingT]]) -> BindingT | None:
+        """A scoped platform trait: the agent's binding of it."""
 
     @overload
     def get(self, trait_type: type[TraitT]) -> TraitT | None:
-        """A trait the agent built itself."""
+        """A trait the agent built itself, or a platform trait that is not scoped."""
 
     def get(self, trait_type: type[Any]) -> Any:
-        """What the agent holds for ``trait_type``, or None.
+        """What ``trait_type`` is for this agent, or None.
 
-        For a platform trait, the agent's binding of it; otherwise the
-        trait the agent built itself.
+        The agent's binding of it; else the trait the agent built itself;
+        else the platform's instance, for a platform trait that is not
+        scoped. A scoped platform trait is found only once the agent uses
+        it.
         """
         binding = self._bindings.get(trait_type)
         if binding is not None:
             return binding
-        return self._traits.get(trait_type)
+        own = self._traits.get(trait_type)
+        if own is not None:
+            return own
+        shared = self._platform.traits.get(trait_type)
+        if shared is None or isinstance(shared, ScopedTrait):
+            return None
+        return shared
 
     def has(self, trait_type: type[Any]) -> bool:
         """Whether :meth:`get` finds ``trait_type``."""
-        return trait_type in self._bindings or self._traits.has(trait_type)
+        return self.get(trait_type) is not None
 
     @overload
-    def require(self, trait_type: type[Trait[BindingT]]) -> BindingT:
-        """A platform trait: the agent's binding of it."""
+    def require(self, trait_type: type[ScopedTrait[BindingT]]) -> BindingT:
+        """A scoped platform trait: the agent's binding of it."""
 
     @overload
     def require(self, trait_type: type[TraitT]) -> TraitT:
-        """A trait the agent built itself."""
+        """A trait the agent built itself, or a platform trait that is not scoped."""
 
     def require(self, trait_type: type[Any]) -> Any:
-        """What the agent holds for ``trait_type``, as :meth:`get` finds it.
+        """What ``trait_type`` is for this agent, as :meth:`get` finds it.
 
         Raises:
-            TraitNotFoundError: The agent holds nothing for ``trait_type``.
+            TraitNotFoundError: :meth:`get` finds nothing: the agent does not
+                use the platform's ``trait_type``, or nothing provides it.
         """
-        held = self.get(trait_type)
-        if held is None:
-            raise TraitNotFoundError(
-                f"{trait_type.__name__} required but not attached - add it with "
-                f"agent.add_trait({trait_type.__name__}(...)), or agent.use() the platform's"
-            )
-        return held
+        found = self.get(trait_type)
+        if found is not None:
+            return found
+        name = trait_type.__name__
+        if isinstance(self._platform.traits.get(trait_type), ScopedTrait):
+            raise TraitNotFoundError(f"{name} is scoped per agent: agent.use({name}) first")
+        raise TraitNotFoundError(
+            f"{name} required but not attached - add it with agent.add_trait({name}(...)), "
+            "or put it on the platform"
+        )
 
     def replace_trait(self, trait: TraitBinding) -> None:
         """Register ``trait``, replacing any existing entry of the same type.

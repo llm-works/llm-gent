@@ -1,20 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Trait and TraitBinding protocols, and a convenience base class.
+"""Trait, ScopedTrait and TraitBinding protocols, and a convenience base class.
 
 Traits and bindings
 -------------------
 
-A :class:`Trait` lives on the platform (``platform.traits``). It holds the
-resources every agent shares (clients, pools) and is always running: the
-platform starts and stops it, never an agent. It keeps nothing per agent.
+A :class:`Trait` lives on the platform (``platform.traits``). It holds what
+every agent and run shares (clients, pools, a knowledge graph) and is always
+running: the platform starts and stops it, never an agent. It keeps nothing
+per agent. A trait with no per-agent data is used as it is:
+``agent.require(T)`` and ``ctx.traits.require(T)`` return the platform's
+instance.
 
-An agent holds a :class:`TraitBinding` of each trait it uses, from
-:meth:`Trait.bind`. The binding holds all of that agent's data for the trait,
-from just the agent's context key to a large working set in memory; the trait
-decides what it holds and provides the interface to manage it. The agent owns
-its bindings: it starts and stops them with itself.
+A trait whose data is scoped to each agent is a :class:`ScopedTrait`.
+An agent holds a :class:`TraitBinding` of it, from :meth:`ScopedTrait.bind`.
+The binding holds all of that agent's data for the trait, from just the
+agent's context key to a large working set in memory; the trait decides what
+it holds and provides the interface to manage it. The agent owns its
+bindings: it starts and stops them with itself.
 
 Dependency-inversion pattern for traits that wrap external resources
 --------------------------------------------------------------------
@@ -58,8 +62,9 @@ class TraitBinding(Protocol):
     - on_start(): called when the agent starts (or on binding, if it has)
     - on_stop(): called when the agent stops; releases what the binding holds
 
-    A binding from :meth:`Trait.bind` reaches its trait's shared resources;
-    an agent-built trait (``BaseTrait``) is a binding with no platform trait.
+    A binding from :meth:`ScopedTrait.bind` reaches its trait's shared
+    resources; an agent-built trait (``BaseTrait``) is a binding with no
+    platform trait.
     A binding can depend on another: use agent.get() in on_start() (all of
     an agent's bindings are added before its on_start()).
     """
@@ -77,21 +82,16 @@ BindingT_co = TypeVar("BindingT_co", bound=TraitBinding, covariant=True)
 
 
 @runtime_checkable
-class Trait(Protocol[BindingT_co]):
-    """A platform trait: the resources every agent shares, always running.
+class Trait(Protocol):
+    """A platform trait: what every agent and run shares, always running.
 
     ``trait_name`` is the name an agent config requires it by
     (``traits.required``). The platform starts it once it is built and stops
-    it on close; an agent never does. :meth:`bind` gives an agent its
-    binding, which holds all of the agent's data; the trait keeps nothing
-    per agent.
+    it on close; an agent never does. It keeps nothing per agent: an agent
+    that requires it gets the platform's instance.
     """
 
     trait_name: str
-
-    def bind(self, agent: Agent) -> BindingT_co:
-        """A new binding of this trait for ``agent``, holding the agent's data."""
-        ...
 
     def on_start(self) -> None:
         """Called by the platform once the trait is built."""
@@ -99,6 +99,20 @@ class Trait(Protocol[BindingT_co]):
 
     def on_stop(self) -> None:
         """Called by the platform when it closes."""
+        ...
+
+
+@runtime_checkable
+class ScopedTrait(Trait, Protocol[BindingT_co]):
+    """A platform trait whose data is scoped to each agent.
+
+    :meth:`bind` gives an agent its binding, which holds all of the agent's
+    data; the trait keeps nothing per agent. An agent uses it through the
+    binding it holds (``agent.use(T)``, then ``agent.require(T)``).
+    """
+
+    def bind(self, agent: Agent) -> BindingT_co:
+        """A new binding of this trait for ``agent``, holding the agent's data."""
         ...
 
 

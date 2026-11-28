@@ -80,10 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: injected agents run as services on appinfra's service `Runtime`; `execution: process`
   spawns them with `isolate=True`. `Core` takes the started `runtime` it spawns them on, and
   `ManagedAgentRunner` takes the service's `stopping` token.
-- Breaking: a platform `Trait` holds shared resources and `bind(agent)`s a `TraitBinding` (the old
-  `Trait` protocol) the agent holds, for memory a `MemoryBinding`; `Agent(lg, platform, config)`;
-  `get` / `has` / `require` replace `*_trait`; an agent `kelt.schema` raises; memory tools get the
-  binding from `ToolFactory.create(..., memory=)`, not `set_memory_trait`.
+- Breaking: a platform `Trait` is shared by every agent and run; a `ScopedTrait` `bind(agent)`s a
+  `TraitBinding` (the old `Trait` protocol) the agent holds, for memory a `MemoryBinding` with
+  memory's operations. `Agent(lg, platform, config)`; `get` / `has` / `require` replace `*_trait`;
+  an agent `kelt.schema` raises; memory tools take `ToolFactory.create(..., memory=)`.
 
 ### Fixed
 

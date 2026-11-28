@@ -17,7 +17,9 @@ Trait selection: ``config["traits"]["required"]`` (list of trait names, wins)
 or the factory-class ``required_traits`` class variable. Each builtin trait
 reads its own top-level key from ``agent.config``; nesting under
 ``traits.<name>`` is NOT recognized. A required name the platform holds a
-trait for (``memory``) is bound to the agent: the agent holds its binding.
+scoped trait for (``memory``) is bound to the agent: the agent holds its
+binding. One whose platform trait is not scoped needs nothing: the agent
+finds the platform's instance.
 
 The factory builds agents on a :class:`~llm_gent.core.Platform`:
 traits use the platform's shared clients, and agent-config keys override the
@@ -35,6 +37,7 @@ from appinfra import DotDict
 from ..errors import ConfigError
 from ..platform import Platform
 from ..traits import TraitName
+from ..traits.base import ScopedTrait
 from ..traits.builtin.memory import MemoryBinding, MemoryTrait
 from .agent import Agent
 from .helpers import _substitute_in_dict
@@ -168,9 +171,10 @@ class Factory:
         - config['traits']['required']
         - self.required_traits class variable
 
-        A name the platform holds a trait for is bound to the agent
-        (``agent.use``); any other is built by the platform's trait factory.
-        The factory knows nothing of what either trait does.
+        A name the platform holds a scoped trait for is bound to the agent
+        (``agent.use``); one the platform holds a trait for that is not
+        scoped needs nothing; any other is built by the platform's trait
+        factory. The factory knows nothing of what any of them does.
 
         Args:
             agent: Agent instance.
@@ -190,14 +194,19 @@ class Factory:
         self._configure_tools(agent, config)
 
     def _add_required_trait(self, agent: Agent, trait_name: TraitName) -> None:
-        """Bind the platform's ``trait_name`` trait to ``agent``, else build it for the agent.
+        """Give ``agent`` the ``trait_name`` trait: the platform's, else one built for it.
 
-        Either way the trait reads its config from ``agent.config``.
+        A scoped platform trait is bound to the agent; one that is not scoped
+        needs nothing, as the agent finds the platform's instance. A built
+        trait reads its config from ``agent.config``.
         """
         shared = self._platform.traits.get_by_name(trait_name)
         if shared is not None:
-            agent.use(type(shared))  # type: ignore[arg-type]
-            self._lg.debug("bound trait", extra={"agent": agent.name, "trait": trait_name.value})
+            if isinstance(shared, ScopedTrait):
+                agent.use(type(shared))
+                self._lg.debug(
+                    "bound trait", extra={"agent": agent.name, "trait": trait_name.value}
+                )
             return
         if not self._platform.trait_factory.creates(trait_name):
             raise ConfigError(

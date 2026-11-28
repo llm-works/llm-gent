@@ -45,7 +45,8 @@ Expected fields:
 class MemoryTrait:
     """Kelt-backed memory on the platform: the shared clients, one per platform.
 
-    The platform builds one MemoryTrait over its memory clients and one kelt
+    A :class:`ScopedTrait`: each agent's memory is its own context. The
+    platform builds one MemoryTrait over its memory clients and one kelt
     client, on the platform's schema, so the schema is prepared once however
     many agents there are. It holds nothing per agent. An agent holds its
     own :class:`MemoryBinding` from :meth:`bind`: its context key and the

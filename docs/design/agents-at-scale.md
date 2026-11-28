@@ -5,7 +5,7 @@ what each agent holds, and how flows run for agents.
 
 Status: the target design, built in steps. Implemented: the `Platform` (one per process, built
 by the platform `Factory` from `Config`) shared by agents and runs, with the shared clients
-injected into traits; platform traits that bind a per-agent `TraitBinding` (memory); the scope
+injected into traits; scoped platform traits with a per-agent `TraitBinding` (memory); the scope
 a flow runs in as a fold of its declarations, the generic run, flow runs started by a runner, and
 the run's own cost tracker (section 6). Not yet: a default `SAIAFactory` the platform builds over
 its router, splitting the remaining traits into a platform trait and a binding, a run's
@@ -164,17 +164,19 @@ platform.
 An agent holds:
 
 - its identity;
-- its bindings (`TraitBinding`), one per platform trait it uses, holding all of the agent's
-  data for that trait;
+- its bindings (`TraitBinding`), one per scoped platform trait it uses, holding all of the
+  agent's data for that trait;
 - a reference to its `Platform`;
 - the trait types it uses (`required_traits`), not trait instances.
 
-No trait instance lives on an agent. A platform trait holds only what every agent shares;
-`trait.bind(agent)` makes the agent's binding, which the agent holds once it calls
-`agent.use(T)` (the agent factory does this for a required trait). `agent.get(T)` and
-`require(T)` return the agent's binding, and find nothing for a `T` the agent has not used. The
-platform starts its traits once built and stops them on close; the agent starts and stops only
-its bindings, in reverse on stop. Until every trait is split this way, an agent also builds the
+No trait instance lives on an agent. A platform trait holds only what every agent shares. A
+trait whose data is scoped to each agent (`ScopedTrait`) makes the agent's binding with
+`trait.bind(agent)`, which the agent holds once it calls `agent.use(T)` (the agent factory does
+this for a required trait); `agent.get(T)` and `require(T)` return that binding, and find
+nothing for a scoped `T` the agent has not used. A trait that is not scoped is used as it is:
+`agent.require(T)` and `ctx.traits.require(T)` return the platform's instance. The platform
+starts its traits once built and stops them on close; the agent starts and stops only its
+bindings, in reverse on stop. Until every trait is split this way, an agent also builds the
 others itself (`BaseTrait`), and `get` / `require` return those too. A custom trait is
 registered with the platform like a built-in one, even when one agent uses it: the platform owns
 its lifecycle and it follows the thread-safety contract.
