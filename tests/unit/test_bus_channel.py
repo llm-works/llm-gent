@@ -7,9 +7,11 @@ import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import zmq
+from appinfra.runtime import ChanClosedError
 
 from llm_gent.bus.channel import ZMQDealerTransport, ZMQRouterTransport
 from llm_gent.bus.protocol import Envelope
@@ -73,6 +75,44 @@ class TestDealerSend:
         assert identity == b"agent-1"
         assert received.source == "agent-1"
         assert received.payload == {"k": 1}
+
+
+class TestDealerSendWhileFull:
+    """A send waiting for room on a full DEALER sees the transport close, and keeps trying."""
+
+    @staticmethod
+    def _full_until_closed(transport: ZMQDealerTransport) -> MagicMock:
+        """The socket stays full; its first send attempt closes the transport, as close() would."""
+
+        def send(frames: list[bytes], **_: Any) -> None:
+            transport.close()
+            raise zmq.Again()
+
+        socket: MagicMock = transport._dealer
+        socket.send_multipart.side_effect = send
+        return socket
+
+    @pytest.mark.parametrize("timeout", [None, 5.0], ids=["no-timeout", "timeout"])
+    def test_closing_ends_the_wait(self, timeout: float | None) -> None:
+        transport = ZMQDealerTransport(MagicMock(), "agent-1")
+        self._full_until_closed(transport)
+
+        with patch("llm_gent.bus.channel.time.sleep") as sleep, pytest.raises(ChanClosedError):
+            transport.send(Envelope(msg_type="test"), timeout=timeout)
+
+        assert all(call.args[0] <= 0.1 for call in sleep.call_args_list)
+
+    def test_a_send_that_finds_room_returns(self) -> None:
+        socket = MagicMock()
+        socket.send_multipart.side_effect = [zmq.Again(), None]
+        transport = ZMQDealerTransport(socket, "agent-1")
+
+        with patch("llm_gent.bus.channel.time.sleep") as sleep:
+            transport.send(Envelope(msg_type="test"))
+
+        assert socket.send_multipart.call_count == 2
+        assert all(c.kwargs["flags"] == zmq.NOBLOCK for c in socket.send_multipart.call_args_list)
+        sleep.assert_called_once_with(0.1)
 
 
 class TestRouterSend:

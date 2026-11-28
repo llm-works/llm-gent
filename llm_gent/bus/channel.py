@@ -27,6 +27,10 @@ from .protocol import Envelope
 from .protocol import Message as BusMessage
 
 
+#: Longest a DEALER send waits for room before it checks whether the transport closed.
+_SEND_SLICE = 0.1
+
+
 def _key(message: Any) -> Hashable:
     """A reply carries the id of its request."""
     return getattr(message, "id", None)
@@ -74,6 +78,7 @@ class ZMQRouterTransport:
         self._agent_id_bytes = agent_id.encode()
         self._send_lock = send_lock
         self._closed = False
+        self._late_replies_dropped = 0
         self.correlator = _correlator(self.send)
 
     def send(self, message: Any, timeout: float | None = None) -> None:
@@ -92,8 +97,30 @@ class ZMQRouterTransport:
             self._router.send_multipart(frames)
 
     def deliver(self, message: Any) -> None:
-        """Route a message from this agent; called by the coordinator bus poll thread."""
+        """Route a message from this agent; called by the coordinator bus poll thread.
+
+        Only the agent's replies arrive here (its requests go to the bus's
+        request handler), and the hub never reads the correlator's inbox. A
+        reply no call waits on, one whose call timed out, is dropped rather
+        than kept for the life of the transport.
+        """
         self.correlator.deliver(message)
+        self._drop_unclaimed()
+
+    def _drop_unclaimed(self) -> None:
+        """Empty the inbox: a call's route is registered before its request is sent, so
+        whatever reached the inbox has no call waiting on it."""
+        while True:
+            try:
+                self.correlator.recv(timeout=0)
+            except (TimeoutError, ChanClosedError):
+                return
+            self._late_replies_dropped += 1
+
+    @property
+    def late_replies_dropped(self) -> int:
+        """How many replies arrived after their call stopped waiting."""
+        return self._late_replies_dropped
 
     def close(self) -> None:
         """Fail the calls waiting on replies; the ROUTER socket stays the bus's."""
@@ -117,34 +144,37 @@ class ZMQDealerTransport:
     def send(self, message: Any, timeout: float | None = None) -> None:
         """Send message to coordinator via DEALER socket, stamped with this agent as source.
 
-        DEALER blocks once its high-water mark is reached. ``None`` waits for
-        room; otherwise a full socket raises ``TimeoutError`` after
-        ``timeout`` seconds.
+        DEALER has no room once its high-water mark is reached. ``None`` waits
+        for room; otherwise a full socket raises ``TimeoutError`` after
+        ``timeout`` seconds, and ``0`` tries once. Closing the transport ends
+        the wait with ``ChanClosedError``.
         """
         if self._closed:
             raise ChanClosedError("transport is closed")
         envelope = _envelope(message)
         envelope.source = self._agent_id
-        frames = [b"", envelope.to_bytes()]
-        if timeout is None:
-            self._dealer.send_multipart(frames)
-        else:
-            self._send_within(frames, timeout)
+        self._send_until(
+            [b"", envelope.to_bytes()], None if timeout is None else time.monotonic() + timeout
+        )
 
-    def _send_within(self, frames: list[bytes], timeout: float) -> None:
-        """Send without blocking; on a full socket wait ``timeout`` once, then give up.
+    def _send_until(self, frames: list[bytes], deadline: float | None) -> None:
+        """Send without blocking, retrying in short slices until there is room, ``deadline``
+        passes or the transport closes.
 
         Sleeps rather than polling for POLLOUT: the agent's poll thread already
         polls this socket.
         """
-        for attempt in range(2):
+        while True:
             try:
                 self._dealer.send_multipart(frames, flags=zmq.NOBLOCK)
                 return
             except zmq.Again:
-                if attempt == 0 and timeout > 0:
-                    time.sleep(timeout)
-        raise TimeoutError(f"dealer socket full for {timeout}s")
+                left = None if deadline is None else deadline - time.monotonic()
+                if left is not None and left <= 0:
+                    raise TimeoutError("dealer socket full") from None
+                time.sleep(_SEND_SLICE if left is None else min(_SEND_SLICE, left))
+            if self._closed:
+                raise ChanClosedError("transport closed while waiting for room")
 
     def deliver(self, message: Any) -> None:
         """Route a message from the coordinator; called by the worker bus poll thread."""

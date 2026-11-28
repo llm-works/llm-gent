@@ -71,7 +71,8 @@ class TestSubmit:
         assert isinstance(reply, FeedbackResponse)
         assert reply.id == request.id
 
-    def test_a_reply_for_another_request_goes_to_recv(self, transport: Transport) -> None:
+    def test_a_reply_for_another_request_goes_to_the_agents_recv(self) -> None:
+        transport = _dealer()
         stray = FeedbackResponse(id="someone-else")
         _replying(transport, lambda req: [stray, FeedbackResponse(id=req.id)])
 
@@ -108,8 +109,9 @@ class TestStream:
 
 
 class TestInbox:
-    def test_a_request_from_the_peer_goes_to_recv(self, transport: Transport) -> None:
-        request = FeedbackRequest(message="from the peer")
+    def test_a_request_from_the_hub_goes_to_the_agents_recv(self) -> None:
+        transport = _dealer()
+        request = FeedbackRequest(message="from the hub")
 
         transport.deliver(request)
 
@@ -118,6 +120,41 @@ class TestInbox:
     def test_nothing_delivered_times_out(self, transport: Transport) -> None:
         with pytest.raises(TimeoutError):
             transport.correlator.recv(timeout=0)
+
+
+class TestLateReplies:
+    """A reply after its call timed out: the hub reads no inbox, the agent reads requests from it."""
+
+    def test_the_hub_drops_a_reply_no_call_waits_on(self) -> None:
+        transport = _router()
+        request = FeedbackRequest(message="slow")
+        with pytest.raises(TimeoutError):
+            transport.correlator.submit(request, timeout=0)
+
+        transport.deliver(FeedbackResponse(id=request.id))
+
+        with pytest.raises(TimeoutError):
+            transport.correlator.recv(timeout=0)
+        assert transport.late_replies_dropped == 1
+
+    def test_the_hub_still_answers_a_waiting_call(self) -> None:
+        transport = _router()
+        _replying(transport, lambda req: [FeedbackResponse(id=req.id)])
+
+        reply = transport.correlator.submit(FeedbackRequest(message="good"), timeout=1.0)
+
+        assert isinstance(reply, FeedbackResponse)
+        assert transport.late_replies_dropped == 0
+
+    def test_the_agent_keeps_a_late_reply_for_its_poll_loop(self) -> None:
+        transport = _dealer()
+        request = FeedbackRequest(message="slow")
+        with pytest.raises(TimeoutError):
+            transport.correlator.submit(request, timeout=0)
+
+        transport.deliver(FeedbackResponse(id=request.id))
+
+        assert transport.correlator.recv(timeout=0).id == request.id
 
 
 class TestClose:
