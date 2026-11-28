@@ -88,6 +88,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent.require(RatingTrait)` is the agent's `RatingBinding` (its context key and `rating`
   config), with the rating operations. Removed: `RatingTrait(agent, router, config)` and
   `TraitFactory`'s router argument.
+- Breaking: requests over the bus go through each ZMQ transport's `correlator` (appinfra's
+  `Correlator`), in place of wrapping it in `BufferedChannel`. Error replies raise
+  `ChanResponseError` (was `ChannelResponseError`), a closed transport `ChanClosedError` and a
+  full one `TimeoutError`; the transports no longer have `recv()`. The hub drops a reply that
+  arrives after its request timed out.
 
 ### Fixed
 

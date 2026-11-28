@@ -28,7 +28,7 @@ import threading
 import time
 from typing import Any
 
-from appinfra.service import BufferedChannel
+from appinfra.runtime import Correlator
 
 from llm_gent.bus.protocol import (
     AgentJoined,
@@ -81,13 +81,13 @@ def _handle_broadcast(bus: ZMQWorkerBus, message: Message) -> None:
         print(f"Broadcast: {message}")
 
 
-def _connect_and_register(bus: ZMQWorkerBus) -> BufferedChannel[Any, Any]:
-    """Connect bus, create channel, register with hub."""
+def _connect_and_register(bus: ZMQWorkerBus) -> Correlator[Any]:
+    """Connect bus, register with hub; the transport's correlator is the channel."""
     bus.start()
     time.sleep(0.3)
 
     assert bus.transport is not None
-    channel: BufferedChannel[Any, Any] = BufferedChannel(bus.transport)
+    channel = bus.transport.correlator
 
     req = RegisterRequest(agent_id=bus.agent_id, capabilities=["echo", "demo"])
     channel.submit(req, timeout=5.0)

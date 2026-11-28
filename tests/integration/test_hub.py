@@ -7,7 +7,8 @@ from typing import Any
 
 import pytest
 from appinfra import DotDict
-from appinfra.service import BufferedChannel, State
+from appinfra.runtime import Correlator
+from appinfra.service import State
 
 from llm_gent.bus.protocol import RegisterRequest, UnregisterRequest
 from llm_gent.bus.transport import ZMQWorkerBus
@@ -45,7 +46,7 @@ def hub_and_worker():
     worker.start()
 
     assert worker.transport is not None
-    channel: BufferedChannel[Any, Any] = BufferedChannel(worker.transport)
+    channel: Correlator[Any] = worker.transport.correlator
 
     yield hub, worker, channel
 
@@ -112,7 +113,7 @@ class TestHubMultipleWorkers:
             w.start()
             workers.append(w)
             assert w.transport is not None
-            ch: BufferedChannel[Any, Any] = BufferedChannel(w.transport)
+            ch: Correlator[Any] = w.transport.correlator
             channels.append(ch)
 
         yield hub, workers, channels

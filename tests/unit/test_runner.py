@@ -351,11 +351,9 @@ class TestPollRequests:
         assert sent_resp.response == "test answer"
 
     def test_channel_timeout_is_silent(self, ext_runner):
-        """ChannelTimeoutError (no message) is silently handled."""
-        from appinfra.service import ChannelTimeoutError
-
+        """A recv timeout (no message) is silently handled."""
         channel = MagicMock()
-        channel.recv.side_effect = ChannelTimeoutError("timeout")
+        channel.recv.side_effect = TimeoutError("timeout")
         ext_runner._channel = channel
 
         ext_runner._poll_requests()  # Should not raise

@@ -4,15 +4,17 @@
 """Runtime core - orchestrates agent lifecycle via appinfra.service.
 
 Core runs agents as services on an appinfra service Runtime.
-Controller-to-agent communication uses appinfra's BufferedChannel backed
-by ZMQ transports. Pub/sub (heartbeats, broadcasts) goes through the bus.
+Controller-to-agent request and reply go through each agent's ZMQ
+transport and its appinfra Correlator. Pub/sub (heartbeats, broadcasts)
+goes through the bus.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from appinfra.service import BufferedChannel, Runner, Runtime, State
+from appinfra.runtime import Correlator
+from appinfra.service import Runner, Runtime, State
 
 from .handle import AgentHandle, AgentInfo
 from .handler import Answer, answer
@@ -30,8 +32,8 @@ class Core:
     """Runtime core - orchestrates agent lifecycle.
 
     Spawns each agent as a service on ``runtime``, a started appinfra service
-    Runtime the caller owns and stops, and uses BufferedChannel over ZMQ
-    transport for controller-to-agent request/response communication.
+    Runtime the caller owns and stops, and sends each agent requests through
+    the correlator of the agent's ZMQ transport.
     """
 
     def __init__(
@@ -56,7 +58,7 @@ class Core:
         self._variables = variables or {}
         self._factory_module = factory_module
         self._runners: dict[str, Runner] = {}
-        self._channels: dict[str, BufferedChannel[Any, Any]] = {}
+        self._channels: dict[str, Correlator[Any]] = {}
 
     @property
     def registry(self) -> AgentRegistry:
@@ -197,8 +199,7 @@ class Core:
         config = handle.config
         config["name"] = handle.name
 
-        transport = self._bus.create_agent_transport(handle.name)
-        channel: BufferedChannel[Any, Any] = BufferedChannel(transport)
+        channel = self._bus.create_agent_transport(handle.name).correlator
         self._channels[handle.name] = channel
 
         try:
