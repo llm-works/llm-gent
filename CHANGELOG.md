@@ -65,8 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TraitName.LLM` are removed; a plain call is `Caller(lg, platform.llm).chat(...)`, which takes
   `output_schema=` for structured output. An agent config with an `llm` key raises `ConfigError`.
 - Breaking: with memory configured, `PlatformFactory.from_config()` builds one `MemoryTrait`
-  (`platform.traits`) and migrates the memory schema then; an agent's memory is
-  `MemoryTrait.view(identity)`. Removed: `MemoryTrait(agent, ...)`, its `owns_*` flags and
+  (`platform.traits`) and migrates the memory schema then; an agent's memory is its binding of
+  it, `agent.require(MemoryTrait)`. Removed: `MemoryTrait(agent, ...)`, its `owns_*` flags and
   `with_*` swaps, `TraitFactory.create_memory_trait`, `MemoryResources`. `AgentStorage` takes
   `(lg, database, context)`.
 - Breaking: an agent's asks run in sessions. `ask(question, session=None)` returns the
@@ -81,10 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spawns them with `isolate=True`. `Core` takes the started `runtime` it spawns them on, and
   `ManagedAgentRunner` takes the service's `stopping` token.
 - Breaking: a platform `Trait` holds shared resources and `bind(agent)`s a `TraitBinding` (the old
-  `Trait` protocol) that the agent holds; `MemoryBinding` replaces `MemoryTrait.view`. `Agent(lg,
-  platform, config)`; `get` / `has` / `require` replace `*_trait`; an agent `kelt.schema` raises.
-  Memory tools get the agent's binding from `ToolFactory.create(..., memory=)`; no
-  `set_memory_trait`.
+  `Trait` protocol) the agent holds, for memory a `MemoryBinding`; `Agent(lg, platform, config)`;
+  `get` / `has` / `require` replace `*_trait`; an agent `kelt.schema` raises; memory tools get the
+  binding from `ToolFactory.create(..., memory=)`, not `set_memory_trait`.
 
 ### Fixed
 

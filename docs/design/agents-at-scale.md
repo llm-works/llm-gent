@@ -5,9 +5,10 @@ what each agent holds, and how flows run for agents.
 
 Status: the target design, built in steps. Implemented: the `Platform` (one per process, built
 by the platform `Factory` from `Config`) shared by agents and runs, with the shared clients
-injected into traits; the scope a flow runs in as a fold of its declarations, the generic run,
-flow runs started by a runner, and the run's own cost tracker (section 6). Not yet: a default
-`SAIAFactory` the platform builds over its router, traits without per-agent instances, a run's
+injected into traits; platform traits that bind a per-agent `TraitBinding` (memory); the scope
+a flow runs in as a fold of its declarations, the generic run, flow runs started by a runner, and
+the run's own cost tracker (section 6). Not yet: a default `SAIAFactory` the platform builds over
+its router, splitting the remaining traits into a platform trait and a binding, a run's
 identity, agents supplying a run's identity and platform, and the API in section 8.
 
 ## 1. Goals
@@ -163,13 +164,20 @@ platform.
 An agent holds:
 
 - its identity;
-- per-agent state objects, keyed by trait, created only for the traits it uses;
+- its bindings (`TraitBinding`), one per platform trait it uses, holding all of the agent's
+  data for that trait;
 - a reference to its `Platform`;
 - the trait types it uses (`required_traits`), not trait instances.
 
-No trait instance lives on an agent. `agent.get(T)` and `require(T)` resolve through
-the platform's registry. A custom trait is registered with the platform like a built-in one, even
-when one agent uses it: the platform owns its lifecycle and it follows the thread-safety contract.
+No trait instance lives on an agent. A platform trait holds only what every agent shares;
+`trait.bind(agent)` makes the agent's binding, which the agent holds once it calls
+`agent.use(T)` (the agent factory does this for a required trait). `agent.get(T)` and
+`require(T)` return the agent's binding, and find nothing for a `T` the agent has not used. The
+platform starts its traits once built and stops them on close; the agent starts and stops only
+its bindings, in reverse on stop. Until every trait is split this way, an agent also builds the
+others itself (`BaseTrait`), and `get` / `require` return those too. A custom trait is
+registered with the platform like a built-in one, even when one agent uses it: the platform owns
+its lifecycle and it follows the thread-safety contract.
 A resource an agent manages itself is plain agent code, an attribute of the agent subclass that
 the agent closes, not a trait.
 
@@ -179,9 +187,10 @@ arguments or data keyed by the ids a call carries, not in a second instance. The
 a second registry. Code that needs other instances builds a registry and a `Platform` of its own:
 nothing prevents it, nothing encourages it. A registry is built whole by `TraitFactory`, which
 wires the dependencies between traits (Rating and Storage take Memory's client and the LLM
-router). Platform components (`SAIAFactory`, tools) hold no trait instances; they resolve traits
-through the platform on each call. Copies that exist for a client's own reasons stay inside the
-client: llm-infer keeps one async HTTP client per event loop behind one router.
+router). Platform components (`SAIAFactory`, tools) hold no trait instances: a tool holds the
+agent's binding of each trait it uses, given to it when it is built. Copies that exist for a
+client's own reasons stay inside the client: llm-infer keeps one async HTTP client per event
+loop behind one router.
 
 ## 6. Flow: structure and runs
 

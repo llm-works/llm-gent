@@ -139,7 +139,7 @@ class TestAgentLifecycle:
 
         mock_trait.on_stop.assert_called_once()
 
-    def test_a_failed_start_stops_what_started_in_reverse(self, agent):
+    def test_a_failed_start_stops_the_failed_one_then_the_started_in_reverse(self, agent):
         events: list[str] = []
         for name, fails in (("A", False), ("B", False), ("C", True)):
             agent._traits.register(_recording_trait(name, events, fails=fails)(agent))
@@ -147,8 +147,19 @@ class TestAgentLifecycle:
         with pytest.raises(RuntimeError, match="C down"):
             agent.start()
 
-        assert events == ["A.start", "B.start", "C.start", "B.stop", "A.stop"]
+        assert events == ["A.start", "B.start", "C.start", "C.stop", "B.stop", "A.stop"]
         assert not agent._started
+
+    def test_a_trait_added_to_a_started_agent_that_fails_to_start_is_stopped(self, agent):
+        events: list[str] = []
+        agent.start()
+        failing = _recording_trait("A", events, fails=True)
+
+        with pytest.raises(RuntimeError, match="A down"):
+            agent.add_trait(failing(agent))
+
+        assert events == ["A.start", "A.stop"]
+        assert not agent.has(failing)
 
 
 class TestAgentTraits:
@@ -295,6 +306,41 @@ class TestAgentLookup:
             self._agent(platform, name=f"agent-{i}").use(_PlatformTrait)
 
         assert vars(trait) == before
+
+    @pytest.mark.parametrize("started", [False, True])
+    def test_a_second_use_raises_and_keeps_the_first_binding(self, platform, started):
+        from llm_gent.core.errors import DuplicateTraitError
+
+        agent = self._agent(platform)
+        agent.use(_PlatformTrait)
+        first = agent.require(_PlatformTrait)
+        if started:
+            agent.start()
+
+        with (
+            patch.object(_PlatformTrait, "bind") as bind,
+            pytest.raises(DuplicateTraitError, match="_PlatformTrait"),
+        ):
+            agent.use(_PlatformTrait)
+
+        bind.assert_not_called()
+        assert agent.require(_PlatformTrait) is first
+        assert first.stopped == 0
+
+    def test_a_binding_that_fails_to_start_is_stopped_and_dropped(self, platform):
+        agent = self._agent(platform)
+        agent.start()
+        binding = _Binding(platform.traits.require(_PlatformTrait), agent.name)
+        binding.on_start = MagicMock(side_effect=RuntimeError("bind down"))  # type: ignore[method-assign]
+
+        with (
+            patch.object(_PlatformTrait, "bind", return_value=binding),
+            pytest.raises(RuntimeError, match="bind down"),
+        ):
+            agent.use(_PlatformTrait)
+
+        assert binding.stopped == 1
+        assert not agent.has(_PlatformTrait)
 
     def test_the_agent_stops_in_reverse_of_its_start(self, platform):
         events: list[str] = []

@@ -159,13 +159,17 @@ def _embedder(
 
 
 def _start_traits(lg: Logger, traits: TraitRegistry) -> None:
-    """Start the platform's traits; when one fails, stop the started ones in reverse."""
+    """Start the platform's traits.
+
+    When one fails to start, it is stopped (releasing what it acquired before
+    failing), then the ones started before it in reverse.
+    """
     started: list[Any] = []
     for trait in traits.all():
         try:
             trait.on_start()
         except Exception:
-            stop_traits(lg, started[::-1])
+            stop_traits(lg, [trait, *started[::-1]])
             raise
         started.append(trait)
 

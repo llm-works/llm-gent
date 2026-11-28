@@ -245,7 +245,7 @@ class TestStartTraits:
 
         assert events == ["A.start", "B.start"]
 
-    def test_a_failed_start_stops_what_started_in_reverse(self):
+    def test_a_failed_start_stops_the_failed_one_then_the_started_in_reverse(self):
         events: list[str] = []
         registry = TraitRegistry(LG)
         for name, fails in (("A", False), ("B", False), ("C", True)):
@@ -254,7 +254,7 @@ class TestStartTraits:
         with pytest.raises(RuntimeError, match="C down"):
             _start_traits(LG, registry)
 
-        assert events == ["A.start", "B.start", "C.start", "B.stop", "A.stop"]
+        assert events == ["A.start", "B.start", "C.start", "C.stop", "B.stop", "A.stop"]
 
 
 class _CountingFactory:

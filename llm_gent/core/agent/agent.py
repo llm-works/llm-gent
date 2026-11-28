@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 from appinfra import DotDict
 from appinfra.log import Logger
 
-from ..errors import TraitNotFoundError
+from ..errors import DuplicateTraitError, TraitNotFoundError
 from ..traits.base import Trait, TraitBinding
 from ..traits.registry import Registry as TraitRegistry
 
@@ -185,7 +185,8 @@ class Agent:
 
         Traits must be constructed with this agent as a parameter. If the
         agent is already started, the trait's ``on_start()`` is called
-        automatically.
+        automatically; if it raises, the trait is stopped and removed, and the
+        exception propagates.
 
         Args:
             trait: The trait instance to add.
@@ -215,17 +216,24 @@ class Agent:
                         "exception": e,
                     },
                 )
+                self._safe_stop_trait(trait, "trait stop after a failed start failed")
                 self._traits.unregister(type(trait))
                 raise
 
     def use(self, trait_type: type[Trait[Any]]) -> None:
         """Bind the platform's ``trait_type`` to this agent and hold the binding.
 
-        The binding starts now if the agent is started; otherwise with it.
+        The binding starts now if the agent is started; otherwise with it. A
+        binding that fails to start is stopped and dropped, and the exception
+        propagates.
 
         Raises:
+            DuplicateTraitError: The agent already holds a binding of ``trait_type``;
+                it is kept as it is.
             TraitNotFoundError: The platform has no ``trait_type`` to bind.
         """
+        if trait_type in self._bindings:
+            raise DuplicateTraitError(f"{self.name} already uses {trait_type.__name__}")
         trait = self._platform.traits.get(trait_type)
         if not isinstance(trait, Trait):
             raise TraitNotFoundError(
@@ -238,6 +246,7 @@ class Agent:
             try:
                 binding.on_start()
             except Exception:
+                self._safe_stop_trait(binding, "binding stop after a failed start failed")
                 del self._bindings[trait_type]
                 raise
 
@@ -387,15 +396,16 @@ class Agent:
     def _start_traits(self) -> None:
         """Start what the agent holds; flip ``_started`` only on success.
 
-        When one fails to start, the ones started before it are stopped, in
-        reverse, before the exception propagates: nothing is left running.
+        When one fails to start, it is stopped (releasing what it acquired before
+        failing), then the ones started before it in reverse, and the exception
+        propagates: nothing is left running.
         """
         started: list[TraitBinding] = []
         for held in self._held():
             try:
                 held.on_start()
             except Exception:
-                for done in reversed(started):
+                for done in [held, *reversed(started)]:
                     self._safe_stop_trait(done, "trait stop after a failed start failed")
                 raise
             started.append(held)
