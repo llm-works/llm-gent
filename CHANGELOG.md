@@ -89,8 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config), with the rating operations. Removed: `RatingTrait(agent, router, config)` and
   `TraitFactory`'s router argument.
 - Breaking: requests over the bus go through each ZMQ transport's `correlator` (appinfra's
-  `Correlator`), in place of wrapping it in `BufferedChannel`. The transports raise
-  `ChanClosedError` when closed and `TimeoutError` when full; they no longer have `recv()`.
+  `Correlator`), in place of wrapping it in `BufferedChannel`. Error replies raise
+  `ChanResponseError` (was `ChannelResponseError`), a closed transport `ChanClosedError` and a
+  full one `TimeoutError`; the transports no longer have `recv()`.
 
 ### Fixed
 
