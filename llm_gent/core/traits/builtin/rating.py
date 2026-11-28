@@ -103,12 +103,12 @@ class RatingTrait(BaseTrait):
         )
 
         # Attach traits; rating calls go through the platform's router
-        agent.add_trait(platform.traits.require(MemoryTrait).view(agent.identity))
+        agent.use(MemoryTrait)
         agent.add_trait(RatingTrait(agent, platform.llm, rating_config))
         agent.start()
 
         # Rate content
-        results = agent.get_trait(RatingTrait).rate_fact_with_all_providers(
+        results = agent.get(RatingTrait).rate_fact_with_all_providers(
             fact_id=123, content="Why did the..."
         )
 
@@ -149,7 +149,7 @@ class RatingTrait(BaseTrait):
         from .memory import MemoryTrait
 
         self.agent.lg.trace("starting rating trait...", extra={"agent": self.agent.name})
-        memory_trait = self.agent.require_trait(MemoryTrait)
+        memory_trait = self.agent.require(MemoryTrait)
 
         # Rating calls go through the platform's router, wrapped for logging
         caller = LLMCaller(self.agent.lg, self._router)
@@ -215,7 +215,7 @@ class RatingTrait(BaseTrait):
         if not self._backend:
             raise RuntimeError("Rating backend not initialized - call on_start() first")
 
-        memory_trait = self.agent.require_trait(MemoryTrait)
+        memory_trait = self.agent.require(MemoryTrait)
         context_key = str(memory_trait.kelt.context.context_key)
 
         return self._backend.get_unrated_count(context_key, fact_type, category)
@@ -244,7 +244,7 @@ class RatingTrait(BaseTrait):
             raise RuntimeError("Rating backend not initialized - call on_start() first")
 
         provider = self._select_provider(provider_index)
-        memory_trait = self.agent.require_trait(MemoryTrait)
+        memory_trait = self.agent.require(MemoryTrait)
         context_key = str(memory_trait.kelt.context.context_key)
 
         results = []
@@ -295,7 +295,7 @@ class RatingTrait(BaseTrait):
             raise RuntimeError("Rating not initialized - call on_start() first")
 
         provider = self._select_provider(provider_index)
-        memory_trait = self.agent.require_trait(MemoryTrait)
+        memory_trait = self.agent.require(MemoryTrait)
         resolved_type = fact_type or "solution"
         type_criteria = self._criteria.get(resolved_type)
         if not type_criteria:

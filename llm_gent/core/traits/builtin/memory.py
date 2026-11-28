@@ -5,9 +5,8 @@
 
 from __future__ import annotations
 
-import copy
 import uuid
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal
 
 from appinfra import DotDict
 from appinfra.log import Logger
@@ -25,7 +24,7 @@ from ...runnable import ExecutionResult
 
 
 if TYPE_CHECKING:
-    from ...agent import Identity
+    from ...agent import Agent
 
 
 # Type alias for Memory configuration
@@ -42,31 +41,16 @@ Expected fields:
     training: Kelt training configuration dict (default_profiles, etc.).
 """
 
-_UNBOUND = (
-    "MemoryTrait is the platform's shared instance; call view(identity) for an identity's memory"
-)
-
 
 class MemoryTrait:
-    """Kelt-backed facts, feedback, and learned completions; one per platform.
+    """Kelt-backed memory on the platform: the shared clients, one per platform.
 
     The platform builds one MemoryTrait over its memory clients and one kelt
-    client, so the database schema is prepared once however many agents
-    there are. Memory is per identity: :meth:`view` binds the shared trait
-    to an identity (a kelt context key) and, optionally, another schema.
-    A view shares every client and does no database I/O; it is what an
-    agent holds (``agent.require_trait(MemoryTrait)``) and what a flow step
-    takes from ``ctx.traits.require(MemoryTrait).view(identity)``.
-
-    Memory operations need a view; on the shared instance they raise.
-
-    Capabilities (on a view):
-        - complete(): Generate completions with automatic fact injection
-        - remember(): Store facts about the user
-        - recall(): Search facts by semantic similarity
-        - record_feedback(): Record feedback on responses
-        - record_preference(): Record preference pairs for training
-        - record_solution(): Record execution solutions
+    client, on the platform's schema, so the schema is prepared once however
+    many agents there are. It holds nothing per agent. An agent holds its
+    own :class:`MemoryBinding` from :meth:`bind`: its context key and the
+    kelt view on it, built without database I/O. ``agent.require(MemoryTrait)``
+    returns that binding, which carries the memory operations.
 
     The platform owns the database, chat client and embedder; the trait
     closes none of them. Adapter-manifest-driven schema resolution lives in
@@ -85,8 +69,10 @@ class MemoryTrait:
             "identity": {"name": "my-agent"},
             "traits": {"required": ["memory"]},
         })
-        result = agent.require_trait(MemoryTrait).complete("What do I prefer?")
+        result = agent.require(MemoryTrait).complete("What do I prefer?")
     """
+
+    trait_name = "memory"
 
     def __init__(
         self,
@@ -111,8 +97,7 @@ class MemoryTrait:
         self._database = database
         self._client = chat_client
         self._embedder = embedder
-        self._platform_schema = _schema_name(config.get("schema"), database.schema)
-        self._schema = self._platform_schema
+        self._schema = _schema_name(config.get("schema"), database.schema)
         self._llm_defaults: dict[str, Any] = resolve_llm_defaults(config.get("llm") or DotDict())
         self._root = KeltClient(
             lg=lg,
@@ -123,21 +108,10 @@ class MemoryTrait:
             schema_mode=SchemaMode.ENSURE,
             training_config=config.get("training"),
         )
-        self._identity: Identity | None = None
-        self._kelt: ClientView | None = None
 
-    def view(self, identity: Identity, *, schema: str | None = None) -> Self:
-        """This memory bound to ``identity``, on ``schema`` (default: the platform's).
-
-        The view shares the clients and the kelt client; it does no database
-        I/O. A schema other than the platform's is prepared once, on the
-        first store access of any view that names it.
-        """
-        bound = copy.copy(self)
-        bound._identity = identity
-        bound._schema = schema or self._platform_schema
-        bound._kelt = self._root.view(identity.context_key, schema_name=bound._schema)
-        return bound
+    def bind(self, agent: Agent) -> MemoryBinding:
+        """``agent``'s memory: its identity's context key, on the platform's schema; no I/O."""
+        return MemoryBinding(self, agent.identity.context_key)
 
     def on_start(self) -> None:
         """Nothing to start: the clients are the platform's and already built."""
@@ -145,35 +119,105 @@ class MemoryTrait:
     def on_stop(self) -> None:
         """Nothing to stop: the platform closes the clients."""
 
-    # =========================================================================
-    # Schema-aware client access
-    # =========================================================================
+    def client_view(self, context_key: str, schema: str | None = None) -> ClientView:
+        """The kelt client scoped to ``context_key`` on ``schema`` (default: the platform's).
 
-    def get_client_for_schema(self, schema: str) -> ClientView:
-        """This view's identity on ``schema``; the schema is prepared on first use."""
-        return self._root.view(self._bound_identity().context_key, schema_name=schema)
-
-    @property
-    def identity(self) -> Identity | None:
-        """The identity this view is bound to; None on the shared instance."""
-        return self._identity
+        A schema other than the platform's is prepared on its first use.
+        """
+        return self._root.view(context_key, schema_name=schema or self._schema)
 
     @property
     def default_schema(self) -> str:
-        """The schema this memory reads and writes: the view's, else the platform's."""
+        """The schema memory reads and writes: the platform's."""
         return self._schema
 
     @property
-    def kelt(self) -> ClientView:
-        """The kelt client scoped to this view's identity and schema."""
-        if self._kelt is None:
-            raise RuntimeError(_UNBOUND)
-        return self._kelt
+    def llm_defaults(self) -> dict[str, Any]:
+        """Model settings for learned completions, from the platform's memory config."""
+        return self._llm_defaults
 
     @property
     def database(self) -> Database:
         """The platform's memory database."""
         return self._database
+
+    @property
+    def embedder(self) -> EmbeddingClient | None:
+        """Access the embedder (None if not configured)."""
+        return self._embedder
+
+    @property
+    def client(self) -> ChatClient:
+        """Access the LLM router."""
+        return self._client
+
+
+class MemoryBinding:
+    """An agent's memory: its context key and the kelt view on it; the agent holds it.
+
+    Built by :meth:`MemoryTrait.bind`. The platform's clients are reached
+    through the trait; the binding holds only the agent's partition.
+
+    Capabilities:
+        - complete(): Generate completions with automatic fact injection
+        - remember(): Store facts about the user
+        - recall(): Search facts by semantic similarity
+        - record_feedback(): Record feedback on responses
+        - record_preference(): Record preference pairs for training
+        - record_solution(): Record execution solutions
+    """
+
+    def __init__(self, trait: MemoryTrait, context_key: str) -> None:
+        """Bind ``trait`` to ``context_key``.
+
+        Args:
+            trait: The platform's memory trait.
+            context_key: The partition the agent's memory lives in.
+        """
+        self._trait = trait
+        self._context_key = context_key
+        self._kelt = trait.client_view(context_key)
+        self._embedder = trait.embedder
+        self._llm_defaults = trait.llm_defaults
+
+    def on_start(self) -> None:
+        """Nothing to start: building the binding did no I/O."""
+
+    def on_stop(self) -> None:
+        """Nothing to release: the binding holds a key and a view, no connection."""
+
+    # =========================================================================
+    # Access
+    # =========================================================================
+
+    @property
+    def trait(self) -> MemoryTrait:
+        """The platform's memory trait this binding is of."""
+        return self._trait
+
+    @property
+    def context_key(self) -> str:
+        """The partition the agent's memory lives in."""
+        return self._context_key
+
+    @property
+    def kelt(self) -> ClientView:
+        """The kelt client scoped to the agent's context key."""
+        return self._kelt
+
+    def get_client_for_schema(self, schema: str) -> ClientView:
+        """The agent's context key on ``schema``; the schema is prepared on first use."""
+        return self._trait.client_view(self._context_key, schema)
+
+    @property
+    def default_schema(self) -> str:
+        """The schema memory reads and writes: the platform's."""
+        return self._trait.default_schema
+
+    @property
+    def database(self) -> Database:
+        """The platform's memory database."""
+        return self._trait.database
 
     @property
     def embedder(self) -> EmbeddingClient | None:
@@ -188,13 +232,7 @@ class MemoryTrait:
     @property
     def client(self) -> ChatClient:
         """Access the LLM router."""
-        return self._client
-
-    def _bound_identity(self) -> Identity:
-        """The view's identity; raises on the shared instance."""
-        if self._identity is None:
-            raise RuntimeError(_UNBOUND)
-        return self._identity
+        return self._trait.client
 
     # =========================================================================
     # Completions
@@ -226,7 +264,6 @@ class MemoryTrait:
         Returns:
             CompletionResult with response and metadata.
         """
-        self._bound_identity()  # a completion is made as an identity, facts or not
         prompt = self._build_completion_prompt(
             system_prompt, query, include_facts, rag, rag_top_k, rag_min_similarity
         )
@@ -301,6 +338,8 @@ class MemoryTrait:
         """Store a fact about the user.
 
         If embedder is configured, the fact is also embedded for semantic search.
+        The embedding is computed before the fact is stored, so an embedder
+        that fails stores nothing.
 
         Args:
             fact: The fact to store.
@@ -311,17 +350,16 @@ class MemoryTrait:
         Returns:
             Fact ID.
         """
+        embedder = self._embedder
+        embedding = embedder.embed(fact) if embedder is not None else None
         fact_id = self.kelt.atomic.assertions.add(
             fact, category=category, source=source, confidence=confidence
         )
-
-        # Embed for semantic search if embedder available
-        if self._embedder is not None:
-            embedding = self._embedder.embed(fact)
+        if embedder is not None and embedding is not None:
             self.kelt.atomic.embeddings.set_embedding(
                 fact_id=fact_id,
                 embedding=embedding.embedding,
-                model=self._embedder.model,
+                model=embedder.model,
             )
 
         return fact_id
@@ -351,7 +389,7 @@ class MemoryTrait:
             min_similarity: Minimum similarity threshold (0-1).
             categories: Filter to these categories (None = all). Deprecated: use embedding_filter.
             embedding_filter: EmbeddingFilter for flexible filtering (recommended).
-            schema: PostgreSQL schema to search in (default: this view's).
+            schema: PostgreSQL schema to search in (default: the platform's).
 
         Returns:
             List of ScoredEntity[Fact] sorted by similarity.

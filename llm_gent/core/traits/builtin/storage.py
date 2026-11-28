@@ -49,12 +49,12 @@ class StorageTrait(BaseTrait):
             rating: Mapped[float | None] = mapped_column(Float, nullable=True)
 
         # Attach traits: the agent's view of the platform's memory, then storage
-        agent.add_trait(platform.traits.require(MemoryTrait).view(agent.identity))
+        agent.use(MemoryTrait)
         agent.add_trait(StorageTrait(agent))
         agent.start()
 
         # Get storage
-        storage = agent.require_trait(StorageTrait).storage
+        storage = agent.require(StorageTrait).storage
 
         # Register table
         storage.register_table(JokeTable)
@@ -98,7 +98,7 @@ class StorageTrait(BaseTrait):
 
         self.agent.lg.trace("starting storage trait...", extra={"agent": self.agent.name})
         # Require MemoryTrait
-        memory_trait = self.agent.require_trait(MemoryTrait)
+        memory_trait = self.agent.require(MemoryTrait)
 
         # Storage shares the memory database, isolated by the memory view's context
         self._storage = AgentStorage(

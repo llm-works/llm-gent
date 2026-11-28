@@ -11,6 +11,7 @@ from appinfra import DotDict
 
 from llm_gent.core import Role
 from llm_gent.core.platform import Config, Factory, Platform
+from llm_gent.core.platform.factory import _start_traits
 from llm_gent.core.traits import Registry as TraitRegistry
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from tests.helpers import make_platform, make_test_logger
@@ -73,7 +74,7 @@ class TestFactory:
 
         assert isinstance(platform, Platform)
         assert platform.llm is router
-        assert platform.trait_factory._memory is None
+        assert not platform.traits.has(MemoryTrait)
         built_from = clients.return_value.from_config.call_args[0][0]
         assert built_from["default"] == "anthropic"
         assert "local" in built_from["backends"]
@@ -145,7 +146,7 @@ class TestFactoryMemory:
             {"memory": {"adapters": {"lora": {"base_path": "/a"}}}}
         )
 
-        assert platform.trait_factory._memory is None
+        assert not platform.traits.has(MemoryTrait)
         database["database"].assert_not_called()
 
     def test_builds_shared_memory_clients(self, packaged, clients, database):
@@ -158,7 +159,7 @@ class TestFactoryMemory:
 
         platform = Factory(lg).from_config({"memory": memory_config})
 
-        memory = platform.trait_factory._memory
+        memory = platform.traits.require(MemoryTrait)
         assert memory.database is database["database"].return_value
         database["pg"].assert_called_once_with(lg, memory_config["db"])
         clients.return_value.embeddings.assert_called_once_with(
@@ -169,10 +170,26 @@ class TestFactoryMemory:
     def test_the_memory_trait_is_built_once_into_the_registry(self, packaged, clients, database):
         platform = Factory(MagicMock()).from_config({"memory": {"db": {"url": "x"}}})
 
-        memory = platform.traits.require(MemoryTrait)
-        assert memory is platform.trait_factory._memory
-        assert memory.identity is None
+        assert isinstance(platform.traits.require(MemoryTrait), MemoryTrait)
         database["kelt"].assert_called_once()
+
+    def test_the_platform_starts_its_memory_trait(self, packaged, clients, database):
+        with patch.object(MemoryTrait, "on_start") as on_start:
+            Factory(MagicMock()).from_config({"memory": {"db": {"url": "x"}}})
+
+        on_start.assert_called_once()
+
+    def test_a_trait_that_fails_to_start_closes_what_was_built(self, packaged, clients, database):
+        router = clients.return_value.from_config.return_value
+
+        with (
+            patch.object(MemoryTrait, "on_start", side_effect=RuntimeError("memory down")),
+            pytest.raises(RuntimeError, match="memory down"),
+        ):
+            Factory(MagicMock()).from_config({"memory": {"db": {"url": "x"}}})
+
+        router.close.assert_called()
+        database["database"].return_value.dispose.assert_called_once()
 
     def test_close_disposes_database_and_closes_clients(self, packaged, clients, database):
         router, chat_client = MagicMock(), MagicMock()
@@ -180,7 +197,7 @@ class TestFactoryMemory:
         platform = Factory(MagicMock()).from_config(
             {"memory": {"db": {"url": "x"}, "embedder_url": "http://localhost:9000"}}
         )
-        memory = platform.trait_factory._memory
+        memory = platform.traits.require(MemoryTrait)
 
         platform.close()
 
@@ -201,6 +218,43 @@ class TestFactoryMemory:
 
         router.close.assert_called()
         database["database"].return_value.dispose.assert_called_once()
+
+
+def _recording_trait(name: str, events: list[str], *, fails: bool = False) -> Any:
+    """A platform trait of its own type that records its start and stop."""
+
+    def on_start(self: Any) -> None:
+        events.append(f"{name}.start")
+        if fails:
+            raise RuntimeError(f"{name} down")
+
+    def on_stop(self: Any) -> None:
+        events.append(f"{name}.stop")
+
+    return type(name, (), {"trait_name": name, "on_start": on_start, "on_stop": on_stop})()
+
+
+class TestStartTraits:
+    def test_starts_every_trait(self):
+        events: list[str] = []
+        registry = TraitRegistry(LG)
+        registry.register(_recording_trait("A", events))
+        registry.register(_recording_trait("B", events))
+
+        _start_traits(LG, registry)
+
+        assert events == ["A.start", "B.start"]
+
+    def test_a_failed_start_stops_the_failed_one_then_the_started_in_reverse(self):
+        events: list[str] = []
+        registry = TraitRegistry(LG)
+        for name, fails in (("A", False), ("B", False), ("C", True)):
+            registry.register(_recording_trait(name, events, fails=fails))
+
+        with pytest.raises(RuntimeError, match="C down"):
+            _start_traits(LG, registry)
+
+        assert events == ["A.start", "B.start", "C.start", "C.stop", "B.stop", "A.stop"]
 
 
 class _CountingFactory:
@@ -259,3 +313,31 @@ class TestTraits:
         assert not registry.has(MemoryTrait)
         assert first.traits.require(MemoryTrait) is memory
         assert second.traits.require(MemoryTrait) is memory
+
+    def test_close_stops_the_platforms_traits(self):
+        registry = TraitRegistry(LG)
+        trait = MagicMock()
+        registry.register(trait)
+
+        make_platform(LG, traits=registry).close()
+
+        trait.on_stop.assert_called_once()
+
+    def test_a_trait_that_fails_to_stop_does_not_stop_the_close(self):
+        registry = TraitRegistry(LG)
+        trait, owned = MagicMock(), MagicMock()
+        trait.on_stop.side_effect = RuntimeError("boom")
+        registry.register(trait)
+        platform = Platform(
+            LG,
+            llm=MagicMock(),
+            saia_factory=MagicMock(),
+            trait_factory=MagicMock(),
+            tool_factory=MagicMock(),
+            traits=registry,
+            owned=[owned],
+        )
+
+        platform.close()
+
+        owned.close.assert_called_once()

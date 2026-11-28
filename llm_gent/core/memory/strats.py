@@ -19,7 +19,7 @@ def recall_chronological(memory_trait: Any, agent_name: str, limit: int = 5) -> 
     Use for repetitive tasks where recency matters (e.g., scheduled execution).
 
     Args:
-        memory_trait: MemoryTrait instance providing access to solutions client.
+        memory_trait: The agent's MemoryBinding, providing access to the solutions client.
         agent_name: Agent name to filter solutions by.
         limit: Maximum number of recent solutions to recall.
 
@@ -50,7 +50,7 @@ def recall_semantic(
     Falls back to chronological recall if search fails.
 
     Args:
-        memory_trait: MemoryTrait instance providing access to solutions client.
+        memory_trait: The agent's MemoryBinding, providing access to the solutions client.
         query: Query string to search for similar solutions.
         limit: Maximum number of solutions to recall.
         agent_name: Optional agent name to filter by (if search supports it).

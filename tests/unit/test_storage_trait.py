@@ -55,7 +55,7 @@ class TestStorageTrait:
     ):
         """on_start creates AgentStorage from MemoryTrait's client."""
         # Setup agent to return mocked MemoryTrait
-        mock_agent.require_trait.return_value = mock_memory_trait
+        mock_agent.require.return_value = mock_memory_trait
 
         # Create mock AgentStorage instance
         mock_storage_instance = MagicMock()
@@ -67,7 +67,7 @@ class TestStorageTrait:
         # Verify MemoryTrait was required
         from llm_gent.core.traits.builtin.memory import MemoryTrait
 
-        mock_agent.require_trait.assert_called_once_with(MemoryTrait)
+        mock_agent.require.assert_called_once_with(MemoryTrait)
 
         # AgentStorage works on the memory database, isolated by the memory view's context
         mock_agent_storage_class.assert_called_once_with(
@@ -87,7 +87,7 @@ class TestStorageTrait:
         self, mock_agent_storage_class, mock_agent, mock_memory_trait
     ):
         """storage property returns AgentStorage after on_start."""
-        mock_agent.require_trait.return_value = mock_memory_trait
+        mock_agent.require.return_value = mock_memory_trait
         mock_storage_instance = MagicMock()
         mock_agent_storage_class.return_value = mock_storage_instance
 
@@ -102,7 +102,7 @@ class TestStorageTrait:
     @patch("llm_gent.core.traits.builtin.storage.AgentStorage")
     def test_on_stop_clears_storage(self, mock_agent_storage_class, mock_agent, mock_memory_trait):
         """on_stop clears storage reference."""
-        mock_agent.require_trait.return_value = mock_memory_trait
+        mock_agent.require.return_value = mock_memory_trait
         mock_storage_instance = MagicMock()
         mock_agent_storage_class.return_value = mock_storage_instance
 
@@ -129,7 +129,7 @@ class TestStorageTrait:
         self, mock_agent_storage_class, mock_agent, mock_memory_trait
     ):
         """storage property raises after on_stop."""
-        mock_agent.require_trait.return_value = mock_memory_trait
+        mock_agent.require.return_value = mock_memory_trait
         mock_storage_instance = MagicMock()
         mock_agent_storage_class.return_value = mock_storage_instance
 
@@ -145,8 +145,8 @@ class TestStorageTrait:
         """on_start raises if MemoryTrait is not attached."""
         from llm_gent.core.errors import TraitNotFoundError
 
-        # Make require_trait raise TraitNotFoundError
-        mock_agent.require_trait.side_effect = TraitNotFoundError("MemoryTrait not found")
+        # Make require raise TraitNotFoundError
+        mock_agent.require.side_effect = TraitNotFoundError("MemoryTrait not found")
 
         trait = StorageTrait(mock_agent)
 

@@ -3,7 +3,7 @@
 
 """Memory tools for agent kelt-backed fact operations.
 
-These tools enable agents to store and retrieve facts via MemoryTrait.
+These tools enable agents to store and retrieve facts through their MemoryBinding.
 """
 
 from __future__ import annotations
@@ -14,20 +14,20 @@ from ..base import BaseTool, ToolResult
 
 
 if TYPE_CHECKING:
-    from ...traits.builtin.memory import MemoryTrait
+    from ...traits.builtin.memory import MemoryBinding
 
 
 class RememberTool(BaseTool):
     """Store a fact in long-term memory.
 
-    Uses MemoryTrait to persist facts for future reference.
+    Uses the agent's MemoryBinding to persist facts for future reference.
     Facts are stored with optional category for organization.
 
     Example:
         from llm_gent.core.traits.builtin.memory import MemoryTrait
         from llm_gent.core.tools.builtin.memory import RememberTool
 
-        memory_trait = agent.require_trait(MemoryTrait)  # the agent's memory view
+        memory_trait = agent.require(MemoryTrait)  # the agent's MemoryBinding
         tool = RememberTool(memory_trait)
         result = tool.execute(fact="User prefers Python", category="preferences")
     """
@@ -51,11 +51,11 @@ class RememberTool(BaseTool):
         "required": ["fact"],
     }
 
-    def __init__(self, memory_trait: MemoryTrait) -> None:
-        """Initialize with MemoryTrait for persistence.
+    def __init__(self, memory_trait: MemoryBinding) -> None:
+        """Initialize with the agent's memory for persistence.
 
         Args:
-            memory_trait: The MemoryTrait instance for storing facts.
+            memory_trait: The agent's MemoryBinding for storing facts.
         """
         self._memory_trait = memory_trait
 
@@ -81,14 +81,14 @@ class RememberTool(BaseTool):
 class RecallTool(BaseTool):
     """Search memory for relevant facts.
 
-    Uses MemoryTrait to search stored facts. Supports semantic search
-    when embedder is configured, otherwise returns recent facts.
+    Uses the agent's MemoryBinding to search stored facts. Supports semantic
+    search when embedder is configured, otherwise returns recent facts.
 
     Example:
         from llm_gent.core.traits.builtin.memory import MemoryTrait
         from llm_gent.core.tools.builtin.memory import RecallTool
 
-        memory_trait = agent.require_trait(MemoryTrait)  # the agent's memory view
+        memory_trait = agent.require(MemoryTrait)  # the agent's MemoryBinding
         tool = RecallTool(memory_trait)
         result = tool.execute(query="user preferences", limit=5)
     """
@@ -114,11 +114,11 @@ class RecallTool(BaseTool):
         "required": ["query"],
     }
 
-    def __init__(self, memory_trait: MemoryTrait) -> None:
-        """Initialize with MemoryTrait for retrieval.
+    def __init__(self, memory_trait: MemoryBinding) -> None:
+        """Initialize with the agent's memory for retrieval.
 
         Args:
-            memory_trait: The MemoryTrait instance for retrieving facts.
+            memory_trait: The agent's MemoryBinding for retrieving facts.
         """
         self._memory_trait = memory_trait
 

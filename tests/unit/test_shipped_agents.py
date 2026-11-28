@@ -62,7 +62,7 @@ def test_task_limits_reach_the_run(path):
     raw = yaml.safe_load(path.read_text())
     task = AgentServerConfig.from_dict({"agents": {path.stem: raw}}).agents[path.stem].task
 
-    config = _build(path, CODEBASE).require_trait(SAIATrait).config
+    config = _build(path, CODEBASE).require(SAIATrait).config
 
     assert (config.max_iterations, config.timeout_secs) == (task.max_iterations, task.timeout_secs)
     assert config.timeout_secs > 0

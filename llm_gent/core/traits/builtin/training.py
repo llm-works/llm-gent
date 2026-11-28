@@ -60,7 +60,7 @@ class TrainingTrait(BaseTrait):
         )))
         agent.start()
 
-        schema = agent.get_trait(TrainingTrait).resolve_schema_for_adapter(adapter_info)
+        schema = agent.get(TrainingTrait).resolve_schema_for_adapter(adapter_info)
 
     Dependency ownership: the trait can build its own ``TrainFactory``
     lazily from ``config.adapters.lora.base_path``, or accept a pre-built
@@ -145,7 +145,7 @@ class TrainingTrait(BaseTrait):
         """Return a new trait bound to ``train_factory``, detached from the registry.
 
         Immutable-view fluent (as ``SAIATrait.with_saia``): ``self``
-        stays canonical for ``agent.get_trait(TrainingTrait)`` and its factory
+        stays canonical for ``agent.get(TrainingTrait)`` and its factory
         is unchanged. ``owns_train_factory`` on the returned trait is False;
         the caller retains ownership. For a persistent swap, call
         ``agent.replace_trait(new)``.

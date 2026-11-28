@@ -68,7 +68,7 @@ class SAIATrait(BaseTrait):
         from llm_saia.backends.anthropic import AnthropicBackend
 
         # Create agent with SAIA
-        agent = MyAgent(lg, config)  # Your Agent subclass
+        agent = MyAgent(lg, platform, config)  # Your Agent subclass
         agent.add_trait(SAIATrait(
             agent,
             backend=AnthropicBackend(),
@@ -77,7 +77,7 @@ class SAIATrait(BaseTrait):
         agent.start()
 
         # Use SAIA verbs
-        saia_trait = agent.require_trait(SAIATrait)
+        saia_trait = agent.require(SAIATrait)
         result = await saia_trait.saia.complete("Analyze this code...")
         verified = await saia_trait.saia.verify(output, "is valid JSON")
     """
@@ -180,7 +180,7 @@ class SAIATrait(BaseTrait):
         """Return a new trait bound to ``saia``, detached from the registry.
 
         Immutable-view fluent (as ``TrainingTrait.with_train_factory``): ``self``
-        stays canonical for ``agent.get_trait(SAIATrait)`` and its instance is
+        stays canonical for ``agent.get(SAIATrait)`` and its instance is
         unchanged. ``owns_saia`` on the returned trait is False; the caller
         retains ownership. For a persistent swap, call
         ``agent.replace_trait(new)``.
@@ -224,7 +224,7 @@ class SAIATrait(BaseTrait):
         """Get tools and executor from ToolsTrait if available."""
         from .tools import ToolsTrait
 
-        tools_trait = self.agent.get_trait(ToolsTrait)
+        tools_trait = self.agent.get(ToolsTrait)
         if tools_trait is None or not tools_trait.has_tools():
             return [], None
 

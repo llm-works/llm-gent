@@ -192,8 +192,10 @@ def saia():
 
 
 def _agent(saia, config=None, storage=None) -> ChatAgent:
+    lg = MagicMock()
     agent = ChatAgent(
-        lg=MagicMock(),
+        lg=lg,
+        platform=make_platform(lg),
         config=DotDict({"identity": {"name": "jokester"}, **(config or {})}),
         session_storage=storage,
     )

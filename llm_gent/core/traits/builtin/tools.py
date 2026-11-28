@@ -26,7 +26,7 @@ class ToolsTrait(BaseTrait):
         from llm_gent.core.traits import ToolsTrait
         from llm_gent.core.tools import ShellTool, FileReadTool
 
-        agent = Agent(lg, config)
+        agent = Agent(lg, platform, config)
         tools_trait = ToolsTrait(agent)
         tools_trait.register(ShellTool())
         tools_trait.register(FileReadTool())

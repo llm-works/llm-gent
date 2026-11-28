@@ -12,7 +12,7 @@ from appinfra import DotDict
 from llm_gent.core.agent import Agent, ExecutionResult, Identity, RunnableAgent
 from llm_gent.core.agent.helpers import _substitute_variables
 from llm_gent.core.traits import BaseTrait
-from tests.helpers import create_mock_trait
+from tests.helpers import create_mock_trait, make_platform
 
 
 pytestmark = pytest.mark.unit
@@ -35,6 +35,20 @@ class _ResourceTrait(BaseTrait):
             self.resource.close()
 
 
+def _recording_trait(name: str, events: list[str], *, fails: bool = False) -> type[BaseTrait]:
+    """A trait class of its own that records its start and stop in ``events``."""
+
+    def on_start(self: BaseTrait) -> None:
+        events.append(f"{name}.start")
+        if fails:
+            raise RuntimeError(f"{name} down")
+
+    def on_stop(self: BaseTrait) -> None:
+        events.append(f"{name}.stop")
+
+    return type(name, (BaseTrait,), {"on_start": on_start, "on_stop": on_stop})
+
+
 class TestAgentBaseClass:
     """Tests for the slim Agent container."""
 
@@ -48,12 +62,25 @@ class TestAgentBaseClass:
         from llm_gent.core.errors import ConfigError
 
         with pytest.raises(ConfigError, match="identity.name is required"):
-            Agent(lg=mock_logger)
+            Agent(lg=mock_logger, platform=make_platform(mock_logger))
+
+    @pytest.mark.parametrize(
+        ("config", "match"),
+        [
+            ({"identity": {"name": "a"}, "llm": "anthropic"}, "'llm' key"),
+            ({"identity": {"name": "a"}, "kelt": {"schema": {"name": "custom"}}}, "kelt.schema"),
+        ],
+    )
+    def test_an_agent_built_directly_rejects_platform_settings(self, mock_logger, config, match):
+        from llm_gent.core.errors import ConfigError
+
+        with pytest.raises(ConfigError, match=match):
+            Agent(lg=mock_logger, platform=make_platform(mock_logger), config=DotDict(config))
 
     def test_agent_container_can_be_instantiated(self, mock_logger):
         """Plain Agent is directly instantiable with just identity."""
         config = DotDict(identity={"name": "test"})
-        agent = Agent(lg=mock_logger, config=config)
+        agent = Agent(lg=mock_logger, platform=make_platform(mock_logger), config=config)
         assert agent.name == "test"
 
     def test_runnable_agent_requires_execution_methods(self, mock_logger):
@@ -63,7 +90,7 @@ class TestAgentBaseClass:
             pass
 
         with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            IncompleteRunnable(lg=mock_logger)
+            IncompleteRunnable(lg=mock_logger, platform=make_platform(mock_logger))
 
     def test_runnable_agent_subclass_can_be_instantiated(self, mock_logger):
         """RunnableAgent subclass with all abstracts is instantiable."""
@@ -82,7 +109,7 @@ class TestAgentBaseClass:
                 return []
 
         config = DotDict(identity={"name": "test"})
-        agent = CompleteAgent(lg=mock_logger, config=config)
+        agent = CompleteAgent(lg=mock_logger, platform=make_platform(mock_logger), config=config)
         assert agent.name == "test"
 
 
@@ -101,6 +128,7 @@ class TestAgentLifecycle:
 
         return DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test-agent"}, default_prompt="You are a test agent."),
         )
 
@@ -124,6 +152,28 @@ class TestAgentLifecycle:
 
         mock_trait.on_stop.assert_called_once()
 
+    def test_a_failed_start_stops_the_failed_one_then_the_started_in_reverse(self, agent):
+        events: list[str] = []
+        for name, fails in (("A", False), ("B", False), ("C", True)):
+            agent._traits.register(_recording_trait(name, events, fails=fails)(agent))
+
+        with pytest.raises(RuntimeError, match="C down"):
+            agent.start()
+
+        assert events == ["A.start", "B.start", "C.start", "C.stop", "B.stop", "A.stop"]
+        assert not agent._started
+
+    def test_a_trait_added_to_a_started_agent_that_fails_to_start_is_stopped(self, agent):
+        events: list[str] = []
+        agent.start()
+        failing = _recording_trait("A", events, fails=True)
+
+        with pytest.raises(RuntimeError, match="A down"):
+            agent.add_trait(failing(agent))
+
+        assert events == ["A.start", "A.stop"]
+        assert not agent.has(failing)
+
 
 class TestAgentTraits:
     """Tests for Agent trait management."""
@@ -140,6 +190,7 @@ class TestAgentTraits:
 
         return DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
 
@@ -149,7 +200,7 @@ class TestAgentTraits:
         agent.add_trait(mock_trait)
 
         # Trait is registered in agent's registry
-        assert agent.has_trait(type(mock_trait))
+        assert agent.has(type(mock_trait))
 
     def test_add_duplicate_trait_raises(self, agent):
         from llm_gent.core.errors import DuplicateTraitError
@@ -163,12 +214,12 @@ class TestAgentTraits:
         mock_trait = MagicMock()
         agent.add_trait(mock_trait)
 
-        result = agent.get_trait(type(mock_trait))
+        result = agent.get(type(mock_trait))
 
         assert result is mock_trait
 
     def test_get_trait_not_found(self, agent):
-        result = agent.get_trait(MagicMock)
+        result = agent.get(MagicMock)
 
         assert result is None
 
@@ -176,7 +227,7 @@ class TestAgentTraits:
         mock_trait = MagicMock()
         agent.add_trait(mock_trait)
 
-        result = agent.require_trait(type(mock_trait))
+        result = agent.require(type(mock_trait))
 
         assert result is mock_trait
 
@@ -184,7 +235,195 @@ class TestAgentTraits:
         from llm_gent.core.errors import TraitNotFoundError
 
         with pytest.raises(TraitNotFoundError, match="required but not attached"):
-            agent.require_trait(MagicMock)
+            agent.require(MagicMock)
+
+
+class _Binding:
+    """One agent's binding of _PlatformTrait: the agent's data, started and stopped by the agent."""
+
+    def __init__(self, trait: "_PlatformTrait", owner: str) -> None:
+        self.trait = trait
+        self.owner = owner
+        self.started = 0
+        self.stopped = 0
+
+    def on_start(self) -> None:
+        self.started += 1
+
+    def on_stop(self) -> None:
+        self.stopped += 1
+
+
+class _PlatformTrait:
+    """A platform trait: shared resources only; each agent binds it."""
+
+    trait_name = "thing"
+
+    def __init__(self) -> None:
+        self.on_start = MagicMock()
+        self.on_stop = MagicMock()
+
+    def bind(self, agent: Agent) -> _Binding:
+        return _Binding(self, agent.name)
+
+
+class TestAgentLookup:
+    """agent.get / has / require: the agent's own traits and bindings of the platform's."""
+
+    @pytest.fixture
+    def platform(self):
+        from llm_gent.core.traits.registry import Registry
+        from tests.helpers import make_platform
+
+        lg = MagicMock()
+        traits = Registry(lg)
+        traits.register(_PlatformTrait())
+        return make_platform(lg, traits=traits)
+
+    def _agent(self, platform, name: str = "a") -> Agent:
+        return Agent(lg=MagicMock(), platform=platform, config=DotDict(identity={"name": name}))
+
+    def test_the_agents_own_trait(self, platform):
+        agent = self._agent(platform)
+        trait = MagicMock()
+        agent.add_trait(trait)
+
+        assert agent.require(type(trait)) is trait
+        assert agent.get(type(trait)) is trait
+        assert agent.has(type(trait))
+
+    def test_use_holds_the_agents_binding_of_the_platform_trait(self, platform):
+        agent = self._agent(platform, name="jokester")
+
+        agent.use(_PlatformTrait)
+
+        binding = agent.require(_PlatformTrait)
+        assert isinstance(binding, _Binding)
+        assert binding.owner == "jokester"
+        assert binding.trait is platform.traits.require(_PlatformTrait)
+        assert agent.get(_PlatformTrait) is binding
+        assert agent.has(_PlatformTrait)
+
+    def test_every_agent_holds_its_own_binding(self, platform):
+        first, second = self._agent(platform, name="a"), self._agent(platform, name="b")
+        first.use(_PlatformTrait)
+        second.use(_PlatformTrait)
+
+        assert first.require(_PlatformTrait) is not second.require(_PlatformTrait)
+
+    def test_the_platform_trait_keeps_nothing_per_agent(self, platform):
+        trait = platform.traits.require(_PlatformTrait)
+        before = dict(vars(trait))
+
+        for i in range(5):
+            self._agent(platform, name=f"agent-{i}").use(_PlatformTrait)
+
+        assert vars(trait) == before
+
+    @pytest.mark.parametrize("started", [False, True])
+    def test_a_second_use_raises_and_keeps_the_first_binding(self, platform, started):
+        from llm_gent.core.errors import DuplicateTraitError
+
+        agent = self._agent(platform)
+        agent.use(_PlatformTrait)
+        first = agent.require(_PlatformTrait)
+        if started:
+            agent.start()
+
+        with (
+            patch.object(_PlatformTrait, "bind") as bind,
+            pytest.raises(DuplicateTraitError, match="_PlatformTrait"),
+        ):
+            agent.use(_PlatformTrait)
+
+        bind.assert_not_called()
+        assert agent.require(_PlatformTrait) is first
+        assert first.stopped == 0
+
+    def test_a_binding_that_fails_to_start_is_stopped_and_dropped(self, platform):
+        agent = self._agent(platform)
+        agent.start()
+        binding = _Binding(platform.traits.require(_PlatformTrait), agent.name)
+        binding.on_start = MagicMock(side_effect=RuntimeError("bind down"))  # type: ignore[method-assign]
+
+        with (
+            patch.object(_PlatformTrait, "bind", return_value=binding),
+            pytest.raises(RuntimeError, match="bind down"),
+        ):
+            agent.use(_PlatformTrait)
+
+        assert binding.stopped == 1
+        assert not agent.has(_PlatformTrait)
+
+    def test_the_agent_stops_in_reverse_of_its_start(self, platform):
+        events: list[str] = []
+        agent = self._agent(platform)
+        agent.use(_PlatformTrait)
+        binding = agent.require(_PlatformTrait)
+        binding.on_start = lambda: events.append("binding.start")  # type: ignore[method-assign]
+        binding.on_stop = lambda: events.append("binding.stop")  # type: ignore[method-assign]
+        for name in ("A", "B", "C"):
+            agent.add_trait(_recording_trait(name, events)(agent))
+
+        agent.start()
+        agent.stop()
+
+        started = ["binding.start", "A.start", "B.start", "C.start"]
+        assert events == [*started, "C.stop", "B.stop", "A.stop", "binding.stop"]
+
+    def test_the_agent_starts_and_stops_its_bindings(self, platform):
+        agent = self._agent(platform)
+        agent.use(_PlatformTrait)
+        binding = agent.require(_PlatformTrait)
+
+        agent.start()
+        agent.stop()
+
+        assert (binding.started, binding.stopped) == (1, 1)
+
+    def test_a_binding_made_while_started_is_started(self, platform):
+        agent = self._agent(platform)
+        agent.start()
+
+        agent.use(_PlatformTrait)
+
+        assert agent.require(_PlatformTrait).started == 1
+
+    def test_the_agent_never_starts_or_stops_the_platform_trait(self, platform):
+        agent = self._agent(platform)
+        agent.use(_PlatformTrait)
+
+        agent.start()
+        agent.stop()
+
+        trait = platform.traits.require(_PlatformTrait)
+        trait.on_start.assert_not_called()
+        trait.on_stop.assert_not_called()
+
+    def test_a_platform_trait_the_agent_does_not_use_is_not_found(self, platform):
+        from llm_gent.core.errors import TraitNotFoundError
+
+        agent = self._agent(platform)
+
+        assert agent.get(_PlatformTrait) is None
+        assert not agent.has(_PlatformTrait)
+        with pytest.raises(TraitNotFoundError, match="_PlatformTrait"):
+            agent.require(_PlatformTrait)
+
+    def test_using_a_trait_the_platform_lacks_raises(self, platform):
+        from llm_gent.core.errors import TraitNotFoundError
+
+        agent = self._agent(platform)
+
+        with pytest.raises(TraitNotFoundError, match="MagicMock"):
+            agent.use(MagicMock)
+
+    def test_the_trait_suffixed_lookups_are_gone(self, platform):
+        agent = self._agent(platform)
+
+        assert not hasattr(agent, "get_trait")
+        assert not hasattr(agent, "has_trait")
+        assert not hasattr(agent, "require_trait")
 
 
 class TestAgentReplaceTrait:
@@ -200,6 +439,7 @@ class TestAgentReplaceTrait:
 
         return DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
 
@@ -214,14 +454,14 @@ class TestAgentReplaceTrait:
         replacement = self._make_trait(agent)
         agent.replace_trait(replacement)
 
-        assert agent.require_trait(_ResourceTrait) is replacement
+        assert agent.require(_ResourceTrait) is replacement
 
     def test_replace_when_no_existing_trait(self, agent):
 
         trait = self._make_trait(agent)
         agent.replace_trait(trait)
 
-        assert agent.require_trait(_ResourceTrait) is trait
+        assert agent.require(_ResourceTrait) is trait
 
     def test_replace_calls_on_start_when_agent_started(self, agent):
         original = self._make_trait(agent)
@@ -300,7 +540,7 @@ class TestAgentReplaceTrait:
         ):
             agent.replace_trait(replacement)
 
-        assert agent.require_trait(_ResourceTrait) is original
+        assert agent.require(_ResourceTrait) is original
         mock_stop.assert_not_called()
 
     def test_replace_swallows_old_on_stop_exception(self, agent, mock_logger):
@@ -324,10 +564,10 @@ class TestAgentReplaceTrait:
         agent._started = True
 
         new_resource = MagicMock()
-        replacement = agent.require_trait(_ResourceTrait).with_resource(new_resource)
+        replacement = agent.require(_ResourceTrait).with_resource(new_resource)
         agent.replace_trait(replacement)
 
-        assert agent.require_trait(_ResourceTrait) is replacement
+        assert agent.require(_ResourceTrait) is replacement
         # Old trait owned its resource — replace_trait's auto-stop closed it.
         old_resource.close.assert_called_once()
         # New trait was built with owns_resource=False; its resource is external.
@@ -368,6 +608,7 @@ class TestAgentExecution:
 
         agent = ChatAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt="Test task"),
             session_storage=None,
         )
@@ -384,6 +625,7 @@ class TestAgentExecution:
 
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt="Test task"),
         )
 
@@ -397,6 +639,7 @@ class TestAgentExecution:
 
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
         agent._traits.register(mock_saia_trait)
@@ -449,6 +692,7 @@ class TestAgentExecution:
 
         agent = ChatAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
             session_storage=None,
         )
@@ -496,6 +740,7 @@ class TestAgentRecentResults:
 
         return DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
 
@@ -529,6 +774,7 @@ class TestAgentRecordFeedback:
 
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
 
@@ -629,6 +875,7 @@ class TestFactorySystemPrompt:
         factory = self._create_factory(mock_logger)
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
         agent.add_trait(DirectiveTrait(agent, "You are a helpful assistant."))
@@ -645,6 +892,7 @@ class TestFactorySystemPrompt:
         factory = self._create_factory(mock_logger)
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
         agent.add_trait(MethodTrait(agent, "- Step 1\n- Step 2"))
@@ -661,6 +909,7 @@ class TestFactorySystemPrompt:
         factory = self._create_factory(mock_logger)
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
         agent.add_trait(DirectiveTrait(agent, "You are a helpful assistant."))
@@ -677,6 +926,7 @@ class TestFactorySystemPrompt:
         factory = self._create_factory(mock_logger)
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
 
@@ -698,7 +948,7 @@ class TestFactorySystemPrompt:
         }
 
         agent = factory.create(config)
-        saia_trait = agent.get_trait(SAIATrait)
+        saia_trait = agent.get(SAIATrait)
 
         assert saia_trait is not None
         expected = "You are a code analyst.\n\n## Method\n- Analyze carefully"

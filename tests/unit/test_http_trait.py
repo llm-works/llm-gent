@@ -24,7 +24,7 @@ from llm_gent.runtime.server.protocol.v1 import (
     RememberRequest,
     RememberResponse,
 )
-from tests.helpers import create_mock_trait
+from tests.helpers import create_mock_trait, make_platform
 
 
 pytestmark = pytest.mark.unit
@@ -331,6 +331,7 @@ class TestHTTPTraitHandleRequest:
 
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
         # Use registry's register method to add mock traits
@@ -519,6 +520,7 @@ class TestHTTPTraitHandleRequest:
         # Create agent with traits
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
         agent._traits.register(mock_memory_trait)
@@ -558,6 +560,7 @@ class TestHTTPTraitHandleRequest:
 
         agent = DefaultAgent(
             lg=mock_logger,
+            platform=make_platform(mock_logger),
             config=DotDict(identity={"name": "test"}, default_prompt=""),
         )
         http_trait = HTTPTrait(agent, handler=HTTPHandler(agent, caller))

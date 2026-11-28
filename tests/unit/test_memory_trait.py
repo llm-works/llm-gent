@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""MemoryTrait: one shared instance per platform, a cheap view per identity."""
+"""MemoryTrait holds the platform's memory clients; each agent holds its own MemoryBinding."""
 
 from unittest.mock import MagicMock, patch
 
@@ -10,10 +10,15 @@ from appinfra import DotDict
 from llm_kelt import SchemaMode
 
 from llm_gent.core.agent import Identity
-from llm_gent.core.traits.builtin.memory import MemoryTrait
+from llm_gent.core.traits.builtin.memory import MemoryBinding, MemoryTrait
 
 
 pytestmark = pytest.mark.unit
+
+
+def _agent(name: str = "a", context_key: str | None = None) -> MagicMock:
+    """An agent as bind reads it: its identity."""
+    return MagicMock(identity=Identity(name, context_key=context_key or name))
 
 
 @pytest.fixture
@@ -32,7 +37,11 @@ def _memory(clients, **config) -> MemoryTrait:
     return MemoryTrait(MagicMock(), DotDict(config), **clients)
 
 
-class TestSharedInstance:
+def _bound(memory: MemoryTrait, name: str = "a") -> MemoryBinding:
+    return memory.bind(_agent(name))
+
+
+class TestTrait:
     def test_builds_one_kelt_client_on_the_platform_schema(self, kelt_class, clients):
         _memory(clients, schema={"name": "acme"}, training={"x": 1})
 
@@ -44,6 +53,9 @@ class TestSharedInstance:
         assert kwargs["schema_mode"] is SchemaMode.ENSURE
         assert kwargs["context"].schema_name == "acme"
         assert kwargs["training_config"] == {"x": 1}
+
+    def test_is_named_memory(self, kelt_class, clients):
+        assert _memory(clients).trait_name == "memory"
 
     def test_schema_defaults_to_public(self, kelt_class, clients):
         clients["database"].schema = None
@@ -67,21 +79,11 @@ class TestSharedInstance:
         assert kelt_class.call_args.kwargs["context"].schema_name == "acme"
         assert memory.default_schema == "acme"
 
-    def test_memory_operations_need_a_view(self, kelt_class, clients):
+    def test_the_trait_has_no_memory_operations(self, kelt_class, clients):
         memory = _memory(clients)
 
-        with pytest.raises(RuntimeError, match="call view"):
-            memory.remember("a fact")
-        with pytest.raises(RuntimeError, match="call view"):
-            memory.get_client_for_schema("other")
-        assert memory.identity is None
-
-    def test_a_completion_needs_a_view_even_without_facts(self, kelt_class, clients):
-        memory = _memory(clients)
-
-        with pytest.raises(RuntimeError, match="call view"):
-            memory.complete("hi", include_facts=False)
-        clients["chat_client"].chat.assert_not_called()
+        assert not hasattr(memory, "remember")
+        assert not hasattr(memory, "kelt")
 
     def test_lifecycle_closes_no_client(self, kelt_class, clients):
         memory = _memory(clients)
@@ -93,67 +95,49 @@ class TestSharedInstance:
         clients["embedder"].close.assert_not_called()
 
 
-class TestView:
-    def test_many_views_share_one_kelt_client(self, kelt_class, clients):
-        memory = _memory(clients)
-
-        views = [memory.view(Identity(f"agent-{i}")) for i in range(5)]
-
-        kelt_class.assert_called_once()
-        assert all(v.client is clients["chat_client"] for v in views)
-        assert all(v.database is clients["database"] for v in views)
-
-    def test_binds_the_identity_context_key_on_the_platform_schema(self, kelt_class, clients):
+class TestBind:
+    def test_binds_the_agents_context_key_on_the_platform_schema(self, kelt_class, clients):
         memory = _memory(clients, schema={"name": "acme"})
 
-        view = memory.view(Identity("jokester", context_key="jokes"))
+        binding = memory.bind(_agent("jokester", context_key="jokes"))
 
         root = kelt_class.return_value
         root.view.assert_called_once_with("jokes", schema_name="acme")
-        assert view.kelt is root.view.return_value
-        assert view.identity == Identity("jokester", context_key="jokes")
-        assert view.default_schema == "acme"
+        assert binding.kelt is root.view.return_value
+        assert binding.context_key == "jokes"
+        assert binding.trait is memory
+        assert binding.default_schema == "acme"
 
-    def test_schema_override(self, kelt_class, clients):
+    def test_every_bind_is_a_new_binding(self, kelt_class, clients):
         memory = _memory(clients)
 
-        view = memory.view(Identity("a"), schema="agent_schema")
+        assert memory.bind(_agent("a")) is not memory.bind(_agent("a"))
 
-        kelt_class.return_value.view.assert_called_once_with("a", schema_name="agent_schema")
-        assert view.default_schema == "agent_schema"
+    def test_the_trait_keeps_nothing_per_agent(self, kelt_class, clients):
+        memory = _memory(clients)
+        before = dict(vars(memory))
 
-    def test_a_view_of_a_view_defaults_to_the_platform_schema(self, kelt_class, clients):
-        memory = _memory(clients, schema={"name": "acme"})
+        for i in range(5):
+            _bound(memory, f"agent-{i}")
 
-        view = memory.view(Identity("a"), schema="tenant").view(Identity("b"))
+        assert vars(memory) == before
 
-        assert view.default_schema == "acme"
-        kelt_class.return_value.view.assert_called_with("b", schema_name="acme")
-
-    def test_leaves_the_shared_instance_unbound(self, kelt_class, clients):
+    def test_bindings_share_the_platforms_clients(self, kelt_class, clients):
         memory = _memory(clients)
 
-        memory.view(Identity("a"))
+        bindings = [_bound(memory, f"agent-{i}") for i in range(5)]
 
-        assert memory.identity is None
-        with pytest.raises(RuntimeError, match="call view"):
-            memory.kelt  # noqa: B018 - the property raises
+        kelt_class.assert_called_once()
+        assert all(b.client is clients["chat_client"] for b in bindings)
+        assert all(b.database is clients["database"] for b in bindings)
+        assert all(b.embedder is clients["embedder"] for b in bindings)
 
-    def test_views_of_different_identities_are_separate(self, kelt_class, clients):
-        root = kelt_class.return_value
-        root.view.side_effect = lambda key, **_: MagicMock(name=key)
-        memory = _memory(clients)
-
-        first, second = memory.view(Identity("a")), memory.view(Identity("b"))
-
-        assert first.kelt is not second.kelt
-
-    def test_client_for_another_schema_keeps_the_identity(self, kelt_class, clients):
-        view = _memory(clients).view(Identity("a", context_key="ka"))
+    def test_client_for_another_schema_keeps_the_context_key(self, kelt_class, clients):
+        binding = _memory(clients).bind(_agent("a", context_key="ka"))
         root = kelt_class.return_value
         root.view.reset_mock()
 
-        client = view.get_client_for_schema("other")
+        client = binding.get_client_for_schema("other")
 
         root.view.assert_called_once_with("ka", schema_name="other")
         assert client is root.view.return_value
@@ -161,13 +145,13 @@ class TestView:
 
 class TestOperations:
     def test_remember_stores_and_embeds(self, kelt_class, clients):
-        view = _memory(clients).view(Identity("a"))
-        kelt = view.kelt
+        binding = _bound(_memory(clients))
+        kelt = binding.kelt
         # MagicMock refuses `.assertions` as an auto-attribute; assign it.
         kelt.atomic.assertions = MagicMock()
         kelt.atomic.assertions.add.return_value = 7
 
-        fact_id = view.remember("likes tea", category="taste")
+        fact_id = binding.remember("likes tea", category="taste")
 
         assert fact_id == 7
         kelt.atomic.assertions.add.assert_called_once_with(
@@ -176,26 +160,37 @@ class TestOperations:
         clients["embedder"].embed.assert_called_once_with("likes tea")
         kelt.atomic.embeddings.set_embedding.assert_called_once()
 
+    def test_remember_stores_nothing_when_the_embedder_fails(self, kelt_class, clients):
+        binding = _bound(_memory(clients))
+        kelt = binding.kelt
+        kelt.atomic.assertions = MagicMock()
+        clients["embedder"].embed.side_effect = RuntimeError("embedder down")
+
+        with pytest.raises(RuntimeError, match="embedder down"):
+            binding.remember("likes tea")
+
+        kelt.atomic.assertions.add.assert_not_called()
+
     def test_recall_in_another_schema(self, kelt_class, clients):
-        view = _memory(clients).view(Identity("a"))
+        binding = _bound(_memory(clients))
         other = MagicMock()
         kelt_class.return_value.view.return_value = other
 
-        view.recall("tea", schema="other")
+        binding.recall("tea", schema="other")
 
         other.atomic.embeddings.search_similar.assert_called_once()
 
-    def test_build_prompt_uses_the_view_context_builder(self, kelt_class, clients):
-        view = _memory(clients).view(Identity("a"))
-        view.kelt.context_builder.build_system_prompt.return_value = "prompt"
+    def test_build_prompt_uses_the_bindings_context_builder(self, kelt_class, clients):
+        binding = _bound(_memory(clients))
+        binding.kelt.context_builder.build_system_prompt.return_value = "prompt"
 
-        assert view.build_prompt("base") == "prompt"
+        assert binding.build_prompt("base") == "prompt"
 
     def test_complete_uses_the_platform_llm_defaults(self, kelt_class, clients):
-        view = _memory(clients, llm={"model": "m1", "temperature": 0.2}).view(Identity("a"))
+        binding = _bound(_memory(clients, llm={"model": "m1", "temperature": 0.2}))
         clients["chat_client"].chat.return_value = MagicMock(content="ok", model="m1", usage=None)
 
-        view.complete("hi", include_facts=False)
+        binding.complete("hi", include_facts=False)
 
         kwargs = clients["chat_client"].chat.call_args.kwargs
         assert kwargs["model"] == "m1"

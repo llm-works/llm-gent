@@ -102,7 +102,7 @@ class TestSAIATraitLifecycle:
 
     def test_on_start_builds_saia(self, mock_saia_builder):
         agent = MagicMock()
-        agent.get_trait.return_value = None  # no ToolsTrait
+        agent.get.return_value = None  # no ToolsTrait
 
         backend = MagicMock()
         trait = SAIATrait(agent, backend, config=SAIAConfig(system_prompt="Be helpful"))
@@ -123,7 +123,7 @@ class TestSAIATraitLifecycle:
         tool.description = "Search the web"
         tool.parameters = {"query": {"type": "string"}}
         tools_trait.registry.list_tools.return_value = [tool]
-        agent.get_trait.return_value = tools_trait
+        agent.get.return_value = tools_trait
 
         backend = MagicMock()
         trait = SAIATrait(agent, backend)
@@ -134,7 +134,7 @@ class TestSAIATraitLifecycle:
 
     def test_on_start_no_system_prompt(self, mock_saia_builder):
         agent = MagicMock()
-        agent.get_trait.return_value = None
+        agent.get.return_value = None
 
         trait = SAIATrait(agent, MagicMock(), config=SAIAConfig(system_prompt=None))
 
@@ -145,7 +145,7 @@ class TestSAIATraitLifecycle:
     def test_on_stop_clears_owned_saia(self, mock_saia_builder):
         """on_stop drops the SAIA instance the trait built in on_start."""
         agent = MagicMock()
-        agent.get_trait.return_value = None
+        agent.get.return_value = None
         trait = SAIATrait(agent, MagicMock())
         trait.on_start()  # builds saia; sets owns_saia=True
         assert trait._saia is not None
@@ -165,7 +165,7 @@ class TestSAIATraitLifecycle:
     def test_on_start_skips_build_when_injected(self, mock_saia_builder):
         """on_start does not call SAIA.builder when saia is already injected."""
         agent = MagicMock()
-        agent.get_trait.return_value = None
+        agent.get.return_value = None
         injected = MagicMock()
         trait = SAIATrait(agent, MagicMock(), saia=injected)
 

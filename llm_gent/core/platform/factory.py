@@ -20,7 +20,7 @@ from ..tools.factory import Factory as ToolFactory
 from ..traits.builtin.memory import MemoryTrait
 from ..traits.factory import Factory as TraitFactory
 from ..traits.registry import Registry as TraitRegistry
-from ._platform import Closeable, Platform, SAIAFactory, close_resources
+from ._platform import Closeable, Platform, SAIAFactory, close_resources, stop_traits
 from .config import Config
 
 
@@ -35,7 +35,7 @@ class Factory:
     one, the platform builds no SAIA and a step reading ``ctx.saia`` raises.
     The platform's trait registry starts empty, or, with memory configured,
     holding the shared :class:`MemoryTrait`, whose memory schema is prepared
-    here; agents and flow steps take views of it (``MemoryTrait.view``).
+    here; each agent binds it and holds its own :class:`MemoryBinding`.
 
     Example:
         async with PlatformFactory(lg).from_config({}) as platform:
@@ -82,16 +82,17 @@ class Factory:
         settings = config if isinstance(config, Config) else Config.model_validate(config)
         router_config = settings.router_config()
         owned: list[Closeable] = []
+        traits = TraitRegistry(self._lg)
         try:
             router = self._router(router_config, owned)
             memory = self._memory(settings.memory, owned)
+            if memory is not None:
+                traits.register(memory)
+            _start_traits(self._lg, traits)  # platform traits run from here until close()
         except Exception:
             close_resources(self._lg, owned)
             raise
-        trait_factory = TraitFactory(self._lg, router, memory_config=settings.memory, memory=memory)
-        traits = TraitRegistry(self._lg)
-        if memory is not None:
-            traits.register(memory)
+        trait_factory = TraitFactory(self._lg, router, memory_config=settings.memory)
         self._lg.debug(
             "platform built",
             extra={"default": router_config.get("default"), "memory": memory is not None},
@@ -155,6 +156,22 @@ def _embedder(
         timeout=memory_config.get("embedder_timeout", 30.0),
     )
     return embedder
+
+
+def _start_traits(lg: Logger, traits: TraitRegistry) -> None:
+    """Start the platform's traits.
+
+    When one fails to start, it is stopped (releasing what it acquired before
+    failing), then the ones started before it in reverse.
+    """
+    started: list[Any] = []
+    for trait in traits.all():
+        try:
+            trait.on_start()
+        except Exception:
+            stop_traits(lg, [trait, *started[::-1]])
+            raise
+        started.append(trait)
 
 
 class _NoSAIAFactory:

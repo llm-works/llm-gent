@@ -160,17 +160,18 @@ class TestAgentTraits:
         from appinfra import DotDict
 
         from llm_gent.agents.default import Agent as DefaultAgent
+        from tests.helpers import make_platform
 
         config = DotDict(identity={"name": "test"}, default_prompt="")
-        return DefaultAgent(lg=mock_logger, config=config)
+        return DefaultAgent(lg=mock_logger, platform=make_platform(mock_logger), config=config)
 
     def test_add_trait(self, agent):
         identity = Directive(prompt="Test identity")
         trait = DirectiveTrait(agent, identity)
         agent.add_trait(trait)
 
-        assert agent.has_trait(DirectiveTrait)
-        assert agent.get_trait(DirectiveTrait) == trait
+        assert agent.has(DirectiveTrait)
+        assert agent.get(DirectiveTrait) == trait
 
     def test_add_trait_attaches(self, agent):
         identity = Directive(prompt="Test identity")
@@ -189,7 +190,7 @@ class TestAgentTraits:
             agent.add_trait(DirectiveTrait(agent, identity))
 
     def test_get_trait_returns_none_if_not_added(self, agent):
-        assert agent.get_trait(DirectiveTrait) is None
+        assert agent.get(DirectiveTrait) is None
 
     def test_has_trait_returns_false_if_not_added(self, agent):
-        assert not agent.has_trait(DirectiveTrait)
+        assert not agent.has(DirectiveTrait)

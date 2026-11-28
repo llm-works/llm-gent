@@ -8,13 +8,13 @@ Dependency-inversion pattern
 
 Traits receive their external dependencies through the constructor; they
 import no resource factory of their own. :class:`PlatformFactory` builds the
-shared clients once per platform (the model router, and the memory trait
-over the memory database, chat client and embedder) and gives them to this
-factory; the platform closes the clients. Model access is not a trait: every
-agent reaches the platform's router (``platform.llm``, ``Platform.saia``).
+shared clients once per platform and gives them to this factory; the
+platform closes the clients. Model access is not a trait: every agent
+reaches the platform's router (``platform.llm``, ``Platform.saia``).
 
-An agent's memory is a view of the platform's one :class:`MemoryTrait`,
-bound to the agent's identity (``MemoryTrait.view``).
+A trait the platform holds (``platform.traits``, e.g. ``MemoryTrait``) is not
+built here: an agent holds a binding of it (``Trait.bind``). This factory
+builds the traits an agent still builds and holds itself.
 """
 
 from __future__ import annotations
@@ -25,19 +25,18 @@ from typing import TYPE_CHECKING, Any
 from appinfra.log import Logger
 from llm_infer.client import ChatClient
 
-from .base import Trait
+from .base import TraitBinding
 
 
 if TYPE_CHECKING:
     from ..agent import Agent
     from . import TraitName
     from .builtin.directive import Directive, DirectiveTrait, MethodTrait
-    from .builtin.memory import MemoryTrait
     from .builtin.training import TrainingTrait
 
 
 class Factory:
-    """Builds traits on the platform's shared clients.
+    """Builds an agent's own traits on the platform's shared clients.
 
     Built by :class:`PlatformFactory`; the platform owns the injected clients.
 
@@ -53,43 +52,38 @@ class Factory:
         router: ChatClient,
         *,
         memory_config: Mapping[str, Any] | None = None,
-        memory: MemoryTrait | None = None,
     ) -> None:
         """Initialize the factory with the platform's shared clients.
 
         Args:
             lg: Logger instance.
             router: The platform's shared router; rating calls go through it.
-            memory_config: The platform's memory settings, or None.
-            memory: The platform's shared memory trait, or None without a
-                memory database.
+            memory_config: The platform's memory settings (training reads its
+                schema and adapters), or None.
         """
         from . import TraitName
 
         self._lg = lg
         self._router = router
         self._memory_config = memory_config
-        self._memory = memory
 
-        self._creators: dict[TraitName, Callable[..., Trait]] = {
+        self._creators: dict[TraitName, Callable[..., TraitBinding]] = {
             TraitName.DIRECTIVE: self._create_directive,
-            TraitName.MEMORY: self._create_memory,
             TraitName.RATING: self._create_rating,
             TraitName.STORAGE: self._create_storage,
             TraitName.METHOD: self._create_method,
             TraitName.TRAINING: self._create_training,
         }
 
-    @property
-    def has_memory(self) -> bool:
-        """The platform's memory clients are built, so a MemoryTrait can be created."""
-        return self._memory is not None
+    def creates(self, trait_name: TraitName) -> bool:
+        """Whether :meth:`create` builds a ``trait_name`` trait."""
+        return trait_name in self._creators
 
     def create(
         self,
         trait_name: TraitName,
         agent: Agent,
-    ) -> Trait:
+    ) -> TraitBinding:
         """Create a trait by name.
 
         Args:
@@ -114,45 +108,18 @@ class Factory:
         """Route to create_directive_trait."""
         return self.create_directive_trait(agent, agent.config.get("directive"))
 
-    def _create_memory(self, agent: Agent) -> MemoryTrait:
-        """The platform's memory, viewed as the agent's identity.
-
-        A non-empty ``kelt.schema`` on the agent replaces the platform's
-        schema: its ``name``, or ``public`` without one. Without it the
-        agent shares the platform's schema.
-
-        Raises:
-            ConfigError: The platform was built without memory.
-        """
-        from ..errors import ConfigError
-
-        if self._memory is None:
-            raise ConfigError("Memory trait requires a platform built with memory configuration")
-        schema = (agent.config.get("kelt") or {}).get("schema")
-        name = (schema.get("name") or "public") if schema else None
-        return self._memory.view(agent.identity, schema=name)
-
     def _create_training(self, agent: Agent) -> TrainingTrait:
-        """Route to create_training_trait.
-
-        Reads schema and adapters from the platform's memory settings; the
-        agent's ``kelt.schema`` overrides the schema.
-        """
+        """Route to create_training_trait, on the platform's memory schema and adapters."""
         source: dict[str, Any] = dict(self._memory_config) if self._memory_config else {}
-
-        agent_kelt = agent.config.get("kelt", {})
-        if agent_kelt and agent_kelt.get("schema"):
-            source["schema"] = agent_kelt["schema"]
-
         return self.create_training_trait(agent, source)
 
-    def _create_rating(self, agent: Agent) -> Trait:
+    def _create_rating(self, agent: Agent) -> TraitBinding:
         """Route to create_rating_trait."""
         from .builtin.rating import RatingTrait
 
         return RatingTrait(agent, self._router, agent.config.get("rating"))
 
-    def _create_storage(self, agent: Agent) -> Trait:
+    def _create_storage(self, agent: Agent) -> TraitBinding:
         """Route to create_storage_trait."""
         from .builtin.storage import StorageTrait
 

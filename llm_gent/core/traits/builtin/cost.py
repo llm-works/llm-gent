@@ -8,7 +8,7 @@ Registry. Trait use is optional: consumers can build a :class:`CostTracker`
 directly and pass it to :meth:`FlowRunner.start` (``cost=``) without
 going through the trait. The trait adds:
 
-- Agent-mounted access (``agent.require_trait(CostTrait).tracker``).
+- Agent-mounted access (``agent.require(CostTrait).tracker``).
 - ``on_stop`` emits a final summary log with total spend and budget.
 - A natural home for future declarative wiring (yaml / manifest).
 """

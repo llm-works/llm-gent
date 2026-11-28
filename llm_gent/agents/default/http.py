@@ -84,7 +84,7 @@ class HTTPHandler:
         """The agent's directive followed by ``system_prompt``; ``None`` when neither is set."""
         from ...core.traits.builtin.directive import DirectiveTrait
 
-        directive = self.agent.get_trait(DirectiveTrait)
+        directive = self.agent.get(DirectiveTrait)
         parts = [directive.directive.prompt] if directive is not None else []
         if system_prompt:
             parts.append(system_prompt)
@@ -105,7 +105,7 @@ class HTTPHandler:
         """
         from ...core.traits.builtin.memory import MemoryTrait
 
-        memory_trait = self.agent.get_trait(MemoryTrait)
+        memory_trait = self.agent.get(MemoryTrait)
         if memory_trait is None:
             raise RuntimeError("MemoryTrait not attached")
         # HTTP protocol allows None category, trait requires str
@@ -122,7 +122,7 @@ class HTTPHandler:
         """
         from ...core.traits.builtin.memory import MemoryTrait
 
-        memory_trait = self.agent.get_trait(MemoryTrait)
+        memory_trait = self.agent.get(MemoryTrait)
         if memory_trait is None:
             raise RuntimeError("MemoryTrait not attached")
         memory_trait.forget(fact_id=fact_id)
@@ -150,7 +150,7 @@ class HTTPHandler:
         """
         from ...core.traits.builtin.memory import MemoryTrait
 
-        memory_trait = self.agent.get_trait(MemoryTrait)
+        memory_trait = self.agent.get(MemoryTrait)
         if memory_trait is None:
             raise RuntimeError("MemoryTrait not attached")
         return memory_trait.recall(
@@ -177,7 +177,7 @@ class HTTPHandler:
 
         from ...core.traits.builtin.memory import MemoryTrait
 
-        memory_trait = self.agent.get_trait(MemoryTrait)
+        memory_trait = self.agent.get(MemoryTrait)
         if memory_trait is None:
             raise RuntimeError("MemoryTrait not attached")
 

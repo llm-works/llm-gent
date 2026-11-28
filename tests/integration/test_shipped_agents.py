@@ -49,7 +49,7 @@ def _build(path: Path) -> Any:
 def test_the_directive_and_method_are_the_system_prompt(path: Path) -> None:
     raw = _raw(path)
 
-    prompt = _build(path).require_trait(SAIATrait).config.system_prompt
+    prompt = _build(path).require(SAIATrait).config.system_prompt
 
     assert prompt is not None
     assert raw["directive"].strip() in prompt
@@ -64,8 +64,8 @@ def test_memory_tools_attach_memory_on_a_platform_with_memory() -> None:
 
     agent = Factory(platform=platform).create(config.factory_config("jokester"))
 
-    assert agent.require_trait(MemoryTrait).identity == agent.identity
-    names = {tool.name for tool in agent.require_trait(ToolsTrait).registry.list_tools()}
+    assert agent.require(MemoryTrait).context_key == agent.identity.context_key
+    names = {tool.name for tool in agent.require(ToolsTrait).registry.list_tools()}
     assert {"remember", "recall"} <= names
 
 
@@ -83,7 +83,7 @@ def test_agents_on_one_platform_prepare_the_memory_schema_once() -> None:
         agents.append(factory.create(config.factory_config(name)))
 
     database.ensure_schema.assert_called_once()
-    keys = {agent.require_trait(MemoryTrait).kelt.context_key for agent in agents}
+    keys = {agent.require(MemoryTrait).kelt.context_key for agent in agents}
     assert keys == {"jokester", "jokester-2"}
 
 
@@ -99,7 +99,7 @@ def _memory(database: MagicMock) -> MemoryTrait:
 
 
 def test_memory_tools_are_skipped_on_a_platform_without_memory() -> None:
-    assert _build(AGENTS_DIR / "jokester.yaml").get_trait(MemoryTrait) is None
+    assert _build(AGENTS_DIR / "jokester.yaml").get(MemoryTrait) is None
 
 
 @pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.stem)
@@ -118,7 +118,7 @@ class TestCodebaseQnaShell:
     def shell(self, tmp_path):
         (tmp_path / "README.md").write_text("hello\n")
         agent = _build_on_codebase(AGENTS_DIR / "codebase-qna.yaml", tmp_path)
-        tool = agent.get_trait(ToolsTrait).registry.get("shell")
+        tool = agent.get(ToolsTrait).registry.get("shell")
         assert tool is not None
         return tool
 

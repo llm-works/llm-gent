@@ -25,8 +25,9 @@ from ...core.agent import RunnableAgent as BaseAgent
 from ...core.agent.session import Session, SessionConfig, Sessions
 from ...core.dispatcher import Dispatcher
 from ...core.errors import ConfigError
+from ...core.platform import Platform
 from ...core.runnable import ExecutionResult
-from ...core.traits.builtin.memory import MemoryTrait
+from ...core.traits.builtin.memory import MemoryBinding, MemoryTrait
 from ...core.traits.builtin.saia import SAIATrait
 
 
@@ -50,6 +51,7 @@ class Agent(BaseAgent):
         # Plain dicts are accepted and converted to DotDict internally
         agent = Agent(
             lg,
+            platform,
             config={
                 "identity": {"name": "explorer"},
                 "default_prompt": "Analyze the codebase",
@@ -62,16 +64,17 @@ class Agent(BaseAgent):
         result = agent.run_once()
     """
 
-    def __init__(self, lg: Logger, config: DotDict) -> None:
+    def __init__(self, lg: Logger, platform: Platform, config: DotDict) -> None:
         """Initialize agent.
 
         Args:
             lg: Logger instance.
+            platform: The platform the agent runs on.
             config: Agent configuration with keys:
                 - identity.name: Agent name (required)
                 - default_prompt: Default prompt for run_once() execution (default: "")
         """
-        super().__init__(lg, config)
+        super().__init__(lg, platform, config)
         self._default_prompt = config.get("default_prompt", "")
         self._recent_results: list[ExecutionResult] = []
         self._max_recent = 100
@@ -125,8 +128,8 @@ class Agent(BaseAgent):
         Returns:
             ExecutionResult with outcome.
         """
-        saia_trait = self.get_trait(SAIATrait)
-        memory_trait = self.get_trait(MemoryTrait)
+        saia_trait = self.get(SAIATrait)
+        memory_trait = self.get(MemoryTrait)
 
         if saia_trait is None:
             return ExecutionResult(success=False, content="SAIATrait not attached")
@@ -147,7 +150,7 @@ class Agent(BaseAgent):
 
     def _recall_context(
         self,
-        memory_trait: MemoryTrait | None,
+        memory_trait: MemoryBinding | None,
         task: str,
         recall_strategy: str,
         recall_limit: int,
@@ -173,7 +176,7 @@ class Agent(BaseAgent):
 
     def _get_context(
         self,
-        memory_trait: MemoryTrait | None,
+        memory_trait: MemoryBinding | None,
         task: str,
         recall_strategy: str,
         recall_limit: int,
@@ -192,7 +195,7 @@ class Agent(BaseAgent):
 
     async def _persist_outcome(
         self,
-        memory_trait: MemoryTrait,
+        memory_trait: MemoryBinding,
         saia_trait: SAIATrait,
         task: str,
         result: ExecutionResult,
@@ -225,7 +228,7 @@ class Agent(BaseAgent):
 
     def _record_solution(
         self,
-        memory_trait: MemoryTrait,
+        memory_trait: MemoryBinding,
         task: str,
         result: ExecutionResult,
         summary: str,
@@ -313,23 +316,31 @@ class ChatAgent(Agent, Chat):
     ``model_call`` step: its iteration, the tools it called, the tokens it spent.
 
     Example:
-        agent = ChatAgent(lg, config={"identity": {"name": "explorer"}}, session_storage=None)
+        agent = ChatAgent(
+            lg, platform, config={"identity": {"name": "explorer"}}, session_storage=None
+        )
         first = agent.ask("What files are in src/?")
         agent.ask("Which of them are tests?", session=first.session)
     """
 
     def __init__(
-        self, lg: Logger, config: DotDict, *, session_storage: SessionStorage | None
+        self,
+        lg: Logger,
+        platform: Platform,
+        config: DotDict,
+        *,
+        session_storage: SessionStorage | None,
     ) -> None:
         """Initialize agent.
 
         Args:
             lg: Logger instance.
+            platform: The platform the agent runs on.
             config: :class:`Agent`'s keys, plus ``chat``: how sessions keep
                 their conversations (:class:`~llm_gent.core.agent.SessionConfig`).
             session_storage: Where sessions persist; ``None`` keeps them in memory only.
         """
-        super().__init__(lg, config)
+        super().__init__(lg, platform, config)
         self._sessions = Sessions(lg, self.identity, _session_config(config), session_storage)
 
     def ask(
