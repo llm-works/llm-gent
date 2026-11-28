@@ -16,8 +16,10 @@ from llm_gent.core.platform import Platform, SAIAFactory
 from llm_gent.core.platform.factory import _NoSAIAFactory
 from llm_gent.core.tools.factory import Factory as ToolFactory
 from llm_gent.core.traits import Registry as TraitRegistry
+from llm_gent.core.traits import TraitName
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.rating import RatingTrait
+from llm_gent.core.traits.builtin.training import TrainingConfig, TrainingTrait
 from llm_gent.core.traits.factory import Factory as TraitFactory
 from llm_gent.flow import Factory, Flow, FlowRunner
 
@@ -159,37 +161,43 @@ def make_platform(
     """A platform on stub clients, built directly: no config file read, no client built.
 
     ``router`` defaults to a ``MagicMock``. Without ``saia_factory`` the platform
-    builds no SAIA, as one from ``PlatformFactory`` without one; without
-    ``traits`` its registry is empty. ``memory``, the shared memory trait, joins
-    the registry with a ``RatingTrait`` over it, as ``PlatformFactory`` registers
-    them; with ``traits`` given, they join a copy, so the caller's registry is
-    never changed.
+    builds no SAIA, as one from ``PlatformFactory`` without one. Its registry
+    holds ``traits`` (none by default), then, as ``PlatformFactory`` registers
+    them, ``memory`` (the shared memory trait) with a ``RatingTrait`` over it,
+    and the shared ``TrainingTrait`` on ``memory_config``'s ``schema`` and
+    ``adapters``. The registry is a new one, so the caller's is never changed.
     """
     router = router if router is not None else MagicMock()
-    trait_factory = TraitFactory(lg, memory_config=memory_config)
     return Platform(
         lg,
         llm=router,
         saia_factory=saia_factory if saia_factory is not None else _NoSAIAFactory(),
-        trait_factory=trait_factory,
+        trait_factory=TraitFactory(lg),
         tool_factory=ToolFactory(lg),
-        traits=_registry(lg, traits, router, memory),
+        traits=_registry(lg, traits, router, memory, memory_config or {}),
         owned=[],
     )
 
 
 def _registry(
-    lg: Logger, traits: TraitRegistry | None, router: Any, memory: MemoryTrait | None
+    lg: Logger,
+    traits: TraitRegistry | None,
+    router: Any,
+    memory: MemoryTrait | None,
+    memory_config: Mapping[str, Any],
 ) -> TraitRegistry:
-    """``traits`` as given without memory; otherwise a new registry of its traits, ``memory``
-    and a ``RatingTrait`` over it."""
-    if memory is None:
-        return traits if traits is not None else TraitRegistry(lg)
+    """A new registry of ``traits``, ``memory`` and a ``RatingTrait`` over it, and training."""
     registry = TraitRegistry(lg)
     for trait in traits.all() if traits is not None else []:
         registry.register(trait)
-    registry.register(memory)
-    registry.register(RatingTrait(lg, router, memory))
+    if memory is not None:
+        registry.register(memory)
+        registry.register(RatingTrait(lg, router, memory))
+    if registry.get_by_name(TraitName.TRAINING) is None:
+        config = TrainingConfig(
+            schema=memory_config.get("schema"), adapters=memory_config.get("adapters")
+        )
+        registry.register(TrainingTrait(lg, config))
     return registry
 
 

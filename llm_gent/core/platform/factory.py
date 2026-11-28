@@ -19,6 +19,7 @@ from ..role import Role
 from ..tools.factory import Factory as ToolFactory
 from ..traits.builtin.memory import MemoryTrait
 from ..traits.builtin.rating import RatingTrait
+from ..traits.builtin.training import TrainingConfig, TrainingTrait
 from ..traits.factory import Factory as TraitFactory
 from ..traits.registry import Registry as TraitRegistry
 from ._platform import Closeable, Platform, SAIAFactory, close_resources, stop_traits
@@ -34,10 +35,12 @@ class Factory:
     of building a router, and stays the caller's to close. The platform's
     SAIA factory is the one given through :meth:`with_saia_factory`; without
     one, the platform builds no SAIA and a step reading ``ctx.saia`` raises.
-    The platform's trait registry starts empty, or, with memory configured,
-    holding the shared :class:`MemoryTrait`, whose memory schema is prepared
-    here, and the :class:`RatingTrait` over it and the router; each agent
-    binds the ones it uses and holds its own binding of each.
+    The platform's trait registry holds the shared :class:`TrainingTrait`, on
+    the memory section's ``schema`` and ``adapters`` (empty without one), and,
+    with memory configured, the shared :class:`MemoryTrait`, whose memory
+    schema is prepared here, and the :class:`RatingTrait` over it and the
+    router. Each agent binds the scoped ones it uses (memory, rating) and holds
+    its own binding of each; training it reaches directly.
 
     Example:
         async with PlatformFactory(lg).from_config({}) as platform:
@@ -91,11 +94,12 @@ class Factory:
             if memory is not None:
                 traits.register(memory)
                 traits.register(RatingTrait(self._lg, router, memory))
+            traits.register(_training(self._lg, settings.memory))
             _start_traits(self._lg, traits)  # platform traits run from here until close()
         except Exception:
             close_resources(self._lg, owned)
             raise
-        trait_factory = TraitFactory(self._lg, memory_config=settings.memory)
+        trait_factory = TraitFactory(self._lg)
         self._lg.debug(
             "platform built",
             extra={"default": router_config.get("default"), "memory": memory is not None},
@@ -159,6 +163,17 @@ def _embedder(
         timeout=memory_config.get("embedder_timeout", 30.0),
     )
     return embedder
+
+
+def _training(lg: Logger, memory_config: Mapping[str, Any] | None) -> TrainingTrait:
+    """The shared training trait, on the memory section's ``schema`` and ``adapters``.
+
+    Without either, every adapter lookup falls back to the default schema.
+    """
+    source = memory_config or {}
+    return TrainingTrait(
+        lg, TrainingConfig(schema=source.get("schema"), adapters=source.get("adapters"))
+    )
 
 
 def _start_traits(lg: Logger, traits: TraitRegistry) -> None:

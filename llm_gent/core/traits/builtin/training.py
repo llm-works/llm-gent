@@ -7,17 +7,11 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
 
 from appinfra import DotDict
+from appinfra.log import Logger
 from llm_infer.client.types import AdapterInfo
 from llm_kelt.training import Factory as TrainFactory
-
-from ..base import BaseTrait
-
-
-if TYPE_CHECKING:
-    from ...agent import Agent
 
 
 # Type alias for Training configuration
@@ -36,8 +30,14 @@ class ManifestNotFoundError(Exception):
     """Raised when adapter manifest cannot be found for schema resolution."""
 
 
-class TrainingTrait(BaseTrait):
+class TrainingTrait:
     """Kelt-training-side capabilities: adapter manifest lookup and schema resolution.
+
+    One per platform, shared by every agent: it holds nothing per agent, so it
+    has no binding and ``agent.require(TrainingTrait)`` is the platform's
+    instance. The platform builds it from the ``schema`` and ``adapters`` keys
+    of its ``memory`` section; without them every lookup falls back to the
+    default schema.
 
     Separated from MemoryTrait so agents that only need memory (facts, embeddings,
     feedback) do not carry the manifest-lookup surface, and agents that need adapter
@@ -52,112 +52,33 @@ class TrainingTrait(BaseTrait):
           manifest is found.
 
     Example:
-        from llm_gent.core.traits import TrainingTrait, TrainingConfig
+        schema = agent.require(TrainingTrait).resolve_schema_for_adapter(adapter_info)
 
-        agent.add_trait(TrainingTrait(agent, TrainingConfig(
-            schema={"name": "public", "enforce": False},
-            adapters={"lora": {"base_path": "~/adapters"}},
-        )))
-        agent.start()
-
-        schema = agent.get(TrainingTrait).resolve_schema_for_adapter(adapter_info)
-
-    Dependency ownership: the trait can build its own ``TrainFactory``
-    lazily from ``config.adapters.lora.base_path``, or accept a pre-built
-    one via ``train_factory=`` at construction. Two seams:
-
-    - Lazy default: ``train_factory=None`` at construction. First
-      ``resolve_schema_for_adapter`` call builds a ``TrainFactory`` from
-      config; trait owns it and drops the reference on ``on_stop``.
-    - Direct injection (test / advanced): pass ``train_factory=`` with a
-      pre-built factory; ``owns_train_factory=False`` keeps the reference
-      across ``on_stop``. See ``.with_train_factory()`` for the
-      immutable-view fluent form.
-
-    ``TraitFactory._create_training`` uses the lazy default — the
-    ``TrainFactory`` constructor reads the on-disk manifest registry, so
-    eager construction at agent-start time is deliberately avoided.
-
-    Lifecycle:
-        - ``__init__``: takes an optional injected ``TrainFactory``.
-        - ``on_start()``: no I/O; factory is created lazily on first lookup.
-        - ``on_stop()``: drops the cached factory iff this trait owns it.
+    The ``TrainFactory`` is built on the first lookup that needs it, from
+    ``config.adapters.lora.base_path``, and kept for the platform's life: its
+    constructor reads the on-disk manifest registry, so no agent or platform
+    start pays for it unless a lookup runs.
     """
 
-    def __init__(
-        self,
-        agent: Agent,
-        config: TrainingConfig | None = None,
-        *,
-        train_factory: TrainFactory | None = None,
-        owns_train_factory: bool = False,
-    ) -> None:
+    trait_name = "training"
+
+    def __init__(self, lg: Logger, config: TrainingConfig) -> None:
         """Initialize training trait.
 
         Args:
-            agent: The agent this trait belongs to.
-            config: Training configuration (None = empty DotDict).
-            train_factory: Pre-built ``TrainFactory`` for injection. When None,
-                a factory is built lazily from ``config.adapters.lora.base_path``
-                on first lookup.
-            owns_train_factory: If True, ``on_stop`` drops the factory
-                reference. Set automatically to True when the trait builds a
-                factory lazily itself. Injected factories default to False so
-                the caller retains ownership across stop/start cycles.
+            lg: Logger instance.
+            config: The platform's training configuration (``schema``, ``adapters``).
         """
-        super().__init__(agent)
-        self.config = config if config is not None else TrainingConfig()
-        self._train_factory: TrainFactory | None = train_factory
-        self._owns_train_factory = owns_train_factory
+        self._lg = lg
+        self.config = config
+        self._train_factory: TrainFactory | None = None
         self._factory_lock = threading.Lock()
 
     def on_start(self) -> None:
-        """No connections; TrainFactory is created lazily on first lookup."""
-        self.agent.lg.trace("starting training trait...", extra={"agent": self.agent.name})
-        self.agent.lg.trace(
-            "training trait started",
-            extra={
-                "agent": self.agent.name,
-                "has_factory": self._train_factory is not None,
-                "owns_train_factory": self._owns_train_factory,
-            },
-        )
+        """No I/O: the TrainFactory is built on the first lookup."""
 
     def on_stop(self) -> None:
-        """Drop the cached TrainFactory iff this trait owns it."""
-        self.agent.lg.trace(
-            "stopping training trait...",
-            extra={
-                "agent": self.agent.name,
-                "owns_train_factory": self._owns_train_factory,
-            },
-        )
-        dropped = self._owns_train_factory
-        if self._owns_train_factory:
-            self._train_factory = None
-            self._owns_train_factory = False
-        self.agent.lg.trace(
-            "training trait stopped",
-            extra={"agent": self.agent.name, "dropped_factory": dropped},
-        )
-
-    def with_train_factory(self, train_factory: TrainFactory) -> Self:
-        """Return a new trait bound to ``train_factory``, detached from the registry.
-
-        Immutable-view fluent (as ``SAIATrait.with_saia``): ``self``
-        stays canonical for ``agent.get(TrainingTrait)`` and its factory
-        is unchanged. ``owns_train_factory`` on the returned trait is False;
-        the caller retains ownership. For a persistent swap, call
-        ``agent.replace_trait(new)``.
-        """
-        new = type(self)(
-            self.agent, self.config, train_factory=train_factory, owns_train_factory=False
-        )
-        self.agent.lg.debug(
-            "training trait detached with new factory",
-            extra={"agent": self.agent.name, "detached_from_registry": True},
-        )
-        return new
+        """Nothing to release: the TrainFactory holds no connection."""
 
     @property
     def default_schema(self) -> str:
@@ -172,7 +93,7 @@ class TrainingTrait(BaseTrait):
         base_path = lora_config.get("base_path")
 
         if not base_path:
-            self.agent.lg.warning(
+            self._lg.warning(
                 "no adapters.lora.base_path configured, manifest lookup disabled",
                 extra={"adapters_config": adapters_config},
             )
@@ -180,7 +101,7 @@ class TrainingTrait(BaseTrait):
 
         registry_path = Path(base_path).expanduser()
         if not registry_path.exists():
-            self.agent.lg.warning(
+            self._lg.warning(
                 "adapter registry path does not exist, manifest lookup disabled",
                 extra={"path": str(registry_path)},
             )
@@ -188,7 +109,7 @@ class TrainingTrait(BaseTrait):
         return registry_path
 
     def _get_train_factory(self) -> TrainFactory | None:
-        """Get or create training factory for manifest lookups."""
+        """The platform's TrainFactory, built once under the lock on first use."""
         if self._train_factory is not None:
             return self._train_factory
 
@@ -200,16 +121,8 @@ class TrainingTrait(BaseTrait):
             if registry_path is None:
                 return None
 
-            self.agent.lg.trace(
-                "building lazy train factory...",
-                extra={"agent": self.agent.name, "registry_path": str(registry_path)},
-            )
-            self._train_factory = TrainFactory(self.agent.lg, registry_path)
-            self._owns_train_factory = True
-            self.agent.lg.trace(
-                "train factory built",
-                extra={"agent": self.agent.name, "owns_train_factory": True},
-            )
+            self._train_factory = TrainFactory(self._lg, registry_path)
+            self._lg.trace("train factory built", extra={"registry_path": str(registry_path)})
             return self._train_factory
 
     def resolve_schema_for_adapter(self, adapter_info: AdapterInfo) -> str:
@@ -236,18 +149,18 @@ class TrainingTrait(BaseTrait):
 
         md5 = adapter_info.md5
         if not md5:
-            self.agent.lg.debug("no md5 in adapter info, using default schema")
+            self._lg.debug("no md5 in adapter info, using default schema")
             return self.default_schema
 
         train_factory = self._get_train_factory()
         if train_factory is None:
-            self.agent.lg.debug("no train factory, using default schema")
+            self._lg.debug("no train factory, using default schema")
             return self.default_schema
 
         manifest = train_factory.manifest.get_manifest(md5)
         if manifest and manifest.source and manifest.source.schema_name:
             schema = str(manifest.source.schema_name)
-            self.agent.lg.trace("resolved schema from manifest", extra={"schema": schema})
+            self._lg.trace("resolved schema from manifest", extra={"schema": schema})
             return schema
 
         raise ManifestNotFoundError(

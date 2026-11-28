@@ -179,9 +179,8 @@ class SAIATrait(BaseTrait):
     def with_saia(self, saia: SAIA) -> Self:
         """Return a new trait bound to ``saia``, detached from the registry.
 
-        Immutable-view fluent (as ``TrainingTrait.with_train_factory``): ``self``
-        stays canonical for ``agent.get(SAIATrait)`` and its instance is
-        unchanged. ``owns_saia`` on the returned trait is False; the caller
+        Immutable-view fluent: ``self`` stays canonical for
+        ``agent.get(SAIATrait)`` and its instance is unchanged. ``owns_saia`` on the returned trait is False; the caller
         retains ownership. For a persistent swap, call
         ``agent.replace_trait(new)``.
         """

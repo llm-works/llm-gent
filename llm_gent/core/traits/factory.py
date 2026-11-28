@@ -12,15 +12,15 @@ shared clients once per platform and gives them to this factory; the
 platform closes the clients. Model access is not a trait: every agent
 reaches the platform's router (``platform.llm``, ``Platform.saia``).
 
-A trait the platform holds (``platform.traits``, e.g. ``MemoryTrait`` and
-``RatingTrait``) is not built here: an agent holds a binding of it
-(``ScopedTrait.bind``). This factory builds the traits an agent still builds
-and holds itself.
+A trait the platform holds (``platform.traits``) is not built here: an agent
+holds a binding of a scoped one (``ScopedTrait.bind``: ``MemoryTrait``,
+``RatingTrait``) and reaches a shared one directly (``TrainingTrait``). This
+factory builds the traits an agent still builds and holds itself.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from ..agent import Agent
     from . import TraitName
     from .builtin.directive import Directive, DirectiveTrait, MethodTrait
-    from .builtin.training import TrainingTrait
 
 
 class Factory:
@@ -46,29 +45,20 @@ class Factory:
         directive_trait = platform.trait_factory.create(TraitName.DIRECTIVE, agent)
     """
 
-    def __init__(
-        self,
-        lg: Logger,
-        *,
-        memory_config: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Initialize the factory with the platform's settings.
+    def __init__(self, lg: Logger) -> None:
+        """Initialize the factory.
 
         Args:
             lg: Logger instance.
-            memory_config: The platform's memory settings (training reads its
-                schema and adapters), or None.
         """
         from . import TraitName
 
         self._lg = lg
-        self._memory_config = memory_config
 
         self._creators: dict[TraitName, Callable[..., TraitBinding]] = {
             TraitName.DIRECTIVE: self._create_directive,
             TraitName.STORAGE: self._create_storage,
             TraitName.METHOD: self._create_method,
-            TraitName.TRAINING: self._create_training,
         }
 
     def creates(self, trait_name: TraitName) -> bool:
@@ -103,11 +93,6 @@ class Factory:
     def _create_directive(self, agent: Agent) -> DirectiveTrait:
         """Route to create_directive_trait."""
         return self.create_directive_trait(agent, agent.config.get("directive"))
-
-    def _create_training(self, agent: Agent) -> TrainingTrait:
-        """Route to create_training_trait, on the platform's memory schema and adapters."""
-        source: dict[str, Any] = dict(self._memory_config) if self._memory_config else {}
-        return self.create_training_trait(agent, source)
 
     def _create_storage(self, agent: Agent) -> TraitBinding:
         """Route to create_storage_trait."""
@@ -152,29 +137,6 @@ class Factory:
             )
 
         return DirectiveTrait(agent, directive)
-
-    def create_training_trait(
-        self, agent: Agent, source_config: dict[str, Any] | None
-    ) -> TrainingTrait:
-        """Create TrainingTrait from a config with schema + adapters keys.
-
-        Args:
-            agent: Agent the trait is for.
-            source_config: Config dict; ``schema`` (name/enforce) and ``adapters``
-                (lora.base_path) are read. Missing keys yield an empty TrainingTrait
-                that falls back to the default schema for every lookup.
-
-        Returns:
-            Configured TrainingTrait instance.
-        """
-        from .builtin.training import TrainingConfig, TrainingTrait
-
-        source: dict[str, Any] = dict(source_config) if source_config else {}
-        config = TrainingConfig(
-            schema=source.get("schema"),
-            adapters=source.get("adapters"),
-        )
-        return TrainingTrait(agent, config)
 
     def create_method_trait(self, agent: Agent, method: str | None) -> MethodTrait:
         """Create MethodTrait from method string.

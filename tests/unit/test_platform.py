@@ -16,6 +16,7 @@ from llm_gent.core.traits import Registry as TraitRegistry
 from llm_gent.core.traits import TraitName
 from llm_gent.core.traits.builtin.memory import MemoryTrait
 from llm_gent.core.traits.builtin.rating import RatingTrait
+from llm_gent.core.traits.builtin.training import TrainingTrait
 from tests.helpers import make_platform, make_test_logger
 
 
@@ -102,10 +103,27 @@ class TestFactory:
         client.close.assert_not_called()
         assert base._llm is None
 
-    def test_the_registry_starts_empty(self, packaged, clients):
+    def test_without_memory_the_registry_holds_only_training(self, packaged, clients):
         platform = Factory(MagicMock()).from_config({})
 
-        assert platform.traits.count() == 0
+        assert platform.traits.count() == 1
+        assert platform.traits.require(TrainingTrait).default_schema == "public"
+
+    def test_training_reads_the_memory_sections_schema_and_adapters(
+        self, packaged, clients, database
+    ):
+        memory = {
+            "db": {"url": "x"},
+            "schema": {"name": "tenant", "enforce": True},
+            "adapters": {"lora": {"base_path": "/data/adapters"}},
+        }
+
+        platform = Factory(MagicMock()).from_config({"memory": memory})
+
+        training = platform.traits.require(TrainingTrait)
+        assert platform.traits.get_by_name(TraitName.TRAINING) is training
+        assert training.default_schema == "tenant"
+        assert training.config["adapters"] == {"lora": {"base_path": "/data/adapters"}}
 
     def test_without_a_saia_factory_the_platform_builds_no_saia(self, packaged, clients):
         platform = Factory(MagicMock()).from_config({})
@@ -314,9 +332,16 @@ class TestSaia:
 
 
 class TestTraits:
-    def test_traits_are_the_registry_given(self):
+    def test_traits_hold_the_registry_given_and_training(self):
         registry = TraitRegistry(LG)
-        assert make_platform(LG, traits=registry).traits is registry
+        stub = MagicMock(spec=["trait_name", "on_start", "on_stop"], trait_name="custom")
+        registry.register(stub)
+
+        traits = make_platform(LG, traits=registry).traits
+
+        assert traits.get_by_name("custom") is stub
+        assert traits.has(TrainingTrait)
+        assert not registry.has(TrainingTrait)
 
     def test_memory_joins_a_copy_of_the_registry_given(self):
         registry = TraitRegistry(LG)
