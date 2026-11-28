@@ -143,6 +143,29 @@ class TestBind:
         assert client is root.view.return_value
 
 
+class TestStorage:
+    """The agent's own tables live on its memory binding, on memory's database and partition."""
+
+    def test_storage_is_on_the_memory_database_and_the_agents_context(self, kelt_class, clients):
+        with patch("llm_gent.core.traits.builtin.memory.AgentStorage") as storage_class:
+            agent = _agent("jokester", context_key="jokes")
+            binding = _memory(clients).bind(agent)
+
+        view = kelt_class.return_value.view.return_value
+        storage_class.assert_called_once_with(agent.lg, clients["database"], view.context)
+        assert binding.storage is storage_class.return_value
+
+    def test_storage_is_built_once_per_binding(self, kelt_class, clients):
+        binding = _memory(clients).bind(_agent("a"))
+
+        assert binding.storage is binding.storage
+
+    def test_each_agent_has_its_own_storage(self, kelt_class, clients):
+        memory = _memory(clients)
+
+        assert _bound(memory, "a").storage is not _bound(memory, "b").storage
+
+
 class TestOperations:
     def test_remember_stores_and_embeds(self, kelt_class, clients):
         binding = _bound(_memory(clients))

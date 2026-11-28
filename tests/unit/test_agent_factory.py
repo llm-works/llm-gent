@@ -199,6 +199,12 @@ class TestPlatformTraits:
         with pytest.raises(ConfigError, match="'memory' is not on this platform"):
             AgentFactory(platform).from_config(config)
 
+    def test_requiring_storage_says_where_it_went(self, platform):
+        config = {"identity": {"name": "a"}, "traits": {"required": ["storage"]}}
+
+        with pytest.raises(ConfigError, match=r"part of memory.*MemoryTrait\)\.storage"):
+            AgentFactory(platform).from_config(config)
+
     def test_an_agent_kelt_schema_raises(self, platform):
         config = {"identity": {"name": "a"}, "kelt": {"schema": {"name": "custom"}}}
 

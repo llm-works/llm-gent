@@ -108,13 +108,3 @@ class TestPlatformTraitsAreNotBuiltHere:
     @pytest.mark.parametrize("name", [TraitName.MEMORY, TraitName.RATING, TraitName.TRAINING])
     def test_does_not_create(self, factory, name):
         assert not factory.creates(name)
-
-
-class TestCreateStorage:
-    """Tests for _create_storage routing."""
-
-    def test_creates_storage_trait(self, factory, mock_agent):
-        from llm_gent.core.traits.builtin.storage import StorageTrait
-
-        trait = factory._create_storage(mock_agent)
-        assert isinstance(trait, StorageTrait)

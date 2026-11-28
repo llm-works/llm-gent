@@ -57,7 +57,6 @@ class Factory:
 
         self._creators: dict[TraitName, Callable[..., TraitBinding]] = {
             TraitName.DIRECTIVE: self._create_directive,
-            TraitName.STORAGE: self._create_storage,
             TraitName.METHOD: self._create_method,
         }
 
@@ -93,12 +92,6 @@ class Factory:
     def _create_directive(self, agent: Agent) -> DirectiveTrait:
         """Route to create_directive_trait."""
         return self.create_directive_trait(agent, agent.config.get("directive"))
-
-    def _create_storage(self, agent: Agent) -> TraitBinding:
-        """Route to create_storage_trait."""
-        from .builtin.storage import StorageTrait
-
-        return StorageTrait(agent)
 
     def _create_method(self, agent: Agent) -> MethodTrait:
         """Route to create_method_trait."""
