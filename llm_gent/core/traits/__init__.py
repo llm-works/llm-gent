@@ -5,7 +5,7 @@
 
 from enum import StrEnum
 
-from .base import BaseTrait, Trait, TraitBinding
+from .base import BaseTrait, ScopedTrait, Trait, TraitBinding
 from .builtin import (
     CostTrait,
     Directive,
@@ -13,9 +13,11 @@ from .builtin import (
     HTTPConfig,
     HTTPTrait,
     ManifestNotFoundError,
+    MemoryBinding,
     MemoryConfig,
     MemoryTrait,
     MethodTrait,
+    RatingBinding,
     RatingConfig,
     RatingTrait,
     SAIAConfig,
@@ -66,6 +68,7 @@ ALL_TRAITS: list[TraitName] = [
 __all__ = [
     # Base
     "BaseTrait",
+    "ScopedTrait",
     "Trait",
     "TraitBinding",
     # Names & Catalogs
@@ -75,7 +78,7 @@ __all__ = [
     "Factory",
     "Registry",
     # Cost
-    "CostTrait",
+    "CostTrait",  # cq: keep re-exports .builtin's list
     # Directive/Method
     "Directive",
     "DirectiveTrait",
@@ -84,9 +87,11 @@ __all__ = [
     "HTTPConfig",
     "HTTPTrait",
     # Memory
+    "MemoryBinding",
     "MemoryConfig",
     "MemoryTrait",
     # Rating
+    "RatingBinding",
     "RatingConfig",
     "RatingTrait",
     # SAIA

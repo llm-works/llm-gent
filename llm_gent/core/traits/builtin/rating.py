@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from appinfra import DotDict
+from appinfra.log import Logger
 from llm_infer.client import ChatClient
 
+from ...llm import Caller as LLMCaller
 from ...memory.rating import (
     AtomicFactsBackend,
     BatchConfig,
@@ -25,7 +27,7 @@ from ...memory.rating import (
 from ...memory.rating import Request as RatingRequest
 from ...memory.rating import Result as RatingResult
 from ...memory.rating import Service as RatingService
-from ..base import BaseTrait
+from .memory import MemoryTrait
 
 
 if TYPE_CHECKING:
@@ -53,23 +55,85 @@ Expected fields:
 class _BatchContext:
     """Context for batch rating operations."""
 
-    context_key: str
     prompt: str
     criteria: list[Criteria]
     model: str
     provider_id: str
-    backend: AtomicFactsBackend
 
 
-class RatingTrait(BaseTrait):
-    """Automated LLM-based content rating trait.
+class RatingTrait:
+    """Automated LLM-based content rating on the platform: the shared service and store.
 
-    Provides automated rating capabilities using LLM backends to evaluate
-    agent-generated content. Stores ratings in kelt's feedback details table with
-    source tracking for multi-rater scenarios.
+    A :class:`ScopedTrait`: each agent rates its own facts by its own criteria.
+    The platform builds one RatingTrait when memory is configured: a rating
+    service over the platform's model router, and the backend that reads
+    facts and stores ratings in memory's database, on the platform's memory
+    schema (prepared when the platform builds memory). It holds nothing per
+    agent. An agent holds its own :class:`RatingBinding` from :meth:`bind`:
+    its context key and the rating config from its ``rating`` section.
+    ``agent.require(RatingTrait)`` returns that binding, which carries the
+    rating operations.
 
-    **IMPORTANT:** RatingTrait depends on MemoryTrait. MemoryTrait must be attached
-    to the agent BEFORE RatingTrait.
+    Example:
+        platform = PlatformFactory(lg).from_config({"memory": {"db": {...}}})
+        agent = AgentFactory(platform).from_config({
+            "identity": {"name": "jokester"},
+            "traits": {"required": ["rating"]},
+            "rating": {
+                "providers": [{"type": "llm", "backend": {"model": "claude-sonnet-4.5"}}],
+                "models": {"atomic": {"solution": {
+                    "prompt": "Rate this joke...",
+                    "criteria": [{"name": "humor", "description": "Is it funny?"}],
+                }}},
+            },
+        })
+        results = agent.require(RatingTrait).rate_fact_with_all_providers(
+            fact_id=123, content="Why did the..."
+        )
+    """
+
+    trait_name = "rating"
+
+    def __init__(self, lg: Logger, router: ChatClient, memory: MemoryTrait) -> None:
+        """Build the shared rating service and backend.
+
+        Args:
+            lg: Logger instance.
+            router: The platform's model router rating calls go through.
+            memory: The platform's memory trait, whose database and schema
+                hold the facts and their ratings.
+        """
+        self._lg = lg
+        self._service = RatingService(lg, LLMCaller(lg, router))
+        self._backend = AtomicFactsBackend(lg, memory.database, memory.default_schema)
+
+    def bind(self, agent: Agent) -> RatingBinding:
+        """``agent``'s rating: its identity's context key and its ``rating`` config; no I/O."""
+        return RatingBinding(agent.lg, self, agent.identity.context_key, agent.config.get("rating"))
+
+    def on_start(self) -> None:
+        """Nothing to start: the service and backend are built and hold no connection."""
+
+    def on_stop(self) -> None:
+        """Nothing to stop: the platform closes the router and the database."""
+
+    @property
+    def service(self) -> RatingService:
+        """The rating service over the platform's router."""
+        return self._service
+
+    @property
+    def backend(self) -> AtomicFactsBackend:
+        """The store that reads facts and saves ratings, on the platform's memory schema."""
+        return self._backend
+
+
+class RatingBinding:
+    """An agent's rating: its context key and its rating config; the agent holds it.
+
+    Built by :meth:`RatingTrait.bind`. The service and backend are the
+    trait's; the binding holds the agent's partition and the providers,
+    criteria and batch size its config names.
 
     Capabilities:
         - rate_unrated(): Find and rate unrated content automatically
@@ -77,120 +141,51 @@ class RatingTrait(BaseTrait):
         - rate_fact_with_all_providers(): Rate with all providers (for inline rating)
         - get_unrated_count(): Count unrated facts
         - Multi-provider support: Use multiple LLMs for rating comparison
-
-    Example:
-        from llm_gent.core.traits import RatingTrait, MemoryTrait
-
-        rating_config = RatingConfig(
-            providers=[{
-                "type": "llm",
-                "backend": {"model": "claude-sonnet-4.5", ...},
-                "enabled": True
-            }],
-            models={
-                "atomic": {
-                    "solution": {
-                        "prompt": "Rate this joke...",
-                        "criteria": [
-                            {"name": "humor", "description": "Is it funny?"},
-                            {"name": "originality", "description": "Is it original?"}
-                        ]
-                    }
-                }
-            },
-            batch_size=10,
-            auto=True
-        )
-
-        # Attach traits; rating calls go through the platform's router
-        agent.use(MemoryTrait)
-        agent.add_trait(RatingTrait(agent, platform.llm, rating_config))
-        agent.start()
-
-        # Rate content
-        results = agent.get(RatingTrait).rate_fact_with_all_providers(
-            fact_id=123, content="Why did the..."
-        )
-
-    Lifecycle:
-        - on_start(): Initialize rating providers and validate configuration
-        - on_stop(): Cleanup resources
     """
 
     def __init__(
         self,
-        agent: Agent,
-        router: ChatClient,
+        lg: Logger,
+        trait: RatingTrait,
+        context_key: str,
         config: RatingConfig | None = None,
     ) -> None:
-        """Initialize rating trait.
+        """Bind ``trait`` to an agent's context key and parse its rating config.
 
         Args:
-            agent: The agent this trait belongs to.
-            router: The model router rating calls go through (the platform's).
-            config: Rating configuration (None = use defaults).
+            lg: The agent's logger.
+            trait: The platform's rating trait.
+            context_key: The agent's context key; its facts are the ones rated.
+            config: The agent's rating config (None = defaults).
         """
-        super().__init__(agent)
-        self._router = router
+        self._lg = lg
+        self._trait = trait
+        self._context_key = str(context_key)
         self.config = config or RatingConfig()
-        self._providers: list[ProviderConfig] = []
-        self._criteria: dict[str, CriteriaConfig] = {}  # fact_type -> CriteriaConfig
-        self._service: RatingService | None = None
-        self._backend: AtomicFactsBackend | None = None
-        self._batch: BatchConfig | None = None
+        parser = ConfigParser(lg)
+        self._providers: list[ProviderConfig] = parser.parse_providers(
+            self.config.get("providers", [])
+        )
+        self._criteria: dict[str, CriteriaConfig] = parser.parse_criteria(
+            self.config.get("models", {})
+        )
+        self._batch: BatchConfig | None = parser.parse_batch(self.config.get("batch_size"))
 
     def on_start(self) -> None:
-        """Initialize rating service and backend.
-
-        Raises:
-            TraitNotFoundError: If MemoryTrait is not attached.
-        """
-        from ...llm import Caller as LLMCaller
-        from .memory import MemoryTrait
-
-        self.agent.lg.trace("starting rating trait...", extra={"agent": self.agent.name})
-        memory_trait = self.agent.require(MemoryTrait)
-
-        # Rating calls go through the platform's router, wrapped for logging
-        caller = LLMCaller(self.agent.lg, self._router)
-        self._service = RatingService(self.agent.lg, caller)
-
-        # The backend works in the schema the agent's memory view uses
-        self._backend = AtomicFactsBackend(
-            self.agent.lg, memory_trait.database, memory_trait.default_schema
-        )
-
-        self._parse_config()
-        self._log_started()
-
-    def _parse_config(self) -> None:
-        """Parse provider, criteria, and batch configurations."""
-        parser = ConfigParser(self.agent.lg)
-        self._providers = parser.parse_providers(self.config.get("providers", []))
-        self._criteria = parser.parse_criteria(self.config.get("models", {}))
-        self._batch = parser.parse_batch(self.config.get("batch_size"))
-
-    def _log_started(self) -> None:
-        """Log trait started with config summary."""
-        self.agent.lg.trace(
-            "rating trait started",
-            extra={
-                "providers": len(self._providers),
-                "enabled": sum(1 for p in self._providers if p.enabled),
-                "types": list(self._criteria.keys()),
-                "auto": self.config.get("auto", False),
-            },
-        )
+        """Nothing to start: the binding holds no resource."""
 
     def on_stop(self) -> None:
-        """Clean up rating resources."""
-        self.agent.lg.trace("stopping rating trait...", extra={"agent": self.agent.name})
-        self._providers = []
-        self._criteria = {}
-        self._service = None
-        self._backend = None
-        self._batch = None
-        self.agent.lg.trace("rating trait stopped", extra={"agent": self.agent.name})
+        """Nothing to release: the binding holds no resource."""
+
+    @property
+    def trait(self) -> RatingTrait:
+        """The platform's rating trait this binding is of."""
+        return self._trait
+
+    @property
+    def context_key(self) -> str:
+        """The agent's context key: the facts this binding rates."""
+        return self._context_key
 
     # =========================================================================
     # Rating operations
@@ -201,7 +196,7 @@ class RatingTrait(BaseTrait):
         fact_type: str | None = None,
         category: str | None = None,
     ) -> int:
-        """Count unrated facts.
+        """Count the agent's unrated facts.
 
         Args:
             fact_type: Filter by fact type (e.g., "solution").
@@ -210,15 +205,7 @@ class RatingTrait(BaseTrait):
         Returns:
             Number of unrated facts matching filters.
         """
-        from .memory import MemoryTrait
-
-        if not self._backend:
-            raise RuntimeError("Rating backend not initialized - call on_start() first")
-
-        memory_trait = self.agent.require(MemoryTrait)
-        context_key = str(memory_trait.kelt.context.context_key)
-
-        return self._backend.get_unrated_count(context_key, fact_type, category)
+        return self._trait.backend.get_unrated_count(self._context_key, fact_type, category)
 
     def rate_unrated(
         self,
@@ -227,7 +214,7 @@ class RatingTrait(BaseTrait):
         category: str | None = None,
         provider_index: int = 0,
     ) -> list[RatingResult]:
-        """Rate unrated facts automatically using configured providers.
+        """Rate the agent's unrated facts automatically using configured providers.
 
         Args:
             limit: Maximum number of facts to rate.
@@ -238,21 +225,13 @@ class RatingTrait(BaseTrait):
         Returns:
             List of rating results.
         """
-        from .memory import MemoryTrait
-
-        if not self._backend:
-            raise RuntimeError("Rating backend not initialized - call on_start() first")
-
         provider = self._select_provider(provider_index)
-        memory_trait = self.agent.require(MemoryTrait)
-        context_key = str(memory_trait.kelt.context.context_key)
-
+        facts = self._trait.backend.unrated_facts(self._context_key, fact_type, category, limit)
         results = []
-        for fact in self._backend.unrated_facts(context_key, fact_type, category, limit):
+        for fact in facts:
             result = self._try_rate_fact(fact, provider)
             if result:
                 results.append(result)
-
         return results
 
     def rate_batch(
@@ -263,7 +242,7 @@ class RatingTrait(BaseTrait):
         category: str | None = None,
         provider_index: int = 0,
     ) -> tuple[int, int]:
-        """Rate unrated facts in batches for efficiency.
+        """Rate the agent's unrated facts in batches for efficiency.
 
         Args:
             limit: Maximum facts to rate (None = all unrated).
@@ -279,7 +258,9 @@ class RatingTrait(BaseTrait):
         size = batch_size or (self._batch.size if self._batch else 5)
         max_facts = 10000 if limit is None else limit
 
-        facts = list(ctx.backend.unrated_facts(ctx.context_key, fact_type, category, max_facts))
+        facts = list(
+            self._trait.backend.unrated_facts(self._context_key, fact_type, category, max_facts)
+        )
         if not facts:
             return (0, 0)
 
@@ -289,13 +270,7 @@ class RatingTrait(BaseTrait):
 
     def _prepare_batch_context(self, fact_type: str | None, provider_index: int) -> _BatchContext:
         """Prepare context for batch rating."""
-        from .memory import MemoryTrait
-
-        if not self._backend or not self._service:
-            raise RuntimeError("Rating not initialized - call on_start() first")
-
         provider = self._select_provider(provider_index)
-        memory_trait = self.agent.require(MemoryTrait)
         resolved_type = fact_type or "solution"
         type_criteria = self._criteria.get(resolved_type)
         if not type_criteria:
@@ -303,12 +278,10 @@ class RatingTrait(BaseTrait):
 
         backend_type = provider.backend.get("type", "unknown")
         return _BatchContext(
-            context_key=str(memory_trait.kelt.context.context_key),
             prompt=type_criteria.prompt,
             criteria=type_criteria.criteria,
             model=provider.model,
             provider_id=f"llm_{provider.model}_{backend_type}",
-            backend=self._backend,
         )
 
     def _rate_facts_in_batches(
@@ -322,7 +295,6 @@ class RatingTrait(BaseTrait):
         schema: str | None = None,
     ) -> tuple[int, int]:
         """Rate facts in batches and save results."""
-        assert self._service is not None
         total_rated, total_failed = 0, 0
 
         for i in range(0, len(facts), batch_size):
@@ -346,7 +318,6 @@ class RatingTrait(BaseTrait):
         schema: str | None = None,
     ) -> tuple[int, int]:
         """Process a single batch of facts. Returns (rated, failed) counts."""
-        assert self._service is not None
         items = [BatchItem(fact=f["id"], content=f["content"]) for f in batch_facts]
         request = BatchRequest(
             items=items,
@@ -357,12 +328,12 @@ class RatingTrait(BaseTrait):
         )
 
         try:
-            results = self._service.rate_batch(request)
+            results = self._trait.service.rate_batch(request)
             for result in results:
                 self._save_rating(result, schema)
             return (len(results), len(items) - len(results))
         except Exception as e:
-            self.agent.lg.warning(
+            self._lg.warning(
                 "batch rating failed",
                 extra={"exception": e, "batch_start": batch_start, "batch_size": len(items)},
             )
@@ -377,7 +348,7 @@ class RatingTrait(BaseTrait):
             self._save_rating(result, schema)
             return result
         except Exception as e:
-            self.agent.lg.warning(
+            self._lg.warning(
                 "rating failed",
                 extra={
                     "exception": e,
@@ -406,15 +377,10 @@ class RatingTrait(BaseTrait):
         Returns:
             Rating result with scores and reasoning.
         """
-        if not self._service:
-            raise RuntimeError("Rating service not initialized - call on_start() first")
-
-        # Get type-specific criteria
         type_criteria = self._criteria.get(fact_type)
         if not type_criteria:
             raise ValueError(f"No criteria configured for fact type: {fact_type}")
 
-        # Use rating service to rate content
         # Build unique provider identifier (handles model="auto" case)
         backend_type = provider.backend.get("type", "unknown")
         provider_id = f"llm_{provider.model}_{backend_type}"
@@ -427,7 +393,7 @@ class RatingTrait(BaseTrait):
             provider=provider_id,
             temperature=0.3,
         )
-        return self._service.rate_content(request)
+        return self._trait.service.rate_content(request)
 
     def rate_fact_with_all_providers(
         self,
@@ -498,13 +464,13 @@ class RatingTrait(BaseTrait):
         try:
             result = self.rate_fact(fact_id, content, fact_type, provider)
             self._save_rating(result, schema)
-            self.agent.lg.debug(
+            self._lg.debug(
                 "rated fact",
                 extra={"fact_id": fact_id, "model": provider.model, "stars": result.stars},
             )
             return result
         except Exception as e:
-            self.agent.lg.warning(
+            self._lg.warning(
                 "rating failed",
                 extra={"exception": e, "fact_id": fact_id, "provider": provider.provider_type},
             )
@@ -536,16 +502,8 @@ class RatingTrait(BaseTrait):
         return enabled_providers[index]
 
     def _save_rating(self, result: RatingResult, schema: str | None = None) -> None:
-        """Save rating using backend.
-
-        Args:
-            result: Rating result to save.
-            schema: Optional schema for the rating (uses backend default if not provided).
-        """
-        if not self._backend:
-            raise RuntimeError("Rating backend not initialized - call on_start() first")
-
-        self._backend.save_rating(result=result, source="llm_rater", schema=schema)
+        """Save a rating through the trait's backend (its schema unless ``schema`` is given)."""
+        self._trait.backend.save_rating(result=result, source="llm_rater", schema=schema)
 
     def get_fact_rating(self, fact_id: int, schema: str | None = None) -> int | None:
         """Get the star rating for a specific fact.
@@ -557,6 +515,4 @@ class RatingTrait(BaseTrait):
         Returns:
             Star rating (1-5) if rated, None if not rated.
         """
-        if not self._backend:
-            return None
-        return self._backend.get_fact_rating(fact_id, schema)
+        return self._trait.backend.get_fact_rating(fact_id, schema)

@@ -95,6 +95,18 @@ def _batch_sql(lg: Logger, schema: str | None) -> list[str]:
     return pg.sql
 
 
+def test_the_unrated_count_does_not_order(test_logger: Logger) -> None:
+    """Postgres refuses ORDER BY on a column a COUNT(*) does not group by."""
+    db: Any = _Recorder()
+
+    AtomicFactsBackend(test_logger, db).get_unrated_count("ctx", "solution", "joke")
+
+    (sql,) = db.sql
+    assert "COUNT(*)" in sql
+    assert "ORDER BY" not in sql
+    assert "af.type = :fact_type" in sql and "af.category = :category" in sql
+
+
 @pytest.mark.parametrize("run", [_backend_sql, _batch_sql])
 class TestTableNames:
     def test_every_statement_names_kelts_tables(self, run: Any, test_logger: Logger) -> None:

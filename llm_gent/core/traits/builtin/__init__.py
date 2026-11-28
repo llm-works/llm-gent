@@ -7,7 +7,7 @@ from .cost import CostTrait
 from .directive import Directive, DirectiveTrait, MethodTrait
 from .http import HTTPConfig, HTTPTrait
 from .memory import MemoryBinding, MemoryConfig, MemoryTrait
-from .rating import RatingConfig, RatingTrait
+from .rating import RatingBinding, RatingConfig, RatingTrait
 from .saia import SAIAConfig, SAIATrait
 from .storage import StorageTrait
 from .tools import ToolsTrait
@@ -16,7 +16,7 @@ from .training import ManifestNotFoundError, TrainingConfig, TrainingTrait
 
 __all__ = [
     # Cost
-    "CostTrait",
+    "CostTrait",  # cq: keep llm_gent.core.traits repeats this list
     # Directive/Method
     "Directive",
     "DirectiveTrait",
@@ -33,6 +33,7 @@ __all__ = [
     "TrainingConfig",
     "TrainingTrait",
     # Rating
+    "RatingBinding",
     "RatingConfig",
     "RatingTrait",
     # SAIA

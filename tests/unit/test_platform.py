@@ -4,7 +4,7 @@
 """The platform: its config, its factory, one SAIA per role and its traits."""
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from appinfra import DotDict
@@ -13,7 +13,9 @@ from llm_gent.core import Role
 from llm_gent.core.platform import Config, Factory, Platform
 from llm_gent.core.platform.factory import _start_traits
 from llm_gent.core.traits import Registry as TraitRegistry
+from llm_gent.core.traits import TraitName
 from llm_gent.core.traits.builtin.memory import MemoryTrait
+from llm_gent.core.traits.builtin.rating import RatingTrait
 from tests.helpers import make_platform, make_test_logger
 
 
@@ -87,11 +89,6 @@ class TestFactory:
         Factory(MagicMock()).from_config(config)
 
         assert clients.return_value.from_config.call_args[0][0]["default"] == "local"
-
-    def test_traits_get_the_shared_router(self, packaged, clients):
-        platform = Factory(MagicMock()).from_config({})
-
-        assert platform.trait_factory._router is platform.llm
 
     def test_with_llm_uses_the_client_and_leaves_it_open(self, packaged, clients):
         client = MagicMock()
@@ -172,6 +169,25 @@ class TestFactoryMemory:
 
         assert isinstance(platform.traits.require(MemoryTrait), MemoryTrait)
         database["kelt"].assert_called_once()
+
+    def test_builds_one_rating_trait_over_memory_and_the_router(self, packaged, clients, database):
+        router = clients.return_value.from_config.return_value
+        with (
+            patch("llm_gent.core.traits.builtin.rating.AtomicFactsBackend") as backend,
+            patch("llm_gent.core.traits.builtin.rating.LLMCaller") as caller,
+        ):
+            platform = Factory(MagicMock()).from_config({"memory": {"db": {"url": "x"}}})
+
+        memory = platform.traits.require(MemoryTrait)
+        rating = platform.traits.require(RatingTrait)
+        assert platform.traits.get_by_name(TraitName.RATING) is rating
+        assert caller.call_args.args[1] is router
+        backend.assert_called_once_with(ANY, memory.database, memory.default_schema)
+
+    def test_no_rating_without_memory(self, packaged, clients):
+        platform = Factory(MagicMock()).from_config({})
+
+        assert not platform.traits.has(RatingTrait)
 
     def test_the_platform_starts_its_memory_trait(self, packaged, clients, database):
         with patch.object(MemoryTrait, "on_start") as on_start:

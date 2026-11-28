@@ -176,12 +176,13 @@ class AtomicFactsBackend:
         Returns:
             Number of unrated facts matching filters.
         """
-        query, params = self._build_unrated_query(context_key, fact_type, category, limit=None)
+        query, params = self._build_unrated_query(
+            context_key, fact_type, category, limit=None, ordered=False
+        )
         query = query.replace(
             "SELECT af.id, af.type, af.category, af.source, af.content, af.created_at",
             "SELECT COUNT(*)",
         )
-        query = query.replace("LIMIT :limit", "")  # Remove limit for count
 
         with self._db.session() as session:
             result = session.execute(text(query), params)
@@ -193,11 +194,19 @@ class AtomicFactsBackend:
         fact_type: str | None,
         category: str | None,
         limit: int | None,
+        *,
+        ordered: bool = True,
     ) -> tuple[str, dict[str, Any]]:
-        """Build SQL query for unrated facts."""
+        """Build SQL query for unrated facts, oldest first unless ``ordered`` is False.
+
+        A count needs no order, and Postgres refuses one on a column ``COUNT(*)``
+        does not group by.
+        """
         query = self._get_base_unrated_query()
         params = self._escape_context_key(context_key)
-        query, params = self._add_query_filters(query, params, fact_type, category, limit)
+        query, params = self._add_query_filters(
+            query, params, fact_type, category, limit, ordered=ordered
+        )
         return query, params
 
     def _get_base_unrated_query(self) -> str:
@@ -225,6 +234,8 @@ class AtomicFactsBackend:
         fact_type: str | None,
         category: str | None,
         limit: int | None,
+        *,
+        ordered: bool = True,
     ) -> tuple[str, dict[str, Any]]:
         """Add optional filters to unrated query."""
         if fact_type:
@@ -235,7 +246,8 @@ class AtomicFactsBackend:
             query += " AND af.category = :category"
             params["category"] = category
 
-        query += " ORDER BY af.created_at ASC"
+        if ordered:
+            query += " ORDER BY af.created_at ASC"
 
         if limit is not None:
             query += " LIMIT :limit"

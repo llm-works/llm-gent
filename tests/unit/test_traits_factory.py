@@ -19,15 +19,9 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def router():
-    """The platform's shared router."""
-    return MagicMock()
-
-
-@pytest.fixture
-def factory(router):
-    """A TraitFactory on a shared router, without memory."""
-    return TraitFactory(MagicMock(), router)
+def factory():
+    """A TraitFactory without memory."""
+    return TraitFactory(MagicMock())
 
 
 @pytest.fixture
@@ -128,27 +122,12 @@ class TestCreateMethodTrait:
         assert trait.method == "Step 1: Analyze\nStep 2: Synthesize"
 
 
-class TestCreateRating:
-    """Tests for _create_rating routing."""
+class TestPlatformTraitsAreNotBuiltHere:
+    """Memory and rating are the platform's: an agent binds them, the factory builds neither."""
 
-    def test_creates_rating_trait(self, factory, mock_agent):
-        from llm_gent.core.traits.builtin.rating import RatingTrait
-
-        mock_agent.config = DotDict({"rating": {"scale": 5}})
-        trait = factory._create_rating(mock_agent)
-        assert isinstance(trait, RatingTrait)
-
-    def test_rating_calls_go_through_the_shared_router(self, factory, router, mock_agent):
-        trait = factory._create_rating(mock_agent)
-
-        assert trait._router is router
-
-    def test_rating_with_none_config(self, factory, mock_agent):
-        from llm_gent.core.traits.builtin.rating import RatingTrait
-
-        mock_agent.config = DotDict({})
-        trait = factory._create_rating(mock_agent)
-        assert isinstance(trait, RatingTrait)
+    @pytest.mark.parametrize("name", [TraitName.MEMORY, TraitName.RATING])
+    def test_does_not_create(self, factory, name):
+        assert not factory.creates(name)
 
 
 class TestCreateStorage:
@@ -172,12 +151,12 @@ class TestCreateTrainingRouting:
         assert isinstance(trait, TrainingTrait)
         assert trait.default_schema == "public"
 
-    def test_reads_platform_adapters(self, router):
+    def test_reads_platform_adapters(self):
         memory_config = {
             "schema": {"name": "platform"},
             "adapters": {"lora": {"base_path": "/data/adapters"}},
         }
-        factory_inst = TraitFactory(MagicMock(), router, memory_config=memory_config)
+        factory_inst = TraitFactory(MagicMock(), memory_config=memory_config)
 
         mock_agent = MagicMock()
         mock_agent.config = DotDict({})
