@@ -61,12 +61,14 @@ def _flow() -> Flow:
 class TestTraits:
     """``ctx.traits`` is the run's platform's registry."""
 
-    async def test_empty_without_registered_traits(self) -> None:
+    async def test_without_memory_only_the_shared_training_trait(self) -> None:
+        from llm_gent.core.traits.builtin.training import TrainingTrait
+
         @verb(role=ROLE_A)
         async def peek(ctx: Any) -> Any:
-            return ctx.traits.count()
+            return ctx.traits.count(), ctx.traits.get(TrainingTrait) is not None
 
-        assert await _runner().start(_flow().call(peek)) == 0
+        assert await _runner().start(_flow().call(peek)) == (1, True)
 
     async def test_a_verb_reads_and_uses_a_registered_trait(self) -> None:
         memory = _MemoryStub(agent=object())

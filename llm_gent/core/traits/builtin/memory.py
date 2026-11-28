@@ -18,6 +18,7 @@ from llm_kelt.core.types import ScoredEntity
 from llm_kelt.memory.atomic import EmbeddingFilter, Fact
 from llm_kelt.memory.isolation import ClientContext
 
+from ....storage import AgentStorage
 from ...llm.config import resolve_llm_defaults
 from ...llm.types import CompletionResult
 from ...runnable import ExecutionResult
@@ -112,7 +113,7 @@ class MemoryTrait:
 
     def bind(self, agent: Agent) -> MemoryBinding:
         """``agent``'s memory: its identity's context key, on the platform's schema; no I/O."""
-        return MemoryBinding(self, agent.identity.context_key)
+        return MemoryBinding(agent.lg, self, agent.identity.context_key)
 
     def on_start(self) -> None:
         """Nothing to start: the clients are the platform's and already built."""
@@ -157,7 +158,8 @@ class MemoryBinding:
     """An agent's memory: its context key and the kelt view on it; the agent holds it.
 
     Built by :meth:`MemoryTrait.bind`. The platform's clients are reached
-    through the trait; the binding holds only the agent's partition.
+    through the trait; the binding holds only the agent's partition and the
+    agent's own tables (:attr:`storage`).
 
     Capabilities:
         - complete(): Generate completions with automatic fact injection
@@ -166,12 +168,14 @@ class MemoryBinding:
         - record_feedback(): Record feedback on responses
         - record_preference(): Record preference pairs for training
         - record_solution(): Record execution solutions
+        - storage: The agent's own tables, rows scoped to its context key
     """
 
-    def __init__(self, trait: MemoryTrait, context_key: str) -> None:
-        """Bind ``trait`` to ``context_key``.
+    def __init__(self, lg: Logger, trait: MemoryTrait, context_key: str) -> None:
+        """Bind ``trait`` to ``context_key``; no I/O.
 
         Args:
+            lg: The agent's logger.
             trait: The platform's memory trait.
             context_key: The partition the agent's memory lives in.
         """
@@ -180,6 +184,7 @@ class MemoryBinding:
         self._kelt = trait.client_view(context_key)
         self._embedder = trait.embedder
         self._llm_defaults = trait.llm_defaults
+        self._storage = AgentStorage(lg, trait.database, self._kelt.context)
 
     def on_start(self) -> None:
         """Nothing to start: building the binding did no I/O."""
@@ -205,6 +210,15 @@ class MemoryBinding:
     def kelt(self) -> ClientView:
         """The kelt client scoped to the agent's context key."""
         return self._kelt
+
+    @property
+    def storage(self) -> AgentStorage:
+        """The agent's own tables on the memory database, rows scoped to its context key.
+
+        A table is created on the platform schema when first registered
+        (``storage.register_table``); the binding keeps what was registered.
+        """
+        return self._storage
 
     def get_client_for_schema(self, schema: str) -> ClientView:
         """The agent's context key on ``schema``; the schema is prepared on first use."""

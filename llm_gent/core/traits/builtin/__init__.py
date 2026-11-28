@@ -9,7 +9,6 @@ from .http import HTTPConfig, HTTPTrait
 from .memory import MemoryBinding, MemoryConfig, MemoryTrait
 from .rating import RatingBinding, RatingConfig, RatingTrait
 from .saia import SAIAConfig, SAIATrait
-from .storage import StorageTrait
 from .tools import ToolsTrait
 from .training import ManifestNotFoundError, TrainingConfig, TrainingTrait
 
@@ -39,8 +38,6 @@ __all__ = [
     # SAIA
     "SAIAConfig",
     "SAIATrait",
-    # Storage
-    "StorageTrait",
     # Tools
     "ToolsTrait",
 ]

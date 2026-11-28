@@ -11,7 +11,6 @@ from appinfra import DotDict
 from llm_gent.core.errors import ConfigError
 from llm_gent.core.traits import TraitName
 from llm_gent.core.traits.builtin.directive import Directive, DirectiveTrait, MethodTrait
-from llm_gent.core.traits.builtin.training import TrainingTrait
 from llm_gent.core.traits.factory import Factory as TraitFactory
 
 
@@ -20,7 +19,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def factory():
-    """A TraitFactory without memory."""
+    """A TraitFactory."""
     return TraitFactory(MagicMock())
 
 
@@ -86,25 +85,6 @@ class TestCreateDirectiveTrait:
             factory.create_directive_trait(mock_agent, 42)
 
 
-class TestCreateTrainingTrait:
-    """Tests for TraitFactory.create_training_trait()."""
-
-    def test_empty_source_yields_empty_config(self, factory, mock_agent):
-        trait = factory.create_training_trait(mock_agent, None)
-        assert isinstance(trait, TrainingTrait)
-        assert trait.default_schema == "public"
-
-    def test_reads_schema_and_adapters(self, factory, mock_agent):
-        source = {
-            "schema": {"name": "custom", "enforce": True},
-            "adapters": {"lora": {"base_path": "/tmp/adapters"}},
-        }
-        trait = factory.create_training_trait(mock_agent, source)
-        assert trait.default_schema == "custom"
-        assert trait.config.get("schema", {}).get("enforce") is True
-        assert trait.config.get("adapters", {}).get("lora", {}).get("base_path") == "/tmp/adapters"
-
-
 class TestCreateMethodTrait:
     """Tests for TraitFactory.create_method_trait()."""
 
@@ -123,44 +103,8 @@ class TestCreateMethodTrait:
 
 
 class TestPlatformTraitsAreNotBuiltHere:
-    """Memory and rating are the platform's: an agent binds them, the factory builds neither."""
+    """Memory, rating and training are the platform's: the factory builds none of them."""
 
-    @pytest.mark.parametrize("name", [TraitName.MEMORY, TraitName.RATING])
+    @pytest.mark.parametrize("name", [TraitName.MEMORY, TraitName.RATING, TraitName.TRAINING])
     def test_does_not_create(self, factory, name):
         assert not factory.creates(name)
-
-
-class TestCreateStorage:
-    """Tests for _create_storage routing."""
-
-    def test_creates_storage_trait(self, factory, mock_agent):
-        from llm_gent.core.traits.builtin.storage import StorageTrait
-
-        trait = factory._create_storage(mock_agent)
-        assert isinstance(trait, StorageTrait)
-
-
-class TestCreateTrainingRouting:
-    """Tests for _create_training with the platform's memory settings."""
-
-    def test_no_memory_config_creates_default_trait(self, factory):
-        mock_agent = MagicMock()
-        mock_agent.config = DotDict({})
-
-        trait = factory._create_training(mock_agent)
-        assert isinstance(trait, TrainingTrait)
-        assert trait.default_schema == "public"
-
-    def test_reads_platform_adapters(self):
-        memory_config = {
-            "schema": {"name": "platform"},
-            "adapters": {"lora": {"base_path": "/data/adapters"}},
-        }
-        factory_inst = TraitFactory(MagicMock(), memory_config=memory_config)
-
-        mock_agent = MagicMock()
-        mock_agent.config = DotDict({})
-
-        trait = factory_inst._create_training(mock_agent)
-        assert trait.default_schema == "platform"
-        assert trait.config.get("adapters", {}).get("lora", {}).get("base_path") == "/data/adapters"

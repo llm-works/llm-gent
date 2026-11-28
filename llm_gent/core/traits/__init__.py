@@ -22,7 +22,6 @@ from .builtin import (
     RatingTrait,
     SAIAConfig,
     SAIATrait,
-    StorageTrait,
     ToolsTrait,
     TrainingConfig,
     TrainingTrait,
@@ -44,7 +43,6 @@ class TraitName(StrEnum):
     HTTP = "http"
     RATING = "rating"
     SAIA = "saia"
-    STORAGE = "storage"
     TOOLS = "tools"
     METHOD = "method"
     TRAINING = "training"
@@ -58,7 +56,6 @@ ALL_TRAITS: list[TraitName] = [
     TraitName.HTTP,
     TraitName.RATING,
     TraitName.SAIA,
-    TraitName.STORAGE,
     TraitName.TOOLS,
     TraitName.METHOD,
     TraitName.TRAINING,
@@ -97,8 +94,6 @@ __all__ = [
     # SAIA
     "SAIAConfig",
     "SAIATrait",
-    # Storage
-    "StorageTrait",
     # Tools
     "ToolsTrait",
     # Training (adapter manifest / schema resolution)

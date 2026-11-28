@@ -130,6 +130,20 @@ class TestPlatformTraits:
         with pytest.raises(ConfigError, match="'rating' is not on this platform.*memory section"):
             AgentFactory(platform).from_config(config)
 
+    def test_agents_share_the_platform_training_trait(self, platform):
+        from llm_gent.core.traits.builtin.training import TrainingTrait
+
+        factory = AgentFactory(platform)
+        config = {"identity": {"name": "a"}, "traits": {"required": ["training"]}}
+
+        first = factory.from_config(config)
+        second = factory.from_config({**config, "identity": {"name": "b"}})
+
+        shared = platform.traits.require(TrainingTrait)
+        assert first.require(TrainingTrait) is shared
+        assert second.require(TrainingTrait) is shared
+        assert first.traits.count() == 0
+
     def test_a_required_platform_trait_that_is_not_scoped_is_the_platforms(self, mock_logger):
         from llm_gent.core.traits import Registry as TraitRegistry
         from llm_gent.core.traits import TraitName
@@ -183,6 +197,12 @@ class TestPlatformTraits:
         config = {"identity": {"name": "a"}, "traits": {"required": ["memory"]}}
 
         with pytest.raises(ConfigError, match="'memory' is not on this platform"):
+            AgentFactory(platform).from_config(config)
+
+    def test_requiring_storage_says_where_it_went(self, platform):
+        config = {"identity": {"name": "a"}, "traits": {"required": ["storage"]}}
+
+        with pytest.raises(ConfigError, match=r"part of memory.*MemoryTrait\)\.storage"):
             AgentFactory(platform).from_config(config)
 
     def test_an_agent_kelt_schema_raises(self, platform):

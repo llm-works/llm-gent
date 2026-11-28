@@ -22,7 +22,8 @@ class AgentStorage:
     """
     Storage client for agent-defined relational data.
 
-    Works on a kelt database and isolation context to provide:
+    An agent's storage is on its memory binding (``agent.require(MemoryTrait).storage``),
+    on the memory database and the agent's context key. It provides:
     - Table registration with automatic isolation
     - Query helpers with automatic context_key filtering
     - Direct SQLAlchemy access for complex queries
@@ -36,6 +37,7 @@ class AgentStorage:
     Example:
         from sqlalchemy import String, Boolean, Float, select, func
         from sqlalchemy.orm import Mapped, mapped_column
+        from llm_gent.core.traits import MemoryTrait
         from llm_gent.storage import AgentTable
 
         # Define schema
@@ -48,13 +50,14 @@ class AgentStorage:
             rating: Mapped[float | None] = mapped_column(Float, nullable=True)
 
         # Register and use
-        agent.storage.register_table(JokeTable)
+        storage = agent.require(MemoryTrait).storage
+        storage.register_table(JokeTable)
 
         # Simple queries (auto-isolated, returns results immediately)
-        unrated = agent.storage.select(JokeTable, rated=False)
+        unrated = storage.select(JokeTable, rated=False)
 
         # Insert (auto-adds context_key)
-        joke_id = agent.storage.insert(JokeTable,
+        joke_id = storage.insert(JokeTable,
             text="Why did the AI cross the road?",
             style="observational",
             rated=False
@@ -65,11 +68,11 @@ class AgentStorage:
             JokeTable.style,
             func.avg(JokeTable.rating).label('avg_rating')
         ).where(
-            JokeTable.context_key == agent.storage.context_key,
+            JokeTable.context_key == storage.context_key,
             JokeTable.rated == True
         ).group_by(JokeTable.style)
 
-        results = agent.storage.execute(stmt).all()
+        results = storage.execute(stmt)  # a list
     """
 
     def __init__(self, lg: Logger, database: Database, context: ClientContext) -> None:
@@ -151,18 +154,18 @@ class AgentStorage:
 
         Example:
             # Simple select with filters
-            unrated_jokes = agent.storage.select(JokeTable, rated=False)
+            unrated_jokes = storage.select(JokeTable, rated=False)
 
             # Select all
-            all_jokes = agent.storage.select(JokeTable)
+            all_jokes = storage.select(JokeTable)
 
             # For complex queries, use execute() instead
             from sqlalchemy import select
             stmt = select(JokeTable).where(
-                JokeTable.context_key == agent.storage.context_key,
+                JokeTable.context_key == storage.context_key,
                 JokeTable.rated == False
             ).order_by(JokeTable.created_at.desc()).limit(10)
-            results = agent.storage.execute(stmt)  # Returns list directly
+            results = storage.execute(stmt)  # Returns list directly
         """
         table_name = model_class.__tablename__
         if table_name not in self._registered_tables:
@@ -201,7 +204,7 @@ class AgentStorage:
             ValueError: If table not registered.
 
         Example:
-            joke_id = agent.storage.insert(JokeTable,
+            joke_id = storage.insert(JokeTable,
                 text="Why did the chicken cross the road?",
                 style="classic",
                 rated=False
@@ -241,11 +244,11 @@ class AgentStorage:
                 JokeTable.style,
                 func.avg(JokeTable.rating).label('avg_rating')
             ).where(
-                JokeTable.context_key == agent.storage.context_key,  # Manual filtering
+                JokeTable.context_key == storage.context_key,  # Manual filtering
                 JokeTable.rated == True
             ).group_by(JokeTable.style)
 
-            results = agent.storage.execute(stmt)  # Returns list directly
+            results = storage.execute(stmt)  # Returns list directly
         """
         with self._database.session() as session:
             result = session.execute(stmt)
@@ -263,7 +266,7 @@ class AgentStorage:
             ValueError: If table not registered, row not found, or attempting to update context_key.
 
         Example:
-            agent.storage.update(JokeTable, joke_id, rated=True, rating=5)
+            storage.update(JokeTable, joke_id, rated=True, rating=5)
         """
         table_name = model_class.__tablename__
         if table_name not in self._registered_tables:
@@ -305,7 +308,7 @@ class AgentStorage:
             ValueError: If table not registered or row not found.
 
         Example:
-            agent.storage.delete(JokeTable, joke_id)
+            storage.delete(JokeTable, joke_id)
         """
         table_name = model_class.__tablename__
         if table_name not in self._registered_tables:

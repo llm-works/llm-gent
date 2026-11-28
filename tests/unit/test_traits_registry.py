@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 
 class FooTrait(BaseTrait):
-    trait_name = TraitName.STORAGE  # reuse existing enum value for "storage"
+    trait_name = TraitName.HTTP  # reuse existing enum value for "http"
 
 
 class BarTrait(BaseTrait):
@@ -65,7 +65,7 @@ class TestRegisterNameCollision:
         """Registering a different type with an already-taken name raises."""
 
         class ConflictTrait(BaseTrait):
-            trait_name = TraitName.STORAGE  # same name as FooTrait
+            trait_name = TraitName.HTTP  # same name as FooTrait
 
         registry.register(FooTrait(agent))
 
@@ -89,29 +89,29 @@ class TestReplace:
         registry.replace(foo2)
 
         assert registry.get(FooTrait) is foo2
-        assert registry.get_by_name(TraitName.STORAGE) is foo2
+        assert registry.get_by_name(TraitName.HTTP) is foo2
 
     def test_replace_with_name_change(self, registry, agent):
         """Old name mapping removed when replacement has a different name."""
 
         class RenamedFoo(FooTrait):
-            trait_name = TraitName.HTTP  # different name
+            trait_name = TraitName.TOOLS  # different name
 
         foo = FooTrait(agent)
         registry.register(foo)
-        assert registry.get_by_name(TraitName.STORAGE) is foo
+        assert registry.get_by_name(TraitName.HTTP) is foo
 
         # Replace FooTrait-type with subclass that has a different name.
         # Because RenamedFoo is a *subclass*, its type differs — register a
         # plain FooTrait first, then replace it with a new FooTrait whose name
         # we override.
         renamed = FooTrait(agent)
-        renamed.trait_name = TraitName.HTTP  # type: ignore[assignment]
+        renamed.trait_name = TraitName.TOOLS  # type: ignore[assignment]
         registry.replace(renamed)
 
         # Old name gone, new name mapped
-        assert registry.get_by_name(TraitName.STORAGE) is None
-        assert registry.get_by_name(TraitName.HTTP) is renamed
+        assert registry.get_by_name(TraitName.HTTP) is None
+        assert registry.get_by_name(TraitName.TOOLS) is renamed
 
     def test_replace_when_not_present_inserts(self, registry, agent):
         """replace() on an unregistered type behaves like register()."""
@@ -119,7 +119,7 @@ class TestReplace:
         registry.replace(foo)
 
         assert registry.get(FooTrait) is foo
-        assert registry.get_by_name(TraitName.STORAGE) is foo
+        assert registry.get_by_name(TraitName.HTTP) is foo
         assert registry.count() == 1
 
 
@@ -135,10 +135,10 @@ class TestGetByName:
         foo = FooTrait(agent)
         registry.register(foo)
 
-        assert registry.get_by_name(TraitName.STORAGE) is foo
+        assert registry.get_by_name(TraitName.HTTP) is foo
 
     def test_not_found_returns_none(self, registry):
-        assert registry.get_by_name(TraitName.STORAGE) is None
+        assert registry.get_by_name(TraitName.HTTP) is None
 
 
 # ---------------------------------------------------------------------------
@@ -153,11 +153,11 @@ class TestRequireByName:
         foo = FooTrait(agent)
         registry.register(foo)
 
-        assert registry.require_by_name(TraitName.STORAGE) is foo
+        assert registry.require_by_name(TraitName.HTTP) is foo
 
     def test_not_found_raises(self, registry):
         with pytest.raises(TraitNotFoundError, match="required but not registered"):
-            registry.require_by_name(TraitName.STORAGE)
+            registry.require_by_name(TraitName.HTTP)
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ class TestUnregister:
         registry.unregister(FooTrait)
 
         assert registry.get(FooTrait) is None
-        assert registry.get_by_name(TraitName.STORAGE) is None
+        assert registry.get_by_name(TraitName.HTTP) is None
         assert registry.count() == 0
 
     def test_unregister_trait_without_name(self, registry, agent):
@@ -230,7 +230,7 @@ class TestClear:
         registry.clear()
 
         assert registry.count() == 0
-        assert registry.get_by_name(TraitName.STORAGE) is None
+        assert registry.get_by_name(TraitName.HTTP) is None
         assert registry.get_by_name(TraitName.MEMORY) is None
         assert registry.all() == []
 

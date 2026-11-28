@@ -43,6 +43,15 @@ from .agent import Agent
 from .helpers import _substitute_in_dict
 
 
+#: Trait names a config may still require, and where their capability went.
+_MOVED_TRAITS: dict[str, str] = {
+    "storage": (
+        "trait 'storage' is part of memory: require 'memory' and use "
+        "agent.require(MemoryTrait).storage"
+    ),
+}
+
+
 class Factory:
     """Factory for creating :class:`Agent` instances from configuration.
 
@@ -228,6 +237,9 @@ class Factory:
         traits_config = config.get("traits", {})
         if "required" in traits_config:
             # Config takes priority - convert strings to TraitName
+            for name in traits_config["required"]:
+                if name in _MOVED_TRAITS:
+                    raise ConfigError(_MOVED_TRAITS[name])
             try:
                 return [TraitName(name) for name in traits_config["required"]]
             except ValueError as e:

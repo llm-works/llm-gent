@@ -80,9 +80,9 @@ Traits provide specific capabilities to agents:
 | Trait | Purpose |
 |-------|---------|
 | `DirectiveTrait` | System prompts and agent instructions |
-| `StorageTrait` | PostgreSQL persistence with migrations |
+| `MemoryTrait` | Facts, feedback and the agent's own tables (`.storage`), on PostgreSQL |
 | `RatingTrait` | Automated LLM-based content evaluation |
-| `LearnTrait` | Training data collection (SFT/DPO) |
+| `TrainingTrait` | Adapter manifest lookup: which memory schema an adapter's data is in |
 | `ToolsTrait` | Tool/function calling support |
 
 ### Tools
