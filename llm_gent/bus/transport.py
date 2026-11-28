@@ -8,8 +8,8 @@ Three-socket pattern:
     PUB/SUB:       Hub broadcasts to agents (commands, notifications)
     SUB/PUB:       Agents publish to hub (heartbeats, events, topic messages)
 
-The bus handles raw message routing. Request/response correlation is
-delegated to appinfra's BufferedChannel which wraps the ZMQ transports.
+The bus handles raw message routing. Request/reply correlation is each ZMQ
+transport's appinfra Correlator.
 """
 
 from __future__ import annotations
@@ -107,8 +107,8 @@ class ZMQCoordinatorBus:
     Binds ROUTER, PUB, and SUB sockets. Routes incoming ROUTER messages
     to per-agent transports. Handles PUB/SUB for broadcast and topic messaging.
 
-    For request/response with agents, use create_agent_transport() to get
-    an appinfra Transport, then wrap in BufferedChannel for correlation.
+    For request/reply with an agent, create_agent_transport() gives its
+    transport; ``transport.correlator`` submits requests and matches replies.
     """
 
     def __init__(self, lg: Logger, config: CoordinatorBusConfig | None = None) -> None:
@@ -215,11 +215,9 @@ class ZMQCoordinatorBus:
     def create_agent_transport(self, agent_id: str) -> ZMQRouterTransport:
         """Create a transport for communicating with a specific agent.
 
-        The transport routes through the shared ROUTER socket. Incoming
-        messages from this agent are delivered to the transport's inbound
-        queue by the poll thread.
-
-        Wrap in appinfra's BufferedChannel for request/response correlation.
+        The transport routes through the shared ROUTER socket. The poll
+        thread delivers incoming messages from this agent to the transport's
+        correlator, which matches replies to requests.
 
         Args:
             agent_id: Target agent's ZMQ identity.
@@ -663,8 +661,8 @@ class ZMQWorkerBus:
     def _handle_dealer(self) -> None:
         """Process incoming message on DEALER socket.
 
-        All DEALER messages are delivered to the dealer transport
-        for appinfra's BufferedChannel to handle correlation.
+        All DEALER messages are delivered to the dealer transport, whose
+        correlator matches replies to requests.
         """
         if self._dealer is None:
             return
@@ -684,7 +682,7 @@ class ZMQWorkerBus:
             self._lg.warning("failed to parse dealer envelope", extra={"exception": e})
             return
 
-        # Deliver to transport for BufferedChannel correlation
+        # Deliver to the transport's correlator
         if self._dealer_transport is not None:
             msg = self._unwrap_envelope(envelope)
             if msg is not None:

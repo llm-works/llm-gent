@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 import zmq
-from appinfra.service import BufferedChannel, ChannelTimeoutError
+from appinfra.runtime import Correlator
 
 from llm_gent.bus.protocol import (
     AgentStats,
@@ -50,9 +50,8 @@ def bus_pair():
     """Create coordinator + worker bus pair.
 
     No parent transport is created -- agent→hub requests go through the
-    coordinator's on_request handler. Worker has a BufferedChannel for
-    request/response via its DEALER transport, which queues requests until
-    it has connected.
+    coordinator's on_request handler. The worker's DEALER transport has a
+    correlator for request/reply, and queues requests until it has connected.
     """
     from unittest.mock import MagicMock
 
@@ -62,7 +61,7 @@ def bus_pair():
     worker.start()
 
     assert worker.transport is not None
-    child_channel: BufferedChannel[Any, Any] = BufferedChannel(worker.transport)
+    child_channel: Correlator[Any] = worker.transport.correlator
 
     yield coord, worker, child_channel
 
@@ -112,7 +111,7 @@ class TestRequestResponse:
         _, _, child_ch = bus_pair
 
         req = RegisterRequest(agent_id="test")
-        with pytest.raises(ChannelTimeoutError):
+        with pytest.raises(TimeoutError):
             child_ch.submit(req, timeout=0.5)
 
 
@@ -185,7 +184,7 @@ class TestMultiWorker:
             workers.append(w)
 
             assert w.transport is not None
-            ch: BufferedChannel[Any, Any] = BufferedChannel(w.transport)
+            ch: Correlator[Any] = w.transport.correlator
             channels.append(ch)
 
         yield coord, workers, channels
@@ -274,15 +273,15 @@ class TestAgentToAgent:
         coord, alice, bob = two_workers
         received: list[Message] = []
 
-        # Bob's transport delivers to its inbound queue
+        # Bob's transport delivers to its correlator, whose recv() gets what no call waits on
         assert bob.transport is not None
-        bob_channel: BufferedChannel[Any, Any] = BufferedChannel(bob.transport)
+        bob_channel: Correlator[Any] = bob.transport.correlator
 
         def arrived(wait: float) -> bool:
             """Bob receives via channel."""
             try:
                 received.append(bob_channel.recv(timeout=wait))
-            except ChannelTimeoutError:
+            except TimeoutError:
                 return False
             return True
 

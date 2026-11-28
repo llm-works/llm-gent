@@ -7,7 +7,7 @@ The Hub is the single coordinator for a swarm. It owns:
 - ZMQ bus (coordinator sockets)
 - Unified agent registry (membership, health, config, state)
 - appinfra service Runtime (injected agents as services, with restart policies)
-- BufferedChannel per agent (controller-to-agent request/response)
+- a ZMQ transport per agent, whose Correlator carries controller-to-agent request/reply
 
 All agent operations go through the Hub: start, stop, ask, feedback.
 """
@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from appinfra import DotDict
-from appinfra.service import BufferedChannel, RestartPolicy, Runner, Runtime
+from appinfra.runtime import Correlator
+from appinfra.service import RestartPolicy, Runner, Runtime
 from appinfra.time import Ticker, TickerMode
 
 from ..bus.protocol import (
@@ -108,7 +109,7 @@ class Hub:
         self._registry = Registry(dead_timeout=config.dead_timeout)
         self._runtime = Runtime(lg, name="hub")
         self._runners: dict[str, Runner] = {}
-        self._channels: dict[str, BufferedChannel[Any, Any]] = {}
+        self._channels: dict[str, Correlator[Any]] = {}
 
         # Heartbeat broadcaster state
         self._hb_ticker = Ticker(lg, secs=config.health_check_interval, mode=TickerMode.FLEX)
@@ -204,8 +205,8 @@ class Hub:
     ) -> AgentEntry:
         """Start an injected agent as a service on the hub's runtime.
 
-        Registers the agent, creates a BufferedChannel over ZMQ transport,
-        and spawns an AgentService with restart policy, returning once it runs.
+        Registers the agent, creates its ZMQ transport (whose correlator is
+        the agent's channel), and spawns an AgentService with restart policy, returning once it runs.
         """
         config["name"] = name
         entry = self._registry.register(agent_id=name, agent_type=AgentType.INJECTED, config=config)
@@ -223,10 +224,8 @@ class Hub:
         return entry
 
     def _create_channel(self, name: str) -> None:
-        """Create ZMQ transport + BufferedChannel for an agent."""
-        transport = self._bus.create_agent_transport(name)
-        channel: BufferedChannel[Any, Any] = BufferedChannel(transport)
-        self._channels[name] = channel
+        """Create an agent's ZMQ transport; its correlator is the agent's channel."""
+        self._channels[name] = self._bus.create_agent_transport(name).correlator
 
     def _spawn_service(
         self, name: str, config: DotDict, llm_config: Any | None, learn_config: Any | None
@@ -549,7 +548,7 @@ class Hub:
             }
         ]
 
-    def _require_channel(self, name: str) -> BufferedChannel[Any, Any]:
+    def _require_channel(self, name: str) -> Correlator[Any]:
         """Get channel for an agent, raising if not found."""
         channel = self._channels.get(name)
         if channel is None:

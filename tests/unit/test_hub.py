@@ -665,16 +665,14 @@ class TestHubCreateChannel:
     """Tests for _create_channel."""
 
     def test_create_channel_stores_channel(self, hub):
-        """_create_channel creates transport + BufferedChannel and stores it."""
-        with patch("llm_gent.hub.hub.BufferedChannel") as mock_bc:
-            mock_transport = MagicMock()
-            hub._bus.create_agent_transport.return_value = mock_transport
+        """_create_channel creates the agent's transport and stores its correlator."""
+        mock_transport = MagicMock()
+        hub._bus.create_agent_transport.return_value = mock_transport
 
-            hub._create_channel("agent-1")
+        hub._create_channel("agent-1")
 
-            hub._bus.create_agent_transport.assert_called_once_with("agent-1")
-            mock_bc.assert_called_once_with(mock_transport)
-            assert hub._channels["agent-1"] is mock_bc.return_value
+        hub._bus.create_agent_transport.assert_called_once_with("agent-1")
+        assert hub._channels["agent-1"] is mock_transport.correlator
 
 
 class TestHubStopAgent:

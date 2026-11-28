@@ -1,40 +1,66 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""ZMQ transport adapters for appinfra's channel system.
-
-Implements appinfra's Transport protocol over ZMQ sockets, enabling
-appinfra's BufferedChannel to handle request/response correlation.
+"""ZMQ transports, each with an appinfra Correlator for request and reply.
 
 Two transports:
 - ZMQRouterTransport: hub-side, routes through ROUTER socket to a specific agent
 - ZMQDealerTransport: agent-side, communicates via DEALER socket to hub
+
+The bus poll thread hands each message it reads for a transport to
+``deliver()``; the transport's ``correlator`` routes a reply to the
+``submit()`` / ``stream()`` waiting on its id, and any other message to
+``correlator.recv()``.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Hashable
+from typing import Any
 
 import zmq
-from appinfra.service import ChannelClosedError, ChannelFullError, ChannelTimeoutError
+from appinfra.runtime import ChanClosedError, Correlator
 
 from .protocol import Envelope
+from .protocol import Message as BusMessage
 
 
-if TYPE_CHECKING:
-    pass
+def _key(message: Any) -> Hashable:
+    """A reply carries the id of its request."""
+    return getattr(message, "id", None)
+
+
+def _failed(message: Any) -> bool:
+    """A reply that sets ``error`` reports a failure."""
+    return bool(getattr(message, "error", None))
+
+
+def _final(message: Any) -> bool:
+    """A chunk without ``is_final`` ends its stream."""
+    return bool(getattr(message, "is_final", True))
+
+
+def _correlator(send: Callable[[Any, float | None], None]) -> Correlator[Any]:
+    return Correlator(send, key=_key, failed=_failed, final=_final)
+
+
+def _envelope(message: Any) -> Envelope:
+    """The envelope ``message`` travels in: an Envelope as is, a bus Message wrapped."""
+    if isinstance(message, Envelope):
+        return message
+    if isinstance(message, BusMessage):
+        return message.to_envelope()
+    raise TypeError(f"cannot send {type(message)}")
 
 
 class ZMQRouterTransport:
     """Hub-side transport routing through a shared ROUTER socket to one agent.
 
-    Implements appinfra's Transport protocol. Multiple ZMQRouterTransports
-    share the same ROUTER socket, each routing to a different agent by ID.
-
-    Messages are serialized as Envelope JSON and sent as ZMQ multipart
-    frames: [agent_id, empty, payload].
+    Multiple ZMQRouterTransports share the same ROUTER socket, each routing
+    to a different agent by ID. Messages are serialized as Envelope JSON and
+    sent as ZMQ multipart frames: [agent_id, empty, payload].
     """
 
     def __init__(
@@ -48,10 +74,7 @@ class ZMQRouterTransport:
         self._agent_id_bytes = agent_id.encode()
         self._send_lock = send_lock
         self._closed = False
-        # Inbound queue: poll thread feeds messages addressed to this agent
-        self._inbound: list[Any] = []
-        self._inbound_event = threading.Event()
-        self._lock = threading.Lock()
+        self.correlator = _correlator(self.send)
 
     def send(self, message: Any, timeout: float | None = None) -> None:
         """Send message to the agent via ROUTER socket.
@@ -60,61 +83,22 @@ class ZMQRouterTransport:
         the send never waits and ``timeout`` has nothing to bound.
         """
         if self._closed:
-            raise ChannelClosedError("transport is closed")
-        envelope = message.to_envelope() if hasattr(message, "to_envelope") else message
-        if isinstance(envelope, Envelope):
-            data = envelope.to_bytes()
-        else:
-            # Raw message -- wrap in envelope
-            from .protocol import Message as BusMessage
-
-            if isinstance(envelope, BusMessage):
-                data = envelope.to_envelope().to_bytes()
-            else:
-                raise TypeError(f"cannot send {type(envelope)}")
+            raise ChanClosedError("transport is closed")
+        frames = [self._agent_id_bytes, b"", _envelope(message).to_bytes()]
         if self._send_lock is not None:
             with self._send_lock:
-                self._router.send_multipart([self._agent_id_bytes, b"", data])
+                self._router.send_multipart(frames)
         else:
-            self._router.send_multipart([self._agent_id_bytes, b"", data])
-
-    def recv(self, timeout: float | None = None) -> Any:
-        """Receive next message addressed to this agent.
-
-        Called by BufferedChannel's correlation loop.
-        """
-        if self._closed:
-            raise ChannelClosedError("transport is closed")
-
-        # Wait for a message to appear in our inbound queue
-        effective_timeout = timeout if timeout is not None else 30.0
-        if not self._inbound_event.wait(timeout=effective_timeout):
-            raise ChannelTimeoutError(f"recv timeout after {effective_timeout}s")
-
-        with self._lock:
-            if self._closed:
-                raise ChannelClosedError("transport is closed")
-            if not self._inbound:
-                raise ChannelTimeoutError("no message available")
-            msg = self._inbound.pop(0)
-            if not self._inbound:
-                self._inbound_event.clear()
-            return msg
+            self._router.send_multipart(frames)
 
     def deliver(self, message: Any) -> None:
-        """Deliver a message to this transport's inbound queue.
-
-        Called by the coordinator bus poll thread when a message arrives
-        from this agent on the ROUTER socket.
-        """
-        with self._lock:
-            self._inbound.append(message)
-            self._inbound_event.set()
+        """Route a message from this agent; called by the coordinator bus poll thread."""
+        self.correlator.deliver(message)
 
     def close(self) -> None:
-        """Mark transport as closed."""
+        """Fail the calls waiting on replies; the ROUTER socket stays the bus's."""
         self._closed = True
-        self._inbound_event.set()  # unblock any waiting recv
+        self.correlator.close()
 
     @property
     def is_closed(self) -> bool:
@@ -122,46 +106,30 @@ class ZMQRouterTransport:
 
 
 class ZMQDealerTransport:
-    """Agent-side transport communicating via DEALER socket to hub.
-
-    Implements appinfra's Transport protocol. Wraps a DEALER socket
-    for sending/receiving messages with the coordinator's ROUTER.
-    """
+    """Agent-side transport communicating via DEALER socket to hub."""
 
     def __init__(self, dealer: zmq.Socket[Any], agent_id: str) -> None:
         self._dealer = dealer
         self._agent_id = agent_id
         self._closed = False
-        self._inbound: list[Any] = []
-        self._inbound_event = threading.Event()
-        self._lock = threading.Lock()
+        self.correlator = _correlator(self.send)
 
     def send(self, message: Any, timeout: float | None = None) -> None:
-        """Send message to coordinator via DEALER socket.
+        """Send message to coordinator via DEALER socket, stamped with this agent as source.
 
         DEALER blocks once its high-water mark is reached. ``None`` waits for
-        room; otherwise a full socket raises ``ChannelFullError`` after
+        room; otherwise a full socket raises ``TimeoutError`` after
         ``timeout`` seconds.
         """
         if self._closed:
-            raise ChannelClosedError("transport is closed")
-        envelope = message.to_envelope() if hasattr(message, "to_envelope") else message
-        if isinstance(envelope, Envelope):
-            envelope.source = self._agent_id
-            data = envelope.to_bytes()
-        else:
-            from .protocol import Message as BusMessage
-
-            if isinstance(envelope, BusMessage):
-                env = envelope.to_envelope()
-                env.source = self._agent_id
-                data = env.to_bytes()
-            else:
-                raise TypeError(f"cannot send {type(envelope)}")
+            raise ChanClosedError("transport is closed")
+        envelope = _envelope(message)
+        envelope.source = self._agent_id
+        frames = [b"", envelope.to_bytes()]
         if timeout is None:
-            self._dealer.send_multipart([b"", data])
+            self._dealer.send_multipart(frames)
         else:
-            self._send_within([b"", data], timeout)
+            self._send_within(frames, timeout)
 
     def _send_within(self, frames: list[bytes], timeout: float) -> None:
         """Send without blocking; on a full socket wait ``timeout`` once, then give up.
@@ -176,37 +144,16 @@ class ZMQDealerTransport:
             except zmq.Again:
                 if attempt == 0 and timeout > 0:
                     time.sleep(timeout)
-        raise ChannelFullError(f"dealer socket full for {timeout}s")
-
-    def recv(self, timeout: float | None = None) -> Any:
-        """Receive next message from coordinator."""
-        if self._closed:
-            raise ChannelClosedError("transport is closed")
-
-        effective_timeout = timeout if timeout is not None else 30.0
-        if not self._inbound_event.wait(timeout=effective_timeout):
-            raise ChannelTimeoutError(f"recv timeout after {effective_timeout}s")
-
-        with self._lock:
-            if self._closed:
-                raise ChannelClosedError("transport is closed")
-            if not self._inbound:
-                raise ChannelTimeoutError("no message available")
-            msg = self._inbound.pop(0)
-            if not self._inbound:
-                self._inbound_event.clear()
-            return msg
+        raise TimeoutError(f"dealer socket full for {timeout}s")
 
     def deliver(self, message: Any) -> None:
-        """Deliver a message to this transport's inbound queue."""
-        with self._lock:
-            self._inbound.append(message)
-            self._inbound_event.set()
+        """Route a message from the coordinator; called by the worker bus poll thread."""
+        self.correlator.deliver(message)
 
     def close(self) -> None:
-        """Mark transport as closed."""
+        """Fail the calls waiting on replies; the DEALER socket stays the bus's."""
         self._closed = True
-        self._inbound_event.set()
+        self.correlator.close()
 
     @property
     def is_closed(self) -> bool:

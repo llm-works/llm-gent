@@ -20,8 +20,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from appinfra.runtime import StopToken
-from appinfra.service import BufferedChannel, ChannelTimeoutError
+from appinfra.runtime import Correlator, StopToken
 from appinfra.time import Ticker, TickerMode
 
 from ..bus.protocol import (
@@ -85,7 +84,7 @@ class BaseAgentRunner(ABC):
         self._metadata = metadata or {}
         self._stop_event = threading.Event()
         self._bus: ZMQWorkerBus | None = None
-        self._channel: BufferedChannel[Any, Any] | None = None
+        self._channel: Correlator[Any] | None = None
 
     @property
     def agent_id(self) -> str:
@@ -153,10 +152,10 @@ class BaseAgentRunner(ABC):
         # TODO: Replace with ZMQ socket monitor events for deterministic connect.
         time.sleep(0.2)
 
-        # Create BufferedChannel from the DEALER transport
+        # Request and reply go through the DEALER transport's correlator
         if self._bus.transport is None:
             raise RuntimeError("bus transport not available after start")
-        self._channel = BufferedChannel(self._bus.transport)
+        self._channel = self._bus.transport.correlator
 
         # Subscribe to broadcast topic for hub-initiated heartbeats
         self._bus.subscribe("broadcast", self._handle_broadcast)
@@ -262,7 +261,7 @@ class BaseAgentRunner(ABC):
             if isinstance(msg, Request):
                 response = self._handle_request(msg)
                 self._channel.send(response)
-        except ChannelTimeoutError:
+        except TimeoutError:
             pass  # no message waiting
         except Exception as e:
             self._lg.debug("poll error", extra={"exception": e})
