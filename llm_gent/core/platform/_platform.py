@@ -84,7 +84,9 @@ class Platform:
     (``ctx.saia``); later asks, from any run on this platform, get the same
     instance. ``trait_factory`` and ``tool_factory`` build traits and tools on
     the shared clients. ``traits`` is the registry steps see as
-    ``ctx.traits``; it may be empty. The platform closes the resources in
+    ``ctx.traits``; it may be empty. Its traits run for the platform's life:
+    whoever builds the platform starts them, and :meth:`close` stops them;
+    agents only hold bindings of them. The platform closes the resources in
     ``owned`` on :meth:`close` or at the end of a ``with`` / ``async with``
     block; everything else stays with whoever built it.
 
@@ -179,12 +181,24 @@ class Platform:
             return cached
 
     def close(self) -> None:
-        """Close the resources this platform owns. Later calls do nothing."""
+        """Stop the traits, then close the resources this platform owns. Later calls do nothing."""
         if self._closed:
             return
         self._closed = True
+        self._stop_traits()
         close_resources(self._lg, self._owned)
         self._lg.debug("platform closed", extra={"closed": len(self._owned)})
+
+    def _stop_traits(self) -> None:
+        """Stop each trait; a failure is logged and the rest still stop."""
+        for trait in self._traits.all():
+            try:
+                trait.on_stop()
+            except Exception as e:
+                self._lg.warning(
+                    "platform trait stop failed",
+                    extra={"trait": type(trait).__name__, "exception": e},
+                )
 
     async def aclose(self) -> None:
         """Close the owned resources' async clients on this event loop, then their sync side.
@@ -196,6 +210,7 @@ class Platform:
         if self._closed:
             return
         self._closed = True
+        self._stop_traits()
         try:
             for resource in self._owned:
                 aclose = getattr(resource, "aclose", None)

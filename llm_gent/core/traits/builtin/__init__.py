@@ -6,7 +6,7 @@
 from .cost import CostTrait
 from .directive import Directive, DirectiveTrait, MethodTrait
 from .http import HTTPConfig, HTTPTrait
-from .memory import MemoryConfig, MemoryTrait
+from .memory import MemoryBinding, MemoryConfig, MemoryTrait
 from .rating import RatingConfig, RatingTrait
 from .saia import SAIAConfig, SAIATrait
 from .storage import StorageTrait
@@ -25,6 +25,7 @@ __all__ = [
     "HTTPConfig",
     "HTTPTrait",
     # Memory
+    "MemoryBinding",
     "MemoryConfig",
     "MemoryTrait",
     # Training (adapter manifest / schema resolution)

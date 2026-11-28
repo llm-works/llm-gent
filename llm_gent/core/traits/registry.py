@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Trait registry for managing available platform traits.
+"""Trait registry: type-safe access and discovery by type and by name.
 
-The registry is a container for all configured platform traits (LLM, Memory, HTTP, etc.)
-that can be attached to agents. It provides type-safe access and discovery.
-
-The type parameter bound is the :class:`Trait` Protocol rather than
-:class:`BaseTrait`, so Registry-mode adopters that implement the Protocol
-directly (without inheriting :class:`BaseTrait`) type-check cleanly. Every
-:class:`BaseTrait` subclass structurally satisfies :class:`Trait`, so the
-existing agent-attached path (which does inherit :class:`BaseTrait` for
-lifecycle) is unaffected.
+The platform keeps its traits in one (``platform.traits``); an agent keeps
+its bindings and its own traits in another. Both kinds have the
+``on_start`` / ``on_stop`` lifecycle, so the type parameter is bound to the
+:class:`TraitBinding` protocol rather than :class:`BaseTrait`: anything that
+implements the protocol directly type-checks cleanly.
 """
 
 from __future__ import annotations
@@ -21,14 +17,14 @@ from typing import TYPE_CHECKING, TypeVar
 from appinfra.log import Logger
 
 from ..errors import DuplicateTraitError, TraitNotFoundError
-from .base import Trait
+from .base import TraitBinding
 
 
 if TYPE_CHECKING:
     from . import TraitName
 
 
-T = TypeVar("T", bound=Trait)
+T = TypeVar("T", bound=TraitBinding)
 
 
 class Registry:
@@ -38,23 +34,23 @@ class Registry:
     Provides type-safe access and trait discovery.
 
     Example:
-        # Agent uses registry internally to manage its traits
-        agent = MyAgent(lg, config)
+        # An agent keeps its own traits in a registry; the platform keeps the
+        # shared ones (platform.traits) in another.
+        agent = MyAgent(lg, platform, config)
 
-        # Traits are built by the platform's TraitFactory, which injects the
-        # platform's shared clients (router, memory clients) into each trait.
-        factory = platform.trait_factory
-        agent.add_trait(factory.create(TraitName.DIRECTIVE, agent))
-        agent.add_trait(factory.create(TraitName.MEMORY, agent))
+        # The platform's TraitFactory builds an agent's own traits on the
+        # platform's shared clients.
+        agent.add_trait(platform.trait_factory.create(TraitName.DIRECTIVE, agent))
+        agent.use(MemoryTrait)  # the platform's, bound to the agent's context key
 
         # Access traits by type through agent
-        directive_trait = agent.get_trait(DirectiveTrait)
+        directive_trait = agent.get(DirectiveTrait)
         if directive_trait:
             # Use the trait
             pass
 
         # Or require it (raises if missing)
-        memory_trait = agent.require_trait(MemoryTrait)
+        memory_trait = agent.require(MemoryTrait)
     """
 
     def __init__(self, lg: Logger) -> None:
@@ -64,10 +60,10 @@ class Registry:
             lg: Logger instance for registry operations.
         """
         self._lg = lg
-        self._traits: dict[type[Trait], Trait] = {}
-        self._by_name: dict[TraitName, Trait] = {}
+        self._traits: dict[type[TraitBinding], TraitBinding] = {}
+        self._by_name: dict[TraitName, TraitBinding] = {}
 
-    def register(self, trait: Trait) -> None:
+    def register(self, trait: TraitBinding) -> None:
         """Register a trait in the registry.
 
         Automatically registers by name if trait has trait_name attribute.
@@ -105,7 +101,7 @@ class Registry:
             extra={"trait": trait_type.__name__, "total": len(self._traits)},
         )
 
-    def replace(self, trait: Trait) -> None:
+    def replace(self, trait: TraitBinding) -> None:
         """Replace an existing trait or register if not present.
 
         Args:
@@ -144,7 +140,7 @@ class Registry:
         )
         return trait  # type: ignore[return-value]
 
-    def get_by_name(self, name: TraitName) -> Trait | None:
+    def get_by_name(self, name: TraitName) -> TraitBinding | None:
         """Get a trait by name.
 
         Args:
@@ -175,7 +171,7 @@ class Registry:
             )
         return trait
 
-    def require_by_name(self, name: TraitName) -> Trait:
+    def require_by_name(self, name: TraitName) -> TraitBinding:
         """Get a required trait by name.
 
         Args:
@@ -195,7 +191,7 @@ class Registry:
             )
         return trait
 
-    def has(self, trait_type: type[Trait]) -> bool:
+    def has(self, trait_type: type[TraitBinding]) -> bool:
         """Check if a trait type is registered.
 
         Args:
@@ -206,7 +202,7 @@ class Registry:
         """
         return trait_type in self._traits
 
-    def all(self) -> list[Trait]:
+    def all(self) -> list[TraitBinding]:
         """Get all registered traits.
 
         Returns:
@@ -214,7 +210,7 @@ class Registry:
         """
         return list(self._traits.values())
 
-    def types(self) -> list[type[Trait]]:
+    def types(self) -> list[type[TraitBinding]]:
         """Get all registered trait types.
 
         Returns:
@@ -230,7 +226,7 @@ class Registry:
         """
         return len(self._traits)
 
-    def unregister(self, trait_type: type[Trait]) -> None:
+    def unregister(self, trait_type: type[TraitBinding]) -> None:
         """Unregister a trait by type.
 
         Args:

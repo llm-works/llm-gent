@@ -15,7 +15,7 @@ from .names import ToolName
 
 
 if TYPE_CHECKING:
-    from ..traits.builtin.memory import MemoryTrait
+    from ..traits.builtin.memory import MemoryBinding
     from .base import BaseTool, Tool
     from .builtin.web.backend import WebSearchBackend, WebSearchBackendFactory
     from .builtin.web.fetch import WebFetchTool
@@ -64,7 +64,7 @@ class Factory:
         """
         self._lg = lg
         self._custom_creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
-        self._memory_trait: MemoryTrait | None = None
+        self._memory_trait: MemoryBinding | None = None
         self._web_fetch: WebFetchTool | None = None
         self._web_search_backend: WebSearchBackend | None = None
 
@@ -242,11 +242,11 @@ class Factory:
     # Public API
     # ------------------------------------------------------------------
 
-    def set_memory_trait(self, memory_trait: MemoryTrait | None) -> None:
-        """Set MemoryTrait for memory tools (remember/recall).
+    def set_memory_trait(self, memory_trait: MemoryBinding | None) -> None:
+        """Set the agent's memory for memory tools (remember/recall).
 
         Args:
-            memory_trait: MemoryTrait instance or None.
+            memory_trait: The agent's MemoryBinding, or None.
         """
         self._memory_trait = memory_trait
 

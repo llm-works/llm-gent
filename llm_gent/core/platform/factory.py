@@ -82,16 +82,18 @@ class Factory:
         settings = config if isinstance(config, Config) else Config.model_validate(config)
         router_config = settings.router_config()
         owned: list[Closeable] = []
+        traits = TraitRegistry(self._lg)
         try:
             router = self._router(router_config, owned)
             memory = self._memory(settings.memory, owned)
+            if memory is not None:
+                traits.register(memory)
+            for trait in traits.all():  # platform traits run from here until close()
+                trait.on_start()
         except Exception:
             close_resources(self._lg, owned)
             raise
-        trait_factory = TraitFactory(self._lg, router, memory_config=settings.memory, memory=memory)
-        traits = TraitRegistry(self._lg)
-        if memory is not None:
-            traits.register(memory)
+        trait_factory = TraitFactory(self._lg, router, memory_config=settings.memory)
         self._lg.debug(
             "platform built",
             extra={"default": router_config.get("default"), "memory": memory is not None},

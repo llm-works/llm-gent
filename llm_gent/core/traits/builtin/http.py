@@ -61,7 +61,7 @@ class HTTPTrait(BaseTrait):
         from appinfra.log import quick_console_logger
 
         lg = quick_console_logger("agent", "info")
-        agent = MyAgent(lg, config)  # Your Agent subclass
+        agent = MyAgent(lg, platform, config)  # Your Agent subclass
         agent.add_trait(HTTPTrait(agent, HTTPConfig(port=8080)))
         agent.start()
 
@@ -187,7 +187,7 @@ class HTTPTrait(BaseTrait):
         """Return a new trait bound to ``server``, detached from the registry.
 
         Immutable-view fluent (as ``SAIATrait.with_saia``): ``self``
-        stays canonical for ``agent.get_trait(HTTPTrait)`` and its server is
+        stays canonical for ``agent.get(HTTPTrait)`` and its server is
         unchanged. ``owns_server`` on the returned trait is False; the caller
         retains stop responsibility. For a persistent swap, call
         ``agent.replace_trait(new)``.

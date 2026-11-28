@@ -89,7 +89,7 @@ class Factory(BaseFactory):
         chat_class = ChatAgent if agent_class is Agent else agent_class
         if not issubclass(chat_class, ChatAgent):
             raise ConfigError(f"{agent_class.__name__} has no chat; the chat section needs one")
-        return chat_class(self._lg, config, session_storage=self._session_storage)
+        return chat_class(self._lg, self._platform, config, session_storage=self._session_storage)
 
     def _get_backend(self) -> Backend:
         """The SAIA backend over the platform's shared router, made on first use."""
@@ -153,7 +153,7 @@ class Factory(BaseFactory):
             return super()._determine_required_traits(config)
         traits = [name for section, name in _SECTION_TRAITS if config.get(section)]
         tools = config.get("tools") or {}
-        if self._platform.trait_factory.has_memory and any(t in tools for t in _MEMORY_TOOLS):
+        if self._platform.traits.has(MemoryTrait) and any(t in tools for t in _MEMORY_TOOLS):
             traits.append(TraitName.MEMORY)
         return list(dict.fromkeys([*self.required_traits, *traits]))
 
@@ -201,11 +201,11 @@ class Factory(BaseFactory):
 
         parts: list[str] = []
 
-        directive_trait = agent.get_trait(DirectiveTrait)
+        directive_trait = agent.get(DirectiveTrait)
         if directive_trait is not None:
             parts.append(directive_trait.directive.prompt)
 
-        method_trait = agent.get_trait(MethodTrait)
+        method_trait = agent.get(MethodTrait)
         if method_trait is not None:
             parts.append(f"## Method\n{method_trait.method}")
 

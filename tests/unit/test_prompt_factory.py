@@ -32,14 +32,14 @@ class TestTraitSelection:
     def test_sections_attach_their_traits(self) -> None:
         agent = Factory(make_platform(MagicMock())).create(_config(directive="d", method="m"))
 
-        assert agent.has_trait(DirectiveTrait)
-        assert agent.has_trait(MethodTrait)
+        assert agent.has(DirectiveTrait)
+        assert agent.has(MethodTrait)
 
     def test_class_requirements_add_to_the_sections(self) -> None:
         agent = _StorageFactory(make_platform(MagicMock())).create(_config(directive="d"))
 
-        assert agent.has_trait(StorageTrait)
-        assert agent.has_trait(DirectiveTrait)
+        assert agent.has(StorageTrait)
+        assert agent.has(DirectiveTrait)
 
     def test_class_requirement_also_declared_by_a_section_attaches_once(self) -> None:
         class _DirectiveFactory(Factory):
@@ -47,13 +47,13 @@ class TestTraitSelection:
 
         agent = _DirectiveFactory(make_platform(MagicMock())).create(_config(directive="d"))
 
-        assert agent.has_trait(DirectiveTrait)
+        assert agent.has(DirectiveTrait)
 
     def test_config_traits_required_overrides_both(self) -> None:
         config = _config(directive="d", traits={"required": ["method"]}, method="m")
 
         agent = _StorageFactory(make_platform(MagicMock())).create(config)
 
-        assert agent.has_trait(MethodTrait)
-        assert not agent.has_trait(DirectiveTrait)
-        assert not agent.has_trait(StorageTrait)
+        assert agent.has(MethodTrait)
+        assert not agent.has(DirectiveTrait)
+        assert not agent.has(StorageTrait)

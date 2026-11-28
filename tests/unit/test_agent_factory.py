@@ -67,6 +67,53 @@ class TestModelAccess:
         platform.llm.close.assert_not_called()
 
 
+@pytest.fixture
+def memory():
+    """The platform's shared memory trait, on a patched kelt client."""
+    from unittest.mock import patch
+
+    from appinfra import DotDict
+
+    from llm_gent.core.traits.builtin.memory import MemoryTrait
+
+    with patch("llm_gent.core.traits.builtin.memory.KeltClient"):
+        yield MemoryTrait(
+            MagicMock(), DotDict(), database=MagicMock(schema=None), chat_client=MagicMock()
+        )
+
+
+class TestPlatformTraits:
+    """A required trait the platform has is bound to the agent; the factory knows no trait."""
+
+    def test_the_agent_holds_its_binding_of_the_platform_memory(self, mock_logger, memory):
+        from llm_gent.core.traits.builtin.memory import MemoryBinding, MemoryTrait
+
+        platform = make_platform(mock_logger, memory=memory)
+        config = {
+            "identity": {"name": "a", "context_key": "jokes"},
+            "traits": {"required": ["memory"]},
+        }
+
+        agent = AgentFactory(platform).from_config(config)
+
+        binding = agent.require(MemoryTrait)
+        assert isinstance(binding, MemoryBinding)
+        assert binding.context_key == "jokes"
+        assert binding.trait is memory
+
+    def test_a_trait_neither_built_nor_on_the_platform_raises(self, platform):
+        config = {"identity": {"name": "a"}, "traits": {"required": ["memory"]}}
+
+        with pytest.raises(ConfigError, match="'memory' is not on this platform"):
+            AgentFactory(platform).from_config(config)
+
+    def test_an_agent_kelt_schema_raises(self, platform):
+        config = {"identity": {"name": "a"}, "kelt": {"schema": {"name": "custom"}}}
+
+        with pytest.raises(ConfigError, match="kelt.schema"):
+            AgentFactory(platform).from_config(config)
+
+
 class TestFromConfig:
     """AgentFactory.from_config wires a bare Agent from a dict, no subclass."""
 
@@ -90,7 +137,7 @@ class TestFromConfig:
             }
         )
 
-        directive = agent.get_trait(DirectiveTrait)
+        directive = agent.get(DirectiveTrait)
         assert directive is not None
         assert directive.directive.prompt == "You are a helpful assistant."
 

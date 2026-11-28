@@ -164,7 +164,7 @@ def make_platform(
     joins a copy, so the caller's registry is never changed.
     """
     router = router if router is not None else MagicMock()
-    trait_factory = TraitFactory(lg, router, memory_config=memory_config, memory=memory)
+    trait_factory = TraitFactory(lg, router, memory_config=memory_config)
     return Platform(
         lg,
         llm=router,

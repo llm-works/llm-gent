@@ -167,7 +167,7 @@ An agent holds:
 - a reference to its `Platform`;
 - the trait types it uses (`required_traits`), not trait instances.
 
-No trait instance lives on an agent. `agent.get_trait(T)` and `require_trait(T)` resolve through
+No trait instance lives on an agent. `agent.get(T)` and `require(T)` resolve through
 the platform's registry. A custom trait is registered with the platform like a built-in one, even
 when one agent uses it: the platform owns its lifecycle and it follows the thread-safety contract.
 A resource an agent manages itself is plain agent code, an attribute of the agent subclass that

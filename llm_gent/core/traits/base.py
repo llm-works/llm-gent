@@ -1,7 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 The llm-gent Authors
 
-"""Base trait protocol and convenience base class.
+"""Trait and TraitBinding protocols, and a convenience base class.
+
+Traits and bindings
+-------------------
+
+A :class:`Trait` lives on the platform (``platform.traits``). It holds the
+resources every agent shares (clients, pools) and is always running: the
+platform starts and stops it, never an agent. It keeps nothing per agent.
+
+An agent holds a :class:`TraitBinding` of each trait it uses, from
+:meth:`Trait.bind`. The binding holds all of that agent's data for the trait,
+from just the agent's context key to a large working set in memory; the trait
+decides what it holds and provides the interface to manage it. The agent owns
+its bindings: it starts and stops them with itself.
 
 Dependency-inversion pattern for traits that wrap external resources
 --------------------------------------------------------------------
@@ -27,15 +40,11 @@ detached from the agent's registry; a caller wanting a persistent swap
 calls ``agent.replace_trait(new)``.
 
 Worked examples: ``TrainingTrait`` (train factory), ``SAIATrait`` (SAIA).
-
-A trait over the platform's shared clients is built once by the platform
-instead and handed to each agent as a view bound to its identity; the
-platform closes those clients (``MemoryTrait`` and ``MemoryTrait.view``).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 
 if TYPE_CHECKING:
@@ -43,37 +52,62 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
-class Trait(Protocol):
-    """Protocol for traits: an agent's capabilities, or resources a platform shares.
+class TraitBinding(Protocol):
+    """What an agent holds: its data for a trait, started and stopped with the agent.
 
-    The protocol is the lifecycle an agent drives:
+    - on_start(): called when the agent starts (or on binding, if it has)
+    - on_stop(): called when the agent stops; releases what the binding holds
 
-    - on_start(): Called when the agent starts
-    - on_stop(): Called when the agent stops
-
-    A trait that belongs to one agent usually takes it in its constructor;
-    BaseTrait provides that. A trait over the platform's shared clients is
-    built once by the platform and handed to agents as views (see
-    MemoryTrait.view), with no agent of its own.
-
-    Traits can depend on other traits: use agent.get_trait() in on_start()
-    (all traits are added before on_start()).
+    A binding from :meth:`Trait.bind` reaches its trait's shared resources;
+    an agent-built trait (``BaseTrait``) is a binding with no platform trait.
+    A binding can depend on another: use agent.get() in on_start() (all of
+    an agent's bindings are added before its on_start()).
     """
 
     def on_start(self) -> None:
-        """Called when agent starts."""
+        """Called when the agent starts."""
         ...
 
     def on_stop(self) -> None:
-        """Called when agent stops."""
+        """Called when the agent stops."""
+        ...
+
+
+BindingT_co = TypeVar("BindingT_co", bound=TraitBinding, covariant=True)
+
+
+@runtime_checkable
+class Trait(Protocol[BindingT_co]):
+    """A platform trait: the resources every agent shares, always running.
+
+    ``trait_name`` is the name an agent config requires it by
+    (``traits.required``). The platform starts it once it is built and stops
+    it on close; an agent never does. :meth:`bind` gives an agent its
+    binding, which holds all of the agent's data; the trait keeps nothing
+    per agent.
+    """
+
+    trait_name: str
+
+    def bind(self, agent: Agent) -> BindingT_co:
+        """A new binding of this trait for ``agent``, holding the agent's data."""
+        ...
+
+    def on_start(self) -> None:
+        """Called by the platform once the trait is built."""
+        ...
+
+    def on_stop(self) -> None:
+        """Called by the platform when it closes."""
         ...
 
 
 class BaseTrait:
-    """Convenience base class for custom traits.
+    """Convenience base class for a trait an agent builds and holds itself.
 
-    Provides common boilerplate: agent storage, property access, lifecycle stubs.
-    Users can also implement the Trait protocol directly if they need different
+    Provides common boilerplate: agent storage, property access, lifecycle
+    stubs. Such a trait is a :class:`TraitBinding` with no platform trait.
+    Users can also implement the protocol directly if they need different
     patterns (e.g., dataclass-based traits like SAIATrait).
 
     Example:
@@ -88,7 +122,7 @@ class BaseTrait:
                 return result.content
 
         agent.add_trait(MyTrait(agent, "config"))
-        my_trait = agent.get_trait(MyTrait)
+        my_trait = agent.require(MyTrait)
         my_trait.do_something()
     """
 
