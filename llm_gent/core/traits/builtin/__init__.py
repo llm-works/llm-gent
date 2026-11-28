@@ -16,7 +16,7 @@ from .training import ManifestNotFoundError, TrainingConfig, TrainingTrait
 
 __all__ = [
     # Cost
-    "CostTrait",
+    "CostTrait",  # cq: keep llm_gent.core.traits repeats this list
     # Directive/Method
     "Directive",
     "DirectiveTrait",

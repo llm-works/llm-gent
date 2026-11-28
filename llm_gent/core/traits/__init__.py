@@ -13,9 +13,11 @@ from .builtin import (
     HTTPConfig,
     HTTPTrait,
     ManifestNotFoundError,
+    MemoryBinding,
     MemoryConfig,
     MemoryTrait,
     MethodTrait,
+    RatingBinding,
     RatingConfig,
     RatingTrait,
     SAIAConfig,
@@ -76,7 +78,7 @@ __all__ = [
     "Factory",
     "Registry",
     # Cost
-    "CostTrait",
+    "CostTrait",  # cq: keep re-exports .builtin's list
     # Directive/Method
     "Directive",
     "DirectiveTrait",
@@ -85,9 +87,11 @@ __all__ = [
     "HTTPConfig",
     "HTTPTrait",
     # Memory
+    "MemoryBinding",
     "MemoryConfig",
     "MemoryTrait",
     # Rating
+    "RatingBinding",
     "RatingConfig",
     "RatingTrait",
     # SAIA
