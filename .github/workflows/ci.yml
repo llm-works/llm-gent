@@ -14,6 +14,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The appinfra commit every job installs: develop's next commit (1091506) removes
+  # appinfra.service.channel, whose BufferedChannel llm_gent.bus runs on.
+  APPINFRA_REF: ac08e86dc62b97c95909a6e9c2f6cc73af005f51
+
 jobs:
   lint:
     name: Lint
@@ -38,7 +43,7 @@ jobs:
           python -m pip install zizmor==1.31.1 actionlint-py==1.7.12.25
           # TODO: remove after these packages are released to PyPI
           # check: pylint, which the duplicated-code check runs
-          python -m pip install "appinfra[check] @ git+https://github.com/llm-works/appinfra.git@develop"
+          python -m pip install "appinfra[check] @ git+https://github.com/llm-works/appinfra.git@${APPINFRA_REF}"
           python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
@@ -95,7 +100,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # TODO: remove after these packages are released to PyPI
-          python -m pip install "git+https://github.com/llm-works/appinfra.git@develop"
+          python -m pip install "git+https://github.com/llm-works/appinfra.git@${APPINFRA_REF}"
           python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
@@ -130,7 +135,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # TODO: remove after these packages are released to PyPI
-          python -m pip install "git+https://github.com/llm-works/appinfra.git@develop"
+          python -m pip install "git+https://github.com/llm-works/appinfra.git@${APPINFRA_REF}"
           python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
@@ -184,7 +189,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # TODO: remove after these packages are released to PyPI
-          python -m pip install "git+https://github.com/llm-works/appinfra.git@develop"
+          python -m pip install "git+https://github.com/llm-works/appinfra.git@${APPINFRA_REF}"
           python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
@@ -230,7 +235,7 @@ jobs:
 
       - name: Install wheel + sibling packages from develop
         run: |
-          python -m pip install "git+https://github.com/llm-works/appinfra.git@develop"
+          python -m pip install "git+https://github.com/llm-works/appinfra.git@${APPINFRA_REF}"
           python -m pip install "git+https://github.com/llm-works/llm-infer.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-kelt.git@develop"
           python -m pip install "git+https://github.com/llm-works/llm-saia.git@develop"
