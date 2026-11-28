@@ -106,6 +106,30 @@ class TestPlatformTraits:
         assert binding.context_key == "jokes"
         assert binding.trait is memory
 
+    def test_the_agent_holds_its_binding_of_the_platform_rating(self, mock_logger, memory):
+        from llm_gent.core.traits.builtin.rating import RatingBinding, RatingTrait
+
+        platform = make_platform(mock_logger, memory=memory)
+        config = {
+            "identity": {"name": "a", "context_key": "jokes"},
+            "traits": {"required": ["rating"]},
+            "rating": {"batch_size": 3},
+        }
+
+        agent = AgentFactory(platform).from_config(config)
+
+        binding = agent.require(RatingTrait)
+        assert isinstance(binding, RatingBinding)
+        assert binding.context_key == "jokes"
+        assert binding.trait is platform.traits.require(RatingTrait)
+        assert binding.config["batch_size"] == 3
+
+    def test_rating_needs_the_platforms_memory(self, platform):
+        config = {"identity": {"name": "a"}, "traits": {"required": ["rating"]}}
+
+        with pytest.raises(ConfigError, match="'rating' is not on this platform.*memory section"):
+            AgentFactory(platform).from_config(config)
+
     def test_a_required_platform_trait_that_is_not_scoped_is_the_platforms(self, mock_logger):
         from llm_gent.core.traits import Registry as TraitRegistry
         from llm_gent.core.traits import TraitName

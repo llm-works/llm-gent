@@ -5,11 +5,12 @@ what each agent holds, and how flows run for agents.
 
 Status: the target design, built in steps. Implemented: the `Platform` (one per process, built
 by the platform `Factory` from `Config`) shared by agents and runs, with the shared clients
-injected into traits; scoped platform traits with a per-agent `TraitBinding` (memory); the scope
-a flow runs in as a fold of its declarations, the generic run, flow runs started by a runner, and
-the run's own cost tracker (section 6). Not yet: a default `SAIAFactory` the platform builds over
-its router, splitting the remaining traits into a platform trait and a binding, a run's
-identity, agents supplying a run's identity and platform, and the API in section 8.
+injected into traits; scoped platform traits with a per-agent `TraitBinding` (memory, rating);
+the scope a flow runs in as a fold of its declarations, the generic run, flow runs started by a
+runner, and the run's own cost tracker (section 6). Not yet: a default `SAIAFactory` the
+platform builds over its router, splitting the remaining traits into a platform trait and a
+binding, a run's identity, agents supplying a run's identity and platform, and the API in
+section 8.
 
 ## 1. Goals
 

@@ -7,7 +7,7 @@ from .cost import CostTrait
 from .directive import Directive, DirectiveTrait, MethodTrait
 from .http import HTTPConfig, HTTPTrait
 from .memory import MemoryBinding, MemoryConfig, MemoryTrait
-from .rating import RatingConfig, RatingTrait
+from .rating import RatingBinding, RatingConfig, RatingTrait
 from .saia import SAIAConfig, SAIATrait
 from .storage import StorageTrait
 from .tools import ToolsTrait
@@ -33,6 +33,7 @@ __all__ = [
     "TrainingConfig",
     "TrainingTrait",
     # Rating
+    "RatingBinding",
     "RatingConfig",
     "RatingTrait",
     # SAIA

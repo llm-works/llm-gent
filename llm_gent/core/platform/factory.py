@@ -18,6 +18,7 @@ from llm_kelt.core import Database
 from ..role import Role
 from ..tools.factory import Factory as ToolFactory
 from ..traits.builtin.memory import MemoryTrait
+from ..traits.builtin.rating import RatingTrait
 from ..traits.factory import Factory as TraitFactory
 from ..traits.registry import Registry as TraitRegistry
 from ._platform import Closeable, Platform, SAIAFactory, close_resources, stop_traits
@@ -35,7 +36,8 @@ class Factory:
     one, the platform builds no SAIA and a step reading ``ctx.saia`` raises.
     The platform's trait registry starts empty, or, with memory configured,
     holding the shared :class:`MemoryTrait`, whose memory schema is prepared
-    here; each agent binds it and holds its own :class:`MemoryBinding`.
+    here, and the :class:`RatingTrait` over it and the router; each agent
+    binds the ones it uses and holds its own binding of each.
 
     Example:
         async with PlatformFactory(lg).from_config({}) as platform:
@@ -88,11 +90,12 @@ class Factory:
             memory = self._memory(settings.memory, owned)
             if memory is not None:
                 traits.register(memory)
+                traits.register(RatingTrait(self._lg, router, memory))
             _start_traits(self._lg, traits)  # platform traits run from here until close()
         except Exception:
             close_resources(self._lg, owned)
             raise
-        trait_factory = TraitFactory(self._lg, router, memory_config=settings.memory)
+        trait_factory = TraitFactory(self._lg, memory_config=settings.memory)
         self._lg.debug(
             "platform built",
             extra={"default": router_config.get("default"), "memory": memory is not None},

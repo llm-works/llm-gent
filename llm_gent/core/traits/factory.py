@@ -12,9 +12,10 @@ shared clients once per platform and gives them to this factory; the
 platform closes the clients. Model access is not a trait: every agent
 reaches the platform's router (``platform.llm``, ``Platform.saia``).
 
-A trait the platform holds (``platform.traits``, e.g. ``MemoryTrait``) is not
-built here: an agent holds a binding of it (``Trait.bind``). This factory
-builds the traits an agent still builds and holds itself.
+A trait the platform holds (``platform.traits``, e.g. ``MemoryTrait`` and
+``RatingTrait``) is not built here: an agent holds a binding of it
+(``ScopedTrait.bind``). This factory builds the traits an agent still builds
+and holds itself.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from appinfra.log import Logger
-from llm_infer.client import ChatClient
 
 from .base import TraitBinding
 
@@ -49,27 +49,23 @@ class Factory:
     def __init__(
         self,
         lg: Logger,
-        router: ChatClient,
         *,
         memory_config: Mapping[str, Any] | None = None,
     ) -> None:
-        """Initialize the factory with the platform's shared clients.
+        """Initialize the factory with the platform's settings.
 
         Args:
             lg: Logger instance.
-            router: The platform's shared router; rating calls go through it.
             memory_config: The platform's memory settings (training reads its
                 schema and adapters), or None.
         """
         from . import TraitName
 
         self._lg = lg
-        self._router = router
         self._memory_config = memory_config
 
         self._creators: dict[TraitName, Callable[..., TraitBinding]] = {
             TraitName.DIRECTIVE: self._create_directive,
-            TraitName.RATING: self._create_rating,
             TraitName.STORAGE: self._create_storage,
             TraitName.METHOD: self._create_method,
             TraitName.TRAINING: self._create_training,
@@ -112,12 +108,6 @@ class Factory:
         """Route to create_training_trait, on the platform's memory schema and adapters."""
         source: dict[str, Any] = dict(self._memory_config) if self._memory_config else {}
         return self.create_training_trait(agent, source)
-
-    def _create_rating(self, agent: Agent) -> TraitBinding:
-        """Route to create_rating_trait."""
-        from .builtin.rating import RatingTrait
-
-        return RatingTrait(agent, self._router, agent.config.get("rating"))
 
     def _create_storage(self, agent: Agent) -> TraitBinding:
         """Route to create_storage_trait."""

@@ -211,7 +211,7 @@ class Factory:
         if not self._platform.trait_factory.creates(trait_name):
             raise ConfigError(
                 f"trait '{trait_name.value}' is not on this platform: the platform builds it "
-                "from its config (memory needs a memory section)"
+                "from its config (memory and rating need a memory section)"
             )
         agent.add_trait(self._create_trait(trait_name, agent))
         self._lg.debug("created trait", extra={"agent": agent.name, "trait": trait_name.value})
