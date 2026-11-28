@@ -160,6 +160,17 @@ class TestOperations:
         clients["embedder"].embed.assert_called_once_with("likes tea")
         kelt.atomic.embeddings.set_embedding.assert_called_once()
 
+    def test_remember_stores_nothing_when_the_embedder_fails(self, kelt_class, clients):
+        binding = _bound(_memory(clients))
+        kelt = binding.kelt
+        kelt.atomic.assertions = MagicMock()
+        clients["embedder"].embed.side_effect = RuntimeError("embedder down")
+
+        with pytest.raises(RuntimeError, match="embedder down"):
+            binding.remember("likes tea")
+
+        kelt.atomic.assertions.add.assert_not_called()
+
     def test_recall_in_another_schema(self, kelt_class, clients):
         binding = _bound(_memory(clients))
         other = MagicMock()

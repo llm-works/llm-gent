@@ -338,6 +338,8 @@ class MemoryBinding:
         """Store a fact about the user.
 
         If embedder is configured, the fact is also embedded for semantic search.
+        The embedding is computed before the fact is stored, so an embedder
+        that fails stores nothing.
 
         Args:
             fact: The fact to store.
@@ -348,17 +350,16 @@ class MemoryBinding:
         Returns:
             Fact ID.
         """
+        embedder = self._embedder
+        embedding = embedder.embed(fact) if embedder is not None else None
         fact_id = self.kelt.atomic.assertions.add(
             fact, category=category, source=source, confidence=confidence
         )
-
-        # Embed for semantic search if embedder available
-        if self._embedder is not None:
-            embedding = self._embedder.embed(fact)
+        if embedder is not None and embedding is not None:
             self.kelt.atomic.embeddings.set_embedding(
                 fact_id=fact_id,
                 embedding=embedding.embedding,
-                model=self._embedder.model,
+                model=embedder.model,
             )
 
         return fact_id

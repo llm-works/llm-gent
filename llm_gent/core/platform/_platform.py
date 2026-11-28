@@ -190,15 +190,8 @@ class Platform:
         self._lg.debug("platform closed", extra={"closed": len(self._owned)})
 
     def _stop_traits(self) -> None:
-        """Stop each trait; a failure is logged and the rest still stop."""
-        for trait in self._traits.all():
-            try:
-                trait.on_stop()
-            except Exception as e:
-                self._lg.warning(
-                    "platform trait stop failed",
-                    extra={"trait": type(trait).__name__, "exception": e},
-                )
+        """Stop each trait, last started first; a failure is logged and the rest still stop."""
+        stop_traits(self._lg, self._traits.all()[::-1])
 
     async def aclose(self) -> None:
         """Close the owned resources' async clients on this event loop, then their sync side.
@@ -256,6 +249,18 @@ class Platform:
     def __repr__(self) -> str:
         """String representation of the platform."""
         return f"Platform(traits={self._traits.count()}, owned={len(self._owned)})"
+
+
+def stop_traits(lg: Logger, traits: Sequence[Any]) -> None:
+    """Stop each of ``traits`` in order; a failure is logged and the rest still stop."""
+    for trait in traits:
+        try:
+            trait.on_stop()
+        except Exception as e:
+            lg.warning(
+                "platform trait stop failed",
+                extra={"trait": type(trait).__name__, "exception": e},
+            )
 
 
 def close_resources(lg: Logger, resources: Sequence[Closeable]) -> None:

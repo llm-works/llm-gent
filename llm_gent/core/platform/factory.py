@@ -20,7 +20,7 @@ from ..tools.factory import Factory as ToolFactory
 from ..traits.builtin.memory import MemoryTrait
 from ..traits.factory import Factory as TraitFactory
 from ..traits.registry import Registry as TraitRegistry
-from ._platform import Closeable, Platform, SAIAFactory, close_resources
+from ._platform import Closeable, Platform, SAIAFactory, close_resources, stop_traits
 from .config import Config
 
 
@@ -35,7 +35,7 @@ class Factory:
     one, the platform builds no SAIA and a step reading ``ctx.saia`` raises.
     The platform's trait registry starts empty, or, with memory configured,
     holding the shared :class:`MemoryTrait`, whose memory schema is prepared
-    here; agents and flow steps take views of it (``MemoryTrait.view``).
+    here; each agent binds it and holds its own :class:`MemoryBinding`.
 
     Example:
         async with PlatformFactory(lg).from_config({}) as platform:
@@ -88,8 +88,7 @@ class Factory:
             memory = self._memory(settings.memory, owned)
             if memory is not None:
                 traits.register(memory)
-            for trait in traits.all():  # platform traits run from here until close()
-                trait.on_start()
+            _start_traits(self._lg, traits)  # platform traits run from here until close()
         except Exception:
             close_resources(self._lg, owned)
             raise
@@ -157,6 +156,18 @@ def _embedder(
         timeout=memory_config.get("embedder_timeout", 30.0),
     )
     return embedder
+
+
+def _start_traits(lg: Logger, traits: TraitRegistry) -> None:
+    """Start the platform's traits; when one fails, stop the started ones in reverse."""
+    started: list[Any] = []
+    for trait in traits.all():
+        try:
+            trait.on_start()
+        except Exception:
+            stop_traits(lg, started[::-1])
+            raise
+        started.append(trait)
 
 
 class _NoSAIAFactory:

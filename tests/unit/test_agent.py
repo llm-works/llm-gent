@@ -35,6 +35,20 @@ class _ResourceTrait(BaseTrait):
             self.resource.close()
 
 
+def _recording_trait(name: str, events: list[str], *, fails: bool = False) -> type[BaseTrait]:
+    """A trait class of its own that records its start and stop in ``events``."""
+
+    def on_start(self: BaseTrait) -> None:
+        events.append(f"{name}.start")
+        if fails:
+            raise RuntimeError(f"{name} down")
+
+    def on_stop(self: BaseTrait) -> None:
+        events.append(f"{name}.stop")
+
+    return type(name, (BaseTrait,), {"on_start": on_start, "on_stop": on_stop})
+
+
 class TestAgentBaseClass:
     """Tests for the slim Agent container."""
 
@@ -124,6 +138,17 @@ class TestAgentLifecycle:
         agent.stop()
 
         mock_trait.on_stop.assert_called_once()
+
+    def test_a_failed_start_stops_what_started_in_reverse(self, agent):
+        events: list[str] = []
+        for name, fails in (("A", False), ("B", False), ("C", True)):
+            agent._traits.register(_recording_trait(name, events, fails=fails)(agent))
+
+        with pytest.raises(RuntimeError, match="C down"):
+            agent.start()
+
+        assert events == ["A.start", "B.start", "C.start", "B.stop", "A.stop"]
+        assert not agent._started
 
 
 class TestAgentTraits:
@@ -270,6 +295,22 @@ class TestAgentLookup:
             self._agent(platform, name=f"agent-{i}").use(_PlatformTrait)
 
         assert vars(trait) == before
+
+    def test_the_agent_stops_in_reverse_of_its_start(self, platform):
+        events: list[str] = []
+        agent = self._agent(platform)
+        agent.use(_PlatformTrait)
+        binding = agent.require(_PlatformTrait)
+        binding.on_start = lambda: events.append("binding.start")  # type: ignore[method-assign]
+        binding.on_stop = lambda: events.append("binding.stop")  # type: ignore[method-assign]
+        for name in ("A", "B", "C"):
+            agent.add_trait(_recording_trait(name, events)(agent))
+
+        agent.start()
+        agent.stop()
+
+        started = ["binding.start", "A.start", "B.start", "C.start"]
+        assert events == [*started, "C.stop", "B.stop", "A.stop", "binding.stop"]
 
     def test_the_agent_starts_and_stops_its_bindings(self, platform):
         agent = self._agent(platform)

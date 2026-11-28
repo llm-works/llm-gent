@@ -35,6 +35,7 @@ from appinfra import DotDict
 from ..errors import ConfigError
 from ..platform import Platform
 from ..traits import TraitName
+from ..traits.builtin.memory import MemoryBinding, MemoryTrait
 from .agent import Agent
 from .helpers import _substitute_in_dict
 
@@ -192,13 +193,16 @@ class Factory:
         traits_to_create = self._determine_required_traits(config)
 
         for trait_name in traits_to_create:
-            self._add_required_trait(agent, trait_name, config)
+            self._add_required_trait(agent, trait_name)
 
         # Configure tools from YAML or factory defaults
         self._configure_tools(agent, config)
 
-    def _add_required_trait(self, agent: Agent, trait_name: TraitName, config: DotDict) -> None:
-        """Bind the platform's ``trait_name`` trait to ``agent``, else build it for the agent."""
+    def _add_required_trait(self, agent: Agent, trait_name: TraitName) -> None:
+        """Bind the platform's ``trait_name`` trait to ``agent``, else build it for the agent.
+
+        Either way the trait reads its config from ``agent.config``.
+        """
         shared = self._platform.traits.get_by_name(trait_name)
         if shared is not None:
             agent.use(type(shared))  # type: ignore[arg-type]
@@ -209,7 +213,7 @@ class Factory:
                 f"trait '{trait_name.value}' is not on this platform: the platform builds it "
                 "from its config (memory needs a memory section)"
             )
-        agent.add_trait(self._create_trait(trait_name, agent, config))
+        agent.add_trait(self._create_trait(trait_name, agent))
         self._lg.debug("created trait", extra={"agent": agent.name, "trait": trait_name.value})
 
     def _determine_required_traits(self, config: DotDict) -> list[TraitName]:
@@ -238,15 +242,16 @@ class Factory:
             # No traits specified - create none
             return []
 
-    def _create_trait(self, trait_name: TraitName, agent: Agent, config: DotDict) -> Any:
+    def _create_trait(self, trait_name: TraitName, agent: Agent) -> Any:
         """Create a trait instance using platform.trait_factory.
 
         Delegates to trait_factory.create() which handles validation and routing.
+        The trait reads its config from ``agent.config``, the config the agent
+        was built on.
 
         Args:
             trait_name: Type of trait to create.
-            agent: Agent instance (needed for agent-specific config like identity).
-            config: Full config dict from manifest.
+            agent: The agent the trait is for; its config and identity are read.
 
         Returns:
             Created trait instance.
@@ -272,7 +277,6 @@ class Factory:
             agent: Agent instance.
             config: Full config dict from manifest.
         """
-        from ..traits.builtin.memory import MemoryTrait
         from ..traits.builtin.tools import ToolsTrait
 
         # Determine which tools to configure
@@ -280,35 +284,29 @@ class Factory:
         if not tools_config:
             return
 
-        # Bind MemoryTrait to platform.tool_factory if available
-        memory_trait = agent.get(MemoryTrait)
-        if memory_trait:
-            self._platform.tool_factory.set_memory_trait(memory_trait)
+        # Get or create ToolsTrait and populate with configured tools
+        tools_trait = agent.get(ToolsTrait)
+        is_new = tools_trait is None
+        if is_new:
+            tools_trait = ToolsTrait(agent)
 
-        try:
-            # Get or create ToolsTrait and populate with configured tools
-            tools_trait = agent.get(ToolsTrait)
-            is_new = tools_trait is None
-            if is_new:
-                tools_trait = ToolsTrait(agent)
+        assert tools_trait is not None  # Either retrieved or just created
+        self._create_and_register_tools(agent, tools_config, tools_trait, agent.get(MemoryTrait))
 
-            assert tools_trait is not None  # Either retrieved or just created
-            self._create_and_register_tools(agent, tools_config, tools_trait)
-
-            # Attach ToolsTrait if any tools were created (only if newly created)
-            if is_new and tools_trait.has_tools():
-                agent.add_trait(tools_trait)
-        finally:
-            # Clear memory_trait to avoid leaking state between agents
-            if memory_trait:
-                self._platform.tool_factory.set_memory_trait(None)
+        # Attach ToolsTrait if any tools were created (only if newly created)
+        if is_new and tools_trait.has_tools():
+            agent.add_trait(tools_trait)
 
     def _create_and_register_tools(
-        self, agent: Agent, tools_config: dict[str, dict[str, Any]], tools_trait: Any
+        self,
+        agent: Agent,
+        tools_config: dict[str, dict[str, Any]],
+        tools_trait: Any,
+        memory: MemoryBinding | None,
     ) -> None:
-        """Create and register tools from configuration."""
+        """Create and register tools from configuration, memory tools on ``memory``."""
         for tool_name, tool_config in tools_config.items():
-            tool = self._platform.tool_factory.create(tool_name, tool_config)
+            tool = self._platform.tool_factory.create(tool_name, tool_config, memory=memory)
             if tool is None:
                 self._lg.warning(
                     "tool could not be created",

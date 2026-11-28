@@ -83,6 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: a platform `Trait` holds shared resources and `bind(agent)`s a `TraitBinding` (the old
   `Trait` protocol) that the agent holds; `MemoryBinding` replaces `MemoryTrait.view`. `Agent(lg,
   platform, config)`; `get` / `has` / `require` replace `*_trait`; an agent `kelt.schema` raises.
+  Memory tools get the agent's binding from `ToolFactory.create(..., memory=)`; no
+  `set_memory_trait`.
 
 ### Fixed
 

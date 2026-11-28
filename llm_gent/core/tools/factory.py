@@ -64,7 +64,6 @@ class Factory:
         """
         self._lg = lg
         self._custom_creators: dict[str, Callable[[dict[str, Any]], Tool]] = {}
-        self._memory_trait: MemoryBinding | None = None
         self._web_fetch: WebFetchTool | None = None
         self._web_search_backend: WebSearchBackend | None = None
 
@@ -224,31 +223,19 @@ class Factory:
 
         return CompleteTaskTool()
 
-    def _create_memory_tool(self, tool_type: str) -> Tool | None:
-        """Create remember or recall tool.
-
-        Returns None if MemoryTrait not available (tool will be skipped).
-        """
+    def _create_memory_tool(self, tool_type: str, memory: MemoryBinding | None) -> Tool | None:
+        """Create a remember or recall tool on the agent's ``memory``; None without it."""
         from .builtin import RecallTool, RememberTool
 
-        if self._memory_trait is None:
+        if memory is None:
             return None
-
         if tool_type == self.REMEMBER:
-            return RememberTool(self._memory_trait)
-        return RecallTool(self._memory_trait)
+            return RememberTool(memory)
+        return RecallTool(memory)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    def set_memory_trait(self, memory_trait: MemoryBinding | None) -> None:
-        """Set the agent's memory for memory tools (remember/recall).
-
-        Args:
-            memory_trait: The agent's MemoryBinding, or None.
-        """
-        self._memory_trait = memory_trait
 
     def register(self, tool_type: str, creator: Callable[[dict[str, Any]], Tool]) -> None:
         """Register a custom tool type.
@@ -262,16 +249,26 @@ class Factory:
         """
         self._custom_creators[tool_type] = creator
 
-    def create(self, tool_type: str, config: dict[str, Any] | None = None) -> Tool | None:
+    def create(
+        self,
+        tool_type: str,
+        config: dict[str, Any] | None = None,
+        *,
+        memory: MemoryBinding | None = None,
+    ) -> Tool | None:
         """Create a tool from type and configuration.
+
+        The factory is shared by every agent on a platform and keeps nothing
+        per agent: memory tools get the agent's binding through ``memory``.
 
         Args:
             tool_type: Tool type (e.g., "shell", "read_file").
             config: Tool-specific configuration.
+            memory: The agent's memory binding, for the remember and recall tools.
 
         Returns:
             Configured Tool instance, or None if tool cannot be created
-            (e.g., memory tools without MemoryTrait).
+            (e.g., memory tools without ``memory``).
 
         Raises:
             ValueError: If tool type is unknown.
@@ -280,7 +277,7 @@ class Factory:
         canonical = self._ALIASES.get(tool_type, tool_type)
 
         if canonical in (self.REMEMBER, self.RECALL):
-            return self._create_memory_tool(canonical)
+            return self._create_memory_tool(canonical, memory)
         if canonical in (self.SHELL, self.READ_FILE, self.WRITE_FILE, self.HTTP_FETCH):
             return self._create_simple(canonical, config)
         if canonical == self.WEB_FETCH:

@@ -82,6 +82,11 @@ def memory():
         )
 
 
+def _memory_agent(name: str, *, tools: dict) -> dict:
+    """An agent config that uses the platform's memory and the given tools."""
+    return {"identity": {"name": name}, "traits": {"required": ["memory"]}, "tools": tools}
+
+
 class TestPlatformTraits:
     """A required trait the platform has is bound to the agent; the factory knows no trait."""
 
@@ -100,6 +105,30 @@ class TestPlatformTraits:
         assert isinstance(binding, MemoryBinding)
         assert binding.context_key == "jokes"
         assert binding.trait is memory
+
+    def test_memory_tools_use_their_own_agents_binding(self, mock_logger, memory):
+        """An agent built while another's tools are being made leaves it its own memory."""
+        from llm_gent.core.tools.base import BaseTool
+        from llm_gent.core.traits.builtin.memory import MemoryTrait
+        from llm_gent.core.traits.builtin.tools import ToolsTrait
+
+        platform = make_platform(mock_logger, memory=memory)
+        factory = AgentFactory(platform)
+        built: list[Agent] = []
+
+        def build_another(config):
+            built.append(factory.from_config(_memory_agent("b", tools={"remember": {}})))
+            tool = MagicMock(spec=BaseTool)
+            tool.name = "interleave"
+            return tool
+
+        platform.tool_factory.register("interleave", build_another)
+        first = factory.from_config(_memory_agent("a", tools={"interleave": {}, "remember": {}}))
+
+        remember = first.require(ToolsTrait).registry.get("remember")
+        assert remember is not None
+        assert remember._memory_trait is first.require(MemoryTrait)
+        assert built[0].require(MemoryTrait) is not first.require(MemoryTrait)
 
     def test_a_trait_neither_built_nor_on_the_platform_raises(self, platform):
         config = {"identity": {"name": "a"}, "traits": {"required": ["memory"]}}

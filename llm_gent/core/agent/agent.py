@@ -385,9 +385,20 @@ class Agent:
         return [*self._bindings.values(), *self._traits.all()]
 
     def _start_traits(self) -> None:
-        """Start what the agent holds; flip ``_started`` only on success."""
+        """Start what the agent holds; flip ``_started`` only on success.
+
+        When one fails to start, the ones started before it are stopped, in
+        reverse, before the exception propagates: nothing is left running.
+        """
+        started: list[TraitBinding] = []
         for held in self._held():
-            held.on_start()
+            try:
+                held.on_start()
+            except Exception:
+                for done in reversed(started):
+                    self._safe_stop_trait(done, "trait stop after a failed start failed")
+                raise
+            started.append(held)
             self._lg.debug(
                 "trait started",
                 extra={"agent": self.name, "trait": type(held).__name__},
@@ -395,8 +406,12 @@ class Agent:
         self._started = True
 
     def _stop_traits(self) -> None:
-        """Stop what the agent holds; flip ``_started`` regardless of errors."""
-        for held in self._held():
+        """Stop what the agent holds, in reverse of the start; flip ``_started`` regardless.
+
+        Its own traits stop last-added first, then its bindings: a trait that
+        used a binding when it started stops while that binding still runs.
+        """
+        for held in reversed(self._held()):
             try:
                 held.on_stop()
                 self._lg.debug(
