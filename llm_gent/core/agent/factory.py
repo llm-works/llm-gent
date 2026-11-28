@@ -22,8 +22,8 @@ trait for (``memory``) is bound to the agent: the agent holds its binding.
 The factory builds agents on a :class:`~llm_gent.core.Platform`:
 traits use the platform's shared clients, and agent-config keys override the
 platform's defaults. Every agent reaches models through the platform's
-router; an ``llm`` key is rejected (models are configured on the platform),
-and so is ``kelt.schema`` (the memory schema is the platform's).
+router; an agent refuses an ``llm`` key (models are configured on the
+platform) and ``kelt.schema`` (the memory schema is the platform's).
 """
 
 from __future__ import annotations
@@ -135,21 +135,12 @@ class Factory:
             Configured agent instance.
 
         Raises:
-            ConfigError: If agent_class not set, required config fields are
-                missing, or the config has an ``llm`` key.
+            ConfigError: If agent_class not set, or the agent refuses the
+                config (missing ``identity.name``, an ``llm`` key or
+                ``kelt.schema``).
         """
         if self.agent_class is None:
             raise ConfigError(f"{self.__class__.__name__} must set agent_class class variable")
-        if "llm" in config:
-            raise ConfigError(
-                "agent config has an 'llm' key: every agent uses the platform's model router; "
-                "configure backends in the platform config's llm section"
-            )
-        if (config.get("kelt") or {}).get("schema"):
-            raise ConfigError(
-                "agent config sets kelt.schema: the memory schema is the platform's; "
-                "set memory.schema in the platform config, or partition with identity.context_key"
-            )
 
         # Apply variable substitutions to config if provided
         if variables:

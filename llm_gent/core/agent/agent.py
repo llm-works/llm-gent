@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 from appinfra import DotDict
 from appinfra.log import Logger
 
-from ..errors import DuplicateTraitError, TraitNotFoundError
+from ..errors import ConfigError, DuplicateTraitError, TraitNotFoundError
 from ..traits.base import Trait, TraitBinding
 from ..traits.registry import Registry as TraitRegistry
 
@@ -76,7 +76,9 @@ class Agent:
                 provided.
 
         Raises:
-            ConfigError: If ``identity.name`` is missing from config.
+            ConfigError: If ``identity.name`` is missing from config, or the
+                config sets what is the platform's: an ``llm`` key or
+                ``kelt.schema``.
         """
         self._lg = lg
         self._platform = platform
@@ -87,6 +89,7 @@ class Agent:
         else:
             self._config = DotDict()
 
+        self._reject_platform_settings()
         self._identity: Identity = self._resolve_identity()
         self._traits = TraitRegistry(lg)
         self._bindings: dict[type[Trait[Any]], TraitBinding] = {}
@@ -438,6 +441,24 @@ class Agent:
     # =========================================================================
     # Configuration Helpers
     # =========================================================================
+
+    def _reject_platform_settings(self) -> None:
+        """Raise ``ConfigError`` for agent config that only the platform sets.
+
+        Models and the memory schema are the platform's: an agent's ``llm`` key
+        or ``kelt.schema`` would have no effect, so it is refused however the
+        agent is built.
+        """
+        if "llm" in self.config:
+            raise ConfigError(
+                "agent config has an 'llm' key: every agent uses the platform's model router; "
+                "configure backends in the platform config's llm section"
+            )
+        if (self.config.get("kelt") or {}).get("schema"):
+            raise ConfigError(
+                "agent config sets kelt.schema: the memory schema is the platform's; "
+                "set memory.schema in the platform config, or partition with identity.context_key"
+            )
 
     def _resolve_identity(self) -> Identity:
         """Resolve :class:`Identity` from ``self.config``.

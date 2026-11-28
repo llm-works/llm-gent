@@ -64,6 +64,19 @@ class TestAgentBaseClass:
         with pytest.raises(ConfigError, match="identity.name is required"):
             Agent(lg=mock_logger, platform=make_platform(mock_logger))
 
+    @pytest.mark.parametrize(
+        ("config", "match"),
+        [
+            ({"identity": {"name": "a"}, "llm": "anthropic"}, "'llm' key"),
+            ({"identity": {"name": "a"}, "kelt": {"schema": {"name": "custom"}}}, "kelt.schema"),
+        ],
+    )
+    def test_an_agent_built_directly_rejects_platform_settings(self, mock_logger, config, match):
+        from llm_gent.core.errors import ConfigError
+
+        with pytest.raises(ConfigError, match=match):
+            Agent(lg=mock_logger, platform=make_platform(mock_logger), config=DotDict(config))
+
     def test_agent_container_can_be_instantiated(self, mock_logger):
         """Plain Agent is directly instantiable with just identity."""
         config = DotDict(identity={"name": "test"})
